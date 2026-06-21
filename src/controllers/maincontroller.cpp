@@ -1720,8 +1720,11 @@ void MainController::setSteamFlowImmediate(int flow) {
     qDebug() << "Steam flow set to:" << flow;
 }
 
-void MainController::setSteamTimeoutImmediate(int timeout) {
-    if (!m_device || !m_device->isConnected() || !m_settings) return;
+bool MainController::setSteamTimeoutImmediate(int timeout) {
+    if (!m_device || !m_device->isConnected() || !m_settings) {
+        qWarning() << "setSteamTimeoutImmediate: DE1 not connected; timeout" << timeout << "not pushed";
+        return false;
+    }
 
     m_settings->brew()->setSteamTimeout(timeout);
 
@@ -1738,6 +1741,7 @@ void MainController::setSteamTimeoutImmediate(int timeout) {
     );
 
     qDebug() << "Steam timeout set to:" << timeout;
+    return true;
 }
 
 void MainController::softStopSteam() {

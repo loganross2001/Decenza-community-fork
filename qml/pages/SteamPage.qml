@@ -123,7 +123,10 @@ Page {
             if (_scaledNow > 0) {
                 Settings.brew.steamTimeout = _scaledNow
                 steamPage.steamTimeoutScaled = true
-                MainController.setSteamTimeoutImmediate(_scaledNow)
+                // The value is already in Settings, so it is re-sent by the next
+                // sendMachineSettings on reconnect — log if the immediate push dropped.
+                if (!MainController.setSteamTimeoutImmediate(_scaledNow))
+                    console.warn("SteamPage: scaled steam time " + _scaledNow + "s set but not pushed (DE1 not connected); will re-send on reconnect")
             }
             // Drop any banner left over from a prior session so it doesn't
             // carry into the new one. SteamHealthTracker re-arms its per-session
@@ -287,6 +290,22 @@ Page {
             steamPage.steamTimeoutScaled = false
             steamPage.lastOnScaleMilk = 0   // captured net milk is pitcher-specific
         }
+    }
+
+    // Why weight-scaling isn't engaging for a CALIBRATED pitcher (so the fixed-baseline
+    // fallback isn't a silent surprise): no saved empty-pitcher weight, or the milk on
+    // the scale is out of the 20-1500 g window. Empty string = nothing to explain.
+    function scalingBlockedReason() {
+        var preset = Settings.brew.getSteamPitcherPreset(Settings.brew.selectedSteamPitcher)
+        if (!preset || preset.disabled) return ""
+        if ((preset.calibMilkG ?? 0) <= 0) return ""   // not calibrated: scaling intentionally off
+        if (!ScaleDevice.connected || ScaleDevice.isFlowScale) return ""
+        if ((preset.pitcherWeightG ?? 0) <= 0)
+            return TranslationManager.translate("steam.hint.noPitcherWeight", "Save the empty-pitcher weight to enable weight-timed steaming")
+        if (scaledSteamTimeout() > 0) return ""        // scaling is working
+        if (MachineState.scaleWeight - (preset.pitcherWeightG ?? 0) > 1)
+            return TranslationManager.translate("steam.hint.milkOutOfRange", "Milk weight is outside the 20-1500 g range")
+        return ""
     }
 
     // Net milk to scale against once the pitcher is off the scale: prefer the value
@@ -1653,6 +1672,17 @@ Page {
                     }
 
                     Rectangle { Layout.fillWidth: true; height: 1; color: Theme.textSecondaryColor; opacity: 0.3; visible: !steamPage.currentPitcherDisabled && ScaleDevice.connected && !ScaleDevice.isFlowScale && steamPage.scaledSteamTimeout() > 0 }
+
+                    // Tell the user why a calibrated pitcher isn't scaling, instead of
+                    // silently steaming the fixed baseline.
+                    Text {
+                        Layout.fillWidth: true
+                        visible: steamPage.scalingBlockedReason() !== ""
+                        text: steamPage.scalingBlockedReason()
+                        color: Theme.warningColor
+                        font: Theme.labelFont
+                        wrapMode: Text.WordWrap
+                    }
 
                     // Auto-capture options (opt-in; default on). Turning this off
                     // stops the scale from auto-scaling the steam time from milk weight.

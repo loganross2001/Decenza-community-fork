@@ -156,7 +156,7 @@ public slots:
     // Real-time steam setting updates
     void setSteamTemperatureImmediate(double temp);
     void setSteamFlowImmediate(int flow);
-    void setSteamTimeoutImmediate(int timeout);
+    bool setSteamTimeoutImmediate(int timeout);
 
     // Soft stop steam (sends 1-second timeout to trigger elapsed > target, no purge)
     Q_INVOKABLE void softStopSteam();

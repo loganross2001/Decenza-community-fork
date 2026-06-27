@@ -96,6 +96,76 @@ Dialog {
     property bool showScaleWarning: false
     property bool lowDoseWarning: doseValue < 3 || showScaleWarning
 
+    // --- Bean memory: best rated shot for the current bean + profile ---
+    // Mirror of ShotHistoryStorage::beanRecipeReady's QVariantMap. Derived from
+    // shot history (no DB migration) — re-requested on open and whenever the
+    // bean or profile changes. `found=false` hides the card entirely.
+    property var beanRecipe: ({ found: false })
+
+    function requestBeanRecipe() {
+        if (!MainController.shotHistory)
+            return
+        var kbId = ProfileManager.currentProfileKbId()
+        if (kbId.length === 0 || (Settings.dye.dyeBeanBrand.length === 0
+                                  && Settings.dye.dyeBeanType.length === 0)) {
+            root.beanRecipe = { found: false }
+            return
+        }
+        MainController.shotHistory.requestBeanRecipe(
+            Settings.dye.dyeBeanBrand, Settings.dye.dyeBeanType,
+            kbId, Settings.dye.dyeBarista)
+    }
+
+    // Apply the remembered recipe to dial memory + the editable fields, so the
+    // change is both persisted and visible before the user confirms with OK.
+    // Guard each field (use ?? — not || — so a legitimate 0 isn't dropped) and
+    // skip fields the remembered shot didn't carry.
+    function applyBeanRecipe() {
+        if (!root.beanRecipe || !root.beanRecipe.found)
+            return
+        var r = root.beanRecipe
+        var grind = r.grinderSetting ?? ""
+        if (grind.length > 0) {
+            Settings.dye.dyeGrinderSetting = grind
+            root.grindSetting = grind
+        }
+        var dose = r.doseG ?? 0
+        if (dose > 0) {
+            Settings.dye.dyeBeanWeight = dose
+            root.targetManuallySet = false
+            root.doseValue = dose
+        }
+        var temp = r.temperatureC ?? 0
+        if (temp > 0) {
+            // property WRITE (the setter isn't Q_INVOKABLE, so a function call throws)
+            Settings.brew.temperatureOverride = temp
+            root.temperatureValue = temp
+        }
+        if (typeof AccessibilityManager !== "undefined" && AccessibilityManager.enabled)
+            AccessibilityManager.announce(TranslationManager.translate(
+                "brewDialog.beanMemory.applied", "Applied best recipe for this bean"))
+    }
+
+    Connections {
+        target: MainController.shotHistory
+        function onBeanRecipeReady(recipe) {
+            root.beanRecipe = recipe
+        }
+    }
+
+    // Re-fetch when the bean or profile changes while the dialog is open.
+    Connections {
+        target: Settings.dye
+        enabled: root.visible
+        function onDyeBeanBrandChanged() { root.requestBeanRecipe() }
+        function onDyeBeanTypeChanged() { root.requestBeanRecipe() }
+    }
+    Connections {
+        target: ProfileManager
+        enabled: root.visible
+        function onCurrentProfileChanged() { root.requestBeanRecipe() }
+    }
+
     // Bean auto-capture lives in IdlePage as a single, persistent detector — it
     // stays armed across this dialog opening/closing, so a cup already weighed on
     // the home screen is NOT re-captured (no second ding) when you open settings.
@@ -164,6 +234,10 @@ Dialog {
         targetValue = Settings.brew.hasBrewYieldOverride ? Settings.brew.brewYieldOverride : profileTargetWeight
         ratio = doseValue > 0 ? targetValue / doseValue : Settings.brew.lastUsedRatio
         targetManuallySet = Settings.brew.hasBrewYieldOverride
+
+        // Bean memory: surface the best rated recipe for this bean + profile.
+        root.beanRecipe = { found: false }
+        root.requestBeanRecipe()
     }
 
     SwitchEquipmentDialog {
@@ -311,6 +385,108 @@ Dialog {
             ChangeBeansDialog {
                 id: brewChangeBeansDialog
                 context: "brew"
+            }
+        }
+
+        // Bean memory: best rated recipe for the current bean + profile.
+        // Derived from shot history; hidden entirely when none exists.
+        Rectangle {
+            id: beanMemoryCard
+            visible: root.beanRecipe && root.beanRecipe.found === true
+            Layout.fillWidth: true
+            Layout.leftMargin: Theme.scaled(20)
+            Layout.rightMargin: Theme.scaled(20)
+            Layout.topMargin: Theme.scaled(8)
+            color: Theme.surfaceColor
+            border.width: 1
+            border.color: Theme.successColor
+            radius: Theme.scaled(8)
+            implicitHeight: beanMemoryRow.implicitHeight + Theme.scaled(20)
+
+            // Hidden Tr instances for property bindings.
+            Tr { id: trBeanMemoryTitle; key: "brewDialog.beanMemory.title"; fallback: "Best on this bean"; visible: false }
+            Tr { id: trBeanMemoryYourBest; key: "brewDialog.beanMemory.yourBest"; fallback: "your best so far"; visible: false }
+            Tr { id: trBeanMemoryApply; key: "brewDialog.beanMemory.apply"; fallback: "Apply"; visible: false }
+
+            // "★ Best on this bean: grind 8.5 · 18 → 36 g · 92°C — rated 88 (Jun 3)"
+            readonly property string recipeLine: {
+                if (!root.beanRecipe || !root.beanRecipe.found)
+                    return ""
+                var r = root.beanRecipe
+                var parts = []
+                var grind = r.grinderSetting ?? ""
+                if (grind.length > 0)
+                    parts.push(TranslationManager.translate("brewDialog.beanMemory.grind", "grind ") + grind)
+                var dose = r.doseG ?? 0
+                var yieldG = r.yieldG ?? 0
+                if (dose > 0 && yieldG > 0)
+                    parts.push(dose.toFixed(1) + " → " + yieldG.toFixed(1) + " g")
+                else if (dose > 0)
+                    parts.push(dose.toFixed(1) + " g")
+                var temp = r.temperatureC ?? 0
+                if (temp > 0)
+                    parts.push(temp.toFixed(0) + "°C")
+                var line = "★ " + trBeanMemoryTitle.text + ": " + parts.join(" · ")
+                var enj = r.enjoyment ?? 0
+                if (enj > 0)
+                    line += " — " + TranslationManager.translate("brewDialog.beanMemory.rated", "rated ") + enj
+                var whenLabel = r.whenLabel ?? ""
+                if (whenLabel.length > 0)
+                    line += " (" + whenLabel + ")"
+                return line
+            }
+
+            // Scope note: per-person attribution or "your best so far".
+            readonly property string scopeNote: {
+                if (!root.beanRecipe || !root.beanRecipe.found)
+                    return ""
+                if (root.beanRecipe.scope === "beanAndPerson" && Settings.dye.dyeBarista.length > 0)
+                    return TranslationManager.translate("brewDialog.beanMemory.forPerson", "for ") + Settings.dye.dyeBarista
+                return "(" + trBeanMemoryYourBest.text + ")"
+            }
+
+            RowLayout {
+                id: beanMemoryRow
+                anchors.fill: parent
+                anchors.margins: Theme.scaled(10)
+                spacing: Theme.scaled(8)
+
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.scaled(2)
+
+                    Text {
+                        Layout.fillWidth: true
+                        text: beanMemoryCard.recipeLine
+                        font: Theme.bodyFont
+                        color: Theme.textColor
+                        wrapMode: Text.Wrap
+                        // The whole card is announced by the Apply button's
+                        // accessibleDescription; avoid double-reading.
+                        Accessible.ignored: true
+                    }
+
+                    Text {
+                        Layout.fillWidth: true
+                        text: beanMemoryCard.scopeNote
+                        font: Theme.captionFont
+                        color: Theme.textSecondaryColor
+                        wrapMode: Text.Wrap
+                        Accessible.ignored: true
+                    }
+                }
+
+                AccessibleButton {
+                    id: beanMemoryApplyButton
+                    Layout.preferredHeight: Theme.scaled(40)
+                    Layout.alignment: Qt.AlignVCenter
+                    subtle: true
+                    text: trBeanMemoryApply.text
+                    accessibleName: TranslationManager.translate(
+                        "brewDialog.beanMemory.apply.accessible", "Apply best recipe for this bean")
+                    accessibleDescription: beanMemoryCard.recipeLine
+                    onClicked: root.applyBeanRecipe()
+                }
             }
         }
 

@@ -23,6 +23,7 @@
 #include <QJsonArray>
 #include <QRegularExpression>
 #include <QLocale>
+#include <QDateTime>
 #include <QDebug>
 #include <QSettings>
 #include <QThread>
@@ -1996,6 +1997,134 @@ void ShotHistoryStorage::requestMostRecentShotId()
         QMetaObject::invokeMethod(this, [this, shotId, destroyed]() {
             if (*destroyed) return;
             emit mostRecentShotIdReady(shotId);
+        }, Qt::QueuedConnection);
+    });
+}
+
+void ShotHistoryStorage::requestBeanRecipe(const QString& beanBrand, const QString& beanType,
+                                           const QString& profileKbId, const QString& barista)
+{
+    // Empty/found=false when we can't even form a meaningful query.
+    if (!m_ready || profileKbId.isEmpty() || (beanBrand.isEmpty() && beanType.isEmpty())) {
+        emit beanRecipeReady(QVariantMap{{"found", false}});
+        return;
+    }
+
+    const QString dbPath = m_dbPath;
+    auto destroyed = m_destroyed;
+    runOnDbThread([this, dbPath, beanBrand, beanType, profileKbId, barista, destroyed]() {
+        QVariantMap recipe{{"found", false}};
+        // Same 90-day window the advisor's bean-best block uses, so the card and
+        // the AI anchor to the same shot (kBestRecentShotWindowDays in dialing_blocks).
+        const qint64 windowFloor = QDateTime::currentSecsSinceEpoch() - 90LL * 24 * 3600;
+
+        const bool opened = withTempDb(dbPath, "shs_bean_recipe", [&](QSqlDatabase& db) {
+            // Two-tier scoping (mirrors DialingBlocks::buildBeanBestShotBlock):
+            // try the active barista first, fall back to bean-wide.
+            const QString baseSql =
+                "SELECT grinder_setting, dose_weight, final_weight, "
+                "       COALESCE(temperature_override, 0), COALESCE(enjoyment, 0), timestamp "
+                "FROM shots "
+                "WHERE profile_kb_id = ? AND bean_brand = ? AND bean_type = ? "
+                "AND enjoyment > 0 AND timestamp >= ? ";
+            const QString orderSql =
+                "ORDER BY enjoyment DESC, timestamp DESC LIMIT 1";
+
+            // Fields captured at the cursor position — QSqlQuery is not copyable,
+            // so the lambda reads the values into these on a hit.
+            struct Row {
+                QString grinderSetting;
+                double doseG = 0.0;
+                double yieldG = 0.0;
+                double temperatureC = 0.0;
+                int enjoyment = 0;
+                qint64 timestamp = 0;
+            };
+            Row row;
+
+            auto bestRow = [&](bool withBarista) -> bool {
+                QSqlQuery q(db);
+                q.prepare(withBarista
+                    ? baseSql + QStringLiteral("AND barista = ? ") + orderSql
+                    : baseSql + orderSql);
+                q.addBindValue(profileKbId);
+                q.addBindValue(beanBrand);
+                q.addBindValue(beanType);
+                q.addBindValue(windowFloor);
+                if (withBarista)
+                    q.addBindValue(barista);
+                if (!q.exec()) {
+                    qWarning() << "ShotHistoryStorage::requestBeanRecipe: query failed:"
+                               << q.lastError().text() << "withBarista=" << withBarista;
+                    return false;
+                }
+                if (!q.next()) return false;
+                row.grinderSetting = q.value(0).toString();
+                row.doseG = q.value(1).toDouble();
+                row.yieldG = q.value(2).toDouble();
+                row.temperatureC = q.value(3).toDouble();
+                row.enjoyment = q.value(4).toInt();
+                row.timestamp = q.value(5).toLongLong();
+                return true;
+            };
+
+            QString scope = QStringLiteral("bean");
+            bool have = false;
+            if (!barista.isEmpty() && bestRow(/*withBarista=*/true)) {
+                scope = QStringLiteral("beanAndPerson");
+                have = true;
+            }
+            if (!have)
+                have = bestRow(/*withBarista=*/false);
+            if (!have) return;   // no rated shot for this bean — found stays false
+
+            // shotCount: rated shots on this bean+profile, matching the winning
+            // scope (so the count reflects what the surfaced recipe is drawn from).
+            qsizetype shotCount = 0;
+            {
+                const QString countBase =
+                    "SELECT COUNT(*) FROM shots "
+                    "WHERE profile_kb_id = ? AND bean_brand = ? AND bean_type = ? "
+                    "AND enjoyment > 0 AND timestamp >= ? ";
+                QSqlQuery cq(db);
+                const bool scoped = scope == QStringLiteral("beanAndPerson");
+                cq.prepare(scoped
+                    ? countBase + QStringLiteral("AND barista = ?")
+                    : countBase);
+                cq.addBindValue(profileKbId);
+                cq.addBindValue(beanBrand);
+                cq.addBindValue(beanType);
+                cq.addBindValue(windowFloor);
+                if (scoped)
+                    cq.addBindValue(barista);
+                if (cq.exec() && cq.next())
+                    shotCount = cq.value(0).toLongLong();
+            }
+
+            const QString whenLabel = row.timestamp > 0
+                ? QDateTime::fromSecsSinceEpoch(row.timestamp).toString(QStringLiteral("MMM d"))
+                : QString();
+
+            recipe = QVariantMap{
+                {"found", true},
+                {"grinderSetting", row.grinderSetting},
+                {"doseG", row.doseG},
+                {"yieldG", row.yieldG},
+                {"temperatureC", row.temperatureC},
+                {"enjoyment", row.enjoyment},
+                {"whenLabel", whenLabel},
+                {"shotCount", static_cast<int>(shotCount)},
+                {"scope", scope},
+            };
+        });
+
+        if (!opened)
+            qWarning() << "ShotHistoryStorage::requestBeanRecipe: DB open failed";
+
+        if (*destroyed) return;
+        QMetaObject::invokeMethod(this, [this, recipe, destroyed]() {
+            if (*destroyed) return;
+            emit beanRecipeReady(recipe);
         }, Qt::QueuedConnection);
     });
 }

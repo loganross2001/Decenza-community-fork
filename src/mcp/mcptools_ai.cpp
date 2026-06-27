@@ -125,6 +125,7 @@ void registerAITools(McpToolRegistry* registry, MainController* mainController)
                 qint64 resolvedShotId = shotId;
                 QJsonArray dialInSessions;
                 QJsonObject bestRecentShot;
+                QJsonObject beanBestShot;
                 QJsonObject grinderContext;
                 QJsonObject grinderCalibration;
                 QJsonArray recentAdvice;
@@ -161,6 +162,13 @@ void registerAITools(McpToolRegistry* registry, MainController* mainController)
                             db, shot.profileKbId, resolvedShotId, 5);
                         bestRecentShot = DialingBlocks::buildBestRecentShotBlock(
                             db, shot.profileKbId, resolvedShotId, shot);
+                        // Bean memory: best rated shot for THIS bean on this
+                        // profile, barista-scoped with bean-wide fallback. The
+                        // anchor shot supplies the bean identity + barista, so
+                        // both surfaces resolve from the same resolved shot.
+                        beanBestShot = DialingBlocks::buildBeanBestShotBlock(
+                            db, shot.profileKbId, shot.beanBrand, shot.beanType,
+                            shot.barista, resolvedShotId, shot);
                         grinderContext = DialingBlocks::buildGrinderContextBlock(
                             db, shot.grinderModel, shot.beverageType, shot.beanBrand);
                         grinderCalibration = DialingBlocks::buildGrinderCalibrationBlock(
@@ -189,8 +197,8 @@ void registerAITools(McpToolRegistry* registry, MainController* mainController)
 
                 QMetaObject::invokeMethod(qApp,
                     [aiPtr, shot, dryRun, userPromptOverride, systemPromptOverride,
-                     resolvedShotId, dialInSessions, bestRecentShot, grinderContext,
-                     grinderCalibration, recentAdvice, respond]() {
+                     resolvedShotId, dialInSessions, bestRecentShot, beanBestShot,
+                     grinderContext, grinderCalibration, recentAdvice, respond]() {
                     if (!aiPtr) {
                         respond(QJsonObject{{"error", "App shut down before advisor call could start"}});
                         return;
@@ -242,7 +250,7 @@ void registerAITools(McpToolRegistry* registry, MainController* mainController)
                         }
                         ai->enrichUserPromptObject(userPromptObj, shot,
                             dialInSessions, bestRecentShot, grinderContext, recentAdvice,
-                            grinderCalibration);
+                            grinderCalibration, beanBestShot);
                         userPrompt = QString::fromUtf8(
                             QJsonDocument(userPromptObj).toJson(QJsonDocument::Indented));
                     }

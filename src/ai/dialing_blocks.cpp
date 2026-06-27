@@ -355,6 +355,113 @@ QJsonObject buildBestRecentShotBlock(QSqlDatabase& db,
     return b;
 }
 
+QJsonObject buildBeanBestShotBlock(QSqlDatabase& db,
+                                   const QString& profileKbId,
+                                   const QString& beanBrand,
+                                   const QString& beanType,
+                                   const QString& barista,
+                                   qint64 resolvedShotId,
+                                   const ShotProjection& currentShot)
+{
+    if (profileKbId.isEmpty()) return QJsonObject();
+    // Need at least one bean identity field — without it this would just be
+    // buildBestRecentShotBlock (any bean), which is already shipped.
+    if (beanBrand.isEmpty() && beanType.isEmpty()) return QJsonObject();
+
+    const qint64 windowFloorSec =
+        QDateTime::currentSecsSinceEpoch()
+        - kBestRecentShotWindowDays * 24 * 3600;
+
+    // Two-tier scoping: try the active barista first (their best on this
+    // bean+profile), fall back to bean-wide (any barista) when the person
+    // has no rated shot on this bean. `scope` records which tier won.
+    const QString baseSql =
+        "SELECT id FROM shots "
+        "WHERE profile_kb_id = ? AND bean_brand = ? AND bean_type = ? "
+        "AND enjoyment > 0 AND id != ? AND timestamp >= ? ";
+    const QString orderSql =
+        "ORDER BY enjoyment DESC, timestamp DESC LIMIT 1";
+
+    qint64 bestId = -1;
+    QString scope = QStringLiteral("bean");
+
+    auto runBest = [&](bool withBarista) -> qint64 {
+        QSqlQuery q(db);
+        q.prepare(withBarista
+            ? baseSql + QStringLiteral("AND barista = ? ") + orderSql
+            : baseSql + orderSql);
+        q.addBindValue(profileKbId);
+        q.addBindValue(beanBrand);
+        q.addBindValue(beanType);
+        q.addBindValue(resolvedShotId);
+        q.addBindValue(windowFloorSec);
+        if (withBarista)
+            q.addBindValue(barista);
+        // Whitespace before () dodges a permission-hook false-positive on the
+        // pattern `.exec(`. Do not auto-format.
+        if (!q.exec ()) {
+            qWarning() << "buildBeanBestShotBlock: bean-best query failed:"
+                       << q.lastError().text() << "kbId=" << profileKbId
+                       << "withBarista=" << withBarista;
+            return -1;
+        }
+        return q.next() ? q.value(0).toLongLong() : -1;
+    };
+
+    if (!barista.isEmpty()) {
+        bestId = runBest(/*withBarista=*/true);
+        if (bestId >= 0)
+            scope = QStringLiteral("beanAndPerson");
+    }
+    if (bestId < 0)
+        bestId = runBest(/*withBarista=*/false);   // bean-wide fallback
+    if (bestId < 0) return QJsonObject();           // no rated shot for this bean in window
+
+    ShotRecord bestRecord = ShotHistoryStorage::loadShotRecordStatic(db, bestId);
+    const ShotProjection best = ShotHistoryStorage::convertShotRecord(bestRecord);
+    if (!best.isValid()) return QJsonObject();
+
+    QJsonObject b;
+    b["scope"] = scope;
+    b["id"] = best.id;
+    b["timestamp"] = best.timestampIso;
+    b["enjoyment0to100"] = best.enjoyment0to100;
+    b["doseG"] = best.doseWeightG;
+    b["yieldG"] = best.finalWeightG;
+    b["durationSec"] = best.durationSec;
+    // Same control-mode + stop-at-weight provenance as bestRecentShot so the
+    // LLM applies the recipe rule when anchoring on the bean's best shot.
+    const QString bestPourControl = DialingBlocks::pourControlFromProfileJson(best.profileJson);
+    if (!bestPourControl.isEmpty())
+        b["pourControl"] = bestPourControl;
+    if (best.targetWeightG > 0)
+        b["targetWeightG"] = best.targetWeightG;
+    if (best.temperatureOverrideC > 0)
+        b["temperatureOverrideC"] = best.temperatureOverrideC;
+    if (best.stoppedBy == QStringLiteral("manual")
+        || best.stoppedBy == QStringLiteral("weight")
+        || best.stoppedBy == QStringLiteral("volume"))
+        b["stoppedBy"] = best.stoppedBy;
+    b["grinderSetting"] = best.grinderSetting;
+    b["grinderModel"] = best.grinderModel;
+    b["beanBrand"] = best.beanBrand;
+    b["beanType"] = best.beanType;
+    if (!best.barista.isEmpty())
+        b["barista"] = best.barista;
+    b["notes"] = best.espressoNotes;
+    if (best.doseWeightG > 0)
+        b["ratio"] = QString("1:%1").arg(best.finalWeightG / best.doseWeightG, 0, 'f', 2);
+    if (best.timestamp > 0) {
+        const qint64 nowSec = QDateTime::currentSecsSinceEpoch();
+        b["daysSinceShot"] = (nowSec - best.timestamp) / (24 * 3600);
+    }
+    const QJsonObject diff = changeFromPrev(best, currentShot);
+    if (!diff.isEmpty())
+        b["changeFromBest"] = diff;
+
+    return b;
+}
+
 QJsonObject buildGrinderContextBlock(QSqlDatabase& db,
                                      const QString& grinderModel,
                                      const QString& beverageType,

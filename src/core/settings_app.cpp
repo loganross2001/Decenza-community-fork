@@ -413,6 +413,17 @@ void SettingsApp::setAutoCheckUpdates(bool enabled) {
     }
 }
 
+bool SettingsApp::coachAfterEachShot() const {
+    return m_settings.value("postShotReview/coachAfterEachShot", false).toBool();
+}
+
+void SettingsApp::setCoachAfterEachShot(bool enabled) {
+    if (coachAfterEachShot() != enabled) {
+        m_settings.setValue("postShotReview/coachAfterEachShot", enabled);
+        emit coachAfterEachShotChanged();
+    }
+}
+
 bool SettingsApp::betaUpdatesEnabled() const {
     return m_settings.value("updates/betaEnabled", false).toBool();
 }

@@ -64,6 +64,11 @@ class SettingsApp : public QObject {
     // Refill kit override (0=force off, 1=force on, 2=auto-detect)
     Q_PROPERTY(int refillKitOverride READ refillKitOverride WRITE setRefillKitOverride NOTIFY refillKitOverrideChanged)
 
+    // Post-shot review: when true, the proactive coaching card on the
+    // post-shot review page auto-fetches an AI recommendation on page load
+    // (no taste tap or button press required). Default false.
+    Q_PROPERTY(bool coachAfterEachShot READ coachAfterEachShot WRITE setCoachAfterEachShot NOTIFY coachAfterEachShotChanged)
+
     // Developer settings
     Q_PROPERTY(bool developerTranslationUpload READ developerTranslationUpload WRITE setDeveloperTranslationUpload NOTIFY developerTranslationUploadChanged)
     Q_PROPERTY(bool simulationMode READ simulationMode WRITE setSimulationMode NOTIFY simulationModeChanged)
@@ -145,6 +150,10 @@ public:
     int refillKitOverride() const;
     void setRefillKitOverride(int value);
 
+    // Post-shot review proactive coaching
+    bool coachAfterEachShot() const;
+    void setCoachAfterEachShot(bool enabled);
+
     // Developer settings
     bool developerTranslationUpload() const;
     void setDeveloperTranslationUpload(bool enabled);
@@ -182,6 +191,7 @@ signals:
     void waterLevelDisplayUnitChanged();
     void waterRefillPointChanged();
     void refillKitOverrideChanged();
+    void coachAfterEachShotChanged();
     void developerTranslationUploadChanged();
     void simulationModeChanged();
     void hideGhcSimulatorChanged();

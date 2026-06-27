@@ -4,6 +4,7 @@
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QRegularExpression>
+#include <QVariantMap>
 #include <optional>
 
 class AIManager;
@@ -158,6 +159,24 @@ public:
     std::optional<QJsonObject> structuredNextForLastAssistantTurn() const;
 
     /**
+     * QML-callable wrapper around structuredNextForLastAssistantTurn(). Qt
+     * cannot marshal std::optional<QJsonObject> to QML, so this returns the
+     * structuredNext object as a QVariantMap (numbers/strings/arrays come
+     * through as JS values) or an EMPTY QVariantMap{} when there is none —
+     * QML treats `Object.keys(m).length === 0` as "no recommendation".
+     */
+    Q_INVOKABLE QVariantMap structuredNextForLastAssistantTurnMap() const;
+
+    /**
+     * QML-callable accessor for the shotId stamped on the most recent
+     * assistant turn, or 0 when none. Used by the in-app coaching card to
+     * confirm a received response belongs to ITS shot (the conversation
+     * object is shared with the free-form overlay), since responseReceived
+     * carries no shot identity. Returns a plain qint64 (marshalable to QML).
+     */
+    Q_INVOKABLE qint64 shotIdForLastAssistantTurn() const;
+
+    /**
      * Bind the resolved shot id to the current user/assistant turn pair.
      * Call once the resolved shot for the current turn is known and
      * BEFORE the assistant message is appended; the
@@ -168,8 +187,14 @@ public:
      * Issue #1053 — without this linkage, recentAdvice cannot attribute
      * a prior advisor recommendation to the shot it was about, and the
      * follow-up shot lookup has no anchor.
+     *
+     * Q_INVOKABLE so the in-app proactive coaching card
+     * (qml/pages/PostShotReviewPage.qml) can latch the reviewed shot onto
+     * the analysis it drives before calling ask()/followUp(), closing the
+     * #1053 loop for the in-app path (the overlay's free-form send path
+     * historically did not stamp a shotId).
      */
-    void setShotIdForCurrentTurn(qint64 shotId);
+    Q_INVOKABLE void setShotIdForCurrentTurn(qint64 shotId);
 
     /**
      * Return the shotId stored on the turn at `index`, or 0 when the

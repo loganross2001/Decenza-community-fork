@@ -254,6 +254,24 @@ std::optional<QJsonObject> AIConversation::structuredNextForLastAssistantTurn() 
     return std::nullopt;
 }
 
+QVariantMap AIConversation::structuredNextForLastAssistantTurnMap() const
+{
+    const std::optional<QJsonObject> next = structuredNextForLastAssistantTurn();
+    if (!next.has_value()) return QVariantMap{};
+    return next->toVariantMap();
+}
+
+qint64 AIConversation::shotIdForLastAssistantTurn() const
+{
+    for (qsizetype i = m_messages.size() - 1; i >= 0; --i) {
+        const QJsonObject msg = m_messages.at(i).toObject();
+        if (msg.value("role").toString() == QStringLiteral("assistant")) {
+            return shotIdForTurn(i);
+        }
+    }
+    return 0;
+}
+
 void AIConversation::setShotIdForCurrentTurn(qint64 shotId)
 {
     m_pendingShotId = shotId;

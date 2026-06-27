@@ -2506,6 +2506,8 @@ int main(int argc, char *argv[])
         "AIConversation is created in C++");
     qmlRegisterUncreatableType<CoffeeBagStorage>("Decenza", 1, 0, "CoffeeBagStorageType",
         "CoffeeBagStorage is created in C++ (MainController.bagStorage)");
+    qmlRegisterUncreatableType<BaristaStorage>("Decenza", 1, 0, "BaristaStorageType",
+        "BaristaStorage is created in C++ (MainController.baristaStorage)");
     qmlRegisterUncreatableType<EquipmentStorage>("Decenza", 1, 0, "EquipmentStorageType",
         "EquipmentStorage is created in C++ (MainController.equipmentStorage)");
     qmlRegisterUncreatableType<UnifiedBeanSearchModel>("Decenza", 1, 0, "UnifiedBeanSearchModelType",

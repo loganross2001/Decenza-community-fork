@@ -492,11 +492,229 @@ KeyboardAwareContainer {
             }
         }
 
-        // Right column: Share Data card, plus Export Shots card below it
+        // Right column: People (barista roster), Share Data, and Export Shots cards
         ColumnLayout {
             Layout.preferredWidth: Theme.scaled(280)
             Layout.fillHeight: true
             spacing: Theme.scaled(15)
+
+        // People (barista roster) card — always available so a user can add a
+        // second person (the idle-screen chip row hides for solo users) or pick
+        // who is currently brewing. Each shot is tagged with the active person,
+        // giving everyone their own history. Mirrors the roster from
+        // MainController.baristaStorage the same way BaristaChipRow does.
+        Rectangle {
+            id: peopleCard
+            objectName: "peopleRoster"
+            Layout.fillWidth: true
+            Layout.preferredHeight: peopleLayout.implicitHeight + Theme.scaled(30)
+            color: Theme.surfaceColor
+            radius: Theme.cardRadius
+
+            // Local mirror of the roster (QVariantList of barista variant maps).
+            property var roster: []
+            readonly property var baristaStorage: MainController.baristaStorage
+
+            function refresh() {
+                if (baristaStorage)
+                    baristaStorage.requestRoster()
+            }
+
+            function hasEmojiAvatar(barista) {
+                return barista.avatar && barista.avatar.length > 0
+            }
+            function initialFor(barista) {
+                var n = barista.name || ""
+                return n.length > 0 ? n.charAt(0).toUpperCase() : "?"
+            }
+            function colorFor(barista) {
+                return (barista.color && barista.color.length > 0) ? barista.color : Theme.primaryColor
+            }
+            function isActive(barista) {
+                return (barista.name || "") === Settings.dye.dyeBarista
+            }
+
+            Component.onCompleted: refresh()
+
+            Connections {
+                target: peopleCard.baristaStorage
+                function onRosterReady(baristas) { peopleCard.roster = baristas }
+                function onBaristasChanged() { peopleCard.refresh() }
+            }
+
+            // One shared edit dialog instance — reused for create and edit.
+            BaristaEditDialog {
+                id: peopleEditDialog
+                onSaved: peopleCard.refresh()
+                onDeleted: peopleCard.refresh()
+            }
+
+            ColumnLayout {
+                id: peopleLayout
+                anchors.fill: parent
+                anchors.margins: Theme.scaled(15)
+                spacing: Theme.scaled(8)
+
+                Tr {
+                    key: "barista.settings.title"
+                    fallback: "People"
+                    color: Theme.textColor
+                    font.pixelSize: Theme.scaled(14)
+                    font.bold: true
+                }
+
+                Tr {
+                    Layout.fillWidth: true
+                    key: "barista.settings.help"
+                    fallback: "Tag who's brewing so each person gets their own history."
+                    color: Theme.textSecondaryColor
+                    font.pixelSize: Theme.scaled(9)
+                    wrapMode: Text.WordWrap
+                }
+
+                // Roster rows — tap to set active, tap the edit icon (or
+                // long-press the row) to edit. Empty when no people exist yet.
+                Repeater {
+                    model: peopleCard.roster
+
+                    delegate: Rectangle {
+                        id: personRow
+                        required property var modelData
+                        readonly property bool active: peopleCard.isActive(modelData)
+
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: Theme.scaled(44)
+                        radius: Theme.scaled(8)
+                        color: active
+                                   ? Qt.rgba(Theme.primaryColor.r, Theme.primaryColor.g, Theme.primaryColor.b, 0.12)
+                                   : (rowTap.isPressed ? Theme.backgroundColor : "transparent")
+                        border.width: active ? 1 : 0
+                        border.color: Theme.primaryColor
+
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: Theme.scaled(8)
+                            anchors.rightMargin: Theme.scaled(4)
+                            spacing: Theme.scaled(8)
+
+                            // Avatar — emoji (SVG image) or the name's initial.
+                            Rectangle {
+                                Layout.alignment: Qt.AlignVCenter
+                                width: Theme.scaled(30)
+                                height: Theme.scaled(30)
+                                radius: width / 2
+                                color: peopleCard.colorFor(personRow.modelData)
+
+                                Image {
+                                    anchors.centerIn: parent
+                                    visible: peopleCard.hasEmojiAvatar(personRow.modelData)
+                                    source: visible ? Theme.emojiToImage(personRow.modelData.avatar) : ""
+                                    sourceSize.width: Theme.scaled(18)
+                                    sourceSize.height: Theme.scaled(18)
+                                    Accessible.ignored: true
+                                }
+                                Text {
+                                    anchors.centerIn: parent
+                                    visible: !peopleCard.hasEmojiAvatar(personRow.modelData)
+                                    text: peopleCard.initialFor(personRow.modelData)
+                                    color: Theme.primaryContrastColor
+                                    font.pixelSize: Theme.scaled(14)
+                                    font.bold: true
+                                    Accessible.ignored: true
+                                }
+                            }
+
+                            Text {
+                                Layout.fillWidth: true
+                                Layout.alignment: Qt.AlignVCenter
+                                text: personRow.modelData.name || ""
+                                color: personRow.active ? Theme.primaryColor : Theme.textColor
+                                font.pixelSize: Theme.scaled(12)
+                                font.bold: personRow.active
+                                elide: Text.ElideRight
+                                Accessible.ignored: true
+                            }
+
+                            // "Currently brewing" indicator on the active row.
+                            Image {
+                                Layout.alignment: Qt.AlignVCenter
+                                visible: personRow.active
+                                source: "qrc:/icons/tick.svg"
+                                sourceSize.width: Theme.scaled(16)
+                                sourceSize.height: Theme.scaled(16)
+                                Accessible.ignored: true
+                            }
+
+                            // Edit affordance.
+                            Rectangle {
+                                Layout.alignment: Qt.AlignVCenter
+                                width: Theme.scaled(32)
+                                height: Theme.scaled(32)
+                                radius: width / 2
+                                color: editTap.isPressed ? Theme.backgroundColor : "transparent"
+
+                                Image {
+                                    anchors.centerIn: parent
+                                    source: "qrc:/icons/edit.svg"
+                                    sourceSize.width: Theme.scaled(16)
+                                    sourceSize.height: Theme.scaled(16)
+                                    Accessible.ignored: true
+                                }
+
+                                AccessibleMouseArea {
+                                    id: editTap
+                                    anchors.fill: parent
+                                    accessibleName: TranslationManager.translate(
+                                        "barista.editPerson", "Edit %1")
+                                        .arg(personRow.modelData.name || "")
+                                    accessibleItem: personRow
+                                    onAccessibleClicked: peopleEditDialog.openForEdit(personRow.modelData)
+                                }
+                            }
+                        }
+
+                        // Tapping the row selects the active person; long-press
+                        // also opens the edit dialog. The accessible state
+                        // announces selection and updates reactively with
+                        // Settings.dye.dyeBarista (via the `active` binding).
+                        AccessibleMouseArea {
+                            id: rowTap
+                            anchors.fill: parent
+                            anchors.rightMargin: Theme.scaled(40)  // leave the edit icon tappable
+                            supportLongPress: true
+                            accessibleRole: Accessible.RadioButton
+                            accessibleChecked: personRow.active
+                            accessibleName: TranslationManager.translate("barista.brewAs", "Brew as %1")
+                                                .arg(personRow.modelData.name || "")
+                                            + (personRow.active
+                                                ? ", " + TranslationManager.translate("barista.selected", "selected")
+                                                : "")
+                            accessibleItem: personRow
+                            onAccessibleClicked: Settings.dye.setDyeBarista(personRow.modelData.name || "")
+                            onAccessibleLongPressed: peopleEditDialog.openForEdit(personRow.modelData)
+                        }
+                    }
+                }
+
+                // Empty state hint — shown when no people exist yet.
+                Tr {
+                    Layout.fillWidth: true
+                    visible: peopleCard.roster.length === 0
+                    key: "barista.settings.empty"
+                    fallback: "No people yet. Add someone to start tagging shots."
+                    color: Theme.textSecondaryColor
+                    font.pixelSize: Theme.scaled(10)
+                    wrapMode: Text.WordWrap
+                }
+
+                AccessibleButton {
+                    Layout.fillWidth: true
+                    text: TranslationManager.translate("barista.settings.addPerson", "Add Person")
+                    accessibleName: TranslationManager.translate("barista.addBarista", "Add barista")
+                    onClicked: peopleEditDialog.openForCreate()
+                }
+            }
+        }
 
         Rectangle {
             objectName: "enableServer"

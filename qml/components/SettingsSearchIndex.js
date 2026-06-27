@@ -157,6 +157,10 @@ function getSearchEntries(tr) {
           title: tr("settings.data.exportshots", "Export Shots to File"),
           description: tr("settings.search.exportShotsDesc", "Mirror shots to JSON files for external tools"),
           keywords: ["export", "json", "shots", "mirror", "backup", "files"] },
+        { tabId: "historyData", cardId: "peopleRoster",
+          title: tr("barista.settings.title", "People"),
+          description: tr("barista.settings.help", "Tag who's brewing so each person gets their own history"),
+          keywords: ["people", "barista", "baristas", "person", "user", "roster", "who", "brewing"] },
 
         // Themes
         { tabId: "themes", cardId: "themeColors",

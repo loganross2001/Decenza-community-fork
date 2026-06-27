@@ -15,6 +15,7 @@
 #include "../machine/steamhealthtracker.h"
 #include "../history/shothistorystorage.h"
 #include "../history/coffeebagstorage.h"
+#include "../history/baristastorage.h"
 #include "../history/equipmentstorage.h"
 #include "../history/unifiedbeansearchmodel.h"
 #include "../history/shotimporter.h"
@@ -59,6 +60,7 @@ class MainController : public QObject {
     Q_PROPERTY(double filteredGoalFlow READ filteredGoalFlow NOTIFY goalsChanged)
     Q_PROPERTY(ShotHistoryStorage* shotHistory READ shotHistory CONSTANT)
     Q_PROPERTY(CoffeeBagStorage* bagStorage READ bagStorage CONSTANT)
+    Q_PROPERTY(BaristaStorage* baristaStorage READ baristaStorage CONSTANT)
     Q_PROPERTY(EquipmentStorage* equipmentStorage READ equipmentStorage CONSTANT)
     Q_PROPERTY(UnifiedBeanSearchModel* beanSearch READ beanSearch CONSTANT)
     Q_PROPERTY(ShotImporter* shotImporter READ shotImporter CONSTANT)
@@ -117,6 +119,7 @@ public:
     QString currentFrameName() const { return m_currentFrameName; }
     ShotHistoryStorage* shotHistory() const { return m_shotHistory; }
     CoffeeBagStorage* bagStorage() const { return m_bagStorage; }
+    BaristaStorage* baristaStorage() const { return m_baristaStorage; }
     EquipmentStorage* equipmentStorage() const { return m_equipmentStorage; }
     UnifiedBeanSearchModel* beanSearch() const { return m_beanSearch; }
     ShotImporter* shotImporter() const { return m_shotImporter; }
@@ -361,6 +364,7 @@ private:
     // Shot history and comparison
     ShotHistoryStorage* m_shotHistory = nullptr;
     CoffeeBagStorage* m_bagStorage = nullptr;
+    BaristaStorage* m_baristaStorage = nullptr;
     EquipmentStorage* m_equipmentStorage = nullptr;
     UnifiedBeanSearchModel* m_beanSearch = nullptr;
     ShotImporter* m_shotImporter = nullptr;

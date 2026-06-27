@@ -1,6 +1,7 @@
 #include "shothistorystorage.h"
 #include "shothistorystorage_internal.h"
 #include "coffeebagstorage.h"
+#include "baristastorage.h"
 #include "equipmentstorage.h"
 #include "ai/conductance.h"
 #include "ai/shotanalysis.h"
@@ -1324,6 +1325,52 @@ bool ShotHistoryStorage::runMigrations()
                 m_db.rollback();
             qWarning() << "ShotHistoryStorage: migration 23 incomplete (ok" << ok
                        << "dropped" << dropped << ") - will retry next launch";
+        }
+    }
+
+    // Migration 24: barista roster (pr/barista-identity). Creates the baristas
+    // table and backfills it with the DISTINCT non-empty barista names already
+    // stamped on shots, so an upgrading device's existing baristas appear in the
+    // roster immediately. Mirrors migration 19's transactional create idiom.
+    // Idempotent: CREATE TABLE IF NOT EXISTS + INSERT OR IGNORE (the name UNIQUE
+    // constraint dedups), so a retried run after a mid-step crash is a no-op.
+    // Whitespace before the open-paren dodges the QSqlQuery permission-hook
+    // false-positive, as elsewhere. Do not auto-format.
+    if (currentVersion < 24) {
+        qDebug() << "ShotHistoryStorage: Running migration to version 24 (barista roster)";
+
+        const bool txn = m_db.transaction();
+        bool ok = BaristaStorage::ensureTableStatic(m_db);
+
+        if (ok) {
+            // Backfill from history. INSERT OR IGNORE skips names already present
+            // (and the UNIQUE name constraint dedups the SELECT DISTINCT). The
+            // backfill is best-effort: a failure here must not block the bump —
+            // the table is the load-bearing artifact, and the chip row tolerates
+            // an empty roster.
+            QSqlQuery backfill(m_db);
+            if (!backfill.exec(
+                    "INSERT OR IGNORE INTO baristas (name, created_epoch, last_used_epoch) "
+                    "SELECT DISTINCT barista, strftime('%s','now'), strftime('%s','now') "
+                    "FROM shots WHERE barista IS NOT NULL AND barista != ''"))
+                qWarning() << "ShotHistoryStorage: migration 24 barista backfill failed:"
+                           << backfill.lastError().text();
+        }
+
+        if (ok) {
+            query.exec ("DELETE FROM schema_version");
+            query.exec ("INSERT INTO schema_version (version) VALUES (24)");
+            if (!txn || m_db.commit()) {
+                currentVersion = 24;
+                qInfo() << "ShotHistoryStorage: migration 24 complete - created baristas table";
+            } else {
+                if (txn) m_db.rollback();
+                qWarning() << "ShotHistoryStorage: migration 24 commit failed - will retry next launch";
+            }
+        } else {
+            if (txn)
+                m_db.rollback();
+            qWarning() << "ShotHistoryStorage: migration 24 incomplete - will retry next launch";
         }
     }
 
@@ -3032,6 +3079,18 @@ bool ShotHistoryStorage::importDatabaseStatic(const QString& destDbPath, const Q
             QHash<qint64, qint64> packageIdMap;
             if (!EquipmentStorage::importEquipmentStatic(srcDb, destDb, merge, packageIdMap)) {
                 qWarning() << "ShotHistoryStorage::importDatabaseStatic: Equipment import failed";
+                destDb.rollback();
+                goto cleanup;
+            }
+
+            // Import the barista roster (pr/barista-identity). Mirrors the bag
+            // importer, but shots reference the barista by NAME (not id), so the
+            // returned id map needs no downstream remap — it exists for
+            // symmetry. Pre-migration-24 sources have no baristas table and
+            // yield an empty map.
+            QHash<qint64, qint64> baristaIdMap;
+            if (!BaristaStorage::importBaristasStatic(srcDb, destDb, merge, baristaIdMap)) {
+                qWarning() << "ShotHistoryStorage::importDatabaseStatic: Barista import failed";
                 destDb.rollback();
                 goto cleanup;
             }

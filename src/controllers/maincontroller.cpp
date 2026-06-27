@@ -201,6 +201,13 @@ MainController::MainController(QNetworkAccessManager* networkManager,
         m_settings->dye()->setActiveBagId(static_cast<int>(m_shotHistory->migratedActiveBagId()));
     m_settings->dye()->setBagStorage(m_bagStorage);
 
+    // Barista roster shares the shot history database (baristas table, created
+    // by migration 24 inside initialize() above). The active barista stays the
+    // free-text Settings.dye.dyeBarista string stamped on each shot; the roster
+    // just makes switching it a one-tap idle-screen concept.
+    m_baristaStorage = new BaristaStorage(this);
+    m_baristaStorage->initialize(m_shotHistory->databasePath());
+
     // Equipment storage shares the same database (equipment_packages +
     // equipment_items tables, created by migration 22). Switchable grinder
     // packages the active bag points at via equipment_id.

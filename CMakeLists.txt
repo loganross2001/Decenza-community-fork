@@ -309,6 +309,7 @@ set(SOURCES
     src/history/shothistorystorage_serialize.cpp
     src/history/shothistorystorage_queries.cpp
     src/history/coffeebagstorage.cpp
+    src/history/baristastorage.cpp
     src/history/equipmentstorage.cpp
     src/history/unifiedbeansearchmodel.cpp
     src/history/shotprojection.cpp
@@ -494,6 +495,7 @@ set(HEADERS
     src/history/shothistorystorage.h
     src/history/shothistorystorage_internal.h
     src/history/coffeebagstorage.h
+    src/history/baristastorage.h
     src/history/equipmentstorage.h
     src/history/unifiedbeansearchmodel.h
     src/history/shotprojection.h
@@ -765,6 +767,8 @@ set(QML_FILES
     qml/components/BeanBaseDetailsRow.qml
     qml/components/BeanSummary.qml
     qml/components/ChangeBeansDialog.qml
+    qml/components/BaristaChipRow.qml
+    qml/components/BaristaEditDialog.qml
     qml/components/BagCard.qml
     qml/components/SwitchEquipmentDialog.qml
     qml/components/EquipmentCard.qml

@@ -11,6 +11,11 @@ Button {
     property color backgroundColor: Theme.primaryColor
     property int iconSize: Theme.scaled(48)
 
+    // When true, draw a prominent accent ring to mark this button as the
+    // currently-active mode/screen.
+    property bool active: false
+    property color activeColor: Theme.accentColor
+
     // Translation support
     property string translationKey: ""
     property string translationFallback: ""
@@ -105,6 +110,16 @@ Button {
             if (control._isPressed) return Qt.darker(control._effectiveBackground, 1.2)
             if (control.hovered || control.activeFocus) return Qt.lighter(control._effectiveBackground, 1.1)
             return control._effectiveBackground
+        }
+
+        // Active-mode indicator: a thick accent ring around the button.
+        Rectangle {
+            anchors.fill: parent
+            visible: control.active
+            color: "transparent"
+            border.width: Theme.scaled(3)
+            border.color: control.activeColor
+            radius: parent.radius
         }
 
         // Focus indicator

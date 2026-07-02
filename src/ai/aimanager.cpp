@@ -1198,12 +1198,26 @@ void AIManager::analyzeConversation(const QString& systemPrompt, const QJsonArra
     m_isConversationRequest = true;
     emit analyzingChanged();
 
+    // Sanitize messages to the API-permitted shape (role + content only). Stored
+    // turns carry extra bookkeeping siblings — shotId (closed-loop attribution) and
+    // structuredNext (the parsed recommendation) — which providers reject as extra
+    // inputs (e.g. Anthropic: "messages.0.shotId: Extra inputs are not permitted").
+    // Strip them here, at the single point all providers go through.
+    QJsonArray apiMessages;
+    for (const QJsonValue& v : messages) {
+        const QJsonObject m = v.toObject();
+        QJsonObject clean;
+        clean["role"] = m.value("role");
+        clean["content"] = m.value("content");
+        apiMessages.append(clean);
+    }
+
     // Store for logging — flatten for the log file
     m_lastSystemPrompt = systemPrompt;
-    m_lastUserPrompt = QString("[Conversation with %1 messages]").arg(messages.size());
+    m_lastUserPrompt = QString("[Conversation with %1 messages]").arg(apiMessages.size());
 
     logPrompt(selectedProvider(), systemPrompt, m_lastUserPrompt);
-    provider->analyzeConversation(systemPrompt, messages);
+    provider->analyzeConversation(systemPrompt, apiMessages);
 }
 
 void AIManager::refreshOllamaModels()

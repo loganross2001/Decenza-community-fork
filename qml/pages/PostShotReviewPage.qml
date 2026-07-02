@@ -217,6 +217,11 @@ Page {
                 // empty baseline vs. dose defaulted from Settings).
                 _committedState = captureEditState()
                 _editLoaded = true
+                // Reflect any previously-saved one-tap taste marker in the
+                // taste row's selected state, then honor the "coach
+                // automatically" preference now that the record is loaded.
+                postShotReviewPage.editTasteChoice = postShotReviewPage.tasteChoiceFromNotes(editNotes)
+                postShotReviewPage.maybeAutoCoach()
                 // Quality badges already arrived recomputed in `shot` via
                 // loadShotRecordStatic, which also persists drift to the DB
                 // and emits shotBadgesUpdated when it does. onShotBadgesUpdated
@@ -261,6 +266,46 @@ Page {
         }
     }
 
+    // Proactive coaching: read the advisor's structuredNext recommendation
+    // when an analysis WE initiated completes. The conversation object is
+    // SHARED with ConversationOverlay (which never sets coachingRequested),
+    // so gate on two conditions: (1) our coachingRequested flag, AND (2)
+    // positive shot-id correlation — the last assistant turn's stamped shotId
+    // must equal editShotId. responseReceived carries no shot identity, and a
+    // free-form overlay send could complete while our flag is still set, so
+    // the id check is what guarantees we only consume OUR OWN response.
+    Connections {
+        target: MainController.aiManager ? MainController.aiManager.conversation : null
+        function onResponseReceived(response) {
+            if (!postShotReviewPage.coachingRequested) return
+            var turnShotId = MainController.aiManager.conversation.shotIdForLastAssistantTurn()
+            // Not our shot — a different consumer (e.g. the overlay) produced
+            // this response. Leave coachingRequested set so OUR pending
+            // analysis can still be matched when it lands.
+            if (turnShotId !== postShotReviewPage.editShotId) return
+            postShotReviewPage.coachingRequested = false
+            postShotReviewPage.coachingResponded = true
+            // structuredNextForLastAssistantTurnMap() returns a QVariantMap
+            // (std::optional<QJsonObject> is not marshalable to QML); an empty
+            // map means "no concrete change" → normalize to null.
+            var next = MainController.aiManager.conversation.structuredNextForLastAssistantTurnMap()
+            postShotReviewPage.coachingResult = (next && Object.keys(next).length > 0) ? next : null
+        }
+        function onErrorOccurred(error) {
+            if (!postShotReviewPage.coachingRequested) return
+            postShotReviewPage.coachingRequested = false
+            // Leave coachingResponded false so the card returns to its
+            // idle/trigger state rather than showing a false "on track".
+        }
+    }
+
+    // Re-evaluate the auto-coach preference if AI becomes configured after
+    // the shot already loaded (e.g. user just set up a provider).
+    Connections {
+        target: MainController.aiManager
+        function onConfigurationChanged() { postShotReviewPage.maybeAutoCoach() }
+    }
+
     // Editing fields (separate from Settings.dye* to avoid polluting current session)
     property string editBeanBrand: ""
     property string editBeanType: ""
@@ -291,6 +336,32 @@ Page {
 
     property string editNotes: ""
     property string editBeverageType: "espresso"
+
+    // === Proactive coaching state (PR proactive-coaching) ===
+    // Which one-tap taste the user picked for this shot, or "" if none.
+    // One of "" | "sour" | "balanced" | "bitter". Drives the selected
+    // visual state of the taste row and is idempotent (re-tapping replaces).
+    property string editTasteChoice: ""
+    // True once a coaching analysis has been kicked off for this shot, so we
+    // know to read structuredNextForLastAssistantTurn() when the response
+    // arrives (vs. an unrelated conversation response).
+    property bool coachingRequested: false
+    // Parsed structuredNext object from the advisor's last recommendation,
+    // or null when the response carried no concrete change ("on track").
+    property var coachingResult: null
+    // Set true once we've consumed a coaching response (so the card can
+    // distinguish "no result yet" from "got a quiet/no-change result").
+    property bool coachingResponded: false
+    // Guards the auto-coach-on-load preference so it fires at most once per
+    // page lifetime (event-based latch, not a timer).
+    property bool _autoCoachAttempted: false
+    // True while a coaching analysis we initiated is in flight. Distinct from
+    // aiManager.isAnalyzing (which is shared with the overlay) so the card
+    // only shows its spinner for its own requests.
+    readonly property bool coachingAnalyzing: coachingRequested
+        && MainController.aiManager
+        && MainController.aiManager.conversation
+        && MainController.aiManager.conversation.busy
     // Bean Base snapshot stored with this shot. Searchable/correctable right
     // here (same flow as BeanInfoPage): picking a result rewrites THIS
     // shot's snapshot and the bean fields, autosaved like any other edit —
@@ -698,6 +769,181 @@ Page {
         nb.espressoNotes = editNotes
         nb.beverageType = editBeverageType
         editShotData = nb
+    }
+
+    // ====================================================================
+    // Proactive coaching (PR proactive-coaching)
+    // ====================================================================
+
+    // Marker we append to the notes so the one-tap taste DIRECTION (not just a
+    // numeric score) is visible to the AI. The shot summarizer ships
+    // espressoNotes verbatim into the user prompt (shot.notes + the
+    // "## Tasting Feedback" prose), so this is what lets the advisor reason
+    // "tasted sour → grind finer". The numeric enjoyment0to100 alone does not
+    // encode direction (45 could be sour or weak).
+    readonly property string _tasteMarkerPrefix: "Tasted "
+
+    // Map a one-tap taste to a numeric enjoyment. Balanced is high; sour and
+    // bitter are mid-low (both "needs work") — but the DIRECTION is preserved
+    // separately via the notes marker so the AI can act on it.
+    function enjoymentForTaste(choice) {
+        if (choice === "sour") return 45
+        if (choice === "balanced") return 82
+        if (choice === "bitter") return 55
+        return 0
+    }
+
+    // Recover the taste choice from a previously-saved notes marker so the
+    // selected state survives a page reload. Matches the CANONICAL ENGLISH
+    // token (the internal choice id), NOT the translated display label — the
+    // marker is persisted in English regardless of UI locale (see
+    // notesWithTasteMarker) so this round-trips in any language.
+    function tasteChoiceFromNotes(notes) {
+        if (!notes) return ""
+        if (notes.indexOf(_tasteMarkerPrefix + "sour") !== -1) return "sour"
+        if (notes.indexOf(_tasteMarkerPrefix + "balanced") !== -1) return "balanced"
+        if (notes.indexOf(_tasteMarkerPrefix + "bitter") !== -1) return "bitter"
+        return ""
+    }
+
+    // Replace any existing taste marker line in notes with the new one,
+    // preserving the user's own typed notes. Idempotent: re-tapping swaps the
+    // marker instead of accumulating. Removing the choice strips the marker.
+    //
+    // The persisted marker uses the CANONICAL ENGLISH choice id ("sour" |
+    // "balanced" | "bitter"), not the translated display label, so that (a)
+    // tasteChoiceFromNotes can restore the selection in any locale and (b) the
+    // English-system-prompt advisor reads a stable "Tasted sour" token instead
+    // of a localized word it may not understand. The visible taste buttons stay
+    // translated; only this stored marker is canonical English.
+    function notesWithTasteMarker(notes, choice) {
+        var base = (notes || "")
+        // Drop any prior taste-marker line(s).
+        var lines = base.split("\n").filter(function(l) {
+            return l.indexOf(_tasteMarkerPrefix) !== 0
+        })
+        var cleaned = lines.join("\n").replace(/\n+$/, "")
+        if (choice === "") return cleaned
+        var marker = _tasteMarkerPrefix + choice
+        return cleaned.length > 0 ? (cleaned + "\n" + marker) : marker
+    }
+
+    // One-tap taste handler: persist enjoyment + a direction-bearing notes
+    // marker, reflect the selection, then trigger coaching for this shot.
+    function applyTaste(choice) {
+        if (editShotId <= 0) return
+        // Idempotent toggle: tapping the active choice again clears it.
+        var next = (editTasteChoice === choice) ? "" : choice
+        editTasteChoice = next
+        editEnjoyment = enjoymentForTaste(next)
+        editNotes = notesWithTasteMarker(editNotes, next)
+        // Reuse the existing metadata-persist path (writes enjoyment +
+        // espressoNotes to the DB, runs sticky sync, advances the baseline).
+        saveEditedShot()
+        if (next !== "")
+            coachThisShot()
+    }
+
+    // Honor the "coach automatically after each shot" preference. Fires at
+    // most once per page lifetime, only when AI is configured and we have a
+    // real shot. Event-driven latch (no timer).
+    function maybeAutoCoach() {
+        if (_autoCoachAttempted) return
+        if (!Settings.app.coachAfterEachShot) return
+        if (!MainController.aiManager || !MainController.aiManager.isConfigured) return
+        if (editShotId <= 0 || !(editShotData.durationSec > 0)) return
+        _autoCoachAttempted = true
+        coachThisShot()
+    }
+
+    // Drive the SAME conversation analysis the AI-advice area uses, inline,
+    // without opening the overlay. Reuses aiManager.conversation +
+    // buildShotAnalysisProseForShot (the exact entrypoint
+    // ConversationOverlay.sendFollowUp uses), and latches the shot id so the
+    // #1053 closed loop attributes this advice to this shot.
+    function coachThisShot() {
+        var ai = MainController.aiManager
+        if (!ai || !ai.conversation) return
+        if (!ai.isConfigured) return
+        if (editShotId <= 0) return
+        var conversation = ai.conversation
+        // Don't stomp an in-flight request (shared with the overlay).
+        if (conversation.busy) return
+
+        var bevType = (editShotData.beverageType || "espresso")
+        if (!ai.isSupportedBeverageType(bevType)) return
+
+        // Route to the right per-bean+profile conversation (same as overlay).
+        ai.switchConversation(editBeanBrand || "", editBeanType || "",
+                              editShotData.profileName || "")
+
+        // Reset card state for this fetch.
+        coachingResult = null
+        coachingResponded = false
+        coachingRequested = true
+
+        // Build the shot prose + change-detection envelope exactly as the
+        // overlay does, then send it as the analysis message.
+        var raw = ai.buildShotAnalysisProseForShot(editShotData)
+        var shotTs = editShotData.timestamp || 0
+        var shotLabel = shotTs > 0
+            ? new Date(shotTs * 1000).toLocaleString(Qt.locale(),
+                Settings.app.use12HourTime ? "MMM d, h:mm AP" : "MMM d, HH:mm")
+            : ""
+        var summary = conversation.processShotForConversation(raw, shotLabel)
+        var message = "## Shot (" + shotLabel + ")\n\nHere's my latest shot:\n\n"
+                      + summary + "\n\n"
+                      + TranslationManager.translate("postshotreview.coach.prompt",
+                          "Briefly: what one change should I make for the next shot?")
+
+        // Latch the reviewed shot onto this turn BEFORE ask()/followUp() so
+        // recentAdvice can attribute the recommendation to this shot (#1053).
+        conversation.setShotIdForCurrentTurn(editShotId)
+
+        if (!conversation.hasHistory) {
+            var systemPrompt = conversation.multiShotSystemPrompt(
+                bevType.toLowerCase(), editShotData.profileName || "")
+            conversation.ask(systemPrompt, message)
+        } else {
+            conversation.followUp(message)
+        }
+    }
+
+    // Apply the advisor's structuredNext recommendation to the next-shot dial
+    // memory. Writes only the fields present in the recommendation.
+    function applyCoachingRecommendation() {
+        var r = coachingResult
+        if (!r) return
+        var applied = []
+        if (r.grinderSetting !== undefined && String(r.grinderSetting).length > 0) {
+            // Next shot reads its grind from Settings.dye.dyeGrinderSetting
+            // (which write-throughs to the active bag + equipment package).
+            Settings.dye.dyeGrinderSetting = String(r.grinderSetting)
+            applied.push(TranslationManager.translate("postshotreview.coach.appliedGrind", "grind")
+                         + " " + String(r.grinderSetting))
+        }
+        if (r.doseG !== undefined && Number(r.doseG) > 0) {
+            // Next shot dose lives on Settings.dye.dyeBeanWeight (double).
+            Settings.dye.dyeBeanWeight = Number(r.doseG)
+            applied.push(TranslationManager.translate("postshotreview.coach.appliedDose", "dose")
+                         + " " + Number(r.doseG) + "g")
+        }
+        if (r.temperatureC !== undefined && Number(r.temperatureC) > 0) {
+            // Next shot reads its brew temp from the override on Settings.brew.
+            // property WRITE (the setter isn't Q_INVOKABLE, so a function call throws)
+            Settings.brew.temperatureOverride = Number(r.temperatureC)
+            applied.push(TranslationManager.translate("postshotreview.coach.appliedTemp", "temperature")
+                         + " " + Number(r.temperatureC) + "°C")
+        }
+        if (applied.length > 0) {
+            coachToast.show(TranslationManager.translate("postshotreview.coach.applied", "Applied to next shot:")
+                            + " " + applied.join(", "))
+        } else {
+            // Profile-only or qualitative advice — nothing to write to dial
+            // memory, but acknowledge so the tap isn't a silent no-op.
+            coachToast.show(TranslationManager.translate("postshotreview.coach.noDialChange",
+                "No dial change to apply — open Why? for details"))
+        }
     }
 
     function buildVisualizerOverrides() {
@@ -1169,6 +1415,358 @@ Page {
                 Layout.fillWidth: true
                 phaseSummaries: editShotData.phaseSummaries || []
                 visible: postShotReviewPage.advancedMode && (editShotData.phaseSummaries || []).length > 0
+            }
+
+            // ================= Proactive coaching (PR proactive-coaching) ===
+            // One-tap taste row: tapping persists a direction-bearing rating
+            // and triggers inline coaching below.
+            RowLayout {
+                id: tasteRow
+                Layout.fillWidth: true
+                spacing: Theme.spacingSmall
+                visible: !!(editShotData.durationSec > 0)
+
+                Tr {
+                    key: "postshotreview.taste.prompt"
+                    fallback: "Taste"
+                    color: Theme.textColor
+                    font: Theme.bodyFont
+                    Layout.maximumWidth: postShotReviewPage.width * 0.25
+                    Accessible.ignored: true
+                }
+
+                Repeater {
+                    model: [
+                        { "choice": "sour",     "emoji": "😖", "key": "postshotreview.taste.sourLabel",     "fallback": "Sour" },
+                        { "choice": "balanced", "emoji": "🙂", "key": "postshotreview.taste.balancedLabel", "fallback": "Balanced" },
+                        { "choice": "bitter",   "emoji": "😋", "key": "postshotreview.taste.bitterLabel",   "fallback": "Bitter" }
+                    ]
+
+                    delegate: Rectangle {
+                        id: tasteButton
+                        required property var modelData
+                        readonly property bool selected: postShotReviewPage.editTasteChoice === modelData.choice
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: Theme.touchTargetMin
+                        radius: Theme.buttonRadius
+                        color: selected ? Theme.primaryColor : Theme.surfaceColor
+                        border.width: 1
+                        border.color: selected ? Theme.primaryColor : Theme.borderColor
+                        opacity: tasteArea.enabled ? 1.0 : 0.5
+
+                        Accessible.role: Accessible.RadioButton
+                        Accessible.name: trTasteLabel.text
+                        Accessible.checked: selected
+                        Accessible.focusable: true
+                        Accessible.onPressAction: tasteArea.accessibleClicked()
+
+                        Tr {
+                            id: trTasteLabel
+                            visible: false
+                            key: tasteButton.modelData.key
+                            fallback: tasteButton.modelData.fallback
+                        }
+
+                        Row {
+                            anchors.centerIn: parent
+                            spacing: Theme.scaled(6)
+
+                            Image {
+                                source: Theme.emojiToImage(tasteButton.modelData.emoji)
+                                width: Theme.scaled(18)
+                                height: Theme.scaled(18)
+                                anchors.verticalCenter: parent.verticalCenter
+                                fillMode: Image.PreserveAspectFit
+                                Accessible.ignored: true
+                            }
+
+                            Text {
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: trTasteLabel.text
+                                font: Theme.bodyFont
+                                color: tasteButton.selected ? Theme.primaryContrastColor : Theme.textColor
+                                Accessible.ignored: true
+                            }
+                        }
+
+                        AccessibleMouseArea {
+                            id: tasteArea
+                            anchors.fill: parent
+                            accessibleName: trTasteLabel.text
+                            accessibleItem: tasteButton
+                            accessibleRole: Accessible.RadioButton
+                            accessibleChecked: tasteButton.selected
+                            onAccessibleClicked: {
+                                postShotReviewPage.resetAutoCloseTimer()
+                                postShotReviewPage.applyTaste(tasteButton.modelData.choice)
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Proactive coaching card — surfaces the advisor's recommendation
+            // inline, above the AI-advice button further down the page.
+            Rectangle {
+                id: coachingCard
+                Layout.fillWidth: true
+                Layout.preferredHeight: coachingCardColumn.implicitHeight + Theme.spacingMedium * 2
+                visible: !!(editShotData.durationSec > 0)
+                radius: Theme.cardRadius
+                color: Theme.surfaceColor
+                border.width: 1
+                border.color: Theme.borderColor
+
+                // State machine:
+                //   notConfigured: AI not set up
+                //   analyzing:     our request is in flight
+                //   result:        structuredNext recommendation present
+                //   quiet:         got a response, no concrete change
+                //   idle:          nothing fetched yet
+                readonly property string cardState: {
+                    if (!MainController.aiManager || !MainController.aiManager.isConfigured)
+                        return "notConfigured"
+                    if (postShotReviewPage.coachingAnalyzing) return "analyzing"
+                    if (postShotReviewPage.coachingResult) return "result"
+                    if (postShotReviewPage.coachingResponded) return "quiet"
+                    return "idle"
+                }
+
+                Accessible.role: Accessible.StaticText
+                Accessible.name: coachingHeadline.text
+
+                ColumnLayout {
+                    id: coachingCardColumn
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.margins: Theme.spacingMedium
+                    spacing: Theme.spacingSmall
+
+                    // Header row: sparkle + title
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: Theme.scaled(6)
+
+                        Image {
+                            source: "qrc:/icons/sparkle.svg"
+                            width: Theme.scaled(16)
+                            height: Theme.scaled(16)
+                            visible: status === Image.Ready
+                            Accessible.ignored: true
+                            layer.enabled: true
+                            layer.smooth: true
+                            layer.effect: MultiEffect {
+                                colorization: 1.0
+                                colorizationColor: Theme.textSecondaryColor
+                            }
+                        }
+
+                        Tr {
+                            key: "postshotreview.coach.title"
+                            fallback: "Coaching"
+                            color: Theme.textSecondaryColor
+                            font: Theme.labelFont
+                            Layout.fillWidth: true
+                            Accessible.ignored: true
+                        }
+                    }
+
+                    // Headline / status line
+                    Text {
+                        id: coachingHeadline
+                        Layout.fillWidth: true
+                        wrapMode: Text.WordWrap
+                        color: Theme.textColor
+                        font: Theme.bodyFont
+                        text: {
+                            switch (coachingCard.cardState) {
+                            case "notConfigured":
+                                return TranslationManager.translate("postshotreview.coach.notConfigured",
+                                    "Set up AI in Settings to get coaching.")
+                            case "analyzing":
+                                return TranslationManager.translate("postshotreview.coach.analyzing",
+                                    "Analyzing this shot…")
+                            case "result":
+                                return (postShotReviewPage.coachingResult.reasoning
+                                        && String(postShotReviewPage.coachingResult.reasoning).length > 0)
+                                    ? String(postShotReviewPage.coachingResult.reasoning)
+                                    : TranslationManager.translate("postshotreview.coach.haveSuggestion",
+                                        "Here's a suggestion for your next shot.")
+                            case "quiet":
+                                return TranslationManager.translate("postshotreview.coach.onTrack",
+                                    "Looks on track — nothing to change.")
+                            default:
+                                return TranslationManager.translate("postshotreview.coach.idlePrompt",
+                                    "Tap a taste above, or coach this shot.")
+                            }
+                        }
+                    }
+
+                    // Concrete change line (result state only)
+                    Text {
+                        Layout.fillWidth: true
+                        wrapMode: Text.WordWrap
+                        color: Theme.textColor
+                        font: Theme.subtitleFont
+                        visible: coachingCard.cardState === "result" && text.length > 0
+                        text: {
+                            var r = postShotReviewPage.coachingResult
+                            if (!r) return ""
+                            var parts = []
+                            // Grind: show CURRENT → TARGET when we know the
+                            // reviewed shot's current grind, else fall back to
+                            // the bare target.
+                            if (r.grinderSetting !== undefined && String(r.grinderSetting).length > 0) {
+                                var curGrind = String(editShotData.grinderSetting || "")
+                                if (curGrind.length > 0)
+                                    parts.push(TranslationManager.translate("postshotreview.coach.grindLabel", "Grind")
+                                               + " " + curGrind + " → " + String(r.grinderSetting))
+                                else
+                                    parts.push(TranslationManager.translate("postshotreview.coach.grindTo", "Grind to")
+                                               + " " + String(r.grinderSetting))
+                            }
+                            // Dose: CURRENT → TARGET g, falling back to target.
+                            if (r.doseG !== undefined && Number(r.doseG) > 0) {
+                                var curDose = Number(editShotData.doseWeightG)
+                                if (curDose > 0)
+                                    parts.push(TranslationManager.translate("postshotreview.coach.doseLabel", "Dose")
+                                               + " " + curDose + " → " + Number(r.doseG) + " "
+                                               + TranslationManager.translate("postshotreview.coach.gramsUnit", "g"))
+                                else
+                                    parts.push(TranslationManager.translate("postshotreview.coach.doseTo", "Dose to")
+                                               + " " + Number(r.doseG) + " "
+                                               + TranslationManager.translate("postshotreview.coach.gramsUnit", "g"))
+                            }
+                            // Temperature: CURRENT → TARGET °C with signed delta.
+                            // Effective current temp = shot override if set,
+                            // else the profile's target temperature.
+                            if (r.temperatureC !== undefined && Number(r.temperatureC) > 0) {
+                                var target = Number(r.temperatureC)
+                                var override = Number(editShotData.temperatureOverrideC)
+                                var curTemp = (override > 0) ? override : Number(ProfileManager.profileTargetTemperature)
+                                var delta = target - curTemp
+                                var deltaStr = (delta >= 0 ? "+" : "") + (Math.round(delta * 10) / 10)
+                                parts.push(TranslationManager.translate("postshotreview.coach.tempLabel", "Temperature")
+                                           + " " + (Math.round(curTemp * 10) / 10) + " → "
+                                           + (Math.round(target * 10) / 10) + " °C  ("
+                                           + deltaStr + "°)")
+                            }
+                            if (r.profileTitle !== undefined && String(r.profileTitle).length > 0)
+                                parts.push(TranslationManager.translate("postshotreview.coach.tryProfile", "Try the")
+                                           + " " + String(r.profileTitle) + " "
+                                           + TranslationManager.translate("postshotreview.coach.profileWord", "profile"))
+                            return parts.join("  ·  ")
+                        }
+                        Accessible.ignored: true
+                    }
+
+                    // Expected duration window (result state, optional)
+                    Text {
+                        Layout.fillWidth: true
+                        wrapMode: Text.WordWrap
+                        color: Theme.textSecondaryColor
+                        font: Theme.labelFont
+                        visible: coachingCard.cardState === "result" && text.length > 0
+                        text: {
+                            var r = postShotReviewPage.coachingResult
+                            if (!r || !r.expectedDurationSec) return ""
+                            var d = r.expectedDurationSec
+                            if (d.length !== 2) return ""
+                            return TranslationManager.translate("postshotreview.coach.expectDuration", "Expect")
+                                   + " " + d[0] + "–" + d[1] + "s"
+                        }
+                        Accessible.ignored: true
+                    }
+
+                    // Action row
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: Theme.spacingSmall
+
+                        // Coach this shot (idle / quiet states)
+                        AccessibleButton {
+                            primary: true
+                            visible: coachingCard.cardState === "idle" || coachingCard.cardState === "quiet"
+                            enabled: MainController.aiManager
+                                     && MainController.aiManager.isConfigured
+                                     && !(MainController.aiManager.conversation
+                                          && MainController.aiManager.conversation.busy)
+                            text: TranslationManager.translate("postshotreview.coach.coachThisShot", "Coach this shot")
+                            accessibleName: TranslationManager.translate("postshotreview.coach.coachThisShot", "Coach this shot")
+                            onClicked: {
+                                postShotReviewPage.resetAutoCloseTimer()
+                                postShotReviewPage.coachThisShot()
+                            }
+                        }
+
+                        // Apply (result state)
+                        AccessibleButton {
+                            primary: true
+                            visible: coachingCard.cardState === "result"
+                            text: TranslationManager.translate("postshotreview.coach.apply", "Apply")
+                            accessibleName: TranslationManager.translate("postshotreview.coach.applyAccessible",
+                                "Apply the suggested change to your next shot")
+                            onClicked: {
+                                postShotReviewPage.resetAutoCloseTimer()
+                                postShotReviewPage.applyCoachingRecommendation()
+                            }
+                        }
+
+                        // Why? (result / quiet states) — opens the full conversation
+                        AccessibleButton {
+                            subtle: true
+                            visible: coachingCard.cardState === "result" || coachingCard.cardState === "quiet"
+                            text: TranslationManager.translate("postshotreview.coach.why", "Why?")
+                            accessibleName: TranslationManager.translate("postshotreview.coach.whyAccessible",
+                                "Open the full coaching conversation")
+                            onClicked: {
+                                postShotReviewPage.resetAutoCloseTimer()
+                                conversationOverlay.openWithShot(editShotData, editBeanBrand, editBeanType,
+                                                                 editShotData.profileName, editShotId)
+                            }
+                        }
+
+                        Item { Layout.fillWidth: true }
+
+                        // Busy spinner for our own request
+                        BusyIndicator {
+                            running: coachingCard.cardState === "analyzing"
+                            visible: running
+                            implicitWidth: Theme.scaled(24)
+                            implicitHeight: Theme.scaled(24)
+                            Accessible.ignored: true
+                        }
+                    }
+
+                    // "Coach automatically after each shot" toggle
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: Theme.spacingSmall
+
+                        Switch {
+                            id: autoCoachSwitch
+                            checked: Settings.app.coachAfterEachShot
+                            onToggled: Settings.app.coachAfterEachShot = checked
+                            Accessible.role: Accessible.CheckBox
+                            Accessible.name: trAutoCoachLabel.text
+                            Accessible.checked: checked
+                            Accessible.focusable: true
+                            Accessible.onToggleAction: toggle()
+                        }
+
+                        Tr {
+                            id: trAutoCoachLabel
+                            key: "postshotreview.coach.autoToggle"
+                            fallback: "Coach automatically after each shot"
+                            color: Theme.textSecondaryColor
+                            font: Theme.labelFont
+                            Layout.fillWidth: true
+                            wrapMode: Text.WordWrap
+                            Accessible.ignored: true
+                        }
+                    }
+                }
             }
 
             RowLayout {
@@ -2366,6 +2964,55 @@ Page {
         id: conversationOverlay
         anchors.fill: parent
         overlayTitle: TranslationManager.translate("postshotreview.conversation.title", "Dialing Conversation")
+    }
+
+    // Confirmation toast for "Apply to next shot" (UI auto-dismiss — allowed).
+    Rectangle {
+        id: coachToast
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: Theme.scaled(40)
+        anchors.horizontalCenter: parent.horizontalCenter
+        width: Math.min(postShotReviewPage.width - Theme.scaled(32),
+                        coachToastLabel.implicitWidth + Theme.scaled(32))
+        height: coachToastLabel.implicitHeight + Theme.scaled(16)
+        radius: Theme.cardRadius
+        color: Theme.surfaceColor
+        border.color: Theme.borderColor
+        border.width: 1
+        opacity: 0
+        visible: opacity > 0
+        z: 600
+        Accessible.ignored: true
+
+        property string message: ""
+
+        function show(text) {
+            message = text
+            opacity = 1
+            coachToastTimer.restart()
+            if (AccessibilityManager.enabled)
+                AccessibilityManager.announce(text, true)
+        }
+
+        Behavior on opacity { NumberAnimation { duration: 250 } }
+
+        Text {
+            id: coachToastLabel
+            anchors.centerIn: parent
+            width: parent.width - Theme.scaled(24)
+            text: coachToast.message
+            color: Theme.textColor
+            font: Theme.bodyFont
+            wrapMode: Text.WordWrap
+            horizontalAlignment: Text.AlignHCenter
+            Accessible.ignored: true
+        }
+
+        Timer {
+            id: coachToastTimer
+            interval: 3000
+            onTriggered: coachToast.opacity = 0
+        }
     }
 
 }

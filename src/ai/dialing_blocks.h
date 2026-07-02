@@ -158,6 +158,30 @@ QJsonObject buildBestRecentShotBlock(QSqlDatabase& db,
                                      qint64 resolvedShotId,
                                      const ShotProjection& currentShot);
 
+// Highest-rated past shot for the CURRENT BEAN on the same profile within
+// the last `kBestRecentShotWindowDays`, with a `changeFromBest` diff
+// against `currentShot`. This is the "bean memory" anchor: it answers
+// "what was your best on THIS bean", not just "best on this profile"
+// (which is what `buildBestRecentShotBlock` gives).
+//
+// Barista scoping with fallback: when `barista` is non-empty the query
+// first restricts to that person's shots; if the person has no rated
+// shot on this bean+profile the barista filter is dropped and the
+// bean-wide best is returned. The emitted block carries a `scope` field
+// — `"beanAndPerson"` when the person-scoped query produced the anchor,
+// otherwise `"bean"`.
+//
+// Returns an empty `QJsonObject` (caller suppresses the key) when
+// `profileKbId` is empty, both bean identity fields are empty, or no
+// rated shot for the bean exists in the window.
+QJsonObject buildBeanBestShotBlock(QSqlDatabase& db,
+                                   const QString& profileKbId,
+                                   const QString& beanBrand,
+                                   const QString& beanType,
+                                   const QString& barista,
+                                   qint64 resolvedShotId,
+                                   const ShotProjection& currentShot);
+
 // Observed grinder settings range, step size, burr-swappable flag, with
 // bean-scoped → cross-bean fallback. Returns an empty `QJsonObject`
 // when `grinderModel` is empty OR when both queries return no rows.

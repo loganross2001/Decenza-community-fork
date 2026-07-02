@@ -385,6 +385,14 @@ QString ProfileManager::currentEditorType() const {
     return m_currentProfile.editorType();
 }
 
+QString ProfileManager::currentProfileKbId() const {
+    // Computed the SAME way shots persist profile_kb_id at save time
+    // (shothistorystorage.cpp: computeProfileKbId(title, editorType)), so the
+    // bean-memory query in ShotHistoryStorage::requestBeanRecipe matches the
+    // current profile's stored shots. Empty when the profile has no KB entry.
+    return ShotSummarizer::computeProfileKbId(m_currentProfile.title(), currentEditorType());
+}
+
 
 // === Target weight / brew-by-ratio ===
 

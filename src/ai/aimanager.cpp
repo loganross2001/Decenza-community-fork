@@ -693,12 +693,18 @@ void AIManager::enrichUserPromptObject(QJsonObject& payload,
                                        const QJsonObject& bestRecentShot,
                                        const QJsonObject& grinderContext,
                                        const QJsonArray& recentAdvice,
-                                       const QJsonObject& grinderCalibration) const
+                                       const QJsonObject& grinderCalibration,
+                                       const QJsonObject& beanBestShot) const
 {
     if (!dialInSessions.isEmpty())
         payload["dialInSessions"] = dialInSessions;
     if (!bestRecentShot.isEmpty())
         payload["bestRecentShot"] = bestRecentShot;
+    // Bean memory: the user's best rated shot for the CURRENT bean on this
+    // profile (issue: bean-memory). Anchors advice to "your best on THIS
+    // bean", not just the profile. Empty → key omitted (no placeholder).
+    if (!beanBestShot.isEmpty())
+        payload["beanBestShot"] = beanBestShot;
     if (!grinderContext.isEmpty())
         payload["grinderContext"] = grinderContext;
     if (!grinderCalibration.isEmpty())

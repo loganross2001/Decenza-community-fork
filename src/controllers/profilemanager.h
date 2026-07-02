@@ -90,6 +90,10 @@ public:
     bool isProfileModified() const { return m_profileModified; }
     bool isCurrentProfileRecipe() const;
     QString currentEditorType() const;
+    // KB id for the current profile, computed identically to how shots persist
+    // profile_kb_id at save time — so QML can key bean-memory lookups
+    // (ShotHistoryStorage::requestBeanRecipe) off it. Empty when no KB entry.
+    Q_INVOKABLE QString currentProfileKbId() const;
     static bool isDFlowTitle(const QString& title);
     static bool isAFlowTitle(const QString& title);
 

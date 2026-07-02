@@ -78,6 +78,27 @@ public:
     // Returns summary data (not full time-series) for dial-in history queries.
     Q_INVOKABLE void requestRecentShotsByKbId(const QString& kbId, int limit = 10);
 
+    // Bean memory: best rated shot for a bean + profile, surfaced to the UI.
+    // Async — runs SQL on a background thread (withTempDb), emits
+    // beanRecipeReady(). Barista-scoped with a bean-wide fallback: when
+    // `barista` is non-empty the best shot is first sought among that
+    // person's shots, falling back to any barista when the person has no
+    // rated shot on this bean+profile.
+    //
+    // beanRecipeReady carries a QVariantMap (QML-marshalable):
+    //   found            bool
+    //   grinderSetting   QString
+    //   doseG            double
+    //   yieldG           double
+    //   temperatureC     double   (0 when the shot had no override)
+    //   enjoyment        int      (0..100)
+    //   whenLabel        QString  (e.g. "Jun 3")
+    //   shotCount        int      (rated shots on this bean+profile, scope-matched)
+    //   scope            QString  ("bean" | "beanAndPerson")
+    // When no rated shot exists the map is { found: false } only.
+    Q_INVOKABLE void requestBeanRecipe(const QString& beanBrand, const QString& beanType,
+                                       const QString& profileKbId, const QString& barista);
+
     // Query recent shots by KB ID (summary data, no time-series).
     // Thread-safe: caller provides their own connection. Shared by MCP and in-app AI.
     static QVariantList loadRecentShotsByKbIdStatic(QSqlDatabase& db, const QString& kbId, int limit, qint64 excludeShotId = -1);
@@ -262,6 +283,8 @@ signals:
     void loadingFilteredChanged();
     void shotReady(qint64 shotId, const ShotProjection& shot);
     void recentShotsByKbIdReady(const QString& kbId, const QVariantList& shots);
+    // Bean memory: result of requestBeanRecipe(). See that method for the map shape.
+    void beanRecipeReady(const QVariantMap& recipe);
     void importDatabaseFinished(bool success);
     void shotMetadataUpdated(qint64 shotId, bool success);
     void autoFavoritesReady(const QVariantList& results);

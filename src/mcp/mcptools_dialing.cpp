@@ -32,6 +32,7 @@ struct DialingDbResult {
     QJsonArray dialInSessions;
     QJsonObject grinderContext;
     QJsonObject bestRecentShot;      // Empty when no rated shot exists on this profile
+    QJsonObject beanBestShot;        // Bean memory: best rated shot for THIS bean (empty when none)
 };
 
 void registerDialingTools(McpToolRegistry* registry, MainController* mainController,
@@ -144,6 +145,14 @@ void registerDialingTools(McpToolRegistry* registry, MainController* mainControl
                         db, dbResult.profileKbId, resolvedShotId, historyLimit);
                     dbResult.bestRecentShot = DialingBlocks::buildBestRecentShotBlock(
                         db, dbResult.profileKbId, resolvedShotId, dbResult.shotData);
+                    // Bean memory: best rated shot for THIS bean on this profile,
+                    // barista-scoped (from the resolved shot's barista) with a
+                    // bean-wide fallback. Same shared builder the in-app advisor
+                    // uses, so the two surfaces ship byte-equivalent blocks.
+                    dbResult.beanBestShot = DialingBlocks::buildBeanBestShotBlock(
+                        db, dbResult.profileKbId, dbResult.shotData.beanBrand,
+                        dbResult.shotData.beanType, dbResult.shotData.barista,
+                        resolvedShotId, dbResult.shotData);
                     dbResult.grinderContext = DialingBlocks::buildGrinderContextBlock(
                         db, dbResult.shotData.grinderModel,
                         dbResult.shotData.beverageType, dbResult.shotData.beanBrand);
@@ -168,6 +177,8 @@ void registerDialingTools(McpToolRegistry* registry, MainController* mainControl
                         result["dialInSessions"] = dbResult.dialInSessions;
                     if (!dbResult.bestRecentShot.isEmpty())
                         result["bestRecentShot"] = dbResult.bestRecentShot;
+                    if (!dbResult.beanBestShot.isEmpty())
+                        result["beanBestShot"] = dbResult.beanBestShot;
                     if (!dbResult.grinderContext.isEmpty())
                         result["grinderContext"] = dbResult.grinderContext;
 

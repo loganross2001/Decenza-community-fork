@@ -442,6 +442,12 @@ Page {
         anchors.topMargin: Theme.pageTopMargin
         spacing: Theme.scaled(20)
 
+        // Barista picker — a one-tap roster switcher. Hides itself when there is
+        // 0 or 1 person in the roster (zero friction for single-user homes).
+        BaristaChipRow {
+            Layout.alignment: Qt.AlignHCenter
+        }
+
         RowLayout {
             Layout.alignment: Qt.AlignHCenter
             spacing: Theme.scaled(50)

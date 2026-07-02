@@ -78,6 +78,11 @@ MainController::MainController(QNetworkAccessManager* networkManager,
     // phase/scale-weight changes, reusing the same refs MainController holds.
     m_liveShotCoach = new LiveShotCoach(m_device, m_machineState, m_shotDataModel, this);
 
+    // Create LiveSteamCoach — local, real-time during-steam coaching cues. It
+    // subscribes itself to MachineState phase/shot-time changes and reads the
+    // target steam duration from Settings; no AI/network/DB in the hot path.
+    m_liveSteamCoach = new LiveSteamCoach(m_machineState, m_settings, this);
+
     // Connect to shot sample updates
     if (m_device) {
         connect(m_device, &DE1Device::shotSampleReceived,

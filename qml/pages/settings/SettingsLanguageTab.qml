@@ -602,6 +602,36 @@ Item {
                         wrapMode: Text.WordWrap
                     }
 
+                    // Visual during-steam live coaching cues (stretch, roll, stop).
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: Theme.scaled(8)
+
+                        Tr {
+                            key: "settings.accessibility.steamCoachingEnable"
+                            fallback: "Steam Coaching Cues"
+                            color: Theme.textColor
+                            font.pixelSize: Theme.scaled(14)
+                        }
+
+                        Item { Layout.fillWidth: true }
+
+                        StyledSwitch {
+                            checked: Settings.app.liveSteamCoachingEnabled
+                            accessibleName: TranslationManager.translate("settings.accessibility.steamCoachingEnable", "Steam Coaching Cues")
+                            onCheckedChanged: Settings.app.liveSteamCoachingEnabled = checked
+                        }
+                    }
+
+                    Tr {
+                        Layout.fillWidth: true
+                        key: "settings.accessibility.steamCoachingDesc"
+                        fallback: "Short on-screen tips while steaming milk (stretch, roll, stop)"
+                        color: Theme.textSecondaryColor
+                        font.pixelSize: Theme.scaled(11)
+                        wrapMode: Text.WordWrap
+                    }
+
                     RowLayout {
                         Layout.fillWidth: true
                         spacing: Theme.scaled(8)

@@ -11,6 +11,7 @@
 #include "../network/beanbaseclient.h"
 #include "../ai/aimanager.h"
 #include "../ai/liveshotcoach.h"
+#include "../ai/livesteamcoach.h"
 #include "../models/shotdatamodel.h"
 #include "../models/steamdatamodel.h"
 #include "../machine/steamhealthtracker.h"
@@ -55,6 +56,7 @@ class MainController : public QObject {
     Q_PROPERTY(BeanBaseClient* beanbase READ beanbase CONSTANT)
     Q_PROPERTY(AIManager* aiManager READ aiManager CONSTANT)
     Q_PROPERTY(LiveShotCoach* liveShotCoach READ liveShotCoach CONSTANT)
+    Q_PROPERTY(LiveSteamCoach* liveSteamCoach READ liveSteamCoach CONSTANT)
     Q_PROPERTY(ShotDataModel* shotDataModel READ shotDataModel CONSTANT)
     Q_PROPERTY(SteamDataModel* steamDataModel READ steamDataModel CONSTANT)
     Q_PROPERTY(SteamHealthTracker* steamHealthTracker READ steamHealthTracker CONSTANT)
@@ -99,8 +101,11 @@ public:
     ProfileStorage* profileStorage() const { return m_profileStorage; }
     AIManager* aiManager() const { return m_aiManager; }
     LiveShotCoach* liveShotCoach() const { return m_liveShotCoach; }
+    LiveSteamCoach* liveSteamCoach() const { return m_liveSteamCoach; }
+    // Injects the TranslationManager into both live coaches for cue i18n.
     void setTranslationManager(TranslationManager* tm) {
         if (m_liveShotCoach) m_liveShotCoach->setTranslationManager(tm);
+        if (m_liveSteamCoach) m_liveSteamCoach->setTranslationManager(tm);
     }
     void setAiManager(AIManager* aiManager) {
         m_aiManager = aiManager;
@@ -312,6 +317,7 @@ private:
     BeanBaseClient* m_beanbase = nullptr;
     AIManager* m_aiManager = nullptr;
     LiveShotCoach* m_liveShotCoach = nullptr;
+    LiveSteamCoach* m_liveSteamCoach = nullptr;
     ShotTimingController* m_timingController = nullptr;
     BLEManager* m_bleManager = nullptr;
     FlowScale* m_flowScale = nullptr;  // Shadow FlowScale for comparison logging

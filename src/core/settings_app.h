@@ -82,6 +82,12 @@ class SettingsApp : public QObject {
     // existing AccessibilityManager extractionAnnouncements* prefs.
     Q_PROPERTY(bool liveCoachingEnabled READ liveCoachingEnabled WRITE setLiveCoachingEnabled NOTIFY liveCoachingEnabledChanged)
 
+    // During-steam live coaching cues. When true (default), the LiveSteamCoach
+    // service's short calm cues are shown in a banner on the steam page while
+    // milk steams. Voice for those cues is gated separately by the existing
+    // AccessibilityManager extractionAnnouncements* prefs.
+    Q_PROPERTY(bool liveSteamCoachingEnabled READ liveSteamCoachingEnabled WRITE setLiveSteamCoachingEnabled NOTIFY liveSteamCoachingEnabledChanged)
+
 public:
     explicit SettingsApp(QObject* parent = nullptr);
 
@@ -176,6 +182,10 @@ public:
     bool liveCoachingEnabled() const;
     void setLiveCoachingEnabled(bool enabled);
 
+    // During-steam live coaching cues
+    bool liveSteamCoachingEnabled() const;
+    void setLiveSteamCoachingEnabled(bool enabled);
+
     // Device identity (stable UUID for server communication)
     Q_INVOKABLE QString deviceId() const;
 
@@ -208,6 +218,7 @@ signals:
     void simulatedScaleEnabledChanged();
     void screenCaptureEnabledChanged();
     void liveCoachingEnabledChanged();
+    void liveSteamCoachingEnabledChanged();
 
 private:
     mutable QSettings m_settings;

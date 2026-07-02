@@ -490,6 +490,18 @@ void SettingsApp::setWaterLevelDisplayUnit(const QString& unit) {
     }
 }
 
+// Temperature display unit. Default Celsius; all internal storage stays Celsius.
+QString SettingsApp::temperatureUnit() const {
+    return m_settings.value("display/temperatureUnit", "celsius").toString();
+}
+
+void SettingsApp::setTemperatureUnit(const QString& unit) {
+    if (temperatureUnit() != unit) {
+        m_settings.setValue("display/temperatureUnit", unit);
+        emit temperatureUnitChanged();
+    }
+}
+
 int SettingsApp::waterRefillPoint() const {
     return m_settings.value("water/refillPoint", 5).toInt();
 }

@@ -57,6 +57,7 @@ class SettingsApp : public QObject {
 
     // Water level / refill
     Q_PROPERTY(QString waterLevelDisplayUnit READ waterLevelDisplayUnit WRITE setWaterLevelDisplayUnit NOTIFY waterLevelDisplayUnitChanged)
+    Q_PROPERTY(QString temperatureUnit READ temperatureUnit WRITE setTemperatureUnit NOTIFY temperatureUnitChanged)
 
     // Water refill level (mm threshold for refill warning, sent to machine)
     Q_PROPERTY(int waterRefillPoint READ waterRefillPoint WRITE setWaterRefillPoint NOTIFY waterRefillPointChanged)
@@ -157,6 +158,11 @@ public:
     // Water level / refill
     QString waterLevelDisplayUnit() const;
     void setWaterLevelDisplayUnit(const QString& unit);
+
+    // Temperature display unit ("celsius" or "fahrenheit"). Storage stays Celsius;
+    // this only affects display/entry.
+    QString temperatureUnit() const;
+    void setTemperatureUnit(const QString& unit);
     int waterRefillPoint() const;
     void setWaterRefillPoint(int mm);
     int refillKitOverride() const;
@@ -209,6 +215,7 @@ signals:
     void firmwareNightlyChannelChanged();
     void dailyBackupHourChanged();
     void waterLevelDisplayUnitChanged();
+    void temperatureUnitChanged();
     void waterRefillPointChanged();
     void refillKitOverrideChanged();
     void coachAfterEachShotChanged();

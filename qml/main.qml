@@ -3198,8 +3198,12 @@ ApplicationWindow {
         // Replace underscores and hyphens with spaces
         cleaned = cleaned.replace(/[_-]/g, " ")
         // Expand units for natural speech
+        var degreesWord = Theme.tempIsFahrenheit() ? " degrees Fahrenheit" : " degrees Celsius"
+        cleaned = cleaned.replace(/°F/g, " degrees Fahrenheit")
+        // The °C / °F symbols denote their own unit regardless of the display setting
+        // (Celsius-only pages keep °C even in Fahrenheit mode), so map them literally.
         cleaned = cleaned.replace(/°C/g, " degrees Celsius")
-        cleaned = cleaned.replace(/(\d)\s*C\b/g, "$1 degrees Celsius")  // "72C" -> "72 degrees Celsius"
+        cleaned = cleaned.replace(/(\d)\s*C\b/g, "$1" + degreesWord)  // bare "72C" (no symbol) -> current unit
         cleaned = cleaned.replace(/(\d)\s*ml\b/gi, "$1 milliliters")
         cleaned = cleaned.replace(/(\d)\s*g\b/g, "$1 grams")
         cleaned = cleaned.replace(/(\d)\s*bar\b/gi, "$1 bar")

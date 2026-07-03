@@ -28,7 +28,9 @@
 #include <QProcess>
 #endif
 #include "version.h"
+#ifdef DECENZA_BARISTA
 #include "barista/baristamodule.h"  // [barista-fork] hook
+#endif
 
 #ifdef Q_OS_ANDROID
 #include <QJniObject>
@@ -2588,7 +2590,9 @@ int main(int argc, char *argv[])
 
     checkpoint("Context properties & type registration");
 
+#ifdef DECENZA_BARISTA
     BaristaModule::install(&engine);  // [barista-fork] hook — registers the "Barista" context property
+#endif
 
     // Load main QML file (QTP0001 NEW policy uses /qt/qml/ prefix)
     const QUrl url(u"qrc:/qt/qml/Decenza/qml/main.qml"_s);

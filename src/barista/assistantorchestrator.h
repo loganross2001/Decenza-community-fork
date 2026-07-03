@@ -41,6 +41,9 @@ public:
 
 signals:
     void stateChanged();
+    // "Apply" is a QML-side action (writes dial memory), so a typed/spoken "apply" in ProposePlan
+    // is surfaced as a signal the overlay wires to its _applyRecipe().
+    void applyRequested();
 
 private slots:
     void onPhaseChanged();

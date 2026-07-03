@@ -78,6 +78,15 @@ Item {
         if (temp > 0) Settings.brew.temperatureOverride = temp
     }
 
+    // Typed input → the orchestrator's local matcher (drives the state machine).
+    function _send() {
+        Qt.inputMethod.commit()   // flush the IME's in-progress word before reading (QML gotcha)
+        var t = chatInput.text
+        chatInput.text = ""
+        if (t && t.length > 0 && root._orch)
+            root._orch.handleUtterance(t)
+    }
+
     // Fetch when the orchestrator enters ProposePlan; receive the async result.
     Connections {
         target: root._orch
@@ -85,6 +94,10 @@ Item {
         function onStateChanged() {
             if (root._orch && root._orch.state === "proposePlan")
                 root._fetchRecipe()
+        }
+        function onApplyRequested() {   // typed/spoken "apply" in ProposePlan
+            root._applyRecipe()
+            if (root._orch) root._orch.dismiss()
         }
     }
     Connections {
@@ -271,6 +284,24 @@ Item {
                 }
 
                 Item { Layout.fillWidth: true }
+            }
+
+            // Typed input — drive the flow by typing (P1c). Enter or Send → handleUtterance.
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: Theme.spacingSmall
+                StyledTextField {
+                    id: chatInput
+                    Layout.fillWidth: true
+                    placeholderText: TranslationManager.translate("barista.chat.placeholder", "Type a reply…")
+                    onAccepted: root._send()
+                }
+                AccessibleButton {
+                    subtle: true
+                    text: TranslationManager.translate("barista.chat.send", "Send")
+                    accessibleName: TranslationManager.translate("barista.chat.send", "Send")
+                    onClicked: root._send()
+                }
             }
         }
     }

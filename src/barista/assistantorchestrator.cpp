@@ -70,8 +70,44 @@ void AssistantOrchestrator::dismiss() {
 }
 
 void AssistantOrchestrator::handleUtterance(const QString& text) {
-    // P1c: local yes/no/same/apply synonym match, else route free text to the planner.
-    Q_UNUSED(text)
+    // P1c: local synonym match to drive the state machine by typed (later spoken) input, so the
+    // whole flow is keyboard/voice-navigable, not just tappable. Free text -> planner comes later.
+    const QString t = text.trimmed().toLower();
+    if (t.isEmpty())
+        return;
+
+    const auto has = [&t](std::initializer_list<const char*> words) {
+        for (const char* w : words)
+            if (t.contains(QString::fromLatin1(w)))
+                return true;
+        return false;
+    };
+
+    // Explicit dismissal works from any state.
+    if (has({"dismiss", "go away", "never mind", "nevermind", "bye", "cancel"})) {
+        dismiss();
+        return;
+    }
+
+    switch (m_state) {
+    case State::ConfirmBean:
+        if (has({"yes", "yep", "yeah", "same", "correct", "right", "sure"}))
+            confirmSameBean();
+        else if (has({"no", "new", "different", "change", "another", "other"}))
+            chooseNewBean();
+        break;
+    case State::ProposePlan:
+        if (has({"apply", "do it", "load", "use it", "go ahead", "yes", "sure", "please"}))
+            emit applyRequested();
+        else if (has({"no", "keep", "not now", "leave"}))
+            dismiss();
+        break;
+    case State::Dormant:
+        wake();
+        break;
+    default:
+        break;
+    }
 }
 
 void AssistantOrchestrator::setState(State s) {

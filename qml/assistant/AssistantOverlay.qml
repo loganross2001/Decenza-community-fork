@@ -31,9 +31,14 @@ Item {
     property var _recipe: ({})
     property bool _recipeLoading: false
     property bool _showSettings: false
+    // Smarter plan: Claude's reasoned tweak on top of the local best-recipe (opt-in, on demand).
+    property bool _coachThinking: false
+    property string _coachText: ""
 
     function _fetchRecipe() {
         root._recipe = ({})
+        root._coachText = ""
+        root._coachThinking = false
         if (typeof MainController === "undefined" || !MainController.shotHistory) {
             root._recipeLoading = false
             return
@@ -108,6 +113,22 @@ Item {
         if (root._orch) root._orch.dismiss()
     }
 
+    // Ask Claude for a reasoned tweak on top of the local best-recipe (opt-in, on demand → cost-controlled).
+    function _askCoach() {
+        if (typeof MainController === "undefined" || !MainController.aiManager
+                || !MainController.aiManager.isConfigured)
+            return
+        root._coachText = ""
+        root._coachThinking = true
+        var who = (typeof Barista !== "undefined" && Barista.settings) ? Barista.settings.assistantName : "Coach"
+        var sys = TranslationManager.translate("barista.coach.system",
+            "You are %1, a friendly espresso dial-in coach. Suggest ONE change to try on the next shot to improve it, in a single plain-language sentence, and say what your suggestion is based on. Do not use JSON.").arg(who)
+        var bean = root._bean.length > 0 ? root._bean : "this coffee"
+        var recipe = (root._recipe && root._recipe.found) ? root._planLine() : "no rated history yet"
+        var user = "Bean: " + bean + ". Best recipe so far: " + recipe + ". Suggest one improvement for the next shot."
+        MainController.aiManager.analyze(sys, user)
+    }
+
     // Fetch when the orchestrator enters ProposePlan; receive the async result.
     Connections {
         target: root._orch
@@ -132,6 +153,17 @@ Item {
             root._recipe = recipe
             root._recipeLoading = false
             root._speakCard()
+        }
+    }
+    Connections {
+        target: (typeof MainController !== "undefined") ? MainController.aiManager : null
+        ignoreUnknownSignals: true
+        function onRecommendationReceived(text) {
+            if (!root._coachThinking) return   // only consume the request we fired
+            root._coachThinking = false
+            root._coachText = text
+            if (typeof Barista !== "undefined" && Barista.voice)
+                Barista.voice.speak(text)
         }
     }
 
@@ -249,6 +281,19 @@ Item {
                 }
             }
 
+            // Coach's reasoned take (async Claude, opt-in — the "smarter plan")
+            Text {
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                color: Theme.textSecondaryColor
+                font: Theme.labelFont
+                visible: root._state === "proposePlan" && (root._coachThinking || root._coachText.length > 0)
+                text: root._coachThinking
+                      ? TranslationManager.translate("barista.coach.thinking", "Thinking…")
+                      : root._coachText
+                Accessible.ignored: true
+            }
+
             // Actions
             RowLayout {
                 Layout.fillWidth: true
@@ -301,6 +346,16 @@ Item {
                     accessibleName: TranslationManager.translate("barista.plan.applyAccessible",
                         "Apply the remembered recipe to your next shot")
                     onClicked: { root._applyRecipe(); if (root._orch) root._orch.dismiss() }
+                }
+                AccessibleButton {
+                    subtle: true
+                    visible: root._state === "proposePlan" && !root._coachText && !root._coachThinking
+                             && typeof MainController !== "undefined" && MainController.aiManager
+                             && MainController.aiManager.isConfigured
+                    text: TranslationManager.translate("barista.coach.ask", "Ask %1")
+                          .arg((typeof Barista !== "undefined" && Barista.settings) ? Barista.settings.assistantName : "Coach")
+                    accessibleName: TranslationManager.translate("barista.coach.askAccessible", "Ask the coach for a suggestion")
+                    onClicked: root._askCoach()
                 }
                 AccessibleButton {
                     subtle: true

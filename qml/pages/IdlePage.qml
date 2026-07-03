@@ -382,6 +382,9 @@ Page {
     // Auto-tare scale and announce presets when activePresetFunction changes
     onActivePresetFunctionChanged: {
         _publishOperationMode()
+        // [barista-fork] hook — greet + suggest a plan when Espresso is selected (proactive barista)
+        if (activePresetFunction === "espresso" && typeof Barista !== "undefined" && Barista.orchestrator)
+            Barista.orchestrator.wake()
         // Auto-tare when steam pills appear so the scale starts at 0
         // before the user places the pitcher
         if (activePresetFunction === "steam" && typeof MachineState !== "undefined") {

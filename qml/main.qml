@@ -2064,13 +2064,14 @@ ApplicationWindow {
     }
 
     // [barista-fork] hook — proactive barista assistant overlay (own qrc, loaded by URL so the
-    // upstream QML module list is untouched; inert shell in P0). Guarded so DECENZA_BARISTA=OFF
-    // builds (no "Barista" context property) simply don't load it.
+    // upstream QML module list is untouched). Confined to the home/idle page so it can never
+    // overlap other screens; guarded so DECENZA_BARISTA=OFF builds simply don't load it.
     Loader {
         id: baristaOverlay
         anchors.fill: parent
         z: 700  // above statusBar (600), below CRT shader (950) / touch capture (1000)
         active: typeof Barista !== "undefined" && Barista.enabled
+                && Theme.currentPageObjectName === "idlePage"
         source: "qrc:/qml/assistant/AssistantOverlay.qml"
     }
 

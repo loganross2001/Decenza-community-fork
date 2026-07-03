@@ -31,16 +31,9 @@ QString AssistantOrchestrator::stateString() const {
 void AssistantOrchestrator::onPhaseChanged() {
     if (!m_machineState)
         return;
-    const MachineState::Phase phase = m_machineState->phase();
-    const int prev = m_lastPhase;
-    m_lastPhase = static_cast<int>(phase);
-
-    // Wake when the machine comes alive: Sleep -> Idle/Ready. This is the "I walked up to the
-    // machine" moment. (P3 opens the mic listen-window here; P1 just greets.)
-    const bool wokeUp = (prev == static_cast<int>(MachineState::Phase::Sleep))
-                        && (phase == MachineState::Phase::Idle || phase == MachineState::Phase::Ready);
-    if (wokeUp && m_state == State::Dormant)
-        wake();
+    // Phase tracking is retained for future shot-end (CloseOut) detection. The greeting itself is
+    // triggered by the Espresso action (a hook in IdlePage calls wake()), NOT by machine wake.
+    m_lastPhase = static_cast<int>(m_machineState->phase());
 }
 
 void AssistantOrchestrator::wake() {

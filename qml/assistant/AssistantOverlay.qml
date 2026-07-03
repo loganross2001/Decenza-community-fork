@@ -109,51 +109,6 @@ Item {
         }
     }
 
-    // ---- Summon pill (dormant) -------------------------------------------------
-    Rectangle {
-        id: pill
-        visible: root._state === "dormant" && typeof Barista !== "undefined" && Barista.enabled
-        anchors.right: parent.right
-        anchors.bottom: parent.bottom
-        anchors.margins: Theme.spacingLarge
-        width: pillRow.implicitWidth + Theme.spacingMedium * 2
-        height: Theme.touchTargetMin
-        radius: height / 2
-        color: pillArea.pressed ? Qt.darker(Theme.primaryColor, 1.15) : Theme.primaryColor
-
-        // pillArea (AccessibleMouseArea below) is the single a11y node — avoid a duplicate.
-        Accessible.ignored: true
-
-        Row {
-            id: pillRow
-            anchors.centerIn: parent
-            spacing: Theme.scaled(6)
-            Image {
-                source: "qrc:/icons/sparkle.svg"
-                width: Theme.scaled(16); height: Theme.scaled(16)
-                anchors.verticalCenter: parent.verticalCenter
-                visible: status === Image.Ready
-                Accessible.ignored: true
-            }
-            Tr {
-                key: "barista.summon"; fallback: "Coach"
-                anchors.verticalCenter: parent.verticalCenter
-                color: Theme.primaryContrastColor
-                font: Theme.bodyFont
-                Accessible.ignored: true
-            }
-        }
-
-        AccessibleMouseArea {
-            id: pillArea
-            anchors.fill: parent
-            accessibleName: TranslationManager.translate("barista.summon", "Coach")
-            accessibleItem: pill
-            accessibleRole: Accessible.Button
-            onAccessibleClicked: if (root._orch) root._orch.wake()
-        }
-    }
-
     // ---- Conversation card (active states) ------------------------------------
     Rectangle {
         id: card

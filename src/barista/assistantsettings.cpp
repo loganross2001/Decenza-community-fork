@@ -49,3 +49,26 @@ void AssistantSettings::setVoiceName(const QString& name) {
     m_settings.setValue(QStringLiteral("barista/voiceName"), name);
     emit voiceNameChanged();
 }
+
+QString AssistantSettings::userName() const {
+    return m_settings.value(QStringLiteral("barista/userName"), QString()).toString();
+}
+
+void AssistantSettings::setUserName(const QString& name) {
+    const QString trimmed = name.trimmed();
+    if (userName() == trimmed)
+        return;
+    m_settings.setValue(QStringLiteral("barista/userName"), trimmed);
+    emit userNameChanged();
+}
+
+QString AssistantSettings::bellSound() const {
+    return m_settings.value(QStringLiteral("barista/bellSound"), QStringLiteral("ding")).toString();
+}
+
+void AssistantSettings::setBellSound(const QString& sound) {
+    if (bellSound() == sound)
+        return;
+    m_settings.setValue(QStringLiteral("barista/bellSound"), sound);
+    emit bellSoundChanged();
+}

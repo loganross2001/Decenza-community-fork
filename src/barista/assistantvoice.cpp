@@ -4,10 +4,13 @@
 
 #include <QTextToSpeech>
 #include <QVoice>
+#include <QSoundEffect>
+#include <QUrl>
 
 AssistantVoice::AssistantVoice(AssistantSettings* settings, QObject* parent)
     : QObject(parent)
     , m_tts(new QTextToSpeech(this))
+    , m_bell(new QSoundEffect(this))
     , m_settings(settings) {
     applyVoiceFromSettings();
     if (m_settings) {
@@ -62,6 +65,18 @@ void AssistantVoice::preview() {
         return;
     const QString who = m_settings ? m_settings->assistantName() : QStringLiteral("Coach");
     m_tts->say(QStringLiteral("Hi, I'm %1. Ready when you are.").arg(who));   // audition — speaks even if muted
+}
+
+void AssistantVoice::playBell() {
+    if (m_settings)
+        previewBell(m_settings->bellSound());
+}
+
+void AssistantVoice::previewBell(const QString& name) {
+    if (!m_bell || name.isEmpty() || name == QLatin1String("off"))
+        return;
+    m_bell->setSource(QUrl(QStringLiteral("qrc:/sounds/%1.wav").arg(name)));
+    m_bell->play();
 }
 
 void AssistantVoice::applyVoiceFromSettings() {

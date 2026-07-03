@@ -13,6 +13,8 @@ class AssistantSettings : public QObject {
     Q_PROPERTY(bool voiceEnabled READ voiceEnabled WRITE setVoiceEnabled NOTIFY voiceEnabledChanged)
     Q_PROPERTY(QString assistantName READ assistantName WRITE setAssistantName NOTIFY assistantNameChanged)
     Q_PROPERTY(QString voiceName READ voiceName WRITE setVoiceName NOTIFY voiceNameChanged)
+    Q_PROPERTY(QString userName READ userName WRITE setUserName NOTIFY userNameChanged)
+    Q_PROPERTY(QString bellSound READ bellSound WRITE setBellSound NOTIFY bellSoundChanged)
 
 public:
     explicit AssistantSettings(QObject* parent = nullptr);
@@ -20,23 +22,28 @@ public:
     bool enabled() const;
     void setEnabled(bool on);
 
-    // Spoken output on/off (mute). Default on.
-    bool voiceEnabled() const;
+    bool voiceEnabled() const;                    // spoken output on/off (mute)
     void setVoiceEnabled(bool on);
 
-    // The assistant's own name (the user names it). Default "Coach".
-    QString assistantName() const;
+    QString assistantName() const;                // the assistant's own name (default "Coach")
     void setAssistantName(const QString& name);
 
-    // Chosen TTS voice name (empty = engine default). Matched against QTextToSpeech voices.
-    QString voiceName() const;
+    QString voiceName() const;                    // chosen TTS voice ("" = engine default)
     void setVoiceName(const QString& name);
+
+    QString userName() const;                     // what the assistant calls the user in greetings
+    void setUserName(const QString& name);
+
+    QString bellSound() const;                    // "ding" | "tick" | ... | "off"
+    void setBellSound(const QString& sound);
 
 signals:
     void enabledChanged();
     void voiceEnabledChanged();
     void assistantNameChanged();
     void voiceNameChanged();
+    void userNameChanged();
+    void bellSoundChanged();
 
 private:
     mutable QSettings m_settings;  // org/app default = DecentEspresso/DE1Qt (set in main)

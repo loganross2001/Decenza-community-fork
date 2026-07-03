@@ -4,6 +4,7 @@
 #include <QStringList>
 
 class QTextToSpeech;
+class QSoundEffect;
 class AssistantSettings;
 
 // [barista-fork] The assistant's spoken voice — its OWN QTextToSpeech instance (deliberately not
@@ -25,6 +26,8 @@ public:
     Q_INVOKABLE void stop();
     Q_INVOKABLE void setVoiceByName(const QString& name);  // persists to settings + applies
     Q_INVOKABLE void preview();                            // speak a sample line to audition a voice
+    Q_INVOKABLE void playBell();                           // play the configured bell (unless "off")
+    Q_INVOKABLE void previewBell(const QString& name);     // audition a specific bell (qrc:/sounds/<name>.wav)
 
 signals:
     void availableVoicesChanged();
@@ -34,5 +37,6 @@ private:
     void applyVoiceFromSettings();
 
     QTextToSpeech* m_tts = nullptr;
+    QSoundEffect* m_bell = nullptr;
     AssistantSettings* m_settings = nullptr;
 };

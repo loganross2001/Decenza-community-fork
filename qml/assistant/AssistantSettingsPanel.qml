@@ -57,6 +57,19 @@ Rectangle {
             onEditingFinished: if (root._settings) root._settings.assistantName = text
         }
 
+        // Your name — how the assistant addresses you (used in greetings)
+        Tr {
+            key: "barista.settings.yourName"; fallback: "Your name"
+            color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true
+        }
+        StyledTextField {
+            id: userField
+            Layout.fillWidth: true
+            text: root._settings ? root._settings.userName : ""
+            placeholderText: TranslationManager.translate("barista.settings.yourNamePlaceholder", "e.g. Chris")
+            onEditingFinished: if (root._settings) root._settings.userName = text
+        }
+
         // Voice picker
         Tr {
             key: "barista.settings.voice"; fallback: "Voice"
@@ -88,6 +101,26 @@ Rectangle {
                 text: TranslationManager.translate("barista.settings.preview", "Preview")
                 accessibleName: TranslationManager.translate("barista.settings.preview", "Preview")
                 onClicked: if (root._voice) root._voice.preview()
+            }
+        }
+
+        // Bell — the chime when the assistant greets you
+        Tr {
+            key: "barista.settings.bell"; fallback: "Bell"
+            color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true
+        }
+        ComboBox {
+            id: bellBox
+            Layout.fillWidth: true
+            model: ["ding", "tick", "frameclick1", "frameclick2", "frameclick3", "off"]
+            Accessible.name: TranslationManager.translate("barista.settings.bell", "Bell")
+            Component.onCompleted: {
+                var i = root._settings ? model.indexOf(root._settings.bellSound) : -1
+                if (i >= 0) currentIndex = i
+            }
+            onActivated: {
+                if (root._settings) root._settings.bellSound = currentText
+                if (root._voice) root._voice.previewBell(currentText)   // audition the choice
             }
         }
 

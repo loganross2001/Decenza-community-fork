@@ -5,6 +5,7 @@
 class QQmlApplicationEngine;
 class MainController;
 class MachineState;
+class Settings;
 class AssistantSettings;
 class AssistantOrchestrator;
 class AssistantVoice;
@@ -26,6 +27,7 @@ public:
     static BaristaModule* install(QQmlApplicationEngine* engine,
                                   MainController* mainController,
                                   MachineState* machineState,
+                                  Settings* appSettings,
                                   QObject* parent = nullptr);
 
     bool enabled() const;
@@ -37,7 +39,8 @@ signals:
     void enabledChanged();
 
 private:
-    BaristaModule(MainController* mainController, MachineState* machineState, QObject* parent);
+    BaristaModule(MainController* mainController, MachineState* machineState,
+                  Settings* appSettings, QObject* parent);
 
     AssistantSettings* m_settings = nullptr;
     AssistantOrchestrator* m_orchestrator = nullptr;

@@ -15,6 +15,10 @@ class AssistantSettings : public QObject {
     Q_PROPERTY(QString voiceName READ voiceName WRITE setVoiceName NOTIFY voiceNameChanged)
     Q_PROPERTY(QString userName READ userName WRITE setUserName NOTIFY userNameChanged)
     Q_PROPERTY(QString bellSound READ bellSound WRITE setBellSound NOTIFY bellSoundChanged)
+    Q_PROPERTY(QString ttsProvider READ ttsProvider WRITE setTtsProvider NOTIFY ttsProviderChanged)
+    Q_PROPERTY(QString openaiVoice READ openaiVoice WRITE setOpenaiVoice NOTIFY openaiVoiceChanged)
+    Q_PROPERTY(QString elevenlabsApiKey READ elevenlabsApiKey WRITE setElevenlabsApiKey NOTIFY elevenlabsApiKeyChanged)
+    Q_PROPERTY(QString elevenlabsVoiceId READ elevenlabsVoiceId WRITE setElevenlabsVoiceId NOTIFY elevenlabsVoiceIdChanged)
 
 public:
     explicit AssistantSettings(QObject* parent = nullptr);
@@ -37,6 +41,18 @@ public:
     QString bellSound() const;                    // "ding" | "tick" | ... | "off"
     void setBellSound(const QString& sound);
 
+    QString ttsProvider() const;                  // "native" | "openai" | "elevenlabs"
+    void setTtsProvider(const QString& p);
+
+    QString openaiVoice() const;                  // alloy/echo/fable/onyx/nova/shimmer (default "nova")
+    void setOpenaiVoice(const QString& v);
+
+    QString elevenlabsApiKey() const;             // ElevenLabs key (the app has no such key)
+    void setElevenlabsApiKey(const QString& k);
+
+    QString elevenlabsVoiceId() const;            // ElevenLabs voice id (default a stock voice)
+    void setElevenlabsVoiceId(const QString& id);
+
 signals:
     void enabledChanged();
     void voiceEnabledChanged();
@@ -44,6 +60,10 @@ signals:
     void voiceNameChanged();
     void userNameChanged();
     void bellSoundChanged();
+    void ttsProviderChanged();
+    void openaiVoiceChanged();
+    void elevenlabsApiKeyChanged();
+    void elevenlabsVoiceIdChanged();
 
 private:
     mutable QSettings m_settings;  // org/app default = DecentEspresso/DE1Qt (set in main)

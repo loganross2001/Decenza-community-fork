@@ -5,7 +5,12 @@
 
 class QTextToSpeech;
 class QSoundEffect;
+class QMediaPlayer;
+class QAudioOutput;
+class QBuffer;
+class QNetworkAccessManager;
 class AssistantSettings;
+class Settings;
 
 // [barista-fork] The assistant's spoken voice — its OWN QTextToSpeech instance (deliberately not
 // routed through AccessibilityManager, so the persona voice is a separate channel from the live-coach
@@ -17,7 +22,7 @@ class AssistantVoice : public QObject {
     Q_PROPERTY(QString voiceName READ voiceName NOTIFY voiceNameChanged)
 
 public:
-    AssistantVoice(AssistantSettings* settings, QObject* parent = nullptr);
+    AssistantVoice(AssistantSettings* settings, Settings* appSettings, QObject* parent = nullptr);
 
     QStringList availableVoices() const;   // voice names, for the picker
     QString voiceName() const;             // the currently active voice's name
@@ -35,8 +40,17 @@ signals:
 
 private:
     void applyVoiceFromSettings();
+    void synthOpenAI(const QString& text);       // POST OpenAI TTS → play the returned mp3
+    void synthElevenLabs(const QString& text);   // POST ElevenLabs TTS → play the returned mp3
+    void playMp3(const QByteArray& audio);       // play compressed audio via QMediaPlayer
+    QString openaiKey() const;                   // reuse the app's OpenAI key
 
     QTextToSpeech* m_tts = nullptr;
     QSoundEffect* m_bell = nullptr;
+    QMediaPlayer* m_player = nullptr;
+    QAudioOutput* m_audioOut = nullptr;
+    QBuffer* m_audioBuffer = nullptr;
+    QNetworkAccessManager* m_net = nullptr;
     AssistantSettings* m_settings = nullptr;
+    Settings* m_appSettings = nullptr;
 };

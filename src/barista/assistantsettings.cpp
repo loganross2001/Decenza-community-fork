@@ -72,3 +72,49 @@ void AssistantSettings::setBellSound(const QString& sound) {
     m_settings.setValue(QStringLiteral("barista/bellSound"), sound);
     emit bellSoundChanged();
 }
+
+QString AssistantSettings::ttsProvider() const {
+    return m_settings.value(QStringLiteral("barista/ttsProvider"), QStringLiteral("native")).toString();
+}
+
+void AssistantSettings::setTtsProvider(const QString& p) {
+    if (ttsProvider() == p)
+        return;
+    m_settings.setValue(QStringLiteral("barista/ttsProvider"), p);
+    emit ttsProviderChanged();
+}
+
+QString AssistantSettings::openaiVoice() const {
+    return m_settings.value(QStringLiteral("barista/openaiVoice"), QStringLiteral("nova")).toString();
+}
+
+void AssistantSettings::setOpenaiVoice(const QString& v) {
+    if (openaiVoice() == v)
+        return;
+    m_settings.setValue(QStringLiteral("barista/openaiVoice"), v);
+    emit openaiVoiceChanged();
+}
+
+QString AssistantSettings::elevenlabsApiKey() const {
+    return m_settings.value(QStringLiteral("barista/elevenlabsApiKey"), QString()).toString();
+}
+
+void AssistantSettings::setElevenlabsApiKey(const QString& k) {
+    if (elevenlabsApiKey() == k)
+        return;
+    m_settings.setValue(QStringLiteral("barista/elevenlabsApiKey"), k);
+    emit elevenlabsApiKeyChanged();
+}
+
+QString AssistantSettings::elevenlabsVoiceId() const {
+    // Default: "Rachel", a stock ElevenLabs voice, so it works before the user customises.
+    return m_settings.value(QStringLiteral("barista/elevenlabsVoiceId"),
+                            QStringLiteral("21m00Tcm4TlvDq8ikWAM")).toString();
+}
+
+void AssistantSettings::setElevenlabsVoiceId(const QString& id) {
+    if (elevenlabsVoiceId() == id)
+        return;
+    m_settings.setValue(QStringLiteral("barista/elevenlabsVoiceId"), id);
+    emit elevenlabsVoiceIdChanged();
+}

@@ -70,38 +70,80 @@ Rectangle {
             onEditingFinished: if (root._settings) root._settings.userName = text
         }
 
-        // Voice picker
+        // Voice source: native (free/robotic) · OpenAI · ElevenLabs (human, cloud)
         Tr {
             key: "barista.settings.voice"; fallback: "Voice"
             color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true
         }
-        RowLayout {
+        readonly property string _provider: root._settings ? root._settings.ttsProvider : "native"
+        ComboBox {
+            id: providerBox
             Layout.fillWidth: true
-            spacing: Theme.spacingSmall
-            ComboBox {
-                id: voiceBox
-                Layout.fillWidth: true
-                model: root._voice ? root._voice.availableVoices : []
-                Accessible.name: TranslationManager.translate("barista.settings.voice", "Voice")
-                Component.onCompleted: _sync()
-                function _sync() {
-                    if (!root._voice) return
-                    var i = model ? model.indexOf(root._voice.voiceName) : -1
-                    if (i >= 0) currentIndex = i
-                }
-                onActivated: if (root._voice && currentText.length > 0) root._voice.setVoiceByName(currentText)
-                Connections {
-                    target: root._voice
-                    ignoreUnknownSignals: true
-                    function onAvailableVoicesChanged() { voiceBox._sync() }
-                }
+            model: ["native", "openai", "elevenlabs"]
+            Accessible.name: TranslationManager.translate("barista.settings.voice", "Voice")
+            Component.onCompleted: {
+                var i = root._settings ? model.indexOf(root._settings.ttsProvider) : -1
+                if (i >= 0) currentIndex = i
             }
-            AccessibleButton {
-                subtle: true
-                text: TranslationManager.translate("barista.settings.preview", "Preview")
-                accessibleName: TranslationManager.translate("barista.settings.preview", "Preview")
-                onClicked: if (root._voice) root._voice.preview()
+            onActivated: if (root._settings) root._settings.ttsProvider = currentText
+        }
+
+        // Native voice picker (only when provider = native)
+        ComboBox {
+            id: voiceBox
+            Layout.fillWidth: true
+            visible: col._provider === "native"
+            model: root._voice ? root._voice.availableVoices : []
+            Accessible.name: TranslationManager.translate("barista.settings.nativeVoice", "Native voice")
+            Component.onCompleted: _sync()
+            function _sync() {
+                if (!root._voice) return
+                var i = model ? model.indexOf(root._voice.voiceName) : -1
+                if (i >= 0) currentIndex = i
             }
+            onActivated: if (root._voice && currentText.length > 0) root._voice.setVoiceByName(currentText)
+            Connections {
+                target: root._voice
+                ignoreUnknownSignals: true
+                function onAvailableVoicesChanged() { voiceBox._sync() }
+            }
+        }
+
+        // OpenAI voice (only when provider = openai) — reuses your app's OpenAI key
+        ComboBox {
+            Layout.fillWidth: true
+            visible: col._provider === "openai"
+            model: ["nova", "shimmer", "alloy", "echo", "fable", "onyx"]
+            Accessible.name: TranslationManager.translate("barista.settings.openaiVoice", "OpenAI voice")
+            Component.onCompleted: {
+                var i = root._settings ? model.indexOf(root._settings.openaiVoice) : -1
+                if (i >= 0) currentIndex = i
+            }
+            onActivated: if (root._settings) root._settings.openaiVoice = currentText
+        }
+
+        // ElevenLabs (only when provider = elevenlabs): API key + voice id
+        StyledTextField {
+            Layout.fillWidth: true
+            visible: col._provider === "elevenlabs"
+            text: root._settings ? root._settings.elevenlabsApiKey : ""
+            placeholderText: TranslationManager.translate("barista.settings.elKey", "ElevenLabs API key")
+            echoMode: TextInput.PasswordEchoOnEdit
+            onEditingFinished: if (root._settings) root._settings.elevenlabsApiKey = text
+        }
+        StyledTextField {
+            Layout.fillWidth: true
+            visible: col._provider === "elevenlabs"
+            text: root._settings ? root._settings.elevenlabsVoiceId : ""
+            placeholderText: TranslationManager.translate("barista.settings.elVoice", "ElevenLabs voice ID")
+            onEditingFinished: if (root._settings) root._settings.elevenlabsVoiceId = text
+        }
+
+        AccessibleButton {
+            subtle: true
+            text: TranslationManager.translate("barista.settings.preview", "Preview voice")
+            accessibleName: TranslationManager.translate("barista.settings.preview", "Preview voice")
+            onClicked: if (root._voice) root._voice.preview()
         }
 
         // Bell — the chime when the assistant greets you

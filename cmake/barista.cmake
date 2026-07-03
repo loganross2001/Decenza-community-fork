@@ -29,6 +29,8 @@ if(DECENZA_BARISTA)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/assistantsettings.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/assistantorchestrator.h
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/assistantorchestrator.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/assistantvoice.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/assistantvoice.cpp
     )
 
     # New-assistant QML — its own resource, loaded by URL via a Loader in main.qml.
@@ -37,6 +39,7 @@ if(DECENZA_BARISTA)
         BASE "${CMAKE_CURRENT_SOURCE_DIR}/qml/assistant"
         FILES
             ${CMAKE_CURRENT_SOURCE_DIR}/qml/assistant/AssistantOverlay.qml
+            ${CMAKE_CURRENT_SOURCE_DIR}/qml/assistant/AssistantSettingsPanel.qml
     )
 
     target_compile_definitions(Decenza PRIVATE DECENZA_BARISTA=1)

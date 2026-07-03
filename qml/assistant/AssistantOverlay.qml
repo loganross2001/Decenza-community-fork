@@ -30,6 +30,7 @@ Item {
     // lands into the same card asynchronously in a later increment.
     property var _recipe: ({})
     property bool _recipeLoading: false
+    property bool _showSettings: false
 
     function _fetchRecipe() {
         root._recipe = ({})
@@ -87,13 +88,26 @@ Item {
             root._orch.handleUtterance(t)
     }
 
+    // Speak the current card (greeting/question, or the plan) via the assistant voice. Deferred
+    // via Qt.callLater so the headline/subline bindings settle for the new state before we read them.
+    function _speakCard() {
+        Qt.callLater(function() {
+            if (typeof Barista !== "undefined" && Barista.voice)
+                Barista.voice.speak(headline.text + ". " + subline.text)
+        })
+    }
+
     // Fetch when the orchestrator enters ProposePlan; receive the async result.
     Connections {
         target: root._orch
         ignoreUnknownSignals: true
         function onStateChanged() {
+            if (root._orch && root._orch.state === "dormant")
+                root._showSettings = false
             if (root._orch && root._orch.state === "proposePlan")
-                root._fetchRecipe()
+                root._fetchRecipe()          // plan is spoken from onBeanRecipeReady once it resolves
+            else if (root._orch && root._orch.state === "confirmBean")
+                root._speakCard()            // greeting + "same bean?"
         }
         function onApplyRequested() {   // typed/spoken "apply" in ProposePlan
             root._applyRecipe()
@@ -106,16 +120,15 @@ Item {
         function onBeanRecipeReady(recipe) {
             root._recipe = recipe
             root._recipeLoading = false
+            root._speakCard()
         }
     }
 
     // ---- Conversation card (active states) ------------------------------------
     Rectangle {
         id: card
-        visible: root._state === "confirmBean" || root._state === "proposePlan"
-        anchors.horizontalCenter: parent.horizontalCenter
-        anchors.bottom: parent.bottom
-        anchors.bottomMargin: Theme.spacingLarge
+        visible: (root._state === "confirmBean" || root._state === "proposePlan") && !root._showSettings
+        anchors.centerIn: parent
         width: Math.min(Theme.scaled(520), parent.width - Theme.spacingLarge * 2)
         height: cardColumn.implicitHeight + Theme.spacingLarge * 2
         radius: Theme.cardRadius
@@ -144,12 +157,32 @@ Item {
                     visible: status === Image.Ready
                     Accessible.ignored: true
                 }
-                Tr {
-                    key: "barista.title"; fallback: "Coach"
+                Text {
+                    text: (typeof Barista !== "undefined" && Barista.settings)
+                          ? Barista.settings.assistantName
+                          : TranslationManager.translate("barista.title", "Coach")
                     Layout.fillWidth: true
                     color: Theme.textSecondaryColor
                     font: Theme.labelFont
                     Accessible.ignored: true
+                }
+                // Gear → assistant settings (name / voice / mute)
+                Item {
+                    implicitWidth: Theme.scaled(28); implicitHeight: Theme.scaled(28)
+                    Image {
+                        anchors.centerIn: parent
+                        source: "qrc:/icons/settings.svg"
+                        width: Theme.scaled(18); height: Theme.scaled(18)
+                        fillMode: Image.PreserveAspectFit
+                        visible: status === Image.Ready
+                        Accessible.ignored: true
+                    }
+                    AccessibleMouseArea {
+                        anchors.fill: parent
+                        accessibleName: TranslationManager.translate("barista.settings.open", "Assistant settings")
+                        accessibleRole: Accessible.Button
+                        onAccessibleClicked: root._showSettings = true
+                    }
                 }
                 AccessibleButton {
                     subtle: true
@@ -259,5 +292,13 @@ Item {
                 }
             }
         }
+    }
+
+    // Settings panel (name / voice / mute), toggled from the card's gear.
+    AssistantSettingsPanel {
+        visible: root._showSettings && (root._state === "confirmBean" || root._state === "proposePlan")
+        anchors.centerIn: parent
+        width: Math.min(Theme.scaled(520), parent.width - Theme.spacingLarge * 2)
+        onClosed: root._showSettings = false
     }
 }

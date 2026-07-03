@@ -7,6 +7,7 @@ class MainController;
 class MachineState;
 class AssistantSettings;
 class AssistantOrchestrator;
+class AssistantVoice;
 
 // [barista-fork] Facade for the proactive barista assistant. The ENTIRE feature hangs off this
 // one object, exposed to QML as the "Barista" context property. `install()` is the single C++
@@ -16,6 +17,7 @@ class BaristaModule : public QObject {
     Q_PROPERTY(bool enabled READ enabled NOTIFY enabledChanged)
     Q_PROPERTY(AssistantSettings* settings READ settings CONSTANT)
     Q_PROPERTY(AssistantOrchestrator* orchestrator READ orchestrator CONSTANT)
+    Q_PROPERTY(AssistantVoice* voice READ voice CONSTANT)
 
 public:
     // Single upstream hook: construct the module (settings + orchestrator), register the
@@ -29,6 +31,7 @@ public:
     bool enabled() const;
     AssistantSettings* settings() const { return m_settings; }
     AssistantOrchestrator* orchestrator() const { return m_orchestrator; }
+    AssistantVoice* voice() const { return m_voice; }
 
 signals:
     void enabledChanged();
@@ -38,4 +41,5 @@ private:
 
     AssistantSettings* m_settings = nullptr;
     AssistantOrchestrator* m_orchestrator = nullptr;
+    AssistantVoice* m_voice = nullptr;
 };

@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
+import QtQuick.Effects
 import Decenza
 
 // [barista-fork] The proactive barista assistant — a REAL conversation, not a script. When the
@@ -202,6 +203,13 @@ Item {
                         fillMode: Image.PreserveAspectFit
                         visible: status === Image.Ready
                         Accessible.ignored: true
+                        // settings.svg is a white-stroke icon → tint to the theme colour so it's
+                        // visible on the light card surface (same pattern as the coaching-card sparkle).
+                        layer.enabled: true
+                        layer.effect: MultiEffect {
+                            colorization: 1.0
+                            colorizationColor: Theme.textColor
+                        }
                     }
                     MouseArea {
                         anchors.fill: parent

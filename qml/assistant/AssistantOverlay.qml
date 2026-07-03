@@ -21,6 +21,8 @@ Item {
     property string _message: ""       // the assistant's latest line
     property bool _thinking: false
     property bool _showSettings: false
+    property bool _awaitingContext: false   // waiting on requestRecentShotContext before ask()
+    property bool _closeOutRated: false      // persist the close-out taste to the shot exactly once
 
     // Who the assistant is talking to: the user's chosen name, else the active barista.
     readonly property string _userName: {
@@ -37,7 +39,8 @@ Item {
         return h < 12 ? "morning" : (h < 18 ? "afternoon" : "evening")
     }
 
-    // Kick off a fresh conversation with full context; Claude writes the opening line.
+    // Kick off a conversation. First pull the user's REAL dial-in history for this bean so the
+    // assistant KNOWS it (and can suggest), instead of asking. ask() fires once the history arrives.
     function _startConversation() {
         if (!root._conv) {
             root._message = TranslationManager.translate("barista.noai",
@@ -46,23 +49,45 @@ Item {
         }
         root._message = ""
         root._thinking = true
+        root._awaitingContext = true
+        root._closeOutRated = false
+        if (typeof MainController !== "undefined" && MainController.aiManager
+                && (Settings.dye.dyeBeanBrand.length > 0 || Settings.dye.dyeBeanType.length > 0)) {
+            MainController.aiManager.requestRecentShotContext(
+                Settings.dye.dyeBeanBrand, Settings.dye.dyeBeanType,
+                (typeof ProfileManager !== "undefined") ? ProfileManager.currentProfileName : "", -1)
+        } else {
+            root._askWithContext("")   // no bean set → converse without history
+        }
+    }
+
+    // Build the system prompt WITH the real history and open the conversation.
+    function _askWithContext(history) {
+        root._awaitingContext = false
+        if (!root._conv)
+            return
         var who = root._settings ? root._settings.assistantName : "Coach"
         var name = root._userName.length > 0 ? root._userName : ""
         var bean = root._bean.length > 0 ? root._bean : "their coffee"
+        var hist = (history && history.length > 0) ? history
+                 : "(no prior shots recorded on this coffee yet)"
         var sys, seed
         if (root._state === "closeOut") {
             sys = "You are " + who + ", a warm, concise home espresso barista"
-                + (name ? " talking to " + name : "")
-                + ". They just finished a shot of " + bean + ". Ask, in ONE short natural sentence, how it tasted."
-                + " When they answer, respond warmly and offer at most one small tweak for next time."
-                + " Keep every reply to 1-2 short sentences (it is read aloud). Be conversational — never a form, list, or recital of numbers."
+                + (name ? " talking to " + name : "") + ".\n"
+                + "Their recent history on " + bean + ":\n" + hist + "\n\n"
+                + "They just finished a shot. Using the history, comment briefly on how it likely went and offer at most "
+                + "one tweak for next time, or ask ONE short question. 1-2 short spoken sentences, conversational."
             seed = "I just pulled a shot."
         } else {
             sys = "You are " + who + ", a warm, concise home espresso barista"
-                + (name ? " talking to " + name : "")
-                + ". It is " + root._partOfDay() + " and they are about to pull espresso. Their coffee is " + bean + "."
-                + " Greet them" + (name ? " by name" : "") + " in ONE short sentence and ask, conversationally, whether they are brewing the same coffee."
-                + " Keep every reply to 1-2 short sentences (it is read aloud). Adapt to their answers. Offer at most one concrete suggestion only when it genuinely helps. Do not recite numbers unless they ask."
+                + (name ? " talking to " + name : "") + ".\n"
+                + "Their recent dial-in history on " + bean + ":\n" + hist + "\n\n"
+                + "It is the " + root._partOfDay() + " and they are about to pull espresso. Greet them briefly"
+                + (name ? " by name" : "") + " and confirm the coffee if useful. You ALREADY KNOW the history above, so do "
+                + "NOT ask them to recap past shots — instead proactively suggest ONE specific change for THIS shot based on "
+                + "the history (e.g. recent shots ran fast or tasted sour → suggest a finer grind; slow or bitter → coarser). "
+                + "Keep every reply to 1-2 short spoken sentences, conversational, and adapt to their answers."
             seed = "Hi — here to make espresso."
         }
         root._conv.ask(sys, seed)
@@ -72,6 +97,22 @@ Item {
         var t = (text || "").trim()
         if (t.length === 0 || !root._conv || root._thinking)
             return
+        // PERSISTENCE: capture the close-out taste feedback onto the shot record, so it's available to
+        // the AI on every future call — never starting over or guessing. (Recent-shot context includes it.)
+        if (root._state === "closeOut" && !root._closeOutRated && root._orch && root._orch.lastShotId > 0
+                && typeof MainController !== "undefined" && MainController.shotHistory) {
+            root._closeOutRated = true
+            var low = t.toLowerCase()
+            var enj = (low.indexOf("sour") >= 0) ? 45
+                    : (low.indexOf("bitter") >= 0) ? 55
+                    : (low.indexOf("balanc") >= 0 || low.indexOf("good") >= 0 || low.indexOf("great") >= 0
+                       || low.indexOf("perfect") >= 0 || low.indexOf("nice") >= 0 || low.indexOf("love") >= 0) ? 82
+                    : 0
+            var meta = { "espressoNotes": t }
+            if (enj > 0)
+                meta["enjoyment0to100"] = enj
+            MainController.shotHistory.requestUpdateShotMetadata(root._orch.lastShotId, meta)
+        }
         root._thinking = true
         root._conv.followUp(t)
     }
@@ -100,6 +141,16 @@ Item {
             root._message = response
             root._thinking = false
             if (root._voice) root._voice.speak(response)
+        }
+    }
+    // Rich dial-in history arrived → now open the conversation grounded in it (so the AI KNOWS,
+    // rather than asking). Gated on _awaitingContext so we only consume the request we fired.
+    Connections {
+        target: (typeof MainController !== "undefined") ? MainController.aiManager : null
+        ignoreUnknownSignals: true
+        function onRecentShotContextReady(context) {
+            if (root._awaitingContext)
+                root._askWithContext(context)
         }
     }
 
@@ -139,20 +190,23 @@ Item {
                     Accessible.ignored: true
                 }
                 Item {
-                    implicitWidth: Theme.scaled(28); implicitHeight: Theme.scaled(28)
+                    implicitWidth: Theme.scaled(32); implicitHeight: Theme.scaled(32)
+                    Accessible.role: Accessible.Button
+                    Accessible.name: TranslationManager.translate("barista.settings.open", "Assistant settings")
+                    Accessible.focusable: true
+                    Accessible.onPressAction: root._showSettings = true
                     Image {
                         anchors.centerIn: parent
                         source: "qrc:/icons/settings.svg"
-                        width: Theme.scaled(18); height: Theme.scaled(18)
+                        width: Theme.scaled(20); height: Theme.scaled(20)
                         fillMode: Image.PreserveAspectFit
                         visible: status === Image.Ready
                         Accessible.ignored: true
                     }
-                    AccessibleMouseArea {
+                    MouseArea {
                         anchors.fill: parent
-                        accessibleName: TranslationManager.translate("barista.settings.open", "Assistant settings")
-                        accessibleRole: Accessible.Button
-                        onAccessibleClicked: root._showSettings = true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root._showSettings = true
                     }
                 }
                 AccessibleButton {

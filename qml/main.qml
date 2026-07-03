@@ -2063,6 +2063,17 @@ ApplicationWindow {
         z: 950  // Above statusBar (600), below touch capture (1000)
     }
 
+    // [barista-fork] hook — proactive barista assistant overlay (own qrc, loaded by URL so the
+    // upstream QML module list is untouched; inert shell in P0). Guarded so DECENZA_BARISTA=OFF
+    // builds (no "Barista" context property) simply don't load it.
+    Loader {
+        id: baristaOverlay
+        anchors.fill: parent
+        z: 700  // above statusBar (600), below CRT shader (950) / touch capture (1000)
+        active: typeof Barista !== "undefined" && Barista.enabled
+        source: "qrc:/qml/assistant/AssistantOverlay.qml"
+    }
+
     // SAW bypassed warning (untared cup detected during extraction)
     property bool sawBypassedVisible: false
 

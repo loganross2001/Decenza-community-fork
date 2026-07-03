@@ -1,0 +1,3 @@
+# [barista-fork] Keep CI's version-code bumps from ever conflicting on upstream merges.
+# Requires once: git config merge.ours.driver true
+versioncode.txt merge=ours

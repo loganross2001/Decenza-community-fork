@@ -948,6 +948,9 @@ add_dependencies(Decenza apply_version_code)
 target_sources(Decenza PRIVATE ${VERSION_CODE_CPP})
 set_source_files_properties(${VERSION_CODE_CPP} PROPERTIES GENERATED TRUE)
 
+# [barista-fork] hook — self-contained proactive-barista module (own sources/QML/flag)
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/barista.cmake)
+
 # Build-time KB validator (change: restructure-kb-as-validated-json, D5/2.4).
 # HARD GATE: a schema / typo'd-key / out-of-range / provenance↔src /
 # alias-integrity violation in resources/ai/profile_knowledge.json fails the

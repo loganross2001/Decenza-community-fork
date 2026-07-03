@@ -27,6 +27,8 @@ if(DECENZA_BARISTA)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristamodule.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/assistantsettings.h
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/assistantsettings.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/assistantorchestrator.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/assistantorchestrator.cpp
     )
 
     # New-assistant QML — its own resource, loaded by URL via a Loader in main.qml.

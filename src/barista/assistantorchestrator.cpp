@@ -1,0 +1,82 @@
+#include "assistantorchestrator.h"
+
+#include "assistantsettings.h"
+#include "../machine/machinestate.h"
+#include "../controllers/maincontroller.h"
+
+AssistantOrchestrator::AssistantOrchestrator(MainController* mainController, MachineState* machineState,
+                                             AssistantSettings* settings, QObject* parent)
+    : QObject(parent)
+    , m_mainController(mainController)
+    , m_machineState(machineState)
+    , m_settings(settings) {
+    if (m_machineState) {
+        connect(m_machineState, &MachineState::phaseChanged,
+                this, &AssistantOrchestrator::onPhaseChanged);
+        m_lastPhase = static_cast<int>(m_machineState->phase());
+    }
+}
+
+QString AssistantOrchestrator::stateString() const {
+    switch (m_state) {
+    case State::ConfirmBean: return QStringLiteral("confirmBean");
+    case State::ProposePlan: return QStringLiteral("proposePlan");
+    case State::Armed:       return QStringLiteral("armed");
+    case State::CloseOut:    return QStringLiteral("closeOut");
+    case State::Dormant:
+    default:                 return QStringLiteral("dormant");
+    }
+}
+
+void AssistantOrchestrator::onPhaseChanged() {
+    if (!m_machineState)
+        return;
+    const MachineState::Phase phase = m_machineState->phase();
+    const int prev = m_lastPhase;
+    m_lastPhase = static_cast<int>(phase);
+
+    // Wake when the machine comes alive: Sleep -> Idle/Ready. This is the "I walked up to the
+    // machine" moment. (P3 opens the mic listen-window here; P1 just greets.)
+    const bool wokeUp = (prev == static_cast<int>(MachineState::Phase::Sleep))
+                        && (phase == MachineState::Phase::Idle || phase == MachineState::Phase::Ready);
+    if (wokeUp && m_state == State::Dormant)
+        wake();
+}
+
+void AssistantOrchestrator::wake() {
+    if (!m_settings || !m_settings->enabled())
+        return;
+    if (m_state != State::Dormant)
+        return;
+    // P1a: greet + immediately ask the same-bean question (rendered together as one card).
+    setState(State::ConfirmBean);
+}
+
+void AssistantOrchestrator::confirmSameBean() {
+    if (m_state != State::ConfirmBean)
+        return;
+    setState(State::ProposePlan);  // P1b fills this with a real (local + Claude) plan
+}
+
+void AssistantOrchestrator::chooseNewBean() {
+    if (m_state != State::ConfirmBean)
+        return;
+    // P1b: open the existing bean picker and update the active bean. For now, proceed.
+    setState(State::ProposePlan);
+}
+
+void AssistantOrchestrator::dismiss() {
+    setState(State::Dormant);
+}
+
+void AssistantOrchestrator::handleUtterance(const QString& text) {
+    // P1c: local yes/no/same/apply synonym match, else route free text to the planner.
+    Q_UNUSED(text)
+}
+
+void AssistantOrchestrator::setState(State s) {
+    if (m_state == s)
+        return;
+    m_state = s;
+    emit stateChanged();
+}

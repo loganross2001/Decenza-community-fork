@@ -2591,7 +2591,7 @@ int main(int argc, char *argv[])
     checkpoint("Context properties & type registration");
 
 #ifdef DECENZA_BARISTA
-    BaristaModule::install(&engine);  // [barista-fork] hook — registers the "Barista" context property
+    BaristaModule::install(&engine, &mainController, &machineState);  // [barista-fork] hook
 #endif
 
     // Load main QML file (QTP0001 NEW policy uses /qt/qml/ prefix)

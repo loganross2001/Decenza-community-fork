@@ -245,9 +245,14 @@ Item {
                 text: {
                     if (root._state === "closeOut")
                         return TranslationManager.translate("barista.closeout.q", "How was that shot?")
+                    // Time-aware greeting: "Good morning/afternoon/evening[, name]."
+                    var h = new Date().getHours()
+                    var greet = h < 12 ? TranslationManager.translate("barista.greet.morning", "Good morning")
+                              : h < 18 ? TranslationManager.translate("barista.greet.afternoon", "Good afternoon")
+                              : TranslationManager.translate("barista.greet.evening", "Good evening")
                     return root._name.length > 0
-                        ? TranslationManager.translate("barista.greet.named", "Morning, %1.").arg(root._name)
-                        : TranslationManager.translate("barista.greet", "Morning.")
+                        ? TranslationManager.translate("barista.greet.named", "%1, %2.").arg(greet).arg(root._name)
+                        : greet + "."
                 }
             }
 

@@ -3,6 +3,7 @@
 #include "assistantsettings.h"
 #include "../machine/machinestate.h"
 #include "../controllers/maincontroller.h"
+#include "../history/shothistorystorage.h"
 
 AssistantOrchestrator::AssistantOrchestrator(MainController* mainController, MachineState* machineState,
                                              AssistantSettings* settings, QObject* parent)
@@ -15,6 +16,20 @@ AssistantOrchestrator::AssistantOrchestrator(MainController* mainController, Mac
                 this, &AssistantOrchestrator::onPhaseChanged);
         m_lastPhase = static_cast<int>(m_machineState->phase());
     }
+    if (m_mainController && m_mainController->shotHistory()) {
+        connect(m_mainController->shotHistory(), &ShotHistoryStorage::shotSaved,
+                this, &AssistantOrchestrator::onShotSaved);
+    }
+}
+
+void AssistantOrchestrator::onShotSaved(qlonglong shotId) {
+    // A shot just finished — offer the one-tap taste close-out. The card is rendered by the
+    // idle-page overlay, so it appears once the user is back on the home screen.
+    if (shotId <= 0 || !m_settings || !m_settings->enabled())
+        return;
+    m_lastShotId = shotId;
+    emit lastShotIdChanged();
+    setState(State::CloseOut);
 }
 
 QString AssistantOrchestrator::stateString() const {

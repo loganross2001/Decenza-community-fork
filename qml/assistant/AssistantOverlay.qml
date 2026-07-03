@@ -97,6 +97,17 @@ Item {
         })
     }
 
+    // Write the one-tap taste rating to the just-finished shot (close-out), then dismiss.
+    // sour/balanced/bitter → enjoyment0to100 (mirrors PostShotReviewPage.enjoymentForTaste).
+    function _writeTaste(choice) {
+        var id = root._orch ? root._orch.lastShotId : -1
+        if (id > 0 && typeof MainController !== "undefined" && MainController.shotHistory) {
+            var enj = (choice === "sour") ? 45 : (choice === "balanced") ? 82 : (choice === "bitter") ? 55 : 0
+            MainController.shotHistory.requestUpdateShotMetadata(id, { "enjoyment0to100": enj })
+        }
+        if (root._orch) root._orch.dismiss()
+    }
+
     // Fetch when the orchestrator enters ProposePlan; receive the async result.
     Connections {
         target: root._orch
@@ -106,8 +117,8 @@ Item {
                 root._showSettings = false
             if (root._orch && root._orch.state === "proposePlan")
                 root._fetchRecipe()          // plan is spoken from onBeanRecipeReady once it resolves
-            else if (root._orch && root._orch.state === "confirmBean")
-                root._speakCard()            // greeting + "same bean?"
+            else if (root._orch && (root._orch.state === "confirmBean" || root._orch.state === "closeOut"))
+                root._speakCard()            // greeting/"same bean?" or the taste question
         }
         function onApplyRequested() {   // typed/spoken "apply" in ProposePlan
             root._applyRecipe()
@@ -127,7 +138,7 @@ Item {
     // ---- Conversation card (active states) ------------------------------------
     Rectangle {
         id: card
-        visible: (root._state === "confirmBean" || root._state === "proposePlan") && !root._showSettings
+        visible: (root._state === "confirmBean" || root._state === "proposePlan" || root._state === "closeOut") && !root._showSettings
         anchors.centerIn: parent
         width: Math.min(Theme.scaled(520), parent.width - Theme.spacingLarge * 2)
         height: cardColumn.implicitHeight + Theme.spacingLarge * 2
@@ -199,9 +210,13 @@ Item {
                 wrapMode: Text.WordWrap
                 color: Theme.textColor
                 font: Theme.subtitleFont
-                text: root._name.length > 0
-                      ? TranslationManager.translate("barista.greet.named", "Morning, %1.").arg(root._name)
-                      : TranslationManager.translate("barista.greet", "Morning.")
+                text: {
+                    if (root._state === "closeOut")
+                        return TranslationManager.translate("barista.closeout.q", "How was that shot?")
+                    return root._name.length > 0
+                        ? TranslationManager.translate("barista.greet.named", "Morning, %1.").arg(root._name)
+                        : TranslationManager.translate("barista.greet", "Morning.")
+                }
             }
 
             // Sub-line: the same-bean question, or the (P1b placeholder) plan line
@@ -212,6 +227,9 @@ Item {
                 color: Theme.textColor
                 font: Theme.bodyFont
                 text: {
+                    if (root._state === "closeOut")
+                        return TranslationManager.translate("barista.closeout.hint",
+                            "Sour, balanced, or bitter — I'll remember for next time.")
                     if (root._state === "confirmBean") {
                         return root._bean.length > 0
                             ? TranslationManager.translate("barista.confirmBean.named", "Same %1 as last time?").arg(root._bean)
@@ -235,6 +253,29 @@ Item {
             RowLayout {
                 Layout.fillWidth: true
                 spacing: Theme.spacingSmall
+
+                // CloseOut taste buttons (sour / balanced / bitter)
+                AccessibleButton {
+                    primary: true
+                    visible: root._state === "closeOut"
+                    text: TranslationManager.translate("barista.taste.sour", "Sour")
+                    accessibleName: TranslationManager.translate("barista.taste.sour", "Sour")
+                    onClicked: root._writeTaste("sour")
+                }
+                AccessibleButton {
+                    primary: true
+                    visible: root._state === "closeOut"
+                    text: TranslationManager.translate("barista.taste.balanced", "Balanced")
+                    accessibleName: TranslationManager.translate("barista.taste.balanced", "Balanced")
+                    onClicked: root._writeTaste("balanced")
+                }
+                AccessibleButton {
+                    primary: true
+                    visible: root._state === "closeOut"
+                    text: TranslationManager.translate("barista.taste.bitter", "Bitter")
+                    accessibleName: TranslationManager.translate("barista.taste.bitter", "Bitter")
+                    onClicked: root._writeTaste("bitter")
+                }
 
                 // ConfirmBean actions
                 AccessibleButton {

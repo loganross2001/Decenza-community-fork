@@ -21,6 +21,8 @@ class AssistantOrchestrator : public QObject {
     // Exposed as a lowercase string ("dormant"/"confirmBean"/"proposePlan"/"armed"/"closeOut")
     // so QML can compare without the enum type being registered.
     Q_PROPERTY(QString state READ stateString NOTIFY stateChanged)
+    // Id of the just-finished shot (for the taste close-out to write the rating to). -1 = none.
+    Q_PROPERTY(qlonglong lastShotId READ lastShotId NOTIFY lastShotIdChanged)
 
 public:
     enum class State { Dormant, ConfirmBean, ProposePlan, Armed, CloseOut };
@@ -30,6 +32,7 @@ public:
                           AssistantSettings* settings, QObject* parent = nullptr);
 
     QString stateString() const;
+    qlonglong lastShotId() const { return m_lastShotId; }
 
     // Interaction entry points. Buttons call these now; the voice layer (P3) will route
     // recognised phrases here too via handleUtterance().
@@ -41,12 +44,14 @@ public:
 
 signals:
     void stateChanged();
+    void lastShotIdChanged();
     // "Apply" is a QML-side action (writes dial memory), so a typed/spoken "apply" in ProposePlan
     // is surfaced as a signal the overlay wires to its _applyRecipe().
     void applyRequested();
 
 private slots:
     void onPhaseChanged();
+    void onShotSaved(qlonglong shotId);   // → taste close-out
 
 private:
     void setState(State s);
@@ -56,4 +61,5 @@ private:
     AssistantSettings* m_settings = nullptr;
     State m_state = State::Dormant;
     int m_lastPhase = -1;  // detects the Sleep->Idle wake transition
+    qlonglong m_lastShotId = -1;
 };

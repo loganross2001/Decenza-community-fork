@@ -145,6 +145,12 @@ public:
     void setProfileManager(ProfileManager* profileManager) { m_profileManager = profileManager; }
     Q_INVOKABLE void requestRecentShotContext(const QString& beanBrand, const QString& beanType, const QString& profileName, int excludeShotId);
 
+    // [barista-fork] Assemble the FULL dialing context (the same rich blocks the advisor uses:
+    // dial-in sessions, best recent shot, bean best shot, grinder context/calibration, closed-loop
+    // recent advice) anchored on the latest shot for the current bean — falling back to the latest
+    // shot overall when the bean name doesn't match. Emits baristaContextReady() on the main thread.
+    Q_INVOKABLE void requestBaristaContext(const QString& beanBrand, const QString& beanType, const QString& profileName);
+
     // Provider testing
     Q_INVOKABLE void testConnection();
 
@@ -252,6 +258,7 @@ signals:
     void ollamaModelsChanged();
     void conversationIndexChanged();
     void recentShotContextReady(const QString& context);
+    void baristaContextReady(const QString& dataBlock);   // [barista-fork]
     void conversationResponseReceived(const QString& response);
     void conversationErrorOccurred(const QString& error);
 

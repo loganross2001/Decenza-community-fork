@@ -95,21 +95,16 @@ Item {
         root._awaitingContext = true
         root._closeOutRated = false
         root._fellBack = false
-        // (1) Load THIS bean's persisted conversation so the AI recalls its own prior guidance and we
-        // pick up where we left off — even after a 2-month gap. (2) Pull the bean's FULL shot history.
-        if (typeof MainController !== "undefined" && MainController.aiManager) {
-            MainController.aiManager.switchConversation(Settings.dye.dyeBeanBrand, Settings.dye.dyeBeanType,
-                (typeof ProfileManager !== "undefined") ? ProfileManager.currentProfileName : "")
-        }
-        if (typeof MainController !== "undefined" && MainController.shotHistory
-                && (Settings.dye.dyeBeanBrand.length > 0 || Settings.dye.dyeBeanType.length > 0)) {
-            MainController.shotHistory.requestShotsFiltered(
-                { "beanBrand": Settings.dye.dyeBeanBrand, "beanType": Settings.dye.dyeBeanType }, 0, 50)
-        } else if (typeof MainController !== "undefined" && MainController.shotHistory) {
-            MainController.shotHistory.requestShotsFiltered({}, 0, 15)   // no bean set → recent overall
-        } else {
+        // (1) Load THIS bean's persisted conversation so the AI recalls its own prior guidance (pick up
+        // where we left off, even after long gaps). (2) Assemble the FULL advisor-grade dialing context
+        // (dial-in sessions, best shot, bean best, grinder context, closed-loop advice) → baristaContextReady.
+        if (typeof MainController === "undefined" || !MainController.aiManager) {
             root._askWithContext("")
+            return
         }
+        var prof = (typeof ProfileManager !== "undefined") ? ProfileManager.currentProfileName : ""
+        MainController.aiManager.switchConversation(Settings.dye.dyeBeanBrand, Settings.dye.dyeBeanType, prof)
+        MainController.aiManager.requestBaristaContext(Settings.dye.dyeBeanBrand, Settings.dye.dyeBeanType, prof)
     }
 
     // Turn recent shots into a compact history the AI can reason over.
@@ -134,34 +129,31 @@ Item {
     // Open (or resume) the conversation with the data in the SYSTEM PROMPT (re-stamped each session,
     // never trimmed) so the AI ALWAYS has it; the kickoff message carries only intent. beginSession()
     // keeps the persisted thread (prior discussion) and can't wipe it.
-    function _askWithContext(history, fellBack) {
+    function _askWithContext(dataBlock, unused) {
         root._awaitingContext = false
         if (!root._conv)
             return
         var who = root._settings ? root._settings.assistantName : "Coach"
         var name = root._userName.length > 0 ? root._userName : ""
-        var bean = root._bean.length > 0 ? root._bean : "your coffee"
 
         var persona = "You are " + who + ", a warm, concise home espresso barista"
             + (name ? " talking to " + name : "") + ".\n"
             + "Your replies are SPOKEN ALOUD: keep them to 1-2 short sentences, conversational — NO markdown, lists, "
-            + "JSON, code, or long number sequences. The '## What I know' block below is the app's LIVE DATABASE of "
-            + "this user's shots and your past advice: you DO have full access to it. NEVER say you lack their history, "
-            + "or that this is their first shot, unless the block says 'recordedShots: 0'. Reference what you see and "
-            + "suggest ONE concrete change for the next shot when it helps (fast/sour → finer; slow/bitter → coarser). "
-            + "Recall your past advice and pick up where you left off, even after long gaps. Adapt to their replies."
+            + "JSON, code, or long number sequences. The data block below is the app's LIVE DATABASE of this user's "
+            + "shots, dial-in history, best recipes, and your own past advice: you DO have full access to it. NEVER say "
+            + "you lack their history, or that this is their first shot, unless the block says 'recordedShots: 0'. "
+            + "Reference what you see and suggest ONE concrete change for the next shot when it helps "
+            + "(fast/sour → finer; slow/bitter → coarser). Recall your past advice and pick up where you left off, "
+            + "even after long gaps. Adapt to their replies."
 
-        var dataBlock = "## What I know about " + (name.length ? name : "this user") + " and this coffee (" + bean + ")\n"
-            + (fellBack ? "(No shots recorded under this exact bean name — these are their recent shots overall.)\n" : "")
-            + ((history && history.length > 0)
-               ? ("Recent shots (most recent first — dose, grind, time, rating):\n" + history)
-               : "recordedShots: 0")
+        // dataBlock is the pre-formatted advisor-grade context from AIManager.requestBaristaContext().
+        var block = (dataBlock && dataBlock.length > 0) ? dataBlock : "recordedShots: 0"
 
         var kickoff = (root._state === "closeOut")
             ? "I just pulled a shot — how did it go?"
             : "It's the " + root._partOfDay() + " and I'm about to pull espresso. Greet me and suggest one thing."
 
-        root._conv.beginSession(persona + "\n\n" + dataBlock, kickoff)
+        root._conv.beginSession(persona + "\n\n" + block, kickoff)
     }
 
     function _send(text) {
@@ -215,24 +207,14 @@ Item {
             root._resetSilence()   // keep the mic session alive while we're conversing
         }
     }
-    // Recent shots arrived → open the conversation grounded in the real history (so the AI KNOWS,
+    // The full advisor-grade context arrived → open the conversation grounded in it (so the AI KNOWS,
     // rather than asking). Gated on _awaitingContext so we only consume the request we fired.
     Connections {
-        target: (typeof MainController !== "undefined") ? MainController.shotHistory : null
+        target: (typeof MainController !== "undefined") ? MainController.aiManager : null
         ignoreUnknownSignals: true
-        function onShotsFilteredReady(results, isAppend, totalCount) {
-            if (!root._awaitingContext)
-                return
-            // Exact bean-name match came back empty → fall back to recent shots overall so the AI
-            // still has real history (Visualizer bean names / roast dates can drift).
-            if ((!results || results.length === 0) && !root._fellBack
-                    && (Settings.dye.dyeBeanBrand.length > 0 || Settings.dye.dyeBeanType.length > 0)
-                    && typeof MainController !== "undefined" && MainController.shotHistory) {
-                root._fellBack = true
-                MainController.shotHistory.requestShotsFiltered({}, 0, 15)
-                return
-            }
-            root._askWithContext(root._buildHistory(results), root._fellBack)
+        function onBaristaContextReady(dataBlock) {
+            if (root._awaitingContext)
+                root._askWithContext(dataBlock, false)
         }
     }
 

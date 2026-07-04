@@ -1134,6 +1134,112 @@ void AIManager::emitRecentShotContext(
     emit recentShotContextReady(result);
 }
 
+// [barista-fork] Assemble the full advisor-grade dialing context for the conversational barista, anchored
+// on the current bean (falling back to the latest shot overall). Mirrors the ai_advisor_invoke recipe in
+// mcptools_ai.cpp: SQL/blocks on a background thread, then buildUserPromptObjectForShot + enrichUserPromptObject
+// on the main thread. Stale results are dropped via the shared m_contextSerial guard.
+void AIManager::requestBaristaContext(const QString& beanBrand, const QString& beanType, const QString& profileName)
+{
+    if (!m_shotHistory) {
+        emit baristaContextReady(QStringLiteral("recordedShots: 0"));
+        return;
+    }
+
+    const QString dbPath = m_shotHistory->databasePath();
+    QPointer<AIManager> self(this);
+    ++m_contextSerial;
+    int serial = m_contextSerial;
+
+    // self is captured by value but ONLY dereferenced inside the main-thread callback (QPointer is
+    // not thread-safe). See requestRecentShotContext for the same discipline.
+    QThread* thread = QThread::create([self, dbPath, beanBrand, beanType, profileName, serial]() {
+        qint64 anchorId = 0;
+        bool beanFilterMissed = false;
+        ShotProjection shot;
+        QJsonArray dialInSessions;
+        QJsonArray recentAdvice;
+        QJsonObject bestRecentShot;
+        QJsonObject beanBestShot;
+        QJsonObject grinderContext;
+        QJsonObject grinderCalibration;
+
+        withTempDb(dbPath, "barista_ctx", [&](QSqlDatabase& db) {
+            // Anchor: latest shot for the current bean; else latest overall (robust to bean-name drift).
+            if (!beanBrand.isEmpty() || !beanType.isEmpty()) {
+                QSqlQuery q(db);
+                q.prepare("SELECT id FROM shots WHERE bean_brand = ? AND bean_type = ? "
+                          "ORDER BY timestamp DESC LIMIT 1");
+                q.addBindValue(beanBrand);
+                q.addBindValue(beanType);
+                if (q.exec () && q.next())
+                    anchorId = q.value(0).toLongLong();
+            }
+            if (anchorId <= 0) {
+                beanFilterMissed = (!beanBrand.isEmpty() || !beanType.isEmpty());
+                QSqlQuery q(db);
+                if (q.exec ("SELECT id FROM shots ORDER BY timestamp DESC LIMIT 1") && q.next())
+                    anchorId = q.value(0).toLongLong();
+            }
+            if (anchorId <= 0)
+                return;
+
+            ShotRecord record = ShotHistoryStorage::loadShotRecordStatic(db, anchorId);
+            shot = ShotHistoryStorage::convertShotRecord(record);
+            if (!shot.isValid())
+                return;
+
+            // Same shared helpers the advisor ships (openspec add-dialing-blocks-to-advisor).
+            dialInSessions = DialingBlocks::buildDialInSessionsBlock(db, shot.profileKbId, anchorId, 5);
+            bestRecentShot = DialingBlocks::buildBestRecentShotBlock(db, shot.profileKbId, anchorId, shot);
+            beanBestShot = DialingBlocks::buildBeanBestShotBlock(
+                db, shot.profileKbId, shot.beanBrand, shot.beanType, shot.barista, anchorId, shot);
+            grinderContext = DialingBlocks::buildGrinderContextBlock(
+                db, shot.grinderModel, shot.beverageType, shot.beanBrand);
+            grinderCalibration = DialingBlocks::buildGrinderCalibrationBlock(
+                db, shot.grinderModel, shot.grinderBurrs, shot.beverageType, anchorId);
+            if (!shot.profileKbId.isEmpty()) {
+                const QString convKey = AIManager::conversationKey(shot.beanBrand, shot.beanType, shot.profileName);
+                const auto turns = AIConversation::loadRecentAssistantTurnsForKey(convKey, 3);
+                if (!turns.isEmpty()) {
+                    DialingBlocks::RecentAdviceInputs in;
+                    in.turns = turns;
+                    in.currentProfileKbId = shot.profileKbId;
+                    in.currentShotId = anchorId;
+                    recentAdvice = DialingBlocks::buildRecentAdviceBlock(db, in);
+                }
+            }
+        });
+
+        QMetaObject::invokeMethod(qApp, [self, serial, shot, anchorId, beanFilterMissed,
+                                         dialInSessions, bestRecentShot, beanBestShot, grinderContext,
+                                         grinderCalibration, recentAdvice]() {
+            if (!self || serial != self->m_contextSerial)
+                return;   // stale — a newer request superseded this one
+            if (anchorId <= 0 || !shot.isValid()) {
+                emit self->baristaContextReady(QStringLiteral("recordedShots: 0"));
+                return;
+            }
+            QJsonObject obj = self->buildUserPromptObjectForShot(shot);
+            if (obj.isEmpty()) {
+                emit self->baristaContextReady(QStringLiteral("recordedShots: 0"));
+                return;
+            }
+            self->enrichUserPromptObject(obj, shot, dialInSessions, bestRecentShot, grinderContext,
+                                         recentAdvice, grinderCalibration, beanBestShot);
+            QString block;
+            if (beanFilterMissed)
+                block += QStringLiteral("NOTE: No shots recorded under the exact current bean name — "
+                                        "the data below is the user's recent shots overall.\n\n");
+            block += QStringLiteral("## The app's structured data on this user and their coffee "
+                                    "(this is real — you DO have their history):\n");
+            block += QString::fromUtf8(QJsonDocument(obj).toJson(QJsonDocument::Indented));
+            emit self->baristaContextReady(block);
+        }, Qt::QueuedConnection);
+    });
+    connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+    thread->start();
+}
+
 void AIManager::testConnection()
 {
     AIProvider* provider = currentProvider();

@@ -6,6 +6,7 @@
 #include "voiceinput.h"
 #include "baristaknowledge.h"
 #include "baristaactions.h"
+#include "baristacontextbuilder.h"
 #include "../controllers/maincontroller.h"
 
 #include <QQmlApplicationEngine>
@@ -19,7 +20,12 @@ BaristaModule::BaristaModule(MainController* mainController, MachineState* machi
     , m_voice(new AssistantVoice(m_settings, appSettings, this))
     , m_voiceInput(new VoiceInput(this))
     , m_knowledge(new BaristaKnowledge(m_settings, mainController ? mainController->aiManager() : nullptr, this))
-    , m_actions(new BaristaActions(appSettings, machineState, this)) {
+    , m_actions(new BaristaActions(appSettings, machineState, this))
+    , m_contextBuilder(new BaristaContextBuilder(
+          mainController ? mainController->aiManager() : nullptr,
+          mainController ? mainController->beanbase() : nullptr,
+          mainController ? mainController->profileManager() : nullptr,
+          appSettings, this)) {
     connect(m_settings, &AssistantSettings::enabledChanged,
             this, &BaristaModule::enabledChanged);
 }

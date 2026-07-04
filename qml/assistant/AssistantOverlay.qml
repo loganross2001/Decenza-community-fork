@@ -156,7 +156,13 @@ Item {
         }
         var prof = (typeof ProfileManager !== "undefined") ? ProfileManager.currentProfileName : ""
         MainController.aiManager.switchConversation(Settings.dye.dyeBeanBrand, Settings.dye.dyeBeanType, prof)
-        MainController.aiManager.requestBaristaContext(Settings.dye.dyeBeanBrand, Settings.dye.dyeBeanType, prof)
+        // Assemble ALL sources into one block via the context builder — the user's dial-in history PLUS,
+        // for an unlinked bean, the community bean profile, PLUS the profile's curated guidance. It emits
+        // one contextReady(). Fall back to the core request alone if the builder isn't available.
+        if (typeof Barista !== "undefined" && Barista.contextBuilder)
+            Barista.contextBuilder.build(Settings.dye.dyeBeanBrand, Settings.dye.dyeBeanType, prof)
+        else
+            MainController.aiManager.requestBaristaContext(Settings.dye.dyeBeanBrand, Settings.dye.dyeBeanType, prof)
     }
 
     // Turn recent shots into a compact history the AI can reason over.
@@ -203,12 +209,28 @@ Item {
             + "temperatureC = brew temp. The app applies it when the user says OK, so give real values. Omit the block "
             + "entirely if you're not changing anything."
 
-        // dataBlock is the pre-formatted advisor-grade context from AIManager.requestBaristaContext().
+        // Proactivity level (user setting): what the assistant may VOLUNTEER (it always answers direct asks).
+        var level = root._settings ? root._settings.proactivityLevel : "full"
+        if (level === "off")
+            persona += "\nOnly answer what the user asks; do NOT volunteer suggestions unless asked."
+        else
+            persona += "\nBe proactive, but raise the SINGLE most useful thing — do NOT list multiple issues. "
+                + "If the recent shots for this bean show 3+ attempts with no rating improvement, name the dialing "
+                + "stall and propose a strategy change (a different variable, or a different profile) rather than "
+                + "another micro-adjustment. Mention bean freshness/degassing only if clearly relevant."
+
+        // dataBlock is the pre-formatted, combined context (dial-in + bean profile + profile guidance).
         var block = (dataBlock && dataBlock.length > 0) ? dataBlock : "recordedShots: 0"
 
+        var suggest = (level === "off")
+            ? "Greet me briefly and wait for me to ask before suggesting changes."
+            : "Greet me and suggest one useful thing."
         var kickoff = (root._state === "closeOut")
             ? "I just pulled a shot — how did it go?"
-            : "It's the " + root._partOfDay() + " and I'm about to pull espresso. Greet me and suggest one thing."
+            : "It's the " + root._partOfDay() + " and I'm about to pull espresso. " + suggest
+        // New-bean opener: no history for this bean → open with a grounded start from the bean profile.
+        if (root._state !== "closeOut" && block.indexOf("recordedShots: 0") >= 0)
+            kickoff += " (This is my first shot on this coffee — use the bean profile to suggest a starting point.)"
         // Volatile bit goes in the kickoff (not the cached system prompt): the pending grind reminder.
         if (root._pendingGrind && root._pendingGrind.value)
             kickoff += " (I earlier agreed to set the grinder to " + root._pendingGrind.value
@@ -299,8 +321,19 @@ Item {
         target: (typeof MainController !== "undefined") ? MainController.aiManager : null
         ignoreUnknownSignals: true
         function onBaristaContextReady(dataBlock) {
-            if (root._awaitingContext)
+            // Only the fallback path (no context builder) consumes this directly; otherwise the builder
+            // owns this signal and emits the fuller combined block via onContextReady below.
+            if (root._awaitingContext && !(typeof Barista !== "undefined" && Barista.contextBuilder))
                 root._askWithContext(dataBlock, false)
+        }
+    }
+    // Combined context (dial-in + community bean profile + curated profile guidance) from the builder.
+    Connections {
+        target: (typeof Barista !== "undefined") ? Barista.contextBuilder : null
+        ignoreUnknownSignals: true
+        function onContextReady(fullBlock) {
+            if (root._awaitingContext)
+                root._askWithContext(fullBlock, false)
         }
     }
 

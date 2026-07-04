@@ -2,9 +2,10 @@
 
 #include <QObject>
 
-#include "voiceinput.h"        // complete type needed for the Q_PROPERTY(VoiceInput*) metatype
-#include "baristaknowledge.h"  // ditto for Q_PROPERTY(BaristaKnowledge*)
-#include "baristaactions.h"    // ditto for Q_PROPERTY(BaristaActions*)
+#include "voiceinput.h"            // complete type needed for the Q_PROPERTY(VoiceInput*) metatype
+#include "baristaknowledge.h"      // ditto for Q_PROPERTY(BaristaKnowledge*)
+#include "baristaactions.h"        // ditto for Q_PROPERTY(BaristaActions*)
+#include "baristacontextbuilder.h" // ditto for Q_PROPERTY(BaristaContextBuilder*)
 
 class QQmlApplicationEngine;
 class MainController;
@@ -26,6 +27,7 @@ class BaristaModule : public QObject {
     Q_PROPERTY(VoiceInput* voiceInput READ voiceInput CONSTANT)
     Q_PROPERTY(BaristaKnowledge* knowledge READ knowledge CONSTANT)
     Q_PROPERTY(BaristaActions* actions READ actions CONSTANT)
+    Q_PROPERTY(BaristaContextBuilder* contextBuilder READ contextBuilder CONSTANT)
 
 public:
     // Single upstream hook: construct the module (settings + orchestrator), register the
@@ -44,6 +46,7 @@ public:
     VoiceInput* voiceInput() const { return m_voiceInput; }
     BaristaKnowledge* knowledge() const { return m_knowledge; }
     BaristaActions* actions() const { return m_actions; }
+    BaristaContextBuilder* contextBuilder() const { return m_contextBuilder; }
 
 signals:
     void enabledChanged();
@@ -58,4 +61,5 @@ private:
     VoiceInput* m_voiceInput = nullptr;
     BaristaKnowledge* m_knowledge = nullptr;
     BaristaActions* m_actions = nullptr;
+    BaristaContextBuilder* m_contextBuilder = nullptr;
 };

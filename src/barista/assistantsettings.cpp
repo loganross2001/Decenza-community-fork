@@ -144,3 +144,14 @@ void AssistantSettings::setVoiceSpeed(double s) {
     m_settings.setValue(QStringLiteral("barista/voiceSpeed"), s);
     emit voiceSpeedChanged();
 }
+
+QString AssistantSettings::proactivityLevel() const {
+    return m_settings.value(QStringLiteral("barista/proactivityLevel"), QStringLiteral("full")).toString();
+}
+
+void AssistantSettings::setProactivityLevel(const QString& level) {
+    if (proactivityLevel() == level)
+        return;
+    m_settings.setValue(QStringLiteral("barista/proactivityLevel"), level);
+    emit proactivityLevelChanged();
+}

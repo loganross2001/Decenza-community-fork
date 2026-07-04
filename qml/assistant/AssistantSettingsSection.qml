@@ -36,6 +36,17 @@ ColumnLayout {
              Layout.fillWidth: true; color: Theme.textColor; font: Theme.bodyFont; Accessible.ignored: true }
     }
 
+    // How proactive it is
+    Tr { key: "barista.settings.proactivity"; fallback: "Proactivity"
+         color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true }
+    ComboBox {
+        Layout.fillWidth: true
+        // "full" = suggests freely; "greetings" = greets + one item; "off" = answers only.
+        model: ["full", "greetings", "off"]
+        Component.onCompleted: { var i = root._settings ? model.indexOf(root._settings.proactivityLevel) : -1; if (i >= 0) currentIndex = i }
+        onActivated: if (root._settings) root._settings.proactivityLevel = currentText
+    }
+
     // Assistant name
     Tr { key: "barista.settings.name"; fallback: "Assistant name"
          color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true }

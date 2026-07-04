@@ -13,6 +13,7 @@ ColumnLayout {
 
     readonly property var _settings: (typeof Barista !== "undefined") ? Barista.settings : null
     readonly property var _voice: (typeof Barista !== "undefined") ? Barista.voice : null
+    readonly property var _knowledge: (typeof Barista !== "undefined") ? Barista.knowledge : null
     readonly property string _provider: root._settings ? root._settings.ttsProvider : "native"
 
     Rectangle { Layout.fillWidth: true; height: 1; color: Theme.borderColor }
@@ -147,5 +148,62 @@ ColumnLayout {
         }
         Tr { id: trSpeak; key: "barista.settings.speak"; fallback: "Speak out loud"
              Layout.fillWidth: true; color: Theme.textColor; font: Theme.bodyFont; Accessible.ignored: true }
+    }
+
+    // ── Knowledge store: portable, relocatable, backed up ──────────────────────────
+    Rectangle { Layout.fillWidth: true; height: 1; color: Theme.borderColor }
+    Tr { key: "barista.kb.title"; fallback: "Knowledge store"
+         color: Theme.textColor; font: Theme.subtitleFont; Accessible.ignored: true }
+    Tr {
+        key: "barista.kb.blurb"
+        fallback: "Your assistant's memory — every conversation and the advice it gave you. Back it up to a folder you own (e.g. a synced or cloud folder) so it's portable and safe."
+        Layout.fillWidth: true; wrapMode: Text.WordWrap
+        color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true
+    }
+
+    Tr { key: "barista.kb.folder"; fallback: "Backup folder"
+         color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true }
+    StyledTextField {
+        Layout.fillWidth: true
+        Component.onCompleted: text = root._knowledge ? root._knowledge.location : ""
+        placeholderText: TranslationManager.translate("barista.kb.folderPlaceholder", "Folder path")
+        onEditingFinished: { Qt.inputMethod.commit(); if (root._knowledge) root._knowledge.location = text }
+    }
+
+    RowLayout {
+        Layout.fillWidth: true; spacing: Theme.spacingSmall
+        AccessibleButton {
+            text: TranslationManager.translate("barista.kb.backup", "Back up now")
+            accessibleName: text
+            onClicked: if (root._knowledge) root._knowledge.backupNow()
+        }
+        // Restore from an existing backup (newest first)
+        ComboBox {
+            id: restoreBox
+            Layout.fillWidth: true
+            visible: root._knowledge && root._knowledge.backups.length > 0
+            model: root._knowledge ? root._knowledge.backups : []
+        }
+        AccessibleButton {
+            subtle: true
+            visible: root._knowledge && root._knowledge.backups.length > 0
+            text: TranslationManager.translate("barista.kb.restore", "Restore")
+            accessibleName: TranslationManager.translate("barista.kb.restoreA", "Restore backup")
+            onClicked: if (root._knowledge && restoreBox.currentText.length > 0) root._knowledge.restore(restoreBox.currentText)
+        }
+    }
+
+    Text {
+        Layout.fillWidth: true; wrapMode: Text.WordWrap
+        color: Theme.textSecondaryColor; font: Theme.labelFont
+        Accessible.ignored: true
+        text: {
+            if (!root._knowledge) return ""
+            if (root._knowledge.status && root._knowledge.status.length > 0) return root._knowledge.status
+            return root._knowledge.lastBackup && root._knowledge.lastBackup.length > 0
+                   ? TranslationManager.translate("barista.kb.last", "Last backup: %1").arg(root._knowledge.lastBackup)
+                   : ""
+        }
+        visible: text.length > 0
     }
 }

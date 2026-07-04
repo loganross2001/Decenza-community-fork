@@ -217,6 +217,7 @@ Item {
         root._closeOutRated = false
         root._fellBack = false
         root._pendingNext = null
+        root._pendingBegin = null   // NICE-1: a new activation supersedes any deferred begin from a prior one
         root._awaitConfirm = false
         // At a greeting (before a shot), surface any off-machine grind the user agreed to but didn't confirm.
         root._pendingGrind = (root._state === "greeting" && typeof Barista !== "undefined" && Barista.actions)
@@ -359,7 +360,7 @@ Item {
         // match "18 grams" and falsely record a grind on a "yes" to a dose question. The chip is the reliable path.
         var _gv = root._pendingGrind ? String(root._pendingGrind.value || "") : ""
         var _grindAsked = _gv.length > 0 && root._message
-                && new RegExp("(^|[^0-9.])" + _gv.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "([^0-9.]|$)").test(root._message)
+                && new RegExp("(^|[^0-9.])" + _gv.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "([^0-9.]|\\.(?![0-9])|$)").test(root._message)
         if (hasActions && _grindAsked) {
             var g = Barista.actions.parseConfirmation(t)   // 1 yes / 0 no / -1 neither
             if (g === 1) { root._resolveGrind(true); return }
@@ -427,8 +428,15 @@ Item {
         // being destroyed/recreated on page navigation), so returning to idle doesn't re-run the greeting.
         if (active && root._orch && !root._orch.sessionStarted)
             root._startConversation()
-        else if (active && root._conv)   // SF-R3-2: already started → restore the last line so it isn't blank
+        else if (active && root._conv) {   // SF-R3-2 + NICE-2: already started → restore the last line, but on
+            // THIS bean's thread (an advisor visit on another page may have switched the conversation key).
+            var prof2 = (typeof ProfileManager !== "undefined") ? ProfileManager.currentProfileName : ""
+            prof2 = prof2.replace(/^\*/, "").replace(/ \(modified\)$/, "")
+            if (typeof MainController !== "undefined" && MainController.aiManager && !root._conv.busy)
+                MainController.aiManager.switchConversation(Settings.dye.dyeBeanBrand, Settings.dye.dyeBeanType, prof2)
             root._message = root._stripBlock(root._conv.lastResponse || "")
+            root._thinking = !!root._conv.busy   // a turn still in flight → keep showing thinking until it lands
+        }
     }
     // B3: if the user navigates away mid-chat, the Loader destroys us — close the mic/TTS session first.
     Component.onDestruction: root._closeSession()

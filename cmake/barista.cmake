@@ -51,6 +51,10 @@ if(DECENZA_BARISTA)
             ${CMAKE_CURRENT_SOURCE_DIR}/qml/assistant/AssistantSettingsSection.qml
             ${CMAKE_CURRENT_SOURCE_DIR}/qml/assistant/ActionConfirmChip.qml
             ${CMAKE_CURRENT_SOURCE_DIR}/qml/assistant/BaristaAvatar.qml
+            ${CMAKE_CURRENT_SOURCE_DIR}/qml/assistant/avatars/AvatarFace.qml
+            ${CMAKE_CURRENT_SOURCE_DIR}/qml/assistant/avatars/AvatarCup.qml
+            ${CMAKE_CURRENT_SOURCE_DIR}/qml/assistant/avatars/AvatarOrb.qml
+            ${CMAKE_CURRENT_SOURCE_DIR}/qml/assistant/avatars/AvatarBean.qml
     )
 
     target_compile_definitions(Decenza PRIVATE DECENZA_BARISTA=1)

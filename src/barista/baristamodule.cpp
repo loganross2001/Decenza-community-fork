@@ -3,6 +3,7 @@
 #include "assistantsettings.h"
 #include "assistantorchestrator.h"
 #include "assistantvoice.h"
+#include "voiceinput.h"
 
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
@@ -12,7 +13,8 @@ BaristaModule::BaristaModule(MainController* mainController, MachineState* machi
     : QObject(parent)
     , m_settings(new AssistantSettings(this))
     , m_orchestrator(new AssistantOrchestrator(mainController, machineState, m_settings, this))
-    , m_voice(new AssistantVoice(m_settings, appSettings, this)) {
+    , m_voice(new AssistantVoice(m_settings, appSettings, this))
+    , m_voiceInput(new VoiceInput(this)) {
     connect(m_settings, &AssistantSettings::enabledChanged,
             this, &BaristaModule::enabledChanged);
 }

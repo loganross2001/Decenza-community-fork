@@ -20,12 +20,14 @@ class AssistantVoice : public QObject {
     Q_OBJECT
     Q_PROPERTY(QStringList availableVoices READ availableVoices NOTIFY availableVoicesChanged)
     Q_PROPERTY(QString voiceName READ voiceName NOTIFY voiceNameChanged)
+    Q_PROPERTY(bool speaking READ speaking NOTIFY speakingChanged)   // for muting the mic while it talks
 
 public:
     AssistantVoice(AssistantSettings* settings, Settings* appSettings, QObject* parent = nullptr);
 
     QStringList availableVoices() const;   // voice names, for the picker
     QString voiceName() const;             // the currently active voice's name
+    bool speaking() const { return m_speaking; }
 
     Q_INVOKABLE void speak(const QString& text);          // no-op when voice is muted
     Q_INVOKABLE void stop();
@@ -37,9 +39,11 @@ public:
 signals:
     void availableVoicesChanged();
     void voiceNameChanged();
+    void speakingChanged();
 
 private:
     void applyVoiceFromSettings();
+    void updateSpeaking();
     void synthOpenAI(const QString& text);       // POST OpenAI TTS → play the returned mp3
     void synthElevenLabs(const QString& text);   // POST ElevenLabs TTS → play the returned mp3
     void playMp3(const QByteArray& audio);       // play compressed audio via QMediaPlayer
@@ -53,4 +57,5 @@ private:
     QNetworkAccessManager* m_net = nullptr;
     AssistantSettings* m_settings = nullptr;
     Settings* m_appSettings = nullptr;
+    bool m_speaking = false;
 };

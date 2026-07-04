@@ -41,6 +41,19 @@ AssistantVoice::AssistantVoice(AssistantSettings* settings, Settings* appSetting
     connect(m_tts, &QTextToSpeech::localeChanged, this, [this] {
         emit availableVoicesChanged();
     });
+    // Track when we're actually speaking (native TTS or cloud playback) so the mic can mute itself.
+    connect(m_tts, &QTextToSpeech::stateChanged, this, [this](QTextToSpeech::State) { updateSpeaking(); });
+    connect(m_player, &QMediaPlayer::playbackStateChanged, this,
+            [this](QMediaPlayer::PlaybackState) { updateSpeaking(); });
+}
+
+void AssistantVoice::updateSpeaking() {
+    const bool now = (m_tts && m_tts->state() == QTextToSpeech::Speaking)
+                  || (m_player && m_player->playbackState() == QMediaPlayer::PlayingState);
+    if (now == m_speaking)
+        return;
+    m_speaking = now;
+    emit speakingChanged();
 }
 
 QStringList AssistantVoice::availableVoices() const {

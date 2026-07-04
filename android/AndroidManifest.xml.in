@@ -13,6 +13,8 @@
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- [barista-fork] on-device speech recognition (Chat button) -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <!-- Lets Qt's QNetworkInformation report real reachability instead of
          "Unknown". Without this, QtAndroidNetworkInformation.registerReceiver()
          throws a SecurityException at every cold start (issue #1124) and any

@@ -31,6 +31,8 @@ if(DECENZA_BARISTA)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/assistantorchestrator.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/assistantvoice.h
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/assistantvoice.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/voiceinput.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/voiceinput.cpp
     )
 
     # New-assistant QML — its own resource, loaded by URL via a Loader in main.qml.

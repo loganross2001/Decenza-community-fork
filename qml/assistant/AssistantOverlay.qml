@@ -14,7 +14,41 @@ Item {
 
     readonly property var _orch: (typeof Barista !== "undefined") ? Barista.orchestrator : null
     readonly property var _voice: (typeof Barista !== "undefined") ? Barista.voice : null
+    readonly property var _voiceInput: (typeof Barista !== "undefined") ? Barista.voiceInput : null
     readonly property var _settings: (typeof Barista !== "undefined") ? Barista.settings : null
+
+    // Voice-input session: 20s of silence auto-closes the mic (resets on any speech / reply / activity).
+    Timer {
+        id: silenceTimer
+        interval: 20000
+        repeat: false
+        onTriggered: if (root._voiceInput) root._voiceInput.stop()
+    }
+    function _resetSilence() {
+        if (root._voiceInput && root._voiceInput.listening) silenceTimer.restart()
+        else silenceTimer.stop()
+    }
+    Connections {
+        target: root._voiceInput
+        ignoreUnknownSignals: true
+        function onFinalText(text) { root._resetSilence(); root._send(text) }   // spoken utterance → the AI
+        function onPartialChanged() { root._resetSilence() }
+        function onListeningChanged() { root._resetSilence() }
+        function onError(message) {   // never fail silently — say what happened
+            root._message = TranslationManager.translate("barista.mic.error",
+                "I couldn't hear you clearly (%1). Tap Chat to try again, or just type.").arg(message)
+        }
+    }
+    // Mute the mic while the assistant is speaking (no echo), resume when it finishes.
+    Connections {
+        target: root._voice
+        ignoreUnknownSignals: true
+        function onSpeakingChanged() {
+            if (!root._voiceInput || !root._voiceInput.listening) return
+            if (root._voice.speaking) root._voiceInput.pauseMic()
+            else { root._voiceInput.resumeMic(); root._resetSilence() }
+        }
+    }
     readonly property string _state: _orch ? _orch.state : "dormant"
     readonly property var _conv: (typeof MainController !== "undefined" && MainController.aiManager)
                                  ? MainController.aiManager.conversation : null
@@ -171,6 +205,7 @@ Item {
             root._message = response
             root._thinking = false
             if (root._voice) root._voice.speak(response)
+            root._resetSilence()   // keep the mic session alive while we're conversing
         }
     }
     // Recent shots arrived → open the conversation grounded in the real history (so the AI KNOWS,
@@ -266,10 +301,43 @@ Item {
                       : root._message
             }
 
-            // Reply input (typed; voice input arrives here too in a later phase)
+            // Live listening indicator (partial transcription while the mic is open)
+            Text {
+                Layout.fillWidth: true
+                visible: root._voiceInput && root._voiceInput.listening
+                wrapMode: Text.WordWrap
+                color: Theme.textSecondaryColor
+                font: Theme.labelFont
+                text: {
+                    var p = (root._voiceInput && root._voiceInput.partial) ? root._voiceInput.partial : ""
+                    return p.length > 0 ? p : TranslationManager.translate("barista.mic.listening", "Listening…")
+                }
+                Accessible.ignored: true
+            }
+
+            // Reply input — type, or use the Chat mic to talk hands-free
             RowLayout {
                 Layout.fillWidth: true
                 spacing: Theme.spacingSmall
+
+                // Chat / mic toggle: opens the mic (Chat) or closes it (Stop)
+                AccessibleButton {
+                    visible: root._voiceInput && root._voiceInput.available
+                    primary: root._voiceInput && root._voiceInput.listening
+                    subtle: !(root._voiceInput && root._voiceInput.listening)
+                    text: (root._voiceInput && root._voiceInput.listening)
+                          ? TranslationManager.translate("barista.mic.stop", "Stop")
+                          : TranslationManager.translate("barista.mic.chat", "Chat")
+                    accessibleName: (root._voiceInput && root._voiceInput.listening)
+                          ? TranslationManager.translate("barista.mic.stopAccessible", "Stop listening")
+                          : TranslationManager.translate("barista.mic.chatAccessible", "Talk to the assistant")
+                    onClicked: {
+                        if (!root._voiceInput) return
+                        if (root._voiceInput.listening) root._voiceInput.stop()
+                        else { root._voiceInput.start(); silenceTimer.restart() }
+                    }
+                }
+
                 StyledTextField {
                     id: replyField
                     Layout.fillWidth: true

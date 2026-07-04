@@ -2,6 +2,8 @@
 
 #include <QObject>
 
+#include "voiceinput.h"   // complete type needed for the Q_PROPERTY(VoiceInput*) metatype
+
 class QQmlApplicationEngine;
 class MainController;
 class MachineState;
@@ -19,6 +21,7 @@ class BaristaModule : public QObject {
     Q_PROPERTY(AssistantSettings* settings READ settings CONSTANT)
     Q_PROPERTY(AssistantOrchestrator* orchestrator READ orchestrator CONSTANT)
     Q_PROPERTY(AssistantVoice* voice READ voice CONSTANT)
+    Q_PROPERTY(VoiceInput* voiceInput READ voiceInput CONSTANT)
 
 public:
     // Single upstream hook: construct the module (settings + orchestrator), register the
@@ -34,6 +37,7 @@ public:
     AssistantSettings* settings() const { return m_settings; }
     AssistantOrchestrator* orchestrator() const { return m_orchestrator; }
     AssistantVoice* voice() const { return m_voice; }
+    VoiceInput* voiceInput() const { return m_voiceInput; }
 
 signals:
     void enabledChanged();
@@ -45,4 +49,5 @@ private:
     AssistantSettings* m_settings = nullptr;
     AssistantOrchestrator* m_orchestrator = nullptr;
     AssistantVoice* m_voice = nullptr;
+    VoiceInput* m_voiceInput = nullptr;
 };

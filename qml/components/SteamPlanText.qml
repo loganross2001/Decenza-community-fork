@@ -4,15 +4,16 @@ import Decenza
 import "../"
 
 // The steam analogue of ShotPlanText: a one-line sentence summarising what the
-// next steam will do — "Steam 300g of milk, using Large for 30s" — with the live
-// values bolded and a leading steam icon. Display-only (no tap target). Temperatures
-// (if shown) go through Theme.formatTemperature so they follow the C/F setting.
+// next steam will do — "Steam 300g of milk, using the Large pitcher for 30s" — with the live
+// values bolded and a leading steam icon. Display-only (no tap target). Renders
+// milk weight / pitcher / duration only (no temperature — the app steams by weight
+// + duration; the only steam temperature is the boiler setpoint, not a milk target).
 Item {
     id: root
 
-    // The currently selected steam pitcher preset. getSteamPitcherPreset() is Q_INVOKABLE, so the binding
-    // must ALSO read steamPitcherPresets to re-run when the selected pitcher is renamed, disabled, or
-    // recalibrated without the selection index itself changing.
+    // The currently selected steam pitcher preset. getSteamPitcherPreset() is Q_INVOKABLE, so the
+    // binding must ALSO read steamPitcherPresets to re-run when the selected pitcher is renamed,
+    // disabled, or recalibrated without the selection index itself changing.
     readonly property var _preset: {
         void(Settings.brew.steamPitcherPresets)
         return Settings.brew.getSteamPitcherPreset(Settings.brew.selectedSteamPitcher)
@@ -20,9 +21,10 @@ Item {
     readonly property bool _presetOff: !!(_preset && _preset.disabled)
     readonly property string _pitcherName: (_preset && _preset.name) ? String(_preset.name) : ""
 
-    // The milk weight measured this session (set on capture / the bell, reset on pitcher
-    // change and session end). Mirrored imperatively from the window root — reading a
-    // sub-property through a var-typed intermediate doesn't register a binding dependency.
+    // The milk weight measured this session (set on capture / the bell, reset on pitcher change and
+    // session end). Mirrored from the window root: seeded on completion / when the window resolves, and
+    // refreshed on its sessionMeasuredMilkGChanged signal. (Rename-fragile: if that root property is ever
+    // renamed, the ignoreUnknownSignals Connections silently no-ops and this freezes on its last value.)
     readonly property var winRoot: root.Window.window
     property real _sessionMilk: 0
     function _refreshMilk() { root._sessionMilk = winRoot ? (winRoot.sessionMeasuredMilkG || 0) : 0 }
@@ -41,49 +43,63 @@ Item {
         if (_preset && (_preset.calibMilkG || 0) > 0) return _preset.calibMilkG
         return Settings.brew.lastSteamMilkG || 0
     }
-    readonly property int _duration: Settings.brew.steamTimeout
+    // The SELECTED preset's effective time (scaled when weight-timing has milk to work
+    // with, else its base duration) — not Settings.brew.steamTimeout, which holds
+    // whatever the last pill tap computed and can be stale for a fresh selection.
+    // effectiveSteamDurationSec() reads preset data + the weight-timing toggle in C++,
+    // so re-read both here to keep the binding live.
+    readonly property int _duration: {
+        void(Settings.brew.steamPitcherPresets)
+        void(Settings.brew.milkAutoCaptureEnabled)
+        return Settings.brew.effectiveSteamDurationSec(Settings.brew.selectedSteamPitcher, _targetMilk)
+    }
 
     readonly property string _milkStr: _targetMilk > 0 ? (_targetMilk.toFixed(0) + "g") : ""
     readonly property string _durStr: _duration > 0 ? (_duration + "s") : ""
 
-    // Plain sentence — exposed as `text` for accessibility and the visibility check.
-    readonly property string text: {
+    // Break a "%N" token in a user value so QString.arg can't substitute a later arg into it (a pitcher
+    // literally named e.g. "50% off"). The zero-width space is invisible.
+    function _argSafe(v) { return String(v).replace(/%(\d)/g, "%\u200B$1") }
+
+    // ONE renderer for both the plain `text` (a11y label + `visible: text !== ""`) and the bolded `_rich`
+    // (display), so they can't drift. fmt(value, live) formats one value: plain %-escapes, rich HTML-escapes
+    // and bolds live values. Disabled ("Off") preset ⇒ "" ⇒ hidden.
+    function _build(fmt, sep) {
         var _ = TranslationManager.translationVersion
         if (_presetOff) return ""
-        if (_milkStr !== "" && _pitcherName !== "" && _durStr !== "")
-            return TranslationManager.translate("steamplan.sentence", "Steam %1 of milk, using the %2 pitcher for %3")
-                .arg(_milkStr).arg(_pitcherName).arg(_durStr)
+        if (_milkStr !== "" && _pitcherName !== "" && _durStr !== "") {
+            // Pills display presets as "Small Pitcher" etc., so users name them that way —
+            // don't render "…the Large Pitcher pitcher". Separate full template (not string
+            // surgery) so translators control word order in both forms.
+            var tpl = _pitcherName.toLowerCase().indexOf("pitcher") >= 0
+                ? TranslationManager.translate("steamplan.sentenceNamedPitcher", "Steam %1 of milk, using the %2 for %3")
+                : TranslationManager.translate("steamplan.sentence", "Steam %1 of milk, using the %2 pitcher for %3")
+            return tpl.arg(fmt(_milkStr, true)).arg(fmt(_pitcherName, true)).arg(fmt(_durStr, true))
+        }
         // Degrade gracefully when a piece is missing.
         var parts = []
-        if (_milkStr !== "") parts.push(_milkStr)
-        if (_pitcherName !== "") parts.push(_pitcherName)
-        if (_durStr !== "") parts.push(_durStr)
+        if (_milkStr !== "") parts.push(fmt(_milkStr, true))
+        if (_pitcherName !== "") parts.push(fmt(_pitcherName, true))
+        if (_durStr !== "") parts.push(fmt(_durStr, true))
         if (parts.length === 0) return ""
-        return TranslationManager.translate("steamplan.prefix", "Steam") + " " + parts.join("  ·  ")
+        return fmt(TranslationManager.translate("steamplan.prefix", "Steam"), false) + " " + parts.join(sep)
     }
 
-    // Rich version with the live values bolded (parts HTML-escaped).
-    readonly property string _rich: {
-        var _ = TranslationManager.translationVersion
-        function b(s) { return "<b>" + Theme.escapeHtml(s) + "</b>" }
-        if (_presetOff) return ""
-        if (_milkStr !== "" && _pitcherName !== "" && _durStr !== "")
-            return TranslationManager.translate("steamplan.sentence", "Steam %1 of milk, using the %2 pitcher for %3")
-                .arg(b(_milkStr)).arg(b(_pitcherName)).arg(b(_durStr))
-        var parts = []
-        if (_milkStr !== "") parts.push(_milkStr)
-        if (_pitcherName !== "") parts.push(_pitcherName)
-        if (_durStr !== "") parts.push(_durStr)
-        if (parts.length === 0) return ""
-        return Theme.escapeHtml(TranslationManager.translate("steamplan.prefix", "Steam")) + " " + Theme.joinWithBullet(parts)
-    }
+    // Plain: for the accessibility label + `visible: text !== ""`.
+    readonly property string text: _build(function(v, live) { return _argSafe(v) }, "  ·  ")
+    // Rich: same content, live values bolded, all HTML-escaped; styled bold safe-dot · separator.
+    readonly property string _rich: _build(function(v, live) {
+        var e = Theme.escapeHtml(_argSafe(v))
+        return live ? ("<b>" + e + "</b>") : e
+    }, " <font size=\"+1\"><b>·</b></font> ")
 
     implicitWidth: row.implicitWidth
     implicitHeight: row.implicitHeight
 
-    Accessible.role: Accessible.StaticText
-    Accessible.name: root.text
-    Accessible.ignored: root.text === ""
+    // Always wrapped by SteamPlanItem / PlanItem, which already expose a StaticText a11y node — so ignore
+    // this role-less root to avoid a duplicate nested announcement (ShotPlanText gets the same effect from
+    // its role-less root, which needs no explicit flag).
+    Accessible.ignored: true
 
     Row {
         id: row

@@ -837,6 +837,7 @@ set(QML_FILES
     qml/components/layout/items/EquipmentItem.qml
     qml/components/layout/items/HistoryItem.qml
     qml/components/layout/items/DiscussItem.qml
+    qml/components/layout/items/BaristaItem.qml
     qml/components/layout/items/AutoFavoritesItem.qml
     qml/components/layout/items/SleepItem.qml
     qml/components/layout/items/SettingsItem.qml

@@ -2430,6 +2430,7 @@ QString ShotServer::generateLayoutPage() const
         {type:"equipment",cat:0,label:"Equipment"},
         {type:"autofavorites",cat:0,label:"Favorites"},
         {type:"discuss",cat:0,label:"Discuss"},
+        {type:"barista",cat:0,label:"Barista"},
         {type:"ghcSimulator",cat:0,label:"Mini GHC"},
         // Readouts (1)
         {type:"machineStatus",cat:1,label:"Machine Status"},
@@ -2471,6 +2472,7 @@ QString ShotServer::generateLayoutPage() const
         screensaverAttractor:"Attractor",screensaverShotMap:"Shot Map",
         lastShot:"Last Shot",
         discuss:"Discuss",
+        barista:"Barista",
         ghcSimulator:"Mini GHC",
         machineStatus:"Machine",
         clock:"Time"

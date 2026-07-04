@@ -477,6 +477,7 @@ Rectangle {
                                 { type: "equipment", cat: 0, label: TranslationManager.translate("layoutEditor.widgetEquipment", "Equipment") },
                                 { type: "autofavorites", cat: 0, label: TranslationManager.translate("layoutEditor.widgetFavorites", "Favorites") },
                                 { type: "discuss", cat: 0, label: TranslationManager.translate("layoutEditor.widgetDiscuss", "Discuss") },
+                                { type: "barista", cat: 0, label: TranslationManager.translate("layoutEditor.widgetBarista", "Barista") },
                                 { type: "ghcSimulator", cat: 0, label: TranslationManager.translate("layoutEditor.widgetGHCSimulator", "Mini GHC") },
                                 // Readouts (1)
                                 { type: "machineStatus", cat: 1, label: TranslationManager.translate("layoutEditor.widgetMachineStatus", "Machine Status") },
@@ -691,6 +692,7 @@ Rectangle {
             "screensaverShotMap": TranslationManager.translate("layoutEditor.chipMap", "Map"),
             "quit": TranslationManager.translate("layoutEditor.chipQuit", "Quit"),
             "discuss": TranslationManager.translate("layoutEditor.chipDiscuss", "Discuss"),
+            "barista": TranslationManager.translate("layoutEditor.chipBarista", "Barista"),
             "clock": TranslationManager.translate("layoutEditor.chipTime", "Time")
         }
         return names[type] || type

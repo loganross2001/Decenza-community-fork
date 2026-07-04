@@ -210,6 +210,7 @@ Item {
                 case "scaleBattery":     src = "items/ScaleBatteryItem.qml"; break
                 case "ghcSimulator":     src = "items/MiniGHCItem.qml"; break
                 case "discuss":          src = "items/DiscussItem.qml"; break
+                case "barista":          src = "items/BaristaItem.qml"; break
                 case "screensaverFlipClock":
                 case "screensaverPipes":
                 case "screensaverAttractor":

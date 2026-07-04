@@ -52,10 +52,18 @@ Item {
         root._thinking = true
         root._awaitingContext = true
         root._closeOutRated = false
-        // Pull the user's ACTUAL recent shots (their real history — this morning's included), not the
-        // narrow grind-calibration blob. ask() fires once they arrive (shotsFilteredReady).
-        if (typeof MainController !== "undefined" && MainController.shotHistory) {
-            MainController.shotHistory.requestShotsFiltered({}, 0, 10)
+        // (1) Load THIS bean's persisted conversation so the AI recalls its own prior guidance and we
+        // pick up where we left off — even after a 2-month gap. (2) Pull the bean's FULL shot history.
+        if (typeof MainController !== "undefined" && MainController.aiManager) {
+            MainController.aiManager.switchConversation(Settings.dye.dyeBeanBrand, Settings.dye.dyeBeanType,
+                (typeof ProfileManager !== "undefined") ? ProfileManager.currentProfileName : "")
+        }
+        if (typeof MainController !== "undefined" && MainController.shotHistory
+                && (Settings.dye.dyeBeanBrand.length > 0 || Settings.dye.dyeBeanType.length > 0)) {
+            MainController.shotHistory.requestShotsFiltered(
+                { "beanBrand": Settings.dye.dyeBeanBrand, "beanType": Settings.dye.dyeBeanType }, 0, 50)
+        } else if (typeof MainController !== "undefined" && MainController.shotHistory) {
+            MainController.shotHistory.requestShotsFiltered({}, 0, 15)   // no bean set → recent overall
         } else {
             root._askWithContext("")
         }
@@ -80,7 +88,8 @@ Item {
         return lines.join("\n")
     }
 
-    // Build the system prompt WITH the real history and open the conversation.
+    // Open (or resume) the conversation. Persona is a STABLE system prompt; the data goes in the
+    // message so followUp() carries fresh history each time while keeping the persisted thread.
     function _askWithContext(history) {
         root._awaitingContext = false
         if (!root._conv)
@@ -88,29 +97,30 @@ Item {
         var who = root._settings ? root._settings.assistantName : "Coach"
         var name = root._userName.length > 0 ? root._userName : ""
         var bean = root._bean.length > 0 ? root._bean : "their coffee"
-        var hist = (history && history.length > 0) ? history
-                 : "(no shots recorded yet)"
-        var sys, seed
+        var hist = (history && history.length > 0) ? history : "(no shots recorded yet)"
+
+        var persona = "You are " + who + ", a warm, concise home espresso barista"
+            + (name ? " talking to " + name : "") + ". You have LONG-TERM memory of this user's shots and your own "
+            + "past advice for each coffee — recall it and pick up where you left off, even after long gaps. Treat any "
+            + "shot history you are given as fact; NEVER claim it is their first shot if shots are listed. Keep every "
+            + "reply to 1-2 short spoken sentences, conversational, and adapt. Suggest at most one concrete change for "
+            + "the next shot when it helps (fast/sour → finer; slow/bitter → coarser)."
+
+        var ctx
         if (root._state === "closeOut") {
-            sys = "You are " + who + ", a warm, concise home espresso barista"
-                + (name ? " talking to " + name : "") + ".\n"
-                + "Their recent shots (most recent first — dose, grind, time, rating):\n" + hist + "\n\n"
-                + "They just finished a shot. Using the history, comment briefly on how it likely went and offer at most "
-                + "one tweak for next time, or ask ONE short question. 1-2 short spoken sentences, conversational."
-            seed = "I just pulled a shot."
+            ctx = "I just pulled a shot of " + bean + ". My shots on this coffee (most recent first — dose, grind, time, "
+                + "rating):\n" + hist + "\nComment briefly on how it likely went and offer one tweak, or ask one short question."
         } else {
-            sys = "You are " + who + ", a warm, concise home espresso barista"
-                + (name ? " talking to " + name : "") + ".\n"
-                + "Their recent shots (most recent first — dose, grind, time, rating):\n" + hist + "\n\n"
-                + "It is the " + root._partOfDay() + " and they are about to pull espresso; their current coffee is " + bean + ".\n"
-                + "You ALREADY HAVE their shot history above — treat it as fact. NEVER say this is their first shot or that "
-                + "you lack data if any shots are listed. Greet them briefly" + (name ? " by name" : "")
-                + ", reference what you see (e.g. how this morning's shots on this coffee went), and proactively suggest ONE "
-                + "specific change for THIS shot based on the history (fast/sour → finer; slow/bitter → coarser). Do NOT ask "
-                + "them to recap past shots. Keep every reply to 1-2 short spoken sentences, conversational, and adapt."
-            seed = "Hi — here to make espresso."
+            ctx = "It is the " + root._partOfDay() + " and I am about to pull espresso; my coffee is " + bean
+                + ". My shots on this coffee (most recent first — dose, grind, time, rating):\n" + hist
+                + "\nGreet me, reference what you see, and suggest one change for this shot."
         }
-        root._conv.ask(sys, seed)
+
+        // Returning to this bean (a saved thread exists) → continue it so prior advice is recalled;
+        // otherwise start a fresh thread with the persona.
+        var returning = root._conv.hasSavedConversation
+        if (!(returning && root._conv.followUp(ctx)))
+            root._conv.ask(persona, ctx)
     }
 
     function _send(text) {

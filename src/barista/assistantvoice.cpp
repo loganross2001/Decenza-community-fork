@@ -176,7 +176,11 @@ void AssistantVoice::playMp3(const QByteArray& audio) {
     m_player->stop();
     // Android's media backend truncates in-memory (QBuffer) sources after a fraction of a second —
     // write the mp3 to a temp file and play that; files play reliably and to completion.
-    const QString path = QDir::tempPath() + QStringLiteral("/decenza_tts.mp3");
+    // ALTERNATE the filename each utterance: reusing one path makes the Android backend cache the prior
+    // clip's DURATION and stop the new (longer) audio early (the cut-off-mid-sentence bug), and setSource
+    // with the same URL is a no-op in Qt. A fresh path forces a clean reload with the correct duration.
+    const QString path = QDir::tempPath()
+                       + QStringLiteral("/decenza_tts_%1.mp3").arg(m_ttsFileSeq++ % 2);
     QFile f(path);
     if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
         m_pendingSynth = false; updateSpeaking();
@@ -184,8 +188,6 @@ void AssistantVoice::playMp3(const QByteArray& audio) {
     }
     f.write(audio);
     f.close();
-    // S12: the temp path is reused every utterance; setSource with the SAME URL is a no-op in Qt, so
-    // the backend can replay the previous clip / stale duration. Clear the source first to force a reload.
     m_player->setSource(QUrl());
     m_player->setSource(QUrl::fromLocalFile(path));
     m_player->play();

@@ -62,4 +62,8 @@ private:
     // holds `speaking` true across that gap so the mic stays paused. m_speakGen discards a stale/late reply.
     bool m_pendingSynth = false;
     int m_speakGen = 0;
+    // [barista-fork] alternate the cloud-TTS temp file each utterance (decenza_tts_0/_1.mp3). Reusing ONE
+    // path makes Android's media backend cache the prior clip's DURATION and stop the new (longer) audio
+    // early — the "cut off mid-sentence" bug. A fresh path each time forces a clean reload.
+    int m_ttsFileSeq = 0;
 };

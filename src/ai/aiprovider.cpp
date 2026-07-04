@@ -125,6 +125,14 @@ void AIProvider::analyzeConversation(const QString& systemPrompt, const QJsonArr
     analyze(systemPrompt, flatPrompt);
 }
 
+// [barista-fork] Options-aware overload — base ignores options (no web search) and forwards. Only
+// AnthropicProvider overrides this; all other providers no-op web search here.
+void AIProvider::analyzeConversation(const QString& systemPrompt, const QJsonArray& messages,
+                                     const RequestOptions& /*options*/)
+{
+    analyzeConversation(systemPrompt, messages);
+}
+
 // ============================================================================
 // OpenAI Provider
 // ============================================================================
@@ -352,6 +360,7 @@ void AnthropicProvider::sendRequest(const QJsonObject& requestBody)
     req.setTransferTimeout(ANALYSIS_TIMEOUT_MS);
 
     m_retryFn = [this, requestBody]() { sendRequest(requestBody); };
+    m_pendingRequestBody = requestBody;   // [barista-fork] basis for a pause_turn continuation
 
     QByteArray body = QJsonDocument(requestBody).toJson();
     QNetworkReply* reply = m_networkManager->post(req, body);
@@ -369,6 +378,8 @@ void AnthropicProvider::analyze(const QString& systemPrompt, const QString& user
 
     setStatus(Status::Busy);
     m_retryCount = 0;
+    m_continuations = 0;          // [barista-fork]
+    m_accumulatedText.clear();    // [barista-fork]
     ++m_reqGen;
 
     QJsonObject requestBody;
@@ -387,6 +398,12 @@ void AnthropicProvider::analyze(const QString& systemPrompt, const QString& user
 
 void AnthropicProvider::analyzeConversation(const QString& systemPrompt, const QJsonArray& messages)
 {
+    analyzeConversation(systemPrompt, messages, RequestOptions{});
+}
+
+void AnthropicProvider::analyzeConversation(const QString& systemPrompt, const QJsonArray& messages,
+                                            const RequestOptions& options)
+{
     if (!isConfigured()) {
         emit analysisFailed("Anthropic API key not configured");
         return;
@@ -394,6 +411,8 @@ void AnthropicProvider::analyzeConversation(const QString& systemPrompt, const Q
 
     setStatus(Status::Busy);
     m_retryCount = 0;
+    m_continuations = 0;          // [barista-fork]
+    m_accumulatedText.clear();    // [barista-fork]
     ++m_reqGen;
 
     QJsonObject requestBody;
@@ -401,6 +420,17 @@ void AnthropicProvider::analyzeConversation(const QString& systemPrompt, const Q
     requestBody["max_tokens"] = 4096;   // [barista-fork] was 1024 — short replies were truncating mid-sentence
     requestBody["system"] = buildCachedSystemPrompt(systemPrompt);
     requestBody["messages"] = messagesWithCachedFirstUser(messages);
+    // [barista-fork] server-side web search — barista only (options.webSearch). Runs on Anthropic's side;
+    // no client tool loop, we only resume on stop_reason "pause_turn" (see onAnalysisReply).
+    if (options.webSearch) {
+        QJsonObject ws;
+        ws["type"] = QString("web_search_20260209");
+        ws["name"] = QString("web_search");
+        ws["max_uses"] = 3;
+        QJsonArray tools;
+        tools.append(ws);
+        requestBody["tools"] = tools;
+    }
 
     sendRequest(requestBody);
 }
@@ -496,14 +526,45 @@ void AnthropicProvider::onAnalysisReply(QNetworkReply* reply)
         return;
     }
 
-    QJsonArray content = root["content"].toArray();
-    if (content.isEmpty()) {
+    const QString stopReason = root["stop_reason"].toString();
+    const QJsonArray content = root["content"].toArray();
+    if (content.isEmpty() && m_accumulatedText.isEmpty()) {
         emit analysisFailed("Anthropic returned no response");
         return;
     }
 
-    QString text = content[0].toObject()["text"].toString();
-    if (text.isEmpty()) {
+    // [barista-fork] With web search on, content is a MULTI-block array. Concatenate every text block;
+    // skip server_tool_use / web_search_tool_result (they carry no prose). Plain single-text replies are
+    // unaffected. Also hardens the old content[0].text read, which broke if a tool block led the array.
+    QString text;
+    for (const QJsonValue& v : content) {
+        const QJsonObject block = v.toObject();
+        if (block["type"].toString() == QLatin1String("text")) {
+            if (!text.isEmpty()) text += QLatin1String("\n");
+            text += block["text"].toString();
+        }
+    }
+
+    // [barista-fork] Server-side search paused mid-turn: resume by re-POSTing the turn with the assistant
+    // content appended verbatim (the API detects the trailing tool block and continues). Bounded loop.
+    if (stopReason == QLatin1String("pause_turn") && m_continuations < MAX_CONTINUATIONS) {
+        ++m_continuations;
+        m_accumulatedText += text;
+        QJsonObject body = m_pendingRequestBody;
+        QJsonArray msgs = body["messages"].toArray();
+        QJsonObject asst;
+        asst["role"] = QString("assistant");
+        asst["content"] = content;
+        msgs.append(asst);
+        body["messages"] = msgs;
+        setStatus(Status::Busy);   // stay Busy across the continuation (line 499 already set Ready)
+        sendRequest(body);
+        return;
+    }
+
+    text = m_accumulatedText + text;
+    m_accumulatedText.clear();
+    if (text.trimmed().isEmpty()) {
         emit analysisFailed("Anthropic returned empty response content");
         return;
     }

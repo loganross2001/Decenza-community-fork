@@ -159,6 +159,17 @@ void AssistantSettings::setProactivityLevel(const QString& level) {
     emit proactivityLevelChanged();
 }
 
+bool AssistantSettings::webSearchEnabled() const {
+    return m_settings.value(QStringLiteral("barista/webSearchEnabled"), true).toBool();
+}
+
+void AssistantSettings::setWebSearchEnabled(bool e) {
+    if (webSearchEnabled() == e)
+        return;
+    m_settings.setValue(QStringLiteral("barista/webSearchEnabled"), e);
+    emit webSearchEnabledChanged();
+}
+
 bool AssistantSettings::consumeProactiveNudge(const QString& beanKey, int cooldownHours) {
     QString safe = beanKey;
     safe.replace(QRegularExpression(QStringLiteral("[^A-Za-z0-9]")), QStringLiteral("_"));

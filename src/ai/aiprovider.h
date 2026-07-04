@@ -3,6 +3,7 @@
 #include <QObject>
 #include <QString>
 #include <QJsonArray>
+#include <QJsonObject>
 #include <QList>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -21,6 +22,12 @@ public:
     struct ModelOption {
         QString id;
         QString displayName;
+    };
+
+    // [barista-fork] Per-request options threaded through analyzeConversation. Only the barista sets
+    // webSearch; every other caller uses the default (off), so the advisor/coach are unaffected.
+    struct RequestOptions {
+        bool webSearch = false;
     };
 
     explicit AIProvider(QNetworkAccessManager* networkManager, QObject* parent = nullptr);
@@ -46,6 +53,10 @@ public:
 
     // Multi-turn conversation method (messages = array of {role, content} objects)
     virtual void analyzeConversation(const QString& systemPrompt, const QJsonArray& messages);
+    // [barista-fork] Options-aware overload. Base forwards to the 2-arg version (options ignored), so
+    // OpenAI/Gemini/OpenRouter/Ollama gracefully no-op web search; AnthropicProvider overrides it.
+    virtual void analyzeConversation(const QString& systemPrompt, const QJsonArray& messages,
+                                     const RequestOptions& options);
 
     // Test connection
     virtual void testConnection() = 0;
@@ -136,6 +147,8 @@ public:
 
     void analyze(const QString& systemPrompt, const QString& userPrompt) override;
     void analyzeConversation(const QString& systemPrompt, const QJsonArray& messages) override;
+    void analyzeConversation(const QString& systemPrompt, const QJsonArray& messages,
+                             const RequestOptions& options) override;
     void testConnection() override;
 
 private slots:
@@ -146,6 +159,13 @@ private:
     void sendRequest(const QJsonObject& requestBody);
     static QJsonArray buildCachedSystemPrompt(const QString& systemPrompt);
 
+    // [barista-fork] server-side web search continuation state. When the model pauses mid-turn to run a
+    // search (stop_reason "pause_turn"), we re-POST the accumulated turn until it completes (bounded).
+    QJsonObject m_pendingRequestBody;
+    int m_continuations = 0;
+    QString m_accumulatedText;
+    static constexpr int MAX_CONTINUATIONS = 2;
+
     // Wrap the first user message's content in a structured block carrying
     // cache_control: ephemeral when its content is currently a plain string.
     // Multi-turn conversations on the same shot reuse the cached per-shot
@@ -155,6 +175,8 @@ private:
 
     QString m_apiKey;
     static constexpr const char* API_URL = "https://api.anthropic.com/v1/messages";
+    // web_search_20260209 requires Sonnet/Opus 4.6+ (this model). If MODEL is ever set below 4.6, change
+    // the web-search tool type to "web_search_20250305" (same name) in analyzeConversation().
     static constexpr const char* MODEL = "claude-sonnet-4-6";
     static constexpr const char* MODEL_DISPLAY = "Sonnet 4.6";
 };

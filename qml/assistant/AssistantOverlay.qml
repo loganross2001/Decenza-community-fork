@@ -24,8 +24,12 @@ Item {
         onTriggered: if (root._voiceInput) root._voiceInput.stop()
     }
     function _resetSilence() {
-        if (root._voiceInput && root._voiceInput.listening) silenceTimer.restart()
-        else silenceTimer.stop()
+        // Only count silence while actually HEARING — a long thinking/searching/speaking turn must not
+        // trip the 20s auto-off (paused = assistant busy). onPausedChanged restarts it when we reopen.
+        if (root._voiceInput && root._voiceInput.listening && !root._voiceInput.paused)
+            silenceTimer.restart()
+        else
+            silenceTimer.stop()
     }
     Connections {
         target: root._voiceInput
@@ -37,6 +41,7 @@ Item {
         }
         function onPartialChanged() { root._resetSilence() }
         function onListeningChanged() { root._resetSilence() }
+        function onPausedChanged() { root._resetSilence() }   // restart the countdown when the mic reopens
         function onError(message) {   // never fail silently — say what happened
             root._message = TranslationManager.translate("barista.mic.error",
                 "I couldn't hear you clearly (%1). Tap Chat to try again, or just type.").arg(message)
@@ -117,7 +122,7 @@ Item {
     // so reopen it here (mirrors the muted-resume path in onResponseReceived).
     function _resumeMicAfterLocal() {
         if (root._voiceInput && root._voiceInput.listening
-                && root._settings && !root._settings.voiceEnabled)
+                && (!root._voice || !root._voice.speaking))
             root._voiceInput.resumeMic()
     }
     // Resolve the off-machine grind reminder: done → writes the grind; not done → leaves it.
@@ -268,6 +273,22 @@ Item {
             persona += "\nGreet warmly and briefly — you recently made a suggestion for this coffee, so don't "
                 + "re-raise it; only bring something up if the user asks or the data has clearly changed."
 
+        // Web search (Anthropic only) — keep the persona truthful about what it can/can't reach.
+        var webOn = !!(root._settings && root._settings.webSearchEnabled)
+                    && typeof MainController !== "undefined" && MainController.aiManager
+                    && MainController.aiManager.selectedProvider === "anthropic"
+        if (webOn)
+            persona += "\nYou also have live web search. Use it when the user asks about things outside the "
+                + "data block — a bean or roaster's tasting notes, roast dates, brewing guides, gear, or "
+                + "anything current — instead of saying you can't check. Search at most once or twice per "
+                + "reply and answer briefly from what you find. BE ACCURATE about your reach: you can search "
+                + "public websites, but you can NOT log into the user's accounts — Visualizer and Beanconqueror "
+                + "are apps, and their private uploads aren't something you can query. The user's real shot "
+                + "history is the data block above, which IS live."
+        else
+            persona += "\nYou cannot browse the web in this session. If asked about outside info, say so "
+                + "briefly and work from the data block."
+
         // dataBlock is the pre-formatted, combined context (dial-in + bean profile + profile guidance).
         var block = (dataBlock && dataBlock.length > 0) ? dataBlock : "recordedShots: 0"
 
@@ -285,6 +306,7 @@ Item {
             kickoff += " (I earlier agreed to set the grinder to " + root._pendingGrind.value
                      + " but haven't confirmed doing it — ask me early whether I actually set it.)"
 
+        root._conv.webSearchEnabled = webOn   // barista session only; reset by ask()/resetInMemory()
         root._stampTurn()
         root._conv.beginSession(persona + "\n\n" + block, kickoff)
     }
@@ -335,6 +357,7 @@ Item {
             }
         }
         root._thinking = true
+        if (root._voiceInput && root._voiceInput.listening) root._voiceInput.pauseMic()
         root._stampTurn()
         root._conv.followUp(t)
     }
@@ -372,6 +395,9 @@ Item {
         function onResponseReceived(response) {
             root._message = root._stripBlock(response)   // hide the JSON action block from the display
             root._thinking = false
+            // Pause the mic BEFORE speaking (greeting path has no prior pause). speak() now flips
+            // `speaking` synchronously, so this + the post-speak check below are race-free.
+            if (root._voiceInput && root._voiceInput.listening) root._voiceInput.pauseMic()
             root._speakSanitised(response)               // (also strips fenced blocks before TTS)
             root._resetSilence()   // keep the mic session alive while we're conversing
             // If this turn carried a concrete recommendation, arm apply-on-confirm + show the chip.
@@ -383,9 +409,10 @@ Item {
                 root._pendingNext = null   // no recommendation this turn → drop any stale chip (S11)
                 root._awaitConfirm = false
             }
-            // Turn done. If speaking, speakingChanged(false) reopens the mic; if muted, reopen it now.
+            // Turn done. If it will speak, `speaking` is already true → skip; onSpeakingChanged(false)
+            // reopens the mic when playback truly ends. If nothing will speak, reopen now.
             if (root._voiceInput && root._voiceInput.listening
-                    && root._settings && !root._settings.voiceEnabled)
+                    && (!root._voice || !root._voice.speaking))
                 root._voiceInput.resumeMic()
         }
         function onErrorOccurred(error) {   // B2: never hang on "…" — surface it and recover the UI
@@ -501,10 +528,11 @@ Item {
                 onSkipped: actionChip.grindMode ? root._resolveGrind(false) : root._skipPending()
             }
 
-            // Live listening indicator (partial transcription while the mic is open)
+            // Live listening indicator — only when actually HEARING (not while thinking or speaking).
             Text {
                 Layout.fillWidth: true
-                visible: root._voiceInput && root._voiceInput.listening
+                visible: root._voiceInput && root._voiceInput.listening && !root._voiceInput.paused
+                         && !root._thinking && (!root._voice || !root._voice.speaking)
                 wrapMode: Text.WordWrap
                 color: Theme.textSecondaryColor
                 font: Theme.labelFont

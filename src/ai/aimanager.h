@@ -160,7 +160,7 @@ public:
     Q_INVOKABLE void analyze(const QString& systemPrompt, const QString& userPrompt);
 
     // Multi-turn conversation - sends system prompt and full message array to current provider
-    void analyzeConversation(const QString& systemPrompt, const QJsonArray& messages);
+    void analyzeConversation(const QString& systemPrompt, const QJsonArray& messages, bool webSearch = false);
 
     // Extract the trailing fenced ```json block from an assistant message.
     // The shot-analysis system prompt asks the model to append a `nextShot`

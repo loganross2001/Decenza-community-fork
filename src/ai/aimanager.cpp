@@ -1288,7 +1288,7 @@ void AIManager::analyze(const QString& systemPrompt, const QString& userPrompt)
     provider->analyze(systemPrompt, userPrompt);
 }
 
-void AIManager::analyzeConversation(const QString& systemPrompt, const QJsonArray& messages)
+void AIManager::analyzeConversation(const QString& systemPrompt, const QJsonArray& messages, bool webSearch)
 {
     if (m_analyzing) {
         emit conversationErrorOccurred("Analysis already in progress");
@@ -1331,7 +1331,7 @@ void AIManager::analyzeConversation(const QString& systemPrompt, const QJsonArra
     m_lastUserPrompt = QString("[Conversation with %1 messages]").arg(apiMessages.size());
 
     logPrompt(selectedProvider(), systemPrompt, m_lastUserPrompt);
-    provider->analyzeConversation(systemPrompt, apiMessages);
+    provider->analyzeConversation(systemPrompt, apiMessages, AIProvider::RequestOptions{webSearch});
 }
 
 void AIManager::refreshOllamaModels()

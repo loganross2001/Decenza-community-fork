@@ -84,8 +84,10 @@ bool VoiceInput::available() const {
 }
 
 void VoiceInput::start() {
+    const bool wasPaused = m_paused;
     m_paused = false;
     m_errorStreak = 0;
+    if (wasPaused) emit pausedChanged();
 #ifdef Q_OS_ANDROID
     // Ask for the microphone once, then open the session. Nothing listens until this is granted.
     QMicrophonePermission mic;
@@ -111,8 +113,10 @@ void VoiceInput::start() {
 }
 
 void VoiceInput::stop() {
+    const bool wasPaused = m_paused;
     setListening(false);
     m_paused = false;
+    if (wasPaused) emit pausedChanged();
     setPartial(QString());
     stopRecogniser();
 }
@@ -122,6 +126,7 @@ void VoiceInput::pauseMic() {
         return;
     m_paused = true;
     m_errorStreak = 0;  // S10: the cancel here can raise ERROR_CLIENT(5) — don't let it count toward the kill
+    emit pausedChanged();
     stopRecogniser();   // stop hearing while the assistant speaks (no echo)
 }
 
@@ -130,6 +135,7 @@ void VoiceInput::resumeMic() {
         return;
     m_paused = false;
     m_errorStreak = 0;  // fresh listen after a pause — reset the transient-error run
+    emit pausedChanged();
     startRecogniser();
 }
 

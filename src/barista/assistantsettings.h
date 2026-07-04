@@ -21,6 +21,7 @@ class AssistantSettings : public QObject {
     Q_PROPERTY(QString elevenlabsApiKey READ elevenlabsApiKey WRITE setElevenlabsApiKey NOTIFY elevenlabsApiKeyChanged)
     Q_PROPERTY(QString elevenlabsVoiceId READ elevenlabsVoiceId WRITE setElevenlabsVoiceId NOTIFY elevenlabsVoiceIdChanged)
     Q_PROPERTY(double voiceSpeed READ voiceSpeed WRITE setVoiceSpeed NOTIFY voiceSpeedChanged)
+    Q_PROPERTY(bool webSearchEnabled READ webSearchEnabled WRITE setWebSearchEnabled NOTIFY webSearchEnabledChanged)
     Q_PROPERTY(QString proactivityLevel READ proactivityLevel WRITE setProactivityLevel NOTIFY proactivityLevelChanged)
 
 public:
@@ -62,6 +63,9 @@ public:
     double voiceSpeed() const;                    // speaking rate multiplier (default 1.0)
     void setVoiceSpeed(double s);
 
+    bool webSearchEnabled() const;                // let the barista search the web (Anthropic; default on)
+    void setWebSearchEnabled(bool e);
+
     QString proactivityLevel() const;             // "off" | "greetings" | "full" (default "full")
     void setProactivityLevel(const QString& level);
 
@@ -82,6 +86,7 @@ signals:
     void elevenlabsApiKeyChanged();
     void elevenlabsVoiceIdChanged();
     void voiceSpeedChanged();
+    void webSearchEnabledChanged();
     void proactivityLevelChanged();
 
 private:

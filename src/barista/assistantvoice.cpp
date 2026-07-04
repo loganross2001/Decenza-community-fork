@@ -48,8 +48,11 @@ AssistantVoice::AssistantVoice(AssistantSettings* settings, Settings* appSetting
 }
 
 void AssistantVoice::updateSpeaking() {
-    const bool now = (m_tts && m_tts->state() == QTextToSpeech::Speaking)
-                  || (m_player && m_player->playbackState() == QMediaPlayer::PlayingState);
+    const bool active = (m_tts && m_tts->state() == QTextToSpeech::Speaking)
+                     || (m_player && m_player->playbackState() == QMediaPlayer::PlayingState);
+    if (active)
+        m_pendingSynth = false;       // real audio started — hand off from the pending flag
+    const bool now = m_pendingSynth || active;
     if (now == m_speaking)
         return;
     m_speaking = now;
@@ -81,6 +84,11 @@ QString AssistantVoice::openaiKey() const {
 void AssistantVoice::speak(const QString& text) {
     if (!m_settings || !m_settings->voiceEnabled() || text.trimmed().isEmpty())
         return;
+    // Mark speaking BEFORE dispatch so speakingChanged(true) fires synchronously — the mic pauses now,
+    // not after the cloud-TTS POST finally starts playback (which is the "listening while talking" bug).
+    ++m_speakGen;
+    m_pendingSynth = true;
+    updateSpeaking();
     const QString provider = m_settings->ttsProvider();
     if (provider == QLatin1String("openai"))
         synthOpenAI(text);
@@ -88,7 +96,10 @@ void AssistantVoice::speak(const QString& text) {
         synthElevenLabs(text);
     else if (m_tts) {
         m_tts->setRate((m_settings->voiceSpeed() - 1.0) / 0.5);   // map ~0.7–1.3 → rate -0.6..0.6
-        m_tts->say(text);   // native engine
+        m_tts->say(text);   // native engine (stateChanged hands off from m_pendingSynth)
+    } else {
+        m_pendingSynth = false;   // no engine at all → nothing will speak
+        updateSpeaking();
     }
 }
 
@@ -96,6 +107,7 @@ void AssistantVoice::synthOpenAI(const QString& text) {
     const QString key = openaiKey();
     if (key.isEmpty()) {                 // no key → graceful fallback to the native voice
         if (m_tts) m_tts->say(text);
+        else { m_pendingSynth = false; updateSpeaking(); }
         return;
     }
     QNetworkRequest req(QUrl(QStringLiteral("https://api.openai.com/v1/audio/speech")));
@@ -109,11 +121,14 @@ void AssistantVoice::synthOpenAI(const QString& text) {
         {QStringLiteral("speed"), m_settings->voiceSpeed()},    // user-adjustable pace
     };
     QNetworkReply* reply = m_net->post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
-    connect(reply, &QNetworkReply::finished, this, [this, reply, text] {
-        if (reply->error() == QNetworkReply::NoError)
-            playMp3(reply->readAll());
-        else if (m_tts)
-            m_tts->say(text);   // cloud call failed → speak natively rather than go silent
+    connect(reply, &QNetworkReply::finished, this, [this, reply, text, gen = m_speakGen] {
+        if (gen == m_speakGen) {   // ignore a superseded / dismissed request's late reply
+            if (reply->error() == QNetworkReply::NoError)
+                playMp3(reply->readAll());
+            else if (m_tts)
+                m_tts->say(text);   // cloud call failed → speak natively rather than go silent
+            else { m_pendingSynth = false; updateSpeaking(); }
+        }
         reply->deleteLater();
     });
 }
@@ -122,6 +137,7 @@ void AssistantVoice::synthElevenLabs(const QString& text) {
     const QString key = m_settings->elevenlabsApiKey();
     if (key.isEmpty()) {                 // no key → graceful fallback to the native voice
         if (m_tts) m_tts->say(text);
+        else { m_pendingSynth = false; updateSpeaking(); }
         return;
     }
     QNetworkRequest req(QUrl(QStringLiteral("https://api.elevenlabs.io/v1/text-to-speech/%1")
@@ -134,25 +150,32 @@ void AssistantVoice::synthElevenLabs(const QString& text) {
         {QStringLiteral("voice_settings"), QJsonObject{{QStringLiteral("speed"), m_settings->voiceSpeed()}}},
     };
     QNetworkReply* reply = m_net->post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
-    connect(reply, &QNetworkReply::finished, this, [this, reply, text] {
-        if (reply->error() == QNetworkReply::NoError)
-            playMp3(reply->readAll());
-        else if (m_tts)
-            m_tts->say(text);   // cloud call failed → speak natively rather than go silent
+    connect(reply, &QNetworkReply::finished, this, [this, reply, text, gen = m_speakGen] {
+        if (gen == m_speakGen) {   // ignore a superseded / dismissed request's late reply
+            if (reply->error() == QNetworkReply::NoError)
+                playMp3(reply->readAll());
+            else if (m_tts)
+                m_tts->say(text);   // cloud call failed → speak natively rather than go silent
+            else { m_pendingSynth = false; updateSpeaking(); }
+        }
         reply->deleteLater();
     });
 }
 
 void AssistantVoice::playMp3(const QByteArray& audio) {
-    if (!m_player || audio.isEmpty())
+    if (!m_player || audio.isEmpty()) {
+        m_pendingSynth = false; updateSpeaking();   // no audio will play → release the pending hold
         return;
+    }
     m_player->stop();
     // Android's media backend truncates in-memory (QBuffer) sources after a fraction of a second —
     // write the mp3 to a temp file and play that; files play reliably and to completion.
     const QString path = QDir::tempPath() + QStringLiteral("/decenza_tts.mp3");
     QFile f(path);
-    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        m_pendingSynth = false; updateSpeaking();
         return;
+    }
     f.write(audio);
     f.close();
     // S12: the temp path is reused every utterance; setSource with the SAME URL is a no-op in Qt, so
@@ -163,10 +186,13 @@ void AssistantVoice::playMp3(const QByteArray& audio) {
 }
 
 void AssistantVoice::stop() {
+    ++m_speakGen;              // discard any in-flight synth reply
+    m_pendingSynth = false;
     if (m_tts)
         m_tts->stop();
     if (m_player)
         m_player->stop();
+    updateSpeaking();
 }
 
 void AssistantVoice::setVoiceByName(const QString& name) {

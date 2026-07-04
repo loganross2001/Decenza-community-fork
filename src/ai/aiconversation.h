@@ -39,6 +39,9 @@ class AIConversation : public QObject {
     Q_PROPERTY(QString errorMessage READ errorMessage NOTIFY errorOccurred)
     Q_PROPERTY(bool canRetry READ canRetry NOTIFY canRetryChanged)
     Q_PROPERTY(QString contextLabel READ contextLabel NOTIFY contextLabelChanged)
+    // [barista-fork] transient (NOT persisted): the barista sets this per session so its turns request
+    // web search; reset in ask()/resetInMemory() so the shared conversation can't leak it to the advisor.
+    Q_PROPERTY(bool webSearchEnabled READ webSearchEnabled WRITE setWebSearchEnabled NOTIFY webSearchEnabledChanged)
 
 public:
     explicit AIConversation(AIManager* aiManager, QObject* parent = nullptr);
@@ -53,6 +56,8 @@ public:
     // in flight — i.e. the previous request failed and can be re-sent verbatim.
     bool canRetry() const;
     QString contextLabel() const { return m_contextLabel; }
+    bool webSearchEnabled() const { return m_webSearchEnabled; }
+    void setWebSearchEnabled(bool e) { if (m_webSearchEnabled != e) { m_webSearchEnabled = e; emit webSearchEnabledChanged(); } }
 
     QString storageKey() const { return m_storageKey; }
     void setStorageKey(const QString& key);
@@ -277,6 +282,7 @@ signals:
     void historyChanged();
     void canRetryChanged();
     void contextLabelChanged();
+    void webSearchEnabledChanged();
     void providerChanged();
     void savedConversationChanged();
 
@@ -350,6 +356,7 @@ private:
 
     AIManager* m_aiManager;
     QString m_systemPrompt;
+    bool m_webSearchEnabled = false;   // [barista-fork] transient per-session (not persisted)
     // Array of {role, content[, shotId?, structuredNext?]} objects.
     // shotId is the resolved shot id the advisor was asked about for
     // the turn pair (issue #1053); structuredNext is present only on

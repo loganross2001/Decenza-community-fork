@@ -47,6 +47,21 @@ ColumnLayout {
         onActivated: if (root._settings) root._settings.proactivityLevel = currentText
     }
 
+    // Web search (Anthropic provider only)
+    RowLayout {
+        Layout.fillWidth: true; spacing: Theme.spacingSmall
+        Switch {
+            checked: root._settings ? root._settings.webSearchEnabled : true
+            onToggled: if (root._settings) root._settings.webSearchEnabled = checked
+            Accessible.role: Accessible.CheckBox; Accessible.name: trWeb.text
+            Accessible.checked: checked; Accessible.focusable: true; Accessible.onToggleAction: toggle()
+        }
+        Tr { id: trWeb; key: "barista.settings.web"
+             fallback: "Web search — look up beans, roasters & brewing guides (Anthropic)"
+             Layout.fillWidth: true; wrapMode: Text.WordWrap
+             color: Theme.textColor; font: Theme.bodyFont; Accessible.ignored: true }
+    }
+
     // Assistant name
     Tr { key: "barista.settings.name"; fallback: "Assistant name"
          color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true }

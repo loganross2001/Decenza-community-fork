@@ -74,6 +74,8 @@ void AIConversation::ask(const QString& systemPrompt, const QString& userMessage
         return;
     }
 
+    m_webSearchEnabled = false;   // [barista-fork] advisor entry point — never inherit the barista's web search
+
     // Clear previous conversation and start fresh
     m_messages = QJsonArray();
     m_systemPrompt = systemPrompt;
@@ -180,6 +182,7 @@ void AIConversation::resetInMemory()
     m_systemPrompt.clear();
     m_lastResponse.clear();
     m_errorMessage.clear();
+    m_webSearchEnabled = false;   // [barista-fork]
     emit historyChanged();
     emit canRetryChanged();
 }
@@ -431,7 +434,7 @@ void AIConversation::sendRequest()
     trimHistory();
 
     qDebug() << "AIConversation: Sending request with" << m_messages.size() << "messages";
-    m_aiManager->analyzeConversation(m_systemPrompt, m_messages);
+    m_aiManager->analyzeConversation(m_systemPrompt, m_messages, m_webSearchEnabled);
 }
 
 void AIConversation::onAnalysisComplete(const QString& response)

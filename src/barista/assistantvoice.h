@@ -58,4 +58,8 @@ private:
     AssistantSettings* m_settings = nullptr;
     Settings* m_appSettings = nullptr;
     bool m_speaking = false;
+    // [barista-fork] cloud TTS (QMediaPlayer) only reports Playing once the network POST completes; this
+    // holds `speaking` true across that gap so the mic stays paused. m_speakGen discards a stale/late reply.
+    bool m_pendingSynth = false;
+    int m_speakGen = 0;
 };

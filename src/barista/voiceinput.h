@@ -15,6 +15,7 @@ class VoiceInput : public QObject {
     Q_OBJECT
     Q_PROPERTY(bool available READ available CONSTANT)          // STT usable on this platform
     Q_PROPERTY(bool listening READ listening NOTIFY listeningChanged)
+    Q_PROPERTY(bool paused READ paused NOTIFY pausedChanged)   // session open but not hearing (assistant busy)
     Q_PROPERTY(QString partial READ partial NOTIFY partialChanged)
 
 public:
@@ -23,6 +24,7 @@ public:
 
     bool available() const;
     bool listening() const { return m_listening; }
+    bool paused() const { return m_paused; }
     QString partial() const { return m_partial; }
 
     Q_INVOKABLE void start();       // open the mic (begin a listening session)
@@ -37,6 +39,7 @@ public:
 
 signals:
     void listeningChanged();
+    void pausedChanged();
     void partialChanged();
     void finalText(const QString& text);   // a complete utterance → send to the conversation
     void error(const QString& message);

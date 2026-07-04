@@ -1,4 +1,5 @@
 #include "assistantorchestrator.h"
+#include <QDebug>
 
 #include "assistantsettings.h"
 #include "../controllers/maincontroller.h"
@@ -26,6 +27,9 @@ QString AssistantOrchestrator::stateString() const {
 }
 
 void AssistantOrchestrator::wake() {
+    qInfo() << "[Barista] wake() called | settings?" << (m_settings != nullptr)
+            << "| enabled?" << (m_settings && m_settings->enabled())
+            << "| state==" << stateString();
     if (!m_settings || !m_settings->enabled())
         return;
     if (m_state == State::Greeting)   // already greeting — don't restart it

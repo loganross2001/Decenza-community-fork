@@ -202,6 +202,10 @@ Item {
     // Kick off a conversation. First pull the user's REAL dial-in history for this bean so the
     // assistant KNOWS it (and can suggest), instead of asking. ask() fires once the history arrives.
     function _startConversation() {
+        console.log("[Barista] _startConversation state=", root._state,
+                    "conv=", !!root._conv, "configured=",
+                    (typeof MainController !== "undefined" && MainController.aiManager)
+                        ? MainController.aiManager.isConfigured : "no-aiManager")
         // _conv (aiManager.conversation) always exists — the real "can I chat?" test is isConfigured,
         // else we'd hang on "…" forever with no key (B2).
         if (!root._conv || typeof MainController === "undefined" || !MainController.aiManager
@@ -428,14 +432,16 @@ Item {
     // Activation → start talking (+ bell on the greeting).
     Connections {
         target: root._orch
-        ignoreUnknownSignals: true
         function onStateChanged() {
             if (!root._orch) return
+            console.log("[Barista] onStateChanged ->", root._orch.state)
             root._collapsed = false   // a new greeting/close-out opens expanded
             if (root._orch.state === "greeting") {
-                if (root._voice) root._voice.playBell()
-                if (avatar.visible) avatar.greet()
+                // Launch the conversation FIRST — the decorative bell/avatar must never be able to
+                // throw before this runs (a load/anim error there would otherwise swallow the greeting).
                 root._startConversation()
+                if (root._voice) root._voice.playBell()
+                if (typeof avatar !== "undefined" && avatar && avatar.visible) avatar.greet()
             } else if (root._orch.state === "closeOut") {
                 root._startConversation()
             } else if (root._orch.state === "dormant") {

@@ -11,6 +11,8 @@
 #include <QMediaPlayer>
 #include <QAudioOutput>
 #include <QBuffer>
+#include <QDir>
+#include <QFile>
 #include <QNetworkAccessManager>
 #include <QNetworkRequest>
 #include <QNetworkReply>
@@ -128,11 +130,15 @@ void AssistantVoice::playMp3(const QByteArray& audio) {
     if (!m_player || audio.isEmpty())
         return;
     m_player->stop();
-    m_audioBuffer->close();
-    m_audioBuffer->setData(audio);
-    m_audioBuffer->open(QIODevice::ReadOnly);
-    // The url hint helps the backend pick the mp3 decoder.
-    m_player->setSourceDevice(m_audioBuffer, QUrl(QStringLiteral("tts.mp3")));
+    // Android's media backend truncates in-memory (QBuffer) sources after a fraction of a second —
+    // write the mp3 to a temp file and play that; files play reliably and to completion.
+    const QString path = QDir::tempPath() + QStringLiteral("/decenza_tts.mp3");
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        return;
+    f.write(audio);
+    f.close();
+    m_player->setSource(QUrl::fromLocalFile(path));
     m_player->play();
 }
 

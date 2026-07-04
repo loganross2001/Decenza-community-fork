@@ -67,6 +67,9 @@ Item {
     property bool _collapsed: false     // panel minimised to a thin edge tab (frees the whole screen)
     property var _pendingNext: null     // structuredNext recommendation awaiting apply/skip
     property var _pendingBegin: null    // SF-4: a greeting that preempted a still-busy close-out; retry when free
+    property string _sessBrand: ""      // SF-R3-1: this activation's switch args, so a deferred retry re-switches
+    property string _sessType: ""
+    property string _sessProf: ""
     property bool _awaitConfirm: false  // a recommendation is armed for a voice "OK"
     property var _pendingGrind: null    // outstanding off-machine grind reminder (shown at greeting)
     property bool _awaitingContext: false   // waiting on the shot history before opening the conversation
@@ -180,9 +183,18 @@ Item {
         root._pendingBegin = null
         Qt.callLater(function() {
             if (root._state === "dormant" || !root._conv || !pb) return
+            // SF-R3-1: the earlier switchConversation was refused while busy — re-run it now (free) so the
+            // greeting lands on the RIGHT per-bean thread; that resets webSearchEnabled, so re-apply it.
+            if (typeof MainController !== "undefined" && MainController.aiManager)
+                MainController.aiManager.switchConversation(root._sessBrand, root._sessType, root._sessProf)
+            root._conv.webSearchEnabled = pb.webOn
             root._thinking = true
             root._stampTurn()
-            root._conv.beginSession(pb.sys, pb.kick)
+            if (!root._conv.beginSession(pb.sys, pb.kick)) {   // N-R3-1: still busy → recover, don't wedge on "…"
+                root._thinking = false
+                root._message = TranslationManager.translate("barista.err",
+                    "Something went wrong — tap Chat or type to try again.")
+            }
         })
     }
 
@@ -221,6 +233,7 @@ Item {
         // the barista's memory from the same profile untweaked (S7). Matches the KB-lookup stripping.
         var prof = (typeof ProfileManager !== "undefined") ? ProfileManager.currentProfileName : ""
         prof = prof.replace(/^\*/, "").replace(/ \(modified\)$/, "")
+        root._sessBrand = Settings.dye.dyeBeanBrand; root._sessType = Settings.dye.dyeBeanType; root._sessProf = prof
         MainController.aiManager.switchConversation(Settings.dye.dyeBeanBrand, Settings.dye.dyeBeanType, prof)
         // Assemble ALL sources into one block via the context builder — the user's dial-in history PLUS,
         // for an unlinked bean, the community bean profile, PLUS the profile's curated guidance. It emits
@@ -331,7 +344,7 @@ Item {
         root._stampTurn()
         var _sys = persona + "\n\n" + block
         if (!root._conv.beginSession(_sys, kickoff))   // SF-4: busy (a prior turn in flight) → retry when free
-            root._pendingBegin = { "sys": _sys, "kick": kickoff }
+            root._pendingBegin = { "sys": _sys, "kick": kickoff, "webOn": webOn }
     }
 
     function _send(text) {
@@ -341,11 +354,13 @@ Item {
         if (root._state === "dormant")   // B3: dismissed → don't keep sending (e.g. late voice finals)
             return
         var hasActions = (typeof Barista !== "undefined" && Barista.actions)
-        // Off-machine grind reminder confirm — ONLY intercept yes/no when the assistant's last line actually
-        // names the pending grind VALUE (SF-6). "grind" alone is too loose (it talks about grind constantly),
-        // so a "yes" to a taste question could falsely record a grind. The Yes/No chip is the reliable path.
-        if (hasActions && root._pendingGrind && root._pendingGrind.value
-                && root._message && root._message.indexOf(root._pendingGrind.value) >= 0) {
+        // Off-machine grind reminder confirm — ONLY intercept yes/no when the assistant's last line names the
+        // pending grind VALUE as a WHOLE number (SF-6/SF-R3-3). A raw substring of a short value like "8" would
+        // match "18 grams" and falsely record a grind on a "yes" to a dose question. The chip is the reliable path.
+        var _gv = root._pendingGrind ? String(root._pendingGrind.value || "") : ""
+        var _grindAsked = _gv.length > 0 && root._message
+                && new RegExp("(^|[^0-9.])" + _gv.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "([^0-9.]|$)").test(root._message)
+        if (hasActions && _grindAsked) {
             var g = Barista.actions.parseConfirmation(t)   // 1 yes / 0 no / -1 neither
             if (g === 1) { root._resolveGrind(true); return }
             if (g === 0) { root._resolveGrind(false); return }
@@ -407,11 +422,13 @@ Item {
     // B1: the overlay only exists on the idle page, so a close-out/greeting whose state flipped while the
     // overlay was destroyed (during the shot) never fired onStateChanged. Catch up on (re)creation.
     Component.onCompleted: {
+        var active = (root._state === "greeting" || root._state === "closeOut")
         // SF-3: catch up ONLY if this activation hasn't been started yet (the latch survives the overlay
         // being destroyed/recreated on page navigation), so returning to idle doesn't re-run the greeting.
-        if ((root._state === "greeting" || root._state === "closeOut")
-                && root._orch && !root._orch.sessionStarted)
+        if (active && root._orch && !root._orch.sessionStarted)
             root._startConversation()
+        else if (active && root._conv)   // SF-R3-2: already started → restore the last line so it isn't blank
+            root._message = root._stripBlock(root._conv.lastResponse || "")
     }
     // B3: if the user navigates away mid-chat, the Loader destroys us — close the mic/TTS session first.
     Component.onDestruction: root._closeSession()
@@ -421,6 +438,8 @@ Item {
         ignoreUnknownSignals: true
         function onResponseReceived(response) {
             if (root._state === "dormant")   // BL-1: reply landed after dismiss (or it's an advisor turn) → ignore
+                return
+            if (root._awaitingContext)   // N-R3-2: a preempted turn's reply during our context build → not ours
                 return
             if (root._pendingBegin) { root._retryBegin(); return }   // SF-4: this is the preempted turn's stale reply
             root._message = root._stripBlock(response)   // hide the JSON action block from the display
@@ -447,6 +466,8 @@ Item {
         }
         function onErrorOccurred(error) {   // B2: never hang on "…" — surface it and recover the UI
             if (root._state === "dormant")
+                return
+            if (root._awaitingContext)   // N-R3-2: a preempted turn's error during our context build → not ours
                 return
             if (root._pendingBegin) { root._retryBegin(); return }   // SF-4: the preempted turn failed → open the greeting
             root._thinking = false

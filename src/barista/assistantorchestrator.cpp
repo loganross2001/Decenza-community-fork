@@ -42,7 +42,17 @@ void AssistantOrchestrator::onShotSaved(qlonglong shotId) {
         return;
     m_lastShotId = shotId;
     emit lastShotIdChanged();
-    setState(State::CloseOut);
+    // BL-R3-1: a second shot pulled without dismissing the card leaves state already CloseOut, so a plain
+    // setState() would no-op and the new shot would get NO close-out. Force reactivation: clear the
+    // session latch and re-emit stateChanged even when the state is unchanged.
+    if (m_sessionStarted) {
+        m_sessionStarted = false;
+        emit sessionStartedChanged();
+    }
+    if (m_state == State::CloseOut)
+        emit stateChanged();
+    else
+        setState(State::CloseOut);
 }
 
 void AssistantOrchestrator::dismiss() {

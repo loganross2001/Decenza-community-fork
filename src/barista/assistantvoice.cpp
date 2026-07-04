@@ -57,7 +57,9 @@ QString AssistantVoice::voiceName() const {
 }
 
 QString AssistantVoice::openaiKey() const {
-    // Reuse the app's configured OpenAI key so the user doesn't re-enter it.
+    // Prefer an explicit key from the assistant settings; else reuse the app's configured OpenAI key.
+    if (m_settings && !m_settings->openaiApiKey().isEmpty())
+        return m_settings->openaiApiKey();
     return (m_appSettings && m_appSettings->ai()) ? m_appSettings->ai()->openaiApiKey() : QString();
 }
 
@@ -89,9 +91,11 @@ void AssistantVoice::synthOpenAI(const QString& text) {
         {QStringLiteral("response_format"), QStringLiteral("mp3")},
     };
     QNetworkReply* reply = m_net->post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
-    connect(reply, &QNetworkReply::finished, this, [this, reply] {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, text] {
         if (reply->error() == QNetworkReply::NoError)
             playMp3(reply->readAll());
+        else if (m_tts)
+            m_tts->say(text);   // cloud call failed → speak natively rather than go silent
         reply->deleteLater();
     });
 }
@@ -111,9 +115,11 @@ void AssistantVoice::synthElevenLabs(const QString& text) {
         {QStringLiteral("model_id"), QStringLiteral("eleven_turbo_v2_5")},
     };
     QNetworkReply* reply = m_net->post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
-    connect(reply, &QNetworkReply::finished, this, [this, reply] {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, text] {
         if (reply->error() == QNetworkReply::NoError)
             playMp3(reply->readAll());
+        else if (m_tts)
+            m_tts->say(text);   // cloud call failed → speak natively rather than go silent
         reply->deleteLater();
     });
 }

@@ -16,15 +16,21 @@ Rectangle {
     color: Theme.surfaceColor
     border.width: 1
     border.color: Theme.borderColor
-    implicitHeight: col.implicitHeight + Theme.spacingLarge * 2
+    // Cap to the screen and scroll — the settings list is taller than a phone screen.
+    height: Math.min(col.implicitHeight + Theme.spacingLarge * 2,
+                     (parent ? parent.height : Theme.scaled(600)) - Theme.spacingLarge * 2)
 
-    ColumnLayout {
-        id: col
-        anchors.left: parent.left
-        anchors.right: parent.right
-        anchors.top: parent.top
+    Flickable {
+        anchors.fill: parent
         anchors.margins: Theme.spacingLarge
-        spacing: Theme.spacingMedium
+        contentHeight: col.implicitHeight
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+
+        ColumnLayout {
+            id: col
+            width: parent.width
+            spacing: Theme.spacingMedium
 
         // Header
         RowLayout {
@@ -121,6 +127,15 @@ Rectangle {
             }
             onActivated: if (root._settings) root._settings.openaiVoice = currentText
         }
+        StyledTextField {
+            Layout.fillWidth: true
+            visible: col._provider === "openai"
+            text: root._settings ? root._settings.openaiApiKey : ""
+            placeholderText: TranslationManager.translate("barista.settings.openaiKey",
+                "OpenAI API key (or leave blank to use Settings → AI)")
+            echoMode: TextInput.PasswordEchoOnEdit
+            onEditingFinished: if (root._settings) root._settings.openaiApiKey = text
+        }
 
         // ElevenLabs (only when provider = elevenlabs): API key + voice id
         StyledTextField {
@@ -187,6 +202,7 @@ Rectangle {
                 color: Theme.textColor; font: Theme.bodyFont
                 Accessible.ignored: true
             }
+        }
         }
     }
 }

@@ -17,6 +17,7 @@ class AssistantSettings : public QObject {
     Q_PROPERTY(QString bellSound READ bellSound WRITE setBellSound NOTIFY bellSoundChanged)
     Q_PROPERTY(QString ttsProvider READ ttsProvider WRITE setTtsProvider NOTIFY ttsProviderChanged)
     Q_PROPERTY(QString openaiVoice READ openaiVoice WRITE setOpenaiVoice NOTIFY openaiVoiceChanged)
+    Q_PROPERTY(QString openaiApiKey READ openaiApiKey WRITE setOpenaiApiKey NOTIFY openaiApiKeyChanged)
     Q_PROPERTY(QString elevenlabsApiKey READ elevenlabsApiKey WRITE setElevenlabsApiKey NOTIFY elevenlabsApiKeyChanged)
     Q_PROPERTY(QString elevenlabsVoiceId READ elevenlabsVoiceId WRITE setElevenlabsVoiceId NOTIFY elevenlabsVoiceIdChanged)
 
@@ -47,6 +48,9 @@ public:
     QString openaiVoice() const;                  // alloy/echo/fable/onyx/nova/shimmer (default "nova")
     void setOpenaiVoice(const QString& v);
 
+    QString openaiApiKey() const;                 // optional override; else the app's Settings.ai key is used
+    void setOpenaiApiKey(const QString& k);
+
     QString elevenlabsApiKey() const;             // ElevenLabs key (the app has no such key)
     void setElevenlabsApiKey(const QString& k);
 
@@ -62,6 +66,7 @@ signals:
     void bellSoundChanged();
     void ttsProviderChanged();
     void openaiVoiceChanged();
+    void openaiApiKeyChanged();
     void elevenlabsApiKeyChanged();
     void elevenlabsVoiceIdChanged();
 

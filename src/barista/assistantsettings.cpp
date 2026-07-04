@@ -95,6 +95,18 @@ void AssistantSettings::setOpenaiVoice(const QString& v) {
     emit openaiVoiceChanged();
 }
 
+QString AssistantSettings::openaiApiKey() const {
+    return m_settings.value(QStringLiteral("barista/openaiApiKey"), QString()).toString();
+}
+
+void AssistantSettings::setOpenaiApiKey(const QString& k) {
+    const QString trimmed = k.trimmed();
+    if (openaiApiKey() == trimmed)
+        return;
+    m_settings.setValue(QStringLiteral("barista/openaiApiKey"), trimmed);
+    emit openaiApiKeyChanged();
+}
+
 QString AssistantSettings::elevenlabsApiKey() const {
     return m_settings.value(QStringLiteral("barista/elevenlabsApiKey"), QString()).toString();
 }

@@ -233,7 +233,7 @@ Page {
             var p = Settings.brew.getSteamPitcherPreset(Settings.brew.selectedSteamPitcher)
             return (p && !p.disabled) ? (p.pitcherWeightG ?? 0) : 0
         }
-        // Opt-in (Settings.brew.milkAutoCaptureEnabled, default ON — calibrating a
+        // Opt-in (Settings.brew.milkAutoCaptureEnabled, default OFF — calibrating a
         // pitcher turns it on) and only while
         // the steam flow is showing AND this page is the active StackView page — so a
         // stray weight never silently changes the steam stop time, and the capture

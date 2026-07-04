@@ -10,8 +10,13 @@ import "../"
 Item {
     id: root
 
-    // The currently selected steam pitcher preset (re-reads when the selection changes).
-    readonly property var _preset: Settings.brew.getSteamPitcherPreset(Settings.brew.selectedSteamPitcher)
+    // The currently selected steam pitcher preset. getSteamPitcherPreset() is Q_INVOKABLE, so the binding
+    // must ALSO read steamPitcherPresets to re-run when the selected pitcher is renamed, disabled, or
+    // recalibrated without the selection index itself changing.
+    readonly property var _preset: {
+        void(Settings.brew.steamPitcherPresets)
+        return Settings.brew.getSteamPitcherPreset(Settings.brew.selectedSteamPitcher)
+    }
     readonly property bool _presetOff: !!(_preset && _preset.disabled)
     readonly property string _pitcherName: (_preset && _preset.name) ? String(_preset.name) : ""
 
@@ -54,7 +59,7 @@ Item {
         if (_pitcherName !== "") parts.push(_pitcherName)
         if (_durStr !== "") parts.push(_durStr)
         if (parts.length === 0) return ""
-        return TranslationManager.translate("steamplan.prefix", "Steam") + " " + parts.join("  •  ")
+        return TranslationManager.translate("steamplan.prefix", "Steam") + " " + parts.join("  ·  ")
     }
 
     // Rich version with the live values bolded (parts HTML-escaped).

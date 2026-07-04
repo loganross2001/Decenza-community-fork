@@ -54,4 +54,5 @@ private:
     QString m_profileBlock;
     QString m_beanQuery;          // the in-flight bean search query (for stale-result discard)
     QTimer m_timeout;
+    bool m_hardPhase = false;     // false: 4s network-only give-up; true: hard backstop so we never hang
 };

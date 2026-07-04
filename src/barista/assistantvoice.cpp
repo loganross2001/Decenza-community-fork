@@ -155,6 +155,9 @@ void AssistantVoice::playMp3(const QByteArray& audio) {
         return;
     f.write(audio);
     f.close();
+    // S12: the temp path is reused every utterance; setSource with the SAME URL is a no-op in Qt, so
+    // the backend can replay the previous clip / stale duration. Clear the source first to force a reload.
+    m_player->setSource(QUrl());
     m_player->setSource(QUrl::fromLocalFile(path));
     m_player->play();
 }

@@ -28,8 +28,10 @@ QString AssistantOrchestrator::stateString() const {
 void AssistantOrchestrator::wake() {
     if (!m_settings || !m_settings->enabled())
         return;
-    if (m_state != State::Dormant)   // don't restart a conversation already in progress
+    if (m_state == State::Greeting)   // already greeting — don't restart it
         return;
+    // Preempt a stale, undismissed close-out (B1): otherwise the state wedges in CloseOut and greetings
+    // stop working until the user taps ×. A fresh Espresso tap always means "greet me".
     setState(State::Greeting);
 }
 

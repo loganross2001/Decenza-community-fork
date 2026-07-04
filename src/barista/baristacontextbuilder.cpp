@@ -17,8 +17,22 @@ BaristaContextBuilder::BaristaContextBuilder(AIManager* aiManager, BeanBaseClien
     , m_profileManager(profileManager)
     , m_settings(settings) {
     m_timeout.setSingleShot(true);
-    m_timeout.setInterval(4000);   // never let a slow/absent network hang the greeting
-    connect(&m_timeout, &QTimer::timeout, this, [this] { maybeEmit(true); });
+    // Phase 1 (4s): give up on the NETWORK bean search only — do NOT cut off the DB core, or a slow
+    // first-of-the-day query makes the assistant falsely claim "first shot". Phase 2 (a longer hard
+    // backstop): force-emit so the greeting can never hang even if the core never arrives.
+    connect(&m_timeout, &QTimer::timeout, this, [this] {
+        if (!m_building)
+            return;
+        if (!m_hardPhase) {
+            m_hardPhase = true;
+            m_beanDone = true;          // stop waiting on the bean lookup
+            maybeEmit();                // emits only if the DB core has arrived
+            if (m_building)             // core still pending → give it more time, then hard-emit
+                m_timeout.start(11000);
+        } else {
+            maybeEmit(true);            // hard backstop
+        }
+    });
 
     if (m_aiManager)
         connect(m_aiManager, &AIManager::baristaContextReady, this, &BaristaContextBuilder::onCoreReady);
@@ -32,6 +46,7 @@ void BaristaContextBuilder::build(const QString& beanBrand, const QString& beanT
     m_building = true;
     m_coreReady = false;
     m_beanDone = false;
+    m_hardPhase = false;
     m_coreBlock.clear();
     m_beanBlock.clear();
     m_beanQuery.clear();
@@ -72,8 +87,8 @@ void BaristaContextBuilder::build(const QString& beanBrand, const QString& beanT
     if (!doBean)
         m_beanDone = true;
 
-    m_timeout.start();
-    maybeEmit();   // in case everything resolved synchronously
+    m_timeout.start(4000);   // phase-1: network give-up
+    maybeEmit();             // in case everything resolved synchronously
 }
 
 void BaristaContextBuilder::onCoreReady(const QString& coreBlock) {

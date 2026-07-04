@@ -121,6 +121,7 @@ void VoiceInput::pauseMic() {
     if (!m_listening || m_paused)
         return;
     m_paused = true;
+    m_errorStreak = 0;  // S10: the cancel here can raise ERROR_CLIENT(5) — don't let it count toward the kill
     stopRecogniser();   // stop hearing while the assistant speaks (no echo)
 }
 
@@ -128,6 +129,7 @@ void VoiceInput::resumeMic() {
     if (!m_listening || !m_paused)
         return;
     m_paused = false;
+    m_errorStreak = 0;  // fresh listen after a pause — reset the transient-error run
     startRecogniser();
 }
 

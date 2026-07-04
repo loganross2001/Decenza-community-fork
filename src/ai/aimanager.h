@@ -312,6 +312,9 @@ private:
     // [barista-fork] anchor shot id from the last requestBaristaContext, so the overlay can stamp the
     // barista's advice turns (setShotIdForCurrentTurn) into the recentAdvice closed loop.
     qint64 m_lastBaristaAnchorId = 0;
+    // Dedicated serial for requestBaristaContext — must NOT share m_contextSerial with
+    // requestRecentShotContext, or one silently invalidates the other's callback (S1).
+    int m_baristaContextSerial = 0;
 
 public:
     void reloadConversations() { loadConversationIndex(); }

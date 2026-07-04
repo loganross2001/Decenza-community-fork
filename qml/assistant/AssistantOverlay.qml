@@ -82,27 +82,43 @@ Item {
     // Apply a confirmed recommendation, then speak a short local confirmation (no model round-trip).
     function _applyPending() {
         if (!root._pendingNext || typeof Barista === "undefined" || !Barista.actions) {
-            root._awaitConfirm = false; return
+            root._awaitConfirm = false; root._pendingNext = null; return
         }
-        var res = Barista.actions.applyFromNext(root._pendingNext,
-            (root._orch && root._orch.lastShotId) ? root._orch.lastShotId : 0)
+        var anchor = (typeof MainController !== "undefined" && MainController.aiManager)
+                     ? MainController.aiManager.lastBaristaAnchorId() : 0
+        var res = Barista.actions.applyFromNext(root._pendingNext, anchor > 0 ? anchor : 0)
         var msg
         if (res.blocked) {
             msg = TranslationManager.translate("barista.act.blocked", "I can't change that while a shot is running.")
         } else {
             var bits = (res.applied || []).concat(res.queued || [])
-            msg = bits.length > 0
-                ? TranslationManager.translate("barista.act.done", "Done — %1 for the next shot.").arg(bits.join(", "))
-                : TranslationManager.translate("barista.act.nothing", "Nothing to change there.")
+            var rej = res.rejected || []
+            if (bits.length > 0 && rej.length === 0)
+                msg = TranslationManager.translate("barista.act.done", "Done — %1 for the next shot.").arg(bits.join(", "))
+            else if (bits.length > 0)
+                msg = TranslationManager.translate("barista.act.donePart", "Done — %1. I skipped %2 (out of range).").arg(bits.join(", ")).arg(rej.join(", "))
+            else if (rej.length > 0)
+                msg = TranslationManager.translate("barista.act.rej", "That looked off (%1), so I left things as they are.").arg(rej.join(", "))
+            else
+                msg = TranslationManager.translate("barista.act.nothing", "Nothing to change there.")
         }
         root._message = msg
         root._speakSanitised(msg)
         root._pendingNext = null
         root._awaitConfirm = false
+        root._resumeMicAfterLocal()
     }
     function _skipPending() {
         root._pendingNext = null
         root._awaitConfirm = false
+        root._resumeMicAfterLocal()
+    }
+    // S4: after a locally-spoken line, a MUTED engine won't fire speakingChanged to reopen the mic —
+    // so reopen it here (mirrors the muted-resume path in onResponseReceived).
+    function _resumeMicAfterLocal() {
+        if (root._voiceInput && root._voiceInput.listening
+                && root._settings && !root._settings.voiceEnabled)
+            root._voiceInput.resumeMic()
     }
     // Resolve the off-machine grind reminder: done → writes the grind; not done → leaves it.
     function _resolveGrind(done) {
@@ -112,6 +128,7 @@ Item {
         root._message = msg
         root._speakSanitised(msg)
         root._pendingGrind = null
+        root._resumeMicAfterLocal()
     }
 
     // Who the assistant is talking to: the user's chosen name, else the active barista.
@@ -135,11 +152,25 @@ Item {
         var id = MainController.aiManager.lastBaristaAnchorId()
         if (id > 0) root._conv.setShotIdForCurrentTurn(id)
     }
+    // B3: fully close the session — stop listening + speaking and clear any pending action, so a
+    // dismissed (or destroyed) overlay never keeps transcribing/replying/talking in the background.
+    function _closeSession() {
+        if (root._voiceInput) root._voiceInput.stop()
+        if (root._voice) root._voice.stop()
+        silenceTimer.stop()
+        root._pendingNext = null
+        root._awaitConfirm = false
+        root._pendingGrind = null
+    }
 
     // Kick off a conversation. First pull the user's REAL dial-in history for this bean so the
     // assistant KNOWS it (and can suggest), instead of asking. ask() fires once the history arrives.
     function _startConversation() {
-        if (!root._conv) {
+        // _conv (aiManager.conversation) always exists — the real "can I chat?" test is isConfigured,
+        // else we'd hang on "…" forever with no key (B2).
+        if (!root._conv || typeof MainController === "undefined" || !MainController.aiManager
+                || !MainController.aiManager.isConfigured) {
+            root._thinking = false
             root._message = TranslationManager.translate("barista.noai",
                 "Add an AI key in Settings → AI and I'll be able to chat.")
             return
@@ -161,7 +192,11 @@ Item {
             root._askWithContext("")
             return
         }
+        // Use the CLEAN profile title — currentProfileName decorates a modified profile ("*Title" /
+        // "Title (modified)"), which would give a tweaked profile a different conversation key and split
+        // the barista's memory from the same profile untweaked (S7). Matches the KB-lookup stripping.
         var prof = (typeof ProfileManager !== "undefined") ? ProfileManager.currentProfileName : ""
+        prof = prof.replace(/^\*/, "").replace(/ \(modified\)$/, "")
         MainController.aiManager.switchConversation(Settings.dye.dyeBeanBrand, Settings.dye.dyeBeanType, prof)
         // Assemble ALL sources into one block via the context builder — the user's dial-in history PLUS,
         // for an unlinked bean, the community bean profile, PLUS the profile's curated guidance. It emits
@@ -258,9 +293,13 @@ Item {
         var t = (text || "").trim()
         if (t.length === 0 || !root._conv || root._thinking)
             return
+        if (root._state === "dormant")   // B3: dismissed → don't keep sending (e.g. late voice finals)
+            return
         var hasActions = (typeof Barista !== "undefined" && Barista.actions)
-        // Off-machine grind reminder confirm takes priority (greeting).
-        if (hasActions && root._pendingGrind && root._pendingGrind.value) {
+        // Off-machine grind reminder confirm — ONLY intercept yes/no when the assistant actually just
+        // asked about the grinder (B4), else a "yes" to some other question would falsely record a grind.
+        if (hasActions && root._pendingGrind && root._pendingGrind.value
+                && root._message && root._message.toLowerCase().indexOf("grind") >= 0) {
             var g = Barista.actions.parseConfirmation(t)   // 1 yes / 0 no / -1 neither
             if (g === 1) { root._resolveGrind(true); return }
             if (g === 0) { root._resolveGrind(false); return }
@@ -270,23 +309,30 @@ Item {
             var c = Barista.actions.parseConfirmation(t)
             if (c === 1) { root._applyPending(); return }
             if (c === 0) { root._skipPending(); return }
-            root._awaitConfirm = false   // ambiguous → new topic, disarm and pass to the AI
+            root._awaitConfirm = false; root._pendingNext = null   // ambiguous → disarm + drop the stale chip (S11)
         }
         // PERSISTENCE: capture the close-out taste feedback onto the shot record, so it's available to
         // the AI on every future call — never starting over or guessing. (Recent-shot context includes it.)
         if (root._state === "closeOut" && !root._closeOutRated && root._orch && root._orch.lastShotId > 0
                 && typeof MainController !== "undefined" && MainController.shotHistory) {
-            root._closeOutRated = true
-            var low = t.toLowerCase()
-            var enj = (low.indexOf("sour") >= 0) ? 45
-                    : (low.indexOf("bitter") >= 0) ? 55
-                    : (low.indexOf("balanc") >= 0 || low.indexOf("good") >= 0 || low.indexOf("great") >= 0
-                       || low.indexOf("perfect") >= 0 || low.indexOf("nice") >= 0 || low.indexOf("love") >= 0) ? 82
-                    : 0
-            var meta = { "espressoNotes": t }
-            if (enj > 0)
-                meta["enjoyment0to100"] = enj
-            MainController.shotHistory.requestUpdateShotMetadata(root._orch.lastShotId, meta)
+            // Only capture from a SUBSTANTIVE reply (not "ok"/"hang on") and match whole words, so "no good"
+            // isn't scored as good and a one-word confirmation doesn't overwrite the notes (S9).
+            var w = t.toLowerCase().replace(/[^a-z0-9'\s]/g, " ").split(/\s+/)
+            var isConfirmation = hasActions && Barista.actions.parseConfirmation(t) >= 0
+            if (!isConfirmation && w.length >= 2) {
+                root._closeOutRated = true
+                var neg = w.indexOf("no") >= 0 || w.indexOf("not") >= 0 || w.indexOf("bad") >= 0
+                var enj = (w.indexOf("sour") >= 0) ? 45
+                        : (w.indexOf("bitter") >= 0 || w.indexOf("burnt") >= 0) ? 55
+                        : (!neg && (w.indexOf("balanced") >= 0 || w.indexOf("good") >= 0 || w.indexOf("great") >= 0
+                            || w.indexOf("perfect") >= 0 || w.indexOf("nice") >= 0 || w.indexOf("delicious") >= 0
+                            || w.indexOf("love") >= 0 || w.indexOf("lovely") >= 0)) ? 82
+                        : 0
+                var meta = { "espressoNotes": t }
+                if (enj > 0)
+                    meta["enjoyment0to100"] = enj
+                MainController.shotHistory.requestUpdateShotMetadata(root._orch.lastShotId, meta)
+            }
         }
         root._thinking = true
         root._stampTurn()
@@ -307,9 +353,18 @@ Item {
                 root._startConversation()
             } else if (root._orch.state === "dormant") {
                 root._showSettings = false
+                root._closeSession()
             }
         }
     }
+    // B1: the overlay only exists on the idle page, so a close-out/greeting whose state flipped while the
+    // overlay was destroyed (during the shot) never fired onStateChanged. Catch up on (re)creation.
+    Component.onCompleted: {
+        if (root._state === "greeting" || root._state === "closeOut")
+            root._startConversation()
+    }
+    // B3: if the user navigates away mid-chat, the Loader destroys us — close the mic/TTS session first.
+    Component.onDestruction: root._closeSession()
     // Claude's replies → show + speak (once each).
     Connections {
         target: root._conv
@@ -324,11 +379,25 @@ Item {
             if (nx && Object.keys(nx).length > 0) {
                 root._pendingNext = nx
                 root._awaitConfirm = true
+            } else {
+                root._pendingNext = null   // no recommendation this turn → drop any stale chip (S11)
+                root._awaitConfirm = false
             }
             // Turn done. If speaking, speakingChanged(false) reopens the mic; if muted, reopen it now.
             if (root._voiceInput && root._voiceInput.listening
                     && root._settings && !root._settings.voiceEnabled)
                 root._voiceInput.resumeMic()
+        }
+        function onErrorOccurred(error) {   // B2: never hang on "…" — surface it and recover the UI
+            root._thinking = false
+            root._message = (error && error.length > 0)
+                ? error
+                : TranslationManager.translate("barista.err", "Something went wrong — tap Chat or type to try again.")
+            // Reopen the mic if a session is live (the turn failed, not the session).
+            if (root._voiceInput && root._voiceInput.listening
+                    && (!root._voice || !root._voice.speaking))
+                root._voiceInput.resumeMic()
+            root._resetSilence()
         }
     }
     // The full advisor-grade context arrived → open the conversation grounded in it (so the AI KNOWS,

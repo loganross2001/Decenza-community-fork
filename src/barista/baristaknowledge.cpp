@@ -8,6 +8,10 @@
 #include <QFileInfo>
 #include <QDateTime>
 #include <QStandardPaths>
+#include <QJsonDocument>
+#include <QJsonArray>
+#include <QJsonObject>
+#include <QMap>
 
 BaristaKnowledge::BaristaKnowledge(AssistantSettings* settings, AIManager* aiManager, QObject* parent)
     : QObject(parent)
@@ -59,13 +63,42 @@ void BaristaKnowledge::copyGroups(QSettings& from, QSettings& to) const {
             // re-entered per device (redact-by-default, like SettingsSerializer), and the store
             // path / last-backup stamp are local state, not portable knowledge.
             if (k.endsWith(QStringLiteral("ApiKey")) || k == QStringLiteral("knowledgePath")
-                    || k == QStringLiteral("lastBackup"))
+                    || k == QStringLiteral("lastBackup")
+                    || k == QStringLiteral("pendingActions"))   // S6: don't resurrect stale grind reminders
                 continue;
             to.setValue(g + QLatin1Char('/') + k, from.value(k));
         }
         from.endGroup();
     }
     to.sync();
+}
+
+void BaristaKnowledge::mergeIndex(const QByteArray& localIndexJson, QSettings& dest) const {
+    // `dest` currently holds the backup's index (copyGroups just wrote it). Union it with the device's
+    // prior index by conversation key, keeping the newer timestamp, so neither side is orphaned (S6).
+    const QByteArray backupIndexJson = dest.value(QStringLiteral("ai/conversations/index")).toByteArray();
+    QMap<QString, QJsonObject> byKey;
+    const auto ingest = [&byKey](const QByteArray& json) {
+        const QJsonArray arr = QJsonDocument::fromJson(json).array();
+        for (const QJsonValue& v : arr) {
+            const QJsonObject o = v.toObject();
+            const QString key = o.value(QStringLiteral("key")).toString();
+            if (key.isEmpty())
+                continue;
+            const auto it = byKey.constFind(key);
+            if (it == byKey.constEnd()
+                    || o.value(QStringLiteral("timestamp")).toDouble()
+                       >= it.value().value(QStringLiteral("timestamp")).toDouble())
+                byKey.insert(key, o);
+        }
+    };
+    ingest(localIndexJson);    // device
+    ingest(backupIndexJson);   // backup (>= so it wins exact-timestamp ties)
+    QJsonArray merged;
+    for (const QJsonObject& o : byKey)
+        merged.append(o);
+    dest.setValue(QStringLiteral("ai/conversations/index"),
+                  QJsonDocument(merged).toJson(QJsonDocument::Compact));
 }
 
 bool BaristaKnowledge::backupNow() {
@@ -98,9 +131,14 @@ bool BaristaKnowledge::restore(const QString& fileName) {
         setStatus(QStringLiteral("Backup not found"));
         return false;
     }
-    QSettings src(path, QSettings::IniFormat);
     QSettings dest;   // app default
+    // S6: capture the device's conversation index BEFORE the copy so restore MERGES rather than replaces
+    // it — otherwise local conversations absent from the backup get orphaned (and later overwritten).
+    const QByteArray localIndex = dest.value(QStringLiteral("ai/conversations/index")).toByteArray();
+    QSettings src(path, QSettings::IniFormat);
     copyGroups(src, dest);
+    mergeIndex(localIndex, dest);
+    dest.sync();
     if (m_aiManager)
         m_aiManager->reloadConversations();   // refresh the in-memory conversation index
     emit lastBackupChanged();

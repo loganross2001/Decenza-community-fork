@@ -44,6 +44,7 @@ signals:
 private:
     QString defaultLocation() const;
     void copyGroups(class QSettings& from, class QSettings& to) const;   // ai/conversations + barista
+    void mergeIndex(const QByteArray& localIndexJson, class QSettings& dest) const;   // union, keep newer
     void setStatus(const QString& s);
 
     AssistantSettings* m_settings = nullptr;

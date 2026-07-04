@@ -15,6 +15,13 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- [barista-fork] on-device speech recognition (Chat button) -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Android 11+ package visibility: without this, SpeechRecognizer.isRecognitionAvailable()
+         returns false and binding fails, so voice input silently vanishes (S5). -->
+    <queries>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+    </queries>
     <!-- Lets Qt's QNetworkInformation report real reachability instead of
          "Unknown". Without this, QtAndroidNetworkInformation.registerReceiver()
          throws a SecurityException at every cold start (issue #1124) and any

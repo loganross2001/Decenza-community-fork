@@ -11,6 +11,7 @@
 #include <QDateTime>
 #include <QUuid>
 #include <QStringList>
+#include <QRegularExpression>
 
 BaristaActions::BaristaActions(Settings* settings, MachineState* machineState, QObject* parent)
     : QObject(parent)
@@ -22,11 +23,12 @@ QVariantMap BaristaActions::applyFromNext(const QVariantMap& next, qint64 anchor
     QVariantMap result;
     QStringList applied, queued;
 
+    QStringList rejected;
     // Never mutate the dial while a shot is physically flowing.
     if (m_machine && m_machine->isFlowing()) {
         result["blocked"] = true;
         result["blockedReason"] = QStringLiteral("a shot is in progress");
-        result["applied"] = applied; result["queued"] = queued;
+        result["applied"] = applied; result["queued"] = queued; result["rejected"] = rejected;
         return result;
     }
 
@@ -34,22 +36,33 @@ QVariantMap BaristaActions::applyFromNext(const QVariantMap& next, qint64 anchor
     SettingsDye* dye = m_settings ? m_settings->dye() : nullptr;
     SettingsBrew* brew = m_settings ? m_settings->brew() : nullptr;
 
-    if (dye && next.value("doseG").toDouble() > 0) {
-        m_undo["doseG"] = dye->dyeBeanWeight();
-        dye->setDyeBeanWeight(next.value("doseG").toDouble());
-        applied << QStringLiteral("dose %1 g").arg(next.value("doseG").toDouble(), 0, 'f', 1);
+    // Reject values outside sane espresso ranges (S2) — a hallucinated 200 °C or 360 g must never reach
+    // the machine sight-unseen on a voice "OK".
+    const double dose = next.value("doseG").toDouble();
+    if (dye && dose > 0) {
+        if (dose >= 5.0 && dose <= 30.0) {
+            m_undo["doseG"] = dye->dyeBeanWeight();
+            dye->setDyeBeanWeight(dose);
+            applied << QStringLiteral("dose %1 g").arg(dose, 0, 'f', 1);
+        } else { rejected << QStringLiteral("dose"); }
     }
-    if (brew && next.value("targetWeightG").toDouble() > 0) {
-        m_undo["targetWeightG_had"] = brew->hasBrewYieldOverride();
-        m_undo["targetWeightG"] = brew->brewYieldOverride();
-        brew->setBrewYieldOverride(next.value("targetWeightG").toDouble());
-        applied << QStringLiteral("yield %1 g").arg(next.value("targetWeightG").toDouble(), 0, 'f', 1);
+    const double yield = next.value("targetWeightG").toDouble();
+    if (brew && yield > 0) {
+        if (yield >= 10.0 && yield <= 120.0) {
+            m_undo["targetWeightG_had"] = brew->hasBrewYieldOverride();
+            m_undo["targetWeightG"] = brew->brewYieldOverride();
+            brew->setBrewYieldOverride(yield);
+            applied << QStringLiteral("yield %1 g").arg(yield, 0, 'f', 1);
+        } else { rejected << QStringLiteral("yield"); }
     }
-    if (brew && next.value("temperatureC").toDouble() > 0) {
-        m_undo["temperatureC_had"] = brew->hasTemperatureOverride();
-        m_undo["temperatureC"] = brew->temperatureOverride();
-        brew->setTemperatureOverride(next.value("temperatureC").toDouble());
-        applied << QStringLiteral("%1 °C").arg(next.value("temperatureC").toDouble(), 0, 'f', 1);
+    const double temp = next.value("temperatureC").toDouble();
+    if (brew && temp > 0) {
+        if (temp >= 80.0 && temp <= 100.0) {
+            m_undo["temperatureC_had"] = brew->hasTemperatureOverride();
+            m_undo["temperatureC"] = brew->temperatureOverride();
+            brew->setTemperatureOverride(temp);
+            applied << QStringLiteral("%1 °C").arg(temp, 0, 'f', 1);
+        } else { rejected << QStringLiteral("temperature"); }
     }
     // Grinder is off-machine — queue it, don't write the dial (the shot must not claim a grind the
     // user never physically set). Resolved to Settings.dye.dyeGrinderSetting on confirmation.
@@ -61,6 +74,7 @@ QVariantMap BaristaActions::applyFromNext(const QVariantMap& next, qint64 anchor
 
     result["applied"] = applied;
     result["queued"] = queued;
+    result["rejected"] = rejected;
     result["blocked"] = false;
     return result;
 }
@@ -77,33 +91,45 @@ void BaristaActions::undoLast() {
         else
             brew->clearTemperatureOverride();
     }
-    if (brew && m_undo.contains("targetWeightG") && m_undo.value("targetWeightG_had").toBool())
-        brew->setBrewYieldOverride(m_undo.value("targetWeightG").toDouble());
+    if (brew && m_undo.contains("targetWeightG")) {
+        if (m_undo.value("targetWeightG_had").toBool())
+            brew->setBrewYieldOverride(m_undo.value("targetWeightG").toDouble());
+        else
+            brew->setBrewYieldOverride(0);   // S3: clear the override we created (0 = no override)
+    }
     m_undo.clear();
 }
 
 // ── confirmation parsing ─────────────────────────────────────────────────────────
 std::optional<bool> BaristaActions::parseConfirmationReply(const QString& reply) {
-    const QString r = reply.trimmed().toLower();
+    QString r = reply.trimmed().toLower();
     if (r.isEmpty()) return std::nullopt;
+    // Only SHORT replies are confirmations. "it was okay, a bit sour" is taste feedback, NOT "OK" —
+    // matching a substring there would silently apply a dial change (B4). Normalise + word-split.
+    r.replace(QRegularExpression(QStringLiteral("[^a-z0-9'\\s]")), QStringLiteral(" "));
+    const QStringList words = r.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
+    if (words.isEmpty() || words.size() > 4)
+        return std::nullopt;   // a sentence → treat as normal conversation, not a yes/no
+    const QString padded = QLatin1Char(' ') + words.join(QLatin1Char(' ')) + QLatin1Char(' ');
+    // Whole-word / whole-phrase matching only (each entry padded with spaces on both sides).
     static const QStringList no = {
         QStringLiteral("no"), QStringLiteral("nope"), QStringLiteral("nah"), QStringLiteral("skip"),
-        QStringLiteral("leave it"), QStringLiteral("don't"), QStringLiteral("do not"),
-        QStringLiteral("cancel"), QStringLiteral("not now"), QStringLiteral("never mind"),
-        QStringLiteral("nevermind")
+        QStringLiteral("leave it"), QStringLiteral("dont"), QStringLiteral("do not"),
+        QStringLiteral("cancel"), QStringLiteral("not now"), QStringLiteral("not yet"),
+        QStringLiteral("never mind"), QStringLiteral("nevermind")
     };
     static const QStringList yes = {
         QStringLiteral("ok"), QStringLiteral("okay"), QStringLiteral("yes"), QStringLiteral("yeah"),
         QStringLiteral("yep"), QStringLiteral("yup"), QStringLiteral("sure"), QStringLiteral("do it"),
-        QStringLiteral("go ahead"), QStringLiteral("apply"), QStringLiteral("set it"),
-        QStringLiteral("please do"), QStringLiteral("sounds good"), QStringLiteral("confirmed"),
-        QStringLiteral("done"), QStringLiteral("did it"), QStringLiteral("let's do it")
+        QStringLiteral("go ahead"), QStringLiteral("go for it"), QStringLiteral("apply"),
+        QStringLiteral("set it"), QStringLiteral("please do"), QStringLiteral("sounds good"),
+        QStringLiteral("confirmed"), QStringLiteral("done"), QStringLiteral("lets do it")
     };
-    auto hit = [&r](const QString& t) {
-        return r == t || r.startsWith(t + QLatin1Char(' ')) || r.contains(QLatin1Char(' ') + t);
+    auto phraseHit = [&padded](const QString& t) {
+        return padded.contains(QLatin1Char(' ') + t + QLatin1Char(' '));
     };
-    for (const QString& n : no)  if (hit(n)) return false;   // negatives win ("not now", "leave it")
-    for (const QString& y : yes) if (hit(y)) return true;
+    for (const QString& n : no)  if (phraseHit(n)) return false;   // negatives win ("not now", "leave it")
+    for (const QString& y : yes) if (phraseHit(y)) return true;
     return std::nullopt;
 }
 
@@ -143,6 +169,20 @@ void BaristaActions::enqueueGrind(const QString& value, qint64 anchorShotId) {
     if (v.isEmpty()) return;
     QVariantList list = loadPending();
     expireStale(list);
+    // S8: drop long-resolved records (done/declined/superseded/expired > 30 days) so the queue, which is
+    // parsed on every greeting, can't grow without bound.
+    {
+        const QDateTime cutoffNow = QDateTime::currentDateTime();
+        for (int i = list.size() - 1; i >= 0; --i) {
+            const QVariantMap m = list.at(i).toMap();
+            if (m.value("status").toString() == QStringLiteral("pending")) continue;
+            const QString stamp = !m.value("resolvedAt").toString().isEmpty()
+                ? m.value("resolvedAt").toString() : m.value("createdAt").toString();
+            const QDateTime when = QDateTime::fromString(stamp, Qt::ISODate);
+            if (when.isValid() && when.daysTo(cutoffNow) > 30)
+                list.removeAt(i);
+        }
+    }
     // Only the newest grinder recommendation matters — supersede older still-pending ones.
     for (QVariant& item : list) {
         QVariantMap m = item.toMap();

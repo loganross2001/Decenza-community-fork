@@ -1145,10 +1145,11 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
         return;
     }
 
+    m_lastBaristaAnchorId = 0;   // clear now so a dropped/superseded callback can't leave a stale anchor (S1)
     const QString dbPath = m_shotHistory->databasePath();
     QPointer<AIManager> self(this);
-    ++m_contextSerial;
-    int serial = m_contextSerial;
+    ++m_baristaContextSerial;
+    int serial = m_baristaContextSerial;
 
     // self is captured by value but ONLY dereferenced inside the main-thread callback (QPointer is
     // not thread-safe). See requestRecentShotContext for the same discipline.
@@ -1213,7 +1214,7 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
         QMetaObject::invokeMethod(qApp, [self, serial, shot, anchorId, beanFilterMissed,
                                          dialInSessions, bestRecentShot, beanBestShot, grinderContext,
                                          grinderCalibration, recentAdvice]() {
-            if (!self || serial != self->m_contextSerial)
+            if (!self || serial != self->m_baristaContextSerial)
                 return;   // stale — a newer request superseded this one
             self->m_lastBaristaAnchorId = (anchorId > 0 && shot.isValid()) ? anchorId : 0;
             if (anchorId <= 0 || !shot.isValid()) {

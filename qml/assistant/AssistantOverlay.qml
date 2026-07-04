@@ -30,7 +30,11 @@ Item {
     Connections {
         target: root._voiceInput
         ignoreUnknownSignals: true
-        function onFinalText(text) { root._resetSilence(); root._send(text) }   // spoken utterance → the AI
+        function onFinalText(text) {   // spoken utterance → the AI; pause the mic until the turn is done
+            root._resetSilence()
+            if (root._voiceInput) root._voiceInput.pauseMic()
+            root._send(text)
+        }
         function onPartialChanged() { root._resetSilence() }
         function onListeningChanged() { root._resetSilence() }
         function onError(message) {   // never fail silently — say what happened
@@ -205,6 +209,10 @@ Item {
             root._thinking = false
             root._speakSanitised(response)
             root._resetSilence()   // keep the mic session alive while we're conversing
+            // Turn done. If speaking, speakingChanged(false) reopens the mic; if muted, reopen it now.
+            if (root._voiceInput && root._voiceInput.listening
+                    && root._settings && !root._settings.voiceEnabled)
+                root._voiceInput.resumeMic()
         }
     }
     // The full advisor-grade context arrived → open the conversation grounded in it (so the AI KNOWS,
@@ -222,9 +230,13 @@ Item {
     Rectangle {
         id: card
         visible: (root._state === "greeting" || root._state === "closeOut") && !root._showSettings
-        anchors.centerIn: parent
-        width: Math.min(Theme.scaled(520), parent.width - Theme.spacingLarge * 2)
-        height: cardCol.implicitHeight + Theme.spacingLarge * 2
+        // Right-docked side panel: leaves the machine controls usable on the left, gives the
+        // conversation room to grow, and is out of the way (recommended tablet-assistant UX).
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        anchors.margins: Theme.spacingMedium
+        width: Math.min(Theme.scaled(440), parent.width * 0.42)
         radius: Theme.cardRadius
         color: Theme.surfaceColor
         border.width: 1
@@ -238,6 +250,7 @@ Item {
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.top: parent.top
+            anchors.bottom: parent.bottom
             anchors.margins: Theme.spacingLarge
             spacing: Theme.spacingMedium
 
@@ -261,10 +274,12 @@ Item {
                 }
             }
 
-            // The assistant's line (or a thinking indicator)
+            // The assistant's line (or a thinking indicator) — fills the panel so the input pins to the bottom
             Text {
                 id: msgText
                 Layout.fillWidth: true
+                Layout.fillHeight: true
+                verticalAlignment: Text.AlignTop
                 wrapMode: Text.WordWrap
                 color: Theme.textColor
                 font: Theme.subtitleFont

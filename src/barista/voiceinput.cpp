@@ -155,8 +155,8 @@ void VoiceInput::handleFinal(const QString& text) {
     const QString t = text.trimmed();
     if (!t.isEmpty())
         emit finalText(t);
-    // Continuous: after an utterance, keep listening for the next one until the session ends.
-    startRecogniser();
+    // Do NOT auto-restart here. The overlay pauses the mic while the assistant thinks/speaks and calls
+    // resumeMic() when the turn is done — restarting into that pending stop is what triggers ERROR_CLIENT (5).
 }
 
 void VoiceInput::handlePartial(const QString& text) {
@@ -171,9 +171,9 @@ void VoiceInput::handleError(int code) {
         startRecogniser();
         return;
     }
-    // Transient (6=timeout, 7=no-match, 8=busy): silence or overlap — keep listening, but back off
-    // after a run of them so a busy-storm can't tight-loop (the 20s timer / Chat button re-triggers).
-    if (code == 6 || code == 7 || code == 8) {
+    // Transient (5=client, 6=timeout, 7=no-match, 8=busy): silence / overlap / benign client hiccup —
+    // keep listening quietly (no pop-up), but back off after a run so a storm can't tight-loop.
+    if (code == 5 || code == 6 || code == 7 || code == 8) {
         if (++m_errorStreak <= 6) {
             startRecogniser();
             return;

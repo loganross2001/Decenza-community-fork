@@ -16,6 +16,10 @@ class AssistantOrchestrator : public QObject {
     Q_OBJECT
     Q_PROPERTY(QString state READ stateString NOTIFY stateChanged)   // "dormant" | "greeting" | "closeOut"
     Q_PROPERTY(qlonglong lastShotId READ lastShotId NOTIFY lastShotIdChanged)
+    // [barista-fork] SF-3: latched true once the overlay has started the conversation for the current
+    // activation; survives overlay destruction (state lives here), so re-entering the idle page doesn't
+    // re-kick the greeting. Cleared on every state change (a genuinely new activation).
+    Q_PROPERTY(bool sessionStarted READ sessionStarted NOTIFY sessionStartedChanged)
 
 public:
     enum class State { Dormant, Greeting, CloseOut };
@@ -26,13 +30,16 @@ public:
 
     QString stateString() const;
     qlonglong lastShotId() const { return m_lastShotId; }
+    bool sessionStarted() const { return m_sessionStarted; }
 
     Q_INVOKABLE void wake();       // Espresso selected → start a greeting conversation
     Q_INVOKABLE void dismiss();
+    Q_INVOKABLE void markSessionStarted();   // the overlay calls this when it opens the conversation
 
 signals:
     void stateChanged();
     void lastShotIdChanged();
+    void sessionStartedChanged();
 
 private slots:
     void onShotSaved(qlonglong shotId);   // → taste close-out conversation
@@ -45,4 +52,5 @@ private:
     AssistantSettings* m_settings = nullptr;
     State m_state = State::Dormant;
     qlonglong m_lastShotId = -1;
+    bool m_sessionStarted = false;
 };

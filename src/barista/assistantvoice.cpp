@@ -42,9 +42,15 @@ AssistantVoice::AssistantVoice(AssistantSettings* settings, Settings* appSetting
         emit availableVoicesChanged();
     });
     // Track when we're actually speaking (native TTS or cloud playback) so the mic can mute itself.
-    connect(m_tts, &QTextToSpeech::stateChanged, this, [this](QTextToSpeech::State) { updateSpeaking(); });
+    connect(m_tts, &QTextToSpeech::stateChanged, this, [this](QTextToSpeech::State s) {
+        if (s == QTextToSpeech::Error)   // SF-2: native engine failed → release the hold or `speaking` wedges
+            m_pendingSynth = false;
+        updateSpeaking();
+    });
     connect(m_player, &QMediaPlayer::playbackStateChanged, this,
             [this](QMediaPlayer::PlaybackState) { updateSpeaking(); });
+    connect(m_player, &QMediaPlayer::errorOccurred, this,   // SF-2: decode/playback error → release the hold
+            [this](QMediaPlayer::Error, const QString&) { m_pendingSynth = false; updateSpeaking(); });
 }
 
 void AssistantVoice::updateSpeaking() {

@@ -49,9 +49,20 @@ void AssistantOrchestrator::dismiss() {
     setState(State::Dormant);
 }
 
+void AssistantOrchestrator::markSessionStarted() {
+    if (m_sessionStarted)
+        return;
+    m_sessionStarted = true;
+    emit sessionStartedChanged();
+}
+
 void AssistantOrchestrator::setState(State s) {
     if (m_state == s)
         return;
     m_state = s;
+    if (m_sessionStarted) {   // a new activation → the overlay may start fresh (SF-3)
+        m_sessionStarted = false;
+        emit sessionStartedChanged();
+    }
     emit stateChanged();
 }

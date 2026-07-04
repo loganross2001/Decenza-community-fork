@@ -66,6 +66,7 @@ Item {
     property bool _showSettings: false
     property bool _collapsed: false     // panel minimised to a thin edge tab (frees the whole screen)
     property var _pendingNext: null     // structuredNext recommendation awaiting apply/skip
+    property var _pendingBegin: null    // SF-4: a greeting that preempted a still-busy close-out; retry when free
     property bool _awaitConfirm: false  // a recommendation is armed for a voice "OK"
     property var _pendingGrind: null    // outstanding off-machine grind reminder (shown at greeting)
     property bool _awaitingContext: false   // waiting on the shot history before opening the conversation
@@ -166,6 +167,23 @@ Item {
         root._pendingNext = null
         root._awaitConfirm = false
         root._pendingGrind = null
+        root._awaitingContext = false   // BL-1: a late context build must not open a turn while dormant
+        root._thinking = false
+        root._pendingBegin = null
+        // SF-1: clear web search so it can't leak onto a later advisor turn on the same conversation key.
+        if (root._conv) root._conv.webSearchEnabled = false
+    }
+    // SF-4: the preempted greeting couldn't beginSession because a close-out reply was mid-flight. Its reply
+    // has now landed (conversation is free), so open the greeting — deferred to avoid re-entering the AI stack.
+    function _retryBegin() {
+        var pb = root._pendingBegin
+        root._pendingBegin = null
+        Qt.callLater(function() {
+            if (root._state === "dormant" || !root._conv || !pb) return
+            root._thinking = true
+            root._stampTurn()
+            root._conv.beginSession(pb.sys, pb.kick)
+        })
     }
 
     // Kick off a conversation. First pull the user's REAL dial-in history for this bean so the
@@ -180,6 +198,7 @@ Item {
                 "Add an AI key in Settings → AI and I'll be able to chat.")
             return
         }
+        if (root._orch) root._orch.markSessionStarted()   // SF-3: don't re-kick on page re-entry
         root._message = ""
         root._thinking = true
         root._awaitingContext = true
@@ -236,6 +255,8 @@ Item {
     // keeps the persisted thread (prior discussion) and can't wipe it.
     function _askWithContext(dataBlock, unused) {
         root._awaitingContext = false
+        if (root._state === "dormant")   // BL-1: dismissed during context build → don't open a turn
+            return
         if (!root._conv)
             return
         var who = root._settings ? root._settings.assistantName : "Coach"
@@ -308,7 +329,9 @@ Item {
 
         root._conv.webSearchEnabled = webOn   // barista session only; reset by ask()/resetInMemory()
         root._stampTurn()
-        root._conv.beginSession(persona + "\n\n" + block, kickoff)
+        var _sys = persona + "\n\n" + block
+        if (!root._conv.beginSession(_sys, kickoff))   // SF-4: busy (a prior turn in flight) → retry when free
+            root._pendingBegin = { "sys": _sys, "kick": kickoff }
     }
 
     function _send(text) {
@@ -318,10 +341,11 @@ Item {
         if (root._state === "dormant")   // B3: dismissed → don't keep sending (e.g. late voice finals)
             return
         var hasActions = (typeof Barista !== "undefined" && Barista.actions)
-        // Off-machine grind reminder confirm — ONLY intercept yes/no when the assistant actually just
-        // asked about the grinder (B4), else a "yes" to some other question would falsely record a grind.
+        // Off-machine grind reminder confirm — ONLY intercept yes/no when the assistant's last line actually
+        // names the pending grind VALUE (SF-6). "grind" alone is too loose (it talks about grind constantly),
+        // so a "yes" to a taste question could falsely record a grind. The Yes/No chip is the reliable path.
         if (hasActions && root._pendingGrind && root._pendingGrind.value
-                && root._message && root._message.toLowerCase().indexOf("grind") >= 0) {
+                && root._message && root._message.indexOf(root._pendingGrind.value) >= 0) {
             var g = Barista.actions.parseConfirmation(t)   // 1 yes / 0 no / -1 neither
             if (g === 1) { root._resolveGrind(true); return }
             if (g === 0) { root._resolveGrind(false); return }
@@ -383,7 +407,10 @@ Item {
     // B1: the overlay only exists on the idle page, so a close-out/greeting whose state flipped while the
     // overlay was destroyed (during the shot) never fired onStateChanged. Catch up on (re)creation.
     Component.onCompleted: {
-        if (root._state === "greeting" || root._state === "closeOut")
+        // SF-3: catch up ONLY if this activation hasn't been started yet (the latch survives the overlay
+        // being destroyed/recreated on page navigation), so returning to idle doesn't re-run the greeting.
+        if ((root._state === "greeting" || root._state === "closeOut")
+                && root._orch && !root._orch.sessionStarted)
             root._startConversation()
     }
     // B3: if the user navigates away mid-chat, the Loader destroys us — close the mic/TTS session first.
@@ -393,6 +420,9 @@ Item {
         target: root._conv
         ignoreUnknownSignals: true
         function onResponseReceived(response) {
+            if (root._state === "dormant")   // BL-1: reply landed after dismiss (or it's an advisor turn) → ignore
+                return
+            if (root._pendingBegin) { root._retryBegin(); return }   // SF-4: this is the preempted turn's stale reply
             root._message = root._stripBlock(response)   // hide the JSON action block from the display
             root._thinking = false
             // Pause the mic BEFORE speaking (greeting path has no prior pause). speak() now flips
@@ -416,6 +446,9 @@ Item {
                 root._voiceInput.resumeMic()
         }
         function onErrorOccurred(error) {   // B2: never hang on "…" — surface it and recover the UI
+            if (root._state === "dormant")
+                return
+            if (root._pendingBegin) { root._retryBegin(); return }   // SF-4: the preempted turn failed → open the greeting
             root._thinking = false
             root._message = (error && error.length > 0)
                 ? error

@@ -539,10 +539,9 @@ void AnthropicProvider::onAnalysisReply(QNetworkReply* reply)
     QString text;
     for (const QJsonValue& v : content) {
         const QJsonObject block = v.toObject();
-        if (block["type"].toString() == QLatin1String("text")) {
-            if (!text.isEmpty()) text += QLatin1String("\n");
-            text += block["text"].toString();
-        }
+        if (block["type"].toString() == QLatin1String("text"))
+            text += block["text"].toString();   // SF-5: append verbatim — Anthropic splits a sentence across
+                                                 // text blocks at citation boundaries; a "\n" join breaks it.
     }
 
     // [barista-fork] Server-side search paused mid-turn: resume by re-POSTing the turn with the assistant

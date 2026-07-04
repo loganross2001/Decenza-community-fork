@@ -130,3 +130,17 @@ void AssistantSettings::setElevenlabsVoiceId(const QString& id) {
     m_settings.setValue(QStringLiteral("barista/elevenlabsVoiceId"), id);
     emit elevenlabsVoiceIdChanged();
 }
+
+double AssistantSettings::voiceSpeed() const {
+    return m_settings.value(QStringLiteral("barista/voiceSpeed"), 1.0).toDouble();
+}
+
+void AssistantSettings::setVoiceSpeed(double s) {
+    // Clamp to a sane spoken range (both OpenAI and ElevenLabs accept ~0.7–1.3 comfortably).
+    if (s < 0.7) s = 0.7;
+    if (s > 1.3) s = 1.3;
+    if (qFuzzyCompare(voiceSpeed(), s))
+        return;
+    m_settings.setValue(QStringLiteral("barista/voiceSpeed"), s);
+    emit voiceSpeedChanged();
+}

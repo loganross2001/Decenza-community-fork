@@ -20,6 +20,7 @@ class AssistantSettings : public QObject {
     Q_PROPERTY(QString openaiApiKey READ openaiApiKey WRITE setOpenaiApiKey NOTIFY openaiApiKeyChanged)
     Q_PROPERTY(QString elevenlabsApiKey READ elevenlabsApiKey WRITE setElevenlabsApiKey NOTIFY elevenlabsApiKeyChanged)
     Q_PROPERTY(QString elevenlabsVoiceId READ elevenlabsVoiceId WRITE setElevenlabsVoiceId NOTIFY elevenlabsVoiceIdChanged)
+    Q_PROPERTY(double voiceSpeed READ voiceSpeed WRITE setVoiceSpeed NOTIFY voiceSpeedChanged)
 
 public:
     explicit AssistantSettings(QObject* parent = nullptr);
@@ -57,6 +58,9 @@ public:
     QString elevenlabsVoiceId() const;            // ElevenLabs voice id (default a stock voice)
     void setElevenlabsVoiceId(const QString& id);
 
+    double voiceSpeed() const;                    // speaking rate multiplier (default 1.0)
+    void setVoiceSpeed(double s);
+
 signals:
     void enabledChanged();
     void voiceEnabledChanged();
@@ -69,6 +73,7 @@ signals:
     void openaiApiKeyChanged();
     void elevenlabsApiKeyChanged();
     void elevenlabsVoiceIdChanged();
+    void voiceSpeedChanged();
 
 private:
     mutable QSettings m_settings;  // org/app default = DecentEspresso/DE1Qt (set in main)

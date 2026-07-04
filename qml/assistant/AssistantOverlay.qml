@@ -1,6 +1,5 @@
 import QtQuick
 import QtQuick.Layouts
-import QtQuick.Effects
 import Decenza
 
 // [barista-fork] The proactive barista assistant — a REAL conversation, not a script. When the
@@ -56,8 +55,17 @@ Item {
     property string _message: ""       // the assistant's latest line
     property bool _thinking: false
     property bool _showSettings: false
-    property bool _awaitingContext: false   // waiting on requestRecentShotContext before ask()
+    property bool _awaitingContext: false   // waiting on the shot history before opening the conversation
     property bool _closeOutRated: false      // persist the close-out taste to the shot exactly once
+    property bool _fellBack: false           // bean-filtered history was empty → fetched recent overall
+
+    // Strip markdown/code so cloud voices don't read asterisks, hashes, or JSON aloud.
+    function _speakSanitised(t) {
+        if (!root._voice) return
+        var clean = (t || "").replace(/```[\s\S]*?```/g, " ").replace(/[*_#`>]/g, "")
+                              .replace(/^\s*[-•]\s+/gm, "").replace(/\s+/g, " ").trim()
+        root._voice.speak(clean)
+    }
 
     // Who the assistant is talking to: the user's chosen name, else the active barista.
     readonly property string _userName: {
@@ -86,6 +94,7 @@ Item {
         root._thinking = true
         root._awaitingContext = true
         root._closeOutRated = false
+        root._fellBack = false
         // (1) Load THIS bean's persisted conversation so the AI recalls its own prior guidance and we
         // pick up where we left off — even after a 2-month gap. (2) Pull the bean's FULL shot history.
         if (typeof MainController !== "undefined" && MainController.aiManager) {
@@ -122,39 +131,37 @@ Item {
         return lines.join("\n")
     }
 
-    // Open (or resume) the conversation. Persona is a STABLE system prompt; the data goes in the
-    // message so followUp() carries fresh history each time while keeping the persisted thread.
-    function _askWithContext(history) {
+    // Open (or resume) the conversation with the data in the SYSTEM PROMPT (re-stamped each session,
+    // never trimmed) so the AI ALWAYS has it; the kickoff message carries only intent. beginSession()
+    // keeps the persisted thread (prior discussion) and can't wipe it.
+    function _askWithContext(history, fellBack) {
         root._awaitingContext = false
         if (!root._conv)
             return
         var who = root._settings ? root._settings.assistantName : "Coach"
         var name = root._userName.length > 0 ? root._userName : ""
-        var bean = root._bean.length > 0 ? root._bean : "their coffee"
-        var hist = (history && history.length > 0) ? history : "(no shots recorded yet)"
+        var bean = root._bean.length > 0 ? root._bean : "your coffee"
 
         var persona = "You are " + who + ", a warm, concise home espresso barista"
-            + (name ? " talking to " + name : "") + ". You have LONG-TERM memory of this user's shots and your own "
-            + "past advice for each coffee — recall it and pick up where you left off, even after long gaps. Treat any "
-            + "shot history you are given as fact; NEVER claim it is their first shot if shots are listed. Keep every "
-            + "reply to 1-2 short spoken sentences, conversational, and adapt. Suggest at most one concrete change for "
-            + "the next shot when it helps (fast/sour → finer; slow/bitter → coarser)."
+            + (name ? " talking to " + name : "") + ".\n"
+            + "Your replies are SPOKEN ALOUD: keep them to 1-2 short sentences, conversational — NO markdown, lists, "
+            + "JSON, code, or long number sequences. The '## What I know' block below is the app's LIVE DATABASE of "
+            + "this user's shots and your past advice: you DO have full access to it. NEVER say you lack their history, "
+            + "or that this is their first shot, unless the block says 'recordedShots: 0'. Reference what you see and "
+            + "suggest ONE concrete change for the next shot when it helps (fast/sour → finer; slow/bitter → coarser). "
+            + "Recall your past advice and pick up where you left off, even after long gaps. Adapt to their replies."
 
-        var ctx
-        if (root._state === "closeOut") {
-            ctx = "I just pulled a shot of " + bean + ". My shots on this coffee (most recent first — dose, grind, time, "
-                + "rating):\n" + hist + "\nComment briefly on how it likely went and offer one tweak, or ask one short question."
-        } else {
-            ctx = "It is the " + root._partOfDay() + " and I am about to pull espresso; my coffee is " + bean
-                + ". My shots on this coffee (most recent first — dose, grind, time, rating):\n" + hist
-                + "\nGreet me, reference what you see, and suggest one change for this shot."
-        }
+        var dataBlock = "## What I know about " + (name.length ? name : "this user") + " and this coffee (" + bean + ")\n"
+            + (fellBack ? "(No shots recorded under this exact bean name — these are their recent shots overall.)\n" : "")
+            + ((history && history.length > 0)
+               ? ("Recent shots (most recent first — dose, grind, time, rating):\n" + history)
+               : "recordedShots: 0")
 
-        // Returning to this bean (a saved thread exists) → continue it so prior advice is recalled;
-        // otherwise start a fresh thread with the persona.
-        var returning = root._conv.hasSavedConversation
-        if (!(returning && root._conv.followUp(ctx)))
-            root._conv.ask(persona, ctx)
+        var kickoff = (root._state === "closeOut")
+            ? "I just pulled a shot — how did it go?"
+            : "It's the " + root._partOfDay() + " and I'm about to pull espresso. Greet me and suggest one thing."
+
+        root._conv.beginSession(persona + "\n\n" + dataBlock, kickoff)
     }
 
     function _send(text) {
@@ -204,7 +211,7 @@ Item {
         function onResponseReceived(response) {
             root._message = response
             root._thinking = false
-            if (root._voice) root._voice.speak(response)
+            root._speakSanitised(response)
             root._resetSilence()   // keep the mic session alive while we're conversing
         }
     }
@@ -214,8 +221,18 @@ Item {
         target: (typeof MainController !== "undefined") ? MainController.shotHistory : null
         ignoreUnknownSignals: true
         function onShotsFilteredReady(results, isAppend, totalCount) {
-            if (root._awaitingContext)
-                root._askWithContext(root._buildHistory(results))
+            if (!root._awaitingContext)
+                return
+            // Exact bean-name match came back empty → fall back to recent shots overall so the AI
+            // still has real history (Visualizer bean names / roast dates can drift).
+            if ((!results || results.length === 0) && !root._fellBack
+                    && (Settings.dye.dyeBeanBrand.length > 0 || Settings.dye.dyeBeanType.length > 0)
+                    && typeof MainController !== "undefined" && MainController.shotHistory) {
+                root._fellBack = true
+                MainController.shotHistory.requestShotsFiltered({}, 0, 15)
+                return
+            }
+            root._askWithContext(root._buildHistory(results), root._fellBack)
         }
     }
 
@@ -253,33 +270,6 @@ Item {
                     color: Theme.textSecondaryColor
                     font: Theme.labelFont
                     Accessible.ignored: true
-                }
-                Item {
-                    implicitWidth: Theme.scaled(32); implicitHeight: Theme.scaled(32)
-                    Accessible.role: Accessible.Button
-                    Accessible.name: TranslationManager.translate("barista.settings.open", "Assistant settings")
-                    Accessible.focusable: true
-                    Accessible.onPressAction: root._showSettings = true
-                    Image {
-                        anchors.centerIn: parent
-                        source: "qrc:/icons/settings.svg"
-                        width: Theme.scaled(20); height: Theme.scaled(20)
-                        fillMode: Image.PreserveAspectFit
-                        visible: status === Image.Ready
-                        Accessible.ignored: true
-                        // settings.svg is a white-stroke icon → tint to the theme colour so it's
-                        // visible on the light card surface (same pattern as the coaching-card sparkle).
-                        layer.enabled: true
-                        layer.effect: MultiEffect {
-                            colorization: 1.0
-                            colorizationColor: Theme.textColor
-                        }
-                    }
-                    MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: root._showSettings = true
-                    }
                 }
                 AccessibleButton {
                     subtle: true
@@ -354,13 +344,5 @@ Item {
                 }
             }
         }
-    }
-
-    // Settings panel (name / voice / bell / mute), toggled from the card's gear.
-    AssistantSettingsPanel {
-        visible: root._showSettings && (root._state === "greeting" || root._state === "closeOut")
-        anchors.centerIn: parent
-        width: Math.min(Theme.scaled(520), parent.width - Theme.spacingLarge * 2)
-        onClosed: root._showSettings = false
     }
 }

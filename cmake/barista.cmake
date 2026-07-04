@@ -42,6 +42,7 @@ if(DECENZA_BARISTA)
         FILES
             ${CMAKE_CURRENT_SOURCE_DIR}/qml/assistant/AssistantOverlay.qml
             ${CMAKE_CURRENT_SOURCE_DIR}/qml/assistant/AssistantSettingsPanel.qml
+            ${CMAKE_CURRENT_SOURCE_DIR}/qml/assistant/AssistantSettingsSection.qml
     )
 
     target_compile_definitions(Decenza PRIVATE DECENZA_BARISTA=1)

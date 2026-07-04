@@ -86,8 +86,10 @@ void AssistantVoice::speak(const QString& text) {
         synthOpenAI(text);
     else if (provider == QLatin1String("elevenlabs"))
         synthElevenLabs(text);
-    else if (m_tts)
+    else if (m_tts) {
+        m_tts->setRate((m_settings->voiceSpeed() - 1.0) / 0.5);   // map ~0.7–1.3 → rate -0.6..0.6
         m_tts->say(text);   // native engine
+    }
 }
 
 void AssistantVoice::synthOpenAI(const QString& text) {
@@ -104,7 +106,7 @@ void AssistantVoice::synthOpenAI(const QString& text) {
         {QStringLiteral("voice"), m_settings->openaiVoice()},
         {QStringLiteral("input"), text},
         {QStringLiteral("response_format"), QStringLiteral("mp3")},
-        {QStringLiteral("speed"), 1.15},                        // a touch faster than default
+        {QStringLiteral("speed"), m_settings->voiceSpeed()},    // user-adjustable pace
     };
     QNetworkReply* reply = m_net->post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
     connect(reply, &QNetworkReply::finished, this, [this, reply, text] {
@@ -129,7 +131,7 @@ void AssistantVoice::synthElevenLabs(const QString& text) {
     const QJsonObject body{
         {QStringLiteral("text"), text},
         {QStringLiteral("model_id"), QStringLiteral("eleven_turbo_v2_5")},
-        {QStringLiteral("voice_settings"), QJsonObject{{QStringLiteral("speed"), 1.15}}},   // faster pacing
+        {QStringLiteral("voice_settings"), QJsonObject{{QStringLiteral("speed"), m_settings->voiceSpeed()}}},
     };
     QNetworkReply* reply = m_net->post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
     connect(reply, &QNetworkReply::finished, this, [this, reply, text] {

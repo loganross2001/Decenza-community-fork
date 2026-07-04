@@ -70,6 +70,15 @@ public:
      */
     Q_INVOKABLE bool followUp(const QString& userMessage);
 
+    // [barista-fork] Re-stamp the system prompt for a new session WITHOUT touching message history.
+    // The system prompt is re-sent on every request and is never trimmed, so a surface that owns the
+    // shared conversation (barista / dialing advisor) puts its persona + freshly-built data context here
+    // each session — data survives trimHistory(), and the prior discussion (m_messages) is preserved.
+    Q_INVOKABLE void setSessionSystemPrompt(const QString& systemPrompt) { m_systemPrompt = systemPrompt; }
+    // Stamp the prompt, then send a kickoff as a normal turn. Works on a fresh OR resumed thread and,
+    // unlike ask(), never wipes history — so a data-less kickoff can't destroy the persisted discussion.
+    Q_INVOKABLE bool beginSession(const QString& systemPrompt, const QString& kickoffMessage);
+
     /**
      * Re-send the last failed turn. Valid only when canRetry() is true (not
      * busy, last turn is an unanswered user message). Re-uses the stored

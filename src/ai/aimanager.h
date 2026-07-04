@@ -44,7 +44,9 @@ public:
     explicit AIManager(QNetworkAccessManager* networkManager, Settings* settings, QObject* parent = nullptr);
     ~AIManager();
 
-    static constexpr int MAX_CONVERSATIONS = 5;
+    // [barista-fork] was 5 — too small once the barista keeps a persisted per-bean thread; evicting the
+    // 6th bean's whole discussion contradicts "recall prior advice even after a 2-month gap".
+    static constexpr int MAX_CONVERSATIONS = 100;
 
     struct ConversationEntry {
         QString key;

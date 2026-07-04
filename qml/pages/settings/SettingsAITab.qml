@@ -863,6 +863,14 @@ KeyboardAwareContainer {
                     }
                 }
 
+                // [barista-fork] hook — barista assistant settings (own component in the module,
+                // loaded by URL so the upstream QML list is untouched).
+                Loader {
+                    Layout.fillWidth: true
+                    active: typeof Barista !== "undefined"
+                    source: "qrc:/qml/assistant/AssistantSettingsSection.qml"
+                }
+
                 // Spacer to push content up
                 Item { Layout.fillHeight: true }
             }

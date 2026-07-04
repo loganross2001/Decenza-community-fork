@@ -145,6 +145,13 @@ bool AIConversation::followUp(const QString& userMessage)
     return true;
 }
 
+// [barista-fork] Stamp a fresh per-session system prompt, then continue the (possibly resumed) thread.
+bool AIConversation::beginSession(const QString& systemPrompt, const QString& kickoffMessage)
+{
+    setSessionSystemPrompt(systemPrompt);
+    return followUp(kickoffMessage);
+}
+
 void AIConversation::clearHistory()
 {
     // Clear stored data for current key

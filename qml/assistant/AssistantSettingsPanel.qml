@@ -58,9 +58,9 @@ Rectangle {
         StyledTextField {
             id: nameField
             Layout.fillWidth: true
-            text: root._settings ? root._settings.assistantName : ""
+            Component.onCompleted: text = root._settings ? root._settings.assistantName : ""
             placeholderText: TranslationManager.translate("barista.settings.namePlaceholder", "e.g. Gaggia")
-            onEditingFinished: if (root._settings) root._settings.assistantName = text
+            onEditingFinished: { Qt.inputMethod.commit(); if (root._settings) root._settings.assistantName = text }
         }
 
         // Your name — how the assistant addresses you (used in greetings)
@@ -71,9 +71,9 @@ Rectangle {
         StyledTextField {
             id: userField
             Layout.fillWidth: true
-            text: root._settings ? root._settings.userName : ""
+            Component.onCompleted: text = root._settings ? root._settings.userName : ""
             placeholderText: TranslationManager.translate("barista.settings.yourNamePlaceholder", "e.g. Chris")
-            onEditingFinished: if (root._settings) root._settings.userName = text
+            onEditingFinished: { Qt.inputMethod.commit(); if (root._settings) root._settings.userName = text }
         }
 
         // Voice source: native (free/robotic) · OpenAI · ElevenLabs (human, cloud)
@@ -130,28 +130,26 @@ Rectangle {
         StyledTextField {
             Layout.fillWidth: true
             visible: col._provider === "openai"
-            text: root._settings ? root._settings.openaiApiKey : ""
+            Component.onCompleted: text = root._settings ? root._settings.openaiApiKey : ""
             placeholderText: TranslationManager.translate("barista.settings.openaiKey",
                 "OpenAI API key (or leave blank to use Settings → AI)")
-            echoMode: TextInput.PasswordEchoOnEdit
-            onEditingFinished: if (root._settings) root._settings.openaiApiKey = text
+            onEditingFinished: { Qt.inputMethod.commit(); if (root._settings) root._settings.openaiApiKey = text }
         }
 
         // ElevenLabs (only when provider = elevenlabs): API key + voice id
         StyledTextField {
             Layout.fillWidth: true
             visible: col._provider === "elevenlabs"
-            text: root._settings ? root._settings.elevenlabsApiKey : ""
+            Component.onCompleted: text = root._settings ? root._settings.elevenlabsApiKey : ""
             placeholderText: TranslationManager.translate("barista.settings.elKey", "ElevenLabs API key")
-            echoMode: TextInput.PasswordEchoOnEdit
-            onEditingFinished: if (root._settings) root._settings.elevenlabsApiKey = text
+            onEditingFinished: { Qt.inputMethod.commit(); if (root._settings) root._settings.elevenlabsApiKey = text }
         }
         StyledTextField {
             Layout.fillWidth: true
             visible: col._provider === "elevenlabs"
-            text: root._settings ? root._settings.elevenlabsVoiceId : ""
+            Component.onCompleted: text = root._settings ? root._settings.elevenlabsVoiceId : ""
             placeholderText: TranslationManager.translate("barista.settings.elVoice", "ElevenLabs voice ID")
-            onEditingFinished: if (root._settings) root._settings.elevenlabsVoiceId = text
+            onEditingFinished: { Qt.inputMethod.commit(); if (root._settings) root._settings.elevenlabsVoiceId = text }
         }
 
         AccessibleButton {

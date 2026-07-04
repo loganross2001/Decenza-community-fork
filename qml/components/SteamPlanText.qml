@@ -98,7 +98,9 @@ Item {
         return live ? ("<b>" + e + "</b>") : e
     }, " <font size=\"+1\"><b>·</b></font> ")
 
-    implicitWidth: row.implicitWidth
+    // Report the NATURAL width, not row.implicitWidth (which would track the capped text width and
+    // ratchet the tile smaller each layout, never re-expanding). See ShotPlanText for the full rationale.
+    implicitWidth: Theme.scaled(20) + Theme.spacingSmall + planText.implicitWidth
     implicitHeight: row.implicitHeight
 
     // Always wrapped by SteamPlanItem / PlanItem, which already expose a StaticText a11y node — so ignore
@@ -121,6 +123,7 @@ Item {
         }
 
         Text {
+            id: planText
             anchors.verticalCenter: parent.verticalCenter
             // Cap to the available width only when the text would overflow; shorter text keeps its
             // natural width so the centred Row is unaffected.

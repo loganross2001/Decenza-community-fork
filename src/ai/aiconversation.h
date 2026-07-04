@@ -42,6 +42,7 @@ class AIConversation : public QObject {
     // [barista-fork] transient (NOT persisted): the barista sets this per session so its turns request
     // web search; reset in ask()/resetInMemory() so the shared conversation can't leak it to the advisor.
     Q_PROPERTY(bool webSearchEnabled READ webSearchEnabled WRITE setWebSearchEnabled NOTIFY webSearchEnabledChanged)
+    Q_PROPERTY(int verbatimPairs READ verbatimPairs WRITE setVerbatimPairs NOTIFY verbatimPairsChanged)
 
 public:
     explicit AIConversation(AIManager* aiManager, QObject* parent = nullptr);
@@ -58,6 +59,10 @@ public:
     QString contextLabel() const { return m_contextLabel; }
     bool webSearchEnabled() const { return m_webSearchEnabled; }
     void setWebSearchEnabled(bool e) { if (m_webSearchEnabled != e) { m_webSearchEnabled = e; emit webSearchEnabledChanged(); } }
+    // [barista-fork] transient per-session override of how many recent user+assistant pairs stay verbatim
+    // (the barista widens it so casual context — "Scott's here, two coffees" — survives a whole session).
+    int verbatimPairs() const { return m_verbatimPairs; }
+    void setVerbatimPairs(int n) { if (m_verbatimPairs != n) { m_verbatimPairs = n; emit verbatimPairsChanged(); } }
 
     QString storageKey() const { return m_storageKey; }
     void setStorageKey(const QString& key);
@@ -283,6 +288,7 @@ signals:
     void canRetryChanged();
     void contextLabelChanged();
     void webSearchEnabledChanged();
+    void verbatimPairsChanged();
     void providerChanged();
     void savedConversationChanged();
 
@@ -357,6 +363,7 @@ private:
     AIManager* m_aiManager;
     QString m_systemPrompt;
     bool m_webSearchEnabled = false;   // [barista-fork] transient per-session (not persisted)
+    int m_verbatimPairs = MAX_VERBATIM_PAIRS;   // [barista-fork] transient per-session (not persisted)
     // Array of {role, content[, shotId?, structuredNext?]} objects.
     // shotId is the resolved shot id the advisor was asked about for
     // the turn pair (issue #1053); structuredNext is present only on

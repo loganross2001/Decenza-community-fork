@@ -75,6 +75,7 @@ void AIConversation::ask(const QString& systemPrompt, const QString& userMessage
     }
 
     if (m_webSearchEnabled) { m_webSearchEnabled = false; emit webSearchEnabledChanged(); }   // [barista-fork] advisor entry — never inherit the barista's web search
+    if (m_verbatimPairs != MAX_VERBATIM_PAIRS) { m_verbatimPairs = MAX_VERBATIM_PAIRS; emit verbatimPairsChanged(); }   // [barista-fork]
 
     // Clear previous conversation and start fresh
     m_messages = QJsonArray();
@@ -183,6 +184,7 @@ void AIConversation::resetInMemory()
     m_lastResponse.clear();
     m_errorMessage.clear();
     if (m_webSearchEnabled) { m_webSearchEnabled = false; emit webSearchEnabledChanged(); }   // [barista-fork]
+    if (m_verbatimPairs != MAX_VERBATIM_PAIRS) { m_verbatimPairs = MAX_VERBATIM_PAIRS; emit verbatimPairsChanged(); }   // [barista-fork]
     emit historyChanged();
     emit canRetryChanged();
 }
@@ -1018,8 +1020,10 @@ void AIConversation::trimHistory()
     // Older shot messages get summarized into a compact context block.
     // Older non-shot messages (plain follow-ups) are dropped.
 
-    // Threshold: MAX_VERBATIM_PAIRS pairs = 2*MAX_VERBATIM_PAIRS messages, plus 1 pending user message
-    int maxVerbatim = MAX_VERBATIM_PAIRS * 2 + 1;
+    // Threshold: m_verbatimPairs pairs = 2*m_verbatimPairs messages, plus 1 pending user message.
+    // [barista-fork] m_verbatimPairs defaults to MAX_VERBATIM_PAIRS; the barista widens it per session so
+    // casual context (a guest, "two coffees today") survives the whole conversation, not just ~2 turns.
+    int maxVerbatim = m_verbatimPairs * 2 + 1;
     if (m_messages.size() <= maxVerbatim) return;
 
     // Split messages: everything before the last maxVerbatim are "old"

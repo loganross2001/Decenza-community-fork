@@ -174,7 +174,7 @@ Item {
         root._thinking = false
         root._pendingBegin = null
         // SF-1: clear web search so it can't leak onto a later advisor turn on the same conversation key.
-        if (root._conv) root._conv.webSearchEnabled = false
+        if (root._conv) { root._conv.webSearchEnabled = false; root._conv.verbatimPairs = 2 }
     }
     // SF-4: the preempted greeting couldn't beginSession because a close-out reply was mid-flight. Its reply
     // has now landed (conversation is free), so open the greeting — deferred to avoid re-entering the AI stack.
@@ -188,6 +188,7 @@ Item {
             if (typeof MainController !== "undefined" && MainController.aiManager)
                 MainController.aiManager.switchConversation(root._sessBrand, root._sessType, root._sessProf)
             root._conv.webSearchEnabled = pb.webOn
+            root._conv.verbatimPairs = 8
             root._thinking = true
             root._stampTurn()
             if (!root._conv.beginSession(pb.sys, pb.kick)) {   // N-R3-1: still busy → recover, don't wedge on "…"
@@ -276,10 +277,17 @@ Item {
         var who = root._settings ? root._settings.assistantName : "Coach"
         var name = root._userName.length > 0 ? root._userName : ""
 
-        var persona = "You are " + who + ", a warm, concise home espresso barista"
-            + (name ? " talking to " + name : "") + ".\n"
-            + "Speak 1-2 short, conversational sentences — no markdown, lists, or long number sequences in the spoken "
-            + "part. The data block below is the app's LIVE DATABASE of this user's shots, dial-in history, best "
+        var persona = "You are " + who + ", " + (name.length ? name + "'s" : "the user's")
+            + " friend behind the counter of their home espresso bar — a warm, curious person who happens to be a "
+            + "great barista.\n"
+            + "Speak 1-2 short, conversational sentences — read aloud, so no markdown, lists, or long number sequences.\n"
+            + "MATCH THE USER'S LANE. If they're being social — a guest, their morning, plans, 'my friend Scott is here "
+            + "so I'm making two coffees' — respond like a friend: react genuinely, ask one natural follow-up, and remember "
+            + "the people and occasions they mention so you can refer to them later ('how did Scott like his?'). Do NOT "
+            + "steer casual talk back to dialing advice. Only coach when the topic is the coffee (they ask, they're about "
+            + "to pull or just pulled a shot, or they report taste), or when something social makes coffee help genuinely "
+            + "useful (two guests → offer to line up back-to-back shots) — and keep it light.\n"
+            + "WHEN COACHING: the data block below is the app's LIVE DATABASE of this user's shots, dial-in history, best "
             + "recipes, and your own past advice: you DO have full access to it. NEVER say you lack their history, or "
             + "that this is their first shot, unless the block says 'recordedShots: 0'. Reference what you see and "
             + "suggest ONE concrete change for the next shot when it helps (fast/sour → finer; slow/bitter → coarser). "
@@ -289,7 +297,8 @@ Item {
             + "```json\n{\"grinderSetting\":\"4.75\",\"doseG\":18.0,\"targetWeightG\":36.0,\"temperatureC\":92.0,\"expectation\":\"less sour\"}\n```\n"
             + "grinderSetting = grinder dial (off-machine), doseG = grams in, targetWeightG = grams out (yield/ratio), "
             + "temperatureC = brew temp. The app applies it when the user says OK, so give real values. Omit the block "
-            + "entirely if you're not changing anything."
+            + "entirely if you're not changing anything — never attach it to casual chat, only when actually recommending "
+            + "a machine or grinder change."
 
         // Proactivity level (user setting): what the assistant may VOLUNTEER (it always answers direct asks).
         var level = root._settings ? root._settings.proactivityLevel : "full"
@@ -328,11 +337,12 @@ Item {
         var block = (dataBlock && dataBlock.length > 0) ? dataBlock : "recordedShots: 0"
 
         var suggest = (level === "off" || !mayNudge)
-            ? "Greet me briefly and wait for me to ask before suggesting changes."
-            : "Greet me and suggest one useful thing."
+            ? "It's the " + root._partOfDay() + " and I'm at the machine. Just say hi like a friend — no advice unless I ask."
+            : "It's the " + root._partOfDay() + " and I'm at the machine. Say hi like a friend would, then mention the single "
+              + "most useful thing if there is one."
         var kickoff = (root._state === "closeOut")
             ? "I just pulled a shot — how did it go?"
-            : "It's the " + root._partOfDay() + " and I'm about to pull espresso. " + suggest
+            : suggest
         // New-bean opener: no history for this bean → open with a grounded start from the bean profile.
         if (root._state !== "closeOut" && block.indexOf("recordedShots: 0") >= 0)
             kickoff += " (This is my first shot on this coffee — use the bean profile to suggest a starting point.)"
@@ -342,6 +352,7 @@ Item {
                      + " but haven't confirmed doing it — ask me early whether I actually set it.)"
 
         root._conv.webSearchEnabled = webOn   // barista session only; reset by ask()/resetInMemory()
+        root._conv.verbatimPairs = 8          // keep more of the chat verbatim so casual context survives the session
         root._stampTurn()
         var _sys = persona + "\n\n" + block
         if (!root._conv.beginSession(_sys, kickoff))   // SF-4: busy (a prior turn in flight) → retry when free
@@ -381,7 +392,14 @@ Item {
             // isn't scored as good and a one-word confirmation doesn't overwrite the notes (S9).
             var w = t.toLowerCase().replace(/[^a-z0-9'\s]/g, " ").split(/\s+/)
             var isConfirmation = hasActions && Barista.actions.parseConfirmation(t) >= 0
-            if (!isConfirmation && w.length >= 2) {
+            // Only treat the reply as taste feedback if it actually describes the shot — otherwise a social
+            // remark ("Scott's here, two coffees") would burn the one-shot capture on non-taste text.
+            var TASTE = ["sour", "bitter", "burnt", "balanced", "good", "great", "perfect", "nice", "delicious",
+                "love", "lovely", "bad", "thin", "watery", "harsh", "weak", "strong", "rich", "smooth", "sweet",
+                "sweeter", "acidic", "fruity", "chocolate", "chocolatey", "nutty", "bright", "muddy", "astringent",
+                "tasty", "taste", "tasted", "tastes", "flavor", "flavour", "crema", "balance", "shot"]
+            var hasTaste = w.some(function(x) { return TASTE.indexOf(x) >= 0 })
+            if (!isConfirmation && w.length >= 2 && hasTaste) {
                 root._closeOutRated = true
                 var neg = w.indexOf("no") >= 0 || w.indexOf("not") >= 0 || w.indexOf("bad") >= 0
                 var enj = (w.indexOf("sour") >= 0) ? 45
@@ -411,6 +429,7 @@ Item {
             root._collapsed = false   // a new greeting/close-out opens expanded
             if (root._orch.state === "greeting") {
                 if (root._voice) root._voice.playBell()
+                if (avatar.visible) avatar.greet()
                 root._startConversation()
             } else if (root._orch.state === "closeOut") {
                 root._startConversation()
@@ -565,15 +584,32 @@ Item {
                 }
             }
 
-            // The assistant's line (or a thinking indicator) — fills the panel so the input pins to the bottom
+            // [barista-fork] The character face — so the user can watch + listen instead of reading. Driven by
+            // the voice/thinking/listening state; greet() fires on activation (see onStateChanged).
+            BaristaAvatar {
+                id: avatar
+                visible: root._settings && root._settings.avatarEnabled
+                Layout.alignment: Qt.AlignHCenter
+                Layout.topMargin: Theme.spacingSmall
+                Layout.preferredWidth: Theme.scaled(150)
+                Layout.preferredHeight: Theme.scaled(150)
+                mode: (root._voice && root._voice.speaking) ? "speaking"
+                    : root._thinking ? "thinking"
+                    : (root._voiceInput && root._voiceInput.listening && !root._voiceInput.paused) ? "listening"
+                    : "idle"
+            }
+
+            // The assistant's line (or a thinking indicator) — fills the panel so the input pins to the bottom.
+            // Secondary when the character is shown (the user doesn't need to read everything), but still visible
+            // so errors, the action chip, and the listening partial stay readable.
             Text {
                 id: msgText
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 verticalAlignment: Text.AlignTop
                 wrapMode: Text.WordWrap
-                color: Theme.textColor
-                font: Theme.subtitleFont
+                color: avatar.visible ? Theme.textSecondaryColor : Theme.textColor
+                font: avatar.visible ? Theme.bodyFont : Theme.subtitleFont
                 text: (root._thinking && root._message.length === 0)
                       ? TranslationManager.translate("barista.thinking", "…")
                       : root._message

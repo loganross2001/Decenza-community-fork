@@ -50,6 +50,7 @@ if(DECENZA_BARISTA)
             ${CMAKE_CURRENT_SOURCE_DIR}/qml/assistant/AssistantSettingsPanel.qml
             ${CMAKE_CURRENT_SOURCE_DIR}/qml/assistant/AssistantSettingsSection.qml
             ${CMAKE_CURRENT_SOURCE_DIR}/qml/assistant/ActionConfirmChip.qml
+            ${CMAKE_CURRENT_SOURCE_DIR}/qml/assistant/BaristaAvatar.qml
     )
 
     target_compile_definitions(Decenza PRIVATE DECENZA_BARISTA=1)

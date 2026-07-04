@@ -170,6 +170,17 @@ void AssistantSettings::setWebSearchEnabled(bool e) {
     emit webSearchEnabledChanged();
 }
 
+bool AssistantSettings::avatarEnabled() const {
+    return m_settings.value(QStringLiteral("barista/avatarEnabled"), true).toBool();
+}
+
+void AssistantSettings::setAvatarEnabled(bool e) {
+    if (avatarEnabled() == e)
+        return;
+    m_settings.setValue(QStringLiteral("barista/avatarEnabled"), e);
+    emit avatarEnabledChanged();
+}
+
 bool AssistantSettings::consumeProactiveNudge(const QString& beanKey, int cooldownHours) {
     QString safe = beanKey;
     safe.replace(QRegularExpression(QStringLiteral("[^A-Za-z0-9]")), QStringLiteral("_"));

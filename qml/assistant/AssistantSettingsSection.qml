@@ -62,6 +62,21 @@ ColumnLayout {
              color: Theme.textColor; font: Theme.bodyFont; Accessible.ignored: true }
     }
 
+    // Show the animated character face
+    RowLayout {
+        Layout.fillWidth: true; spacing: Theme.spacingSmall
+        Switch {
+            checked: root._settings ? root._settings.avatarEnabled : true
+            onToggled: if (root._settings) root._settings.avatarEnabled = checked
+            Accessible.role: Accessible.CheckBox; Accessible.name: trAvatar.text
+            Accessible.checked: checked; Accessible.focusable: true; Accessible.onToggleAction: toggle()
+        }
+        Tr { id: trAvatar; key: "barista.settings.avatar"
+             fallback: "Show character — a face to watch while it talks"
+             Layout.fillWidth: true; wrapMode: Text.WordWrap
+             color: Theme.textColor; font: Theme.bodyFont; Accessible.ignored: true }
+    }
+
     // Assistant name
     Tr { key: "barista.settings.name"; fallback: "Assistant name"
          color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true }

@@ -4,6 +4,7 @@
 
 #include "voiceinput.h"        // complete type needed for the Q_PROPERTY(VoiceInput*) metatype
 #include "baristaknowledge.h"  // ditto for Q_PROPERTY(BaristaKnowledge*)
+#include "baristaactions.h"    // ditto for Q_PROPERTY(BaristaActions*)
 
 class QQmlApplicationEngine;
 class MainController;
@@ -24,6 +25,7 @@ class BaristaModule : public QObject {
     Q_PROPERTY(AssistantVoice* voice READ voice CONSTANT)
     Q_PROPERTY(VoiceInput* voiceInput READ voiceInput CONSTANT)
     Q_PROPERTY(BaristaKnowledge* knowledge READ knowledge CONSTANT)
+    Q_PROPERTY(BaristaActions* actions READ actions CONSTANT)
 
 public:
     // Single upstream hook: construct the module (settings + orchestrator), register the
@@ -41,6 +43,7 @@ public:
     AssistantVoice* voice() const { return m_voice; }
     VoiceInput* voiceInput() const { return m_voiceInput; }
     BaristaKnowledge* knowledge() const { return m_knowledge; }
+    BaristaActions* actions() const { return m_actions; }
 
 signals:
     void enabledChanged();
@@ -54,4 +57,5 @@ private:
     AssistantVoice* m_voice = nullptr;
     VoiceInput* m_voiceInput = nullptr;
     BaristaKnowledge* m_knowledge = nullptr;
+    BaristaActions* m_actions = nullptr;
 };

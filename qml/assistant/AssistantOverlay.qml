@@ -59,6 +59,10 @@ Item {
     property string _message: ""       // the assistant's latest line
     property bool _thinking: false
     property bool _showSettings: false
+    property bool _collapsed: false     // panel minimised to a thin edge tab (frees the whole screen)
+    property var _pendingNext: null     // structuredNext recommendation awaiting apply/skip
+    property bool _awaitConfirm: false  // a recommendation is armed for a voice "OK"
+    property var _pendingGrind: null    // outstanding off-machine grind reminder (shown at greeting)
     property bool _awaitingContext: false   // waiting on the shot history before opening the conversation
     property bool _closeOutRated: false      // persist the close-out taste to the shot exactly once
     property bool _fellBack: false           // bean-filtered history was empty → fetched recent overall
@@ -69,6 +73,45 @@ Item {
         var clean = (t || "").replace(/```[\s\S]*?```/g, " ").replace(/[*_#`>]/g, "")
                               .replace(/^\s*[-•]\s+/gm, "").replace(/\s+/g, " ").trim()
         root._voice.speak(clean)
+    }
+    // Strip the trailing structuredNext fenced block from the DISPLAYED message (keep the prose).
+    function _stripBlock(t) {
+        return (t || "").replace(/```[\s\S]*?```/g, "").replace(/\n{3,}/g, "\n\n").trim()
+    }
+
+    // Apply a confirmed recommendation, then speak a short local confirmation (no model round-trip).
+    function _applyPending() {
+        if (!root._pendingNext || typeof Barista === "undefined" || !Barista.actions) {
+            root._awaitConfirm = false; return
+        }
+        var res = Barista.actions.applyFromNext(root._pendingNext,
+            (root._orch && root._orch.lastShotId) ? root._orch.lastShotId : 0)
+        var msg
+        if (res.blocked) {
+            msg = TranslationManager.translate("barista.act.blocked", "I can't change that while a shot is running.")
+        } else {
+            var bits = (res.applied || []).concat(res.queued || [])
+            msg = bits.length > 0
+                ? TranslationManager.translate("barista.act.done", "Done — %1 for the next shot.").arg(bits.join(", "))
+                : TranslationManager.translate("barista.act.nothing", "Nothing to change there.")
+        }
+        root._message = msg
+        root._speakSanitised(msg)
+        root._pendingNext = null
+        root._awaitConfirm = false
+    }
+    function _skipPending() {
+        root._pendingNext = null
+        root._awaitConfirm = false
+    }
+    // Resolve the off-machine grind reminder: done → writes the grind; not done → leaves it.
+    function _resolveGrind(done) {
+        if (typeof Barista !== "undefined" && Barista.actions) Barista.actions.resolveGrind(done)
+        var msg = done ? TranslationManager.translate("barista.act.grindOk", "Great — got it.")
+                       : TranslationManager.translate("barista.act.grindNo", "No problem, I'll leave it.")
+        root._message = msg
+        root._speakSanitised(msg)
+        root._pendingGrind = null
     }
 
     // Who the assistant is talking to: the user's chosen name, else the active barista.
@@ -99,6 +142,11 @@ Item {
         root._awaitingContext = true
         root._closeOutRated = false
         root._fellBack = false
+        root._pendingNext = null
+        root._awaitConfirm = false
+        // At a greeting (before a shot), surface any off-machine grind the user agreed to but didn't confirm.
+        root._pendingGrind = (root._state === "greeting" && typeof Barista !== "undefined" && Barista.actions)
+                             ? Barista.actions.outstandingGrind() : null
         // (1) Load THIS bean's persisted conversation so the AI recalls its own prior guidance (pick up
         // where we left off, even after long gaps). (2) Assemble the FULL advisor-grade dialing context
         // (dial-in sessions, best shot, bean best, grinder context, closed-loop advice) → baristaContextReady.
@@ -142,13 +190,18 @@ Item {
 
         var persona = "You are " + who + ", a warm, concise home espresso barista"
             + (name ? " talking to " + name : "") + ".\n"
-            + "Your replies are SPOKEN ALOUD: keep them to 1-2 short sentences, conversational — NO markdown, lists, "
-            + "JSON, code, or long number sequences. The data block below is the app's LIVE DATABASE of this user's "
-            + "shots, dial-in history, best recipes, and your own past advice: you DO have full access to it. NEVER say "
-            + "you lack their history, or that this is their first shot, unless the block says 'recordedShots: 0'. "
-            + "Reference what you see and suggest ONE concrete change for the next shot when it helps "
-            + "(fast/sour → finer; slow/bitter → coarser). Recall your past advice and pick up where you left off, "
-            + "even after long gaps. Adapt to their replies."
+            + "Speak 1-2 short, conversational sentences — no markdown, lists, or long number sequences in the spoken "
+            + "part. The data block below is the app's LIVE DATABASE of this user's shots, dial-in history, best "
+            + "recipes, and your own past advice: you DO have full access to it. NEVER say you lack their history, or "
+            + "that this is their first shot, unless the block says 'recordedShots: 0'. Reference what you see and "
+            + "suggest ONE concrete change for the next shot when it helps (fast/sour → finer; slow/bitter → coarser). "
+            + "Recall your past advice and pick up where you left off. Adapt to their replies.\n"
+            + "WHEN you recommend a concrete change, append EXACTLY ONE fenced block at the very END, with only the "
+            + "field(s) you're changing:\n"
+            + "```json\n{\"grinderSetting\":\"4.75\",\"doseG\":18.0,\"targetWeightG\":36.0,\"temperatureC\":92.0,\"expectation\":\"less sour\"}\n```\n"
+            + "grinderSetting = grinder dial (off-machine), doseG = grams in, targetWeightG = grams out (yield/ratio), "
+            + "temperatureC = brew temp. The app applies it when the user says OK, so give real values. Omit the block "
+            + "entirely if you're not changing anything."
 
         // dataBlock is the pre-formatted advisor-grade context from AIManager.requestBaristaContext().
         var block = (dataBlock && dataBlock.length > 0) ? dataBlock : "recordedShots: 0"
@@ -156,6 +209,10 @@ Item {
         var kickoff = (root._state === "closeOut")
             ? "I just pulled a shot — how did it go?"
             : "It's the " + root._partOfDay() + " and I'm about to pull espresso. Greet me and suggest one thing."
+        // Volatile bit goes in the kickoff (not the cached system prompt): the pending grind reminder.
+        if (root._pendingGrind && root._pendingGrind.value)
+            kickoff += " (I earlier agreed to set the grinder to " + root._pendingGrind.value
+                     + " but haven't confirmed doing it — ask me early whether I actually set it.)"
 
         root._conv.beginSession(persona + "\n\n" + block, kickoff)
     }
@@ -164,6 +221,20 @@ Item {
         var t = (text || "").trim()
         if (t.length === 0 || !root._conv || root._thinking)
             return
+        var hasActions = (typeof Barista !== "undefined" && Barista.actions)
+        // Off-machine grind reminder confirm takes priority (greeting).
+        if (hasActions && root._pendingGrind && root._pendingGrind.value) {
+            var g = Barista.actions.parseConfirmation(t)   // 1 yes / 0 no / -1 neither
+            if (g === 1) { root._resolveGrind(true); return }
+            if (g === 0) { root._resolveGrind(false); return }
+        }
+        // Apply-on-confirm for a pending recommendation ("OK" → apply; "no" → skip).
+        if (hasActions && root._awaitConfirm && root._pendingNext) {
+            var c = Barista.actions.parseConfirmation(t)
+            if (c === 1) { root._applyPending(); return }
+            if (c === 0) { root._skipPending(); return }
+            root._awaitConfirm = false   // ambiguous → new topic, disarm and pass to the AI
+        }
         // PERSISTENCE: capture the close-out taste feedback onto the shot record, so it's available to
         // the AI on every future call — never starting over or guessing. (Recent-shot context includes it.)
         if (root._state === "closeOut" && !root._closeOutRated && root._orch && root._orch.lastShotId > 0
@@ -190,6 +261,7 @@ Item {
         ignoreUnknownSignals: true
         function onStateChanged() {
             if (!root._orch) return
+            root._collapsed = false   // a new greeting/close-out opens expanded
             if (root._orch.state === "greeting") {
                 if (root._voice) root._voice.playBell()
                 root._startConversation()
@@ -205,10 +277,16 @@ Item {
         target: root._conv
         ignoreUnknownSignals: true
         function onResponseReceived(response) {
-            root._message = response
+            root._message = root._stripBlock(response)   // hide the JSON action block from the display
             root._thinking = false
-            root._speakSanitised(response)
+            root._speakSanitised(response)               // (also strips fenced blocks before TTS)
             root._resetSilence()   // keep the mic session alive while we're conversing
+            // If this turn carried a concrete recommendation, arm apply-on-confirm + show the chip.
+            var nx = root._conv ? root._conv.structuredNextForLastAssistantTurnMap() : null
+            if (nx && Object.keys(nx).length > 0) {
+                root._pendingNext = nx
+                root._awaitConfirm = true
+            }
             // Turn done. If speaking, speakingChanged(false) reopens the mic; if muted, reopen it now.
             if (root._voiceInput && root._voiceInput.listening
                     && root._settings && !root._settings.voiceEnabled)
@@ -229,7 +307,7 @@ Item {
     // ---- Conversation card (centered, idle page only) --------------------------
     Rectangle {
         id: card
-        visible: (root._state === "greeting" || root._state === "closeOut") && !root._showSettings
+        visible: (root._state === "greeting" || root._state === "closeOut") && !root._showSettings && !root._collapsed
         // Right-docked side panel: leaves the machine controls usable on the left, gives the
         // conversation room to grow, and is out of the way (recommended tablet-assistant UX).
         anchors.right: parent.right
@@ -268,6 +346,12 @@ Item {
                 }
                 AccessibleButton {
                     subtle: true
+                    text: "→"   // collapse to a thin edge tab, freeing the whole screen
+                    accessibleName: TranslationManager.translate("barista.collapse", "Collapse assistant")
+                    onClicked: root._collapsed = true
+                }
+                AccessibleButton {
+                    subtle: true
                     text: "×"
                     accessibleName: TranslationManager.translate("common.accessibility.dismissDialog", "Dismiss")
                     onClicked: if (root._orch) root._orch.dismiss()
@@ -286,6 +370,17 @@ Item {
                 text: (root._thinking && root._message.length === 0)
                       ? TranslationManager.translate("barista.thinking", "…")
                       : root._message
+            }
+
+            // Apply-on-confirm chip: appears when a recommendation (or a grind reminder) is pending.
+            ActionConfirmChip {
+                id: actionChip
+                Layout.fillWidth: true
+                grindMode: root._pendingGrind && root._pendingGrind.value ? true : false
+                grindValue: root._pendingGrind ? (root._pendingGrind.value || "") : ""
+                next: root._pendingNext || ({})
+                onApplied: actionChip.grindMode ? root._resolveGrind(true) : root._applyPending()
+                onSkipped: actionChip.grindMode ? root._resolveGrind(false) : root._skipPending()
             }
 
             // Live listening indicator (partial transcription while the mic is open)
@@ -340,6 +435,38 @@ Item {
                     onClicked: { root._send(replyField.text); replyField.text = "" }
                 }
             }
+        }
+    }
+
+    // Collapsed state: a thin tab on the right edge. The whole screen is usable; tap to reopen.
+    Rectangle {
+        id: edgeTab
+        visible: (root._state === "greeting" || root._state === "closeOut") && !root._showSettings && root._collapsed
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        width: Theme.scaled(34)
+        height: Theme.scaled(96)
+        radius: Theme.cardRadius
+        color: Theme.surfaceColor
+        border.width: 1
+        border.color: Theme.borderColor
+
+        Accessible.role: Accessible.Button
+        Accessible.name: TranslationManager.translate("barista.expand", "Open assistant")
+        Accessible.focusable: true
+        Accessible.onPressAction: root._collapsed = false
+
+        Text {
+            anchors.centerIn: parent
+            text: "←"   // pull the panel back out
+            color: Theme.textColor
+            font: Theme.subtitleFont
+            Accessible.ignored: true
+        }
+        MouseArea {
+            anchors.fill: parent
+            cursorShape: Qt.PointingHandCursor
+            onClicked: root._collapsed = false
         }
     }
 }

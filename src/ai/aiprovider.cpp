@@ -178,7 +178,7 @@ void OpenAIProvider::analyze(const QString& systemPrompt, const QString& userPro
     userMsg["content"] = userPrompt;
     messages.append(userMsg);
     requestBody["messages"] = messages;
-    requestBody["max_tokens"] = 1024;
+    requestBody["max_tokens"] = 4096;   // [barista-fork] was 1024 — short replies were truncating mid-sentence
 
     sendRequest(requestBody);
 }
@@ -197,7 +197,7 @@ void OpenAIProvider::analyzeConversation(const QString& systemPrompt, const QJso
     QJsonObject requestBody;
     requestBody["model"] = QString::fromLatin1(MODEL);
     requestBody["messages"] = buildOpenAIMessages(systemPrompt, messages);
-    requestBody["max_tokens"] = 1024;
+    requestBody["max_tokens"] = 4096;   // [barista-fork] was 1024 — short replies were truncating mid-sentence
 
     sendRequest(requestBody);
 }
@@ -373,7 +373,7 @@ void AnthropicProvider::analyze(const QString& systemPrompt, const QString& user
 
     QJsonObject requestBody;
     requestBody["model"] = QString::fromLatin1(MODEL);
-    requestBody["max_tokens"] = 1024;
+    requestBody["max_tokens"] = 4096;   // [barista-fork] was 1024 — short replies were truncating mid-sentence
     requestBody["system"] = buildCachedSystemPrompt(systemPrompt);
     QJsonArray messages;
     QJsonObject userMsg;
@@ -398,7 +398,7 @@ void AnthropicProvider::analyzeConversation(const QString& systemPrompt, const Q
 
     QJsonObject requestBody;
     requestBody["model"] = QString::fromLatin1(MODEL);
-    requestBody["max_tokens"] = 1024;
+    requestBody["max_tokens"] = 4096;   // [barista-fork] was 1024 — short replies were truncating mid-sentence
     requestBody["system"] = buildCachedSystemPrompt(systemPrompt);
     requestBody["messages"] = messagesWithCachedFirstUser(messages);
 
@@ -685,7 +685,7 @@ void GeminiProvider::sendRequest(const QJsonObject& requestBody)
     }
     QJsonObject generationConfig;
     generationConfig["thinkingConfig"] = thinkingConfig;
-    generationConfig["maxOutputTokens"] = 1024;  // also bounds thinking tokens; matches other providers
+    generationConfig["maxOutputTokens"] = 4096;  // [barista-fork] was 1024; also bounds thinking tokens
     bodyWithConfig["generationConfig"] = generationConfig;
 
     m_retryFn = [this, requestBody]() { sendRequest(requestBody); };
@@ -984,7 +984,7 @@ void OpenRouterProvider::analyze(const QString& systemPrompt, const QString& use
     userMsg["content"] = userPrompt;
     messages.append(userMsg);
     requestBody["messages"] = messages;
-    requestBody["max_tokens"] = 1024;
+    requestBody["max_tokens"] = 4096;   // [barista-fork] was 1024 — short replies were truncating mid-sentence
 
     sendRequest(requestBody);
 }
@@ -1003,7 +1003,7 @@ void OpenRouterProvider::analyzeConversation(const QString& systemPrompt, const 
     QJsonObject requestBody;
     requestBody["model"] = m_model;
     requestBody["messages"] = buildOpenAIMessages(systemPrompt, messages);
-    requestBody["max_tokens"] = 1024;
+    requestBody["max_tokens"] = 4096;   // [barista-fork] was 1024 — short replies were truncating mid-sentence
 
     sendRequest(requestBody);
 }

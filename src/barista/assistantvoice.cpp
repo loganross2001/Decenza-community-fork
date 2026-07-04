@@ -91,6 +91,7 @@ void AssistantVoice::synthOpenAI(const QString& text) {
         {QStringLiteral("voice"), m_settings->openaiVoice()},
         {QStringLiteral("input"), text},
         {QStringLiteral("response_format"), QStringLiteral("mp3")},
+        {QStringLiteral("speed"), 1.15},                        // a touch faster than default
     };
     QNetworkReply* reply = m_net->post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
     connect(reply, &QNetworkReply::finished, this, [this, reply, text] {
@@ -115,6 +116,7 @@ void AssistantVoice::synthElevenLabs(const QString& text) {
     const QJsonObject body{
         {QStringLiteral("text"), text},
         {QStringLiteral("model_id"), QStringLiteral("eleven_turbo_v2_5")},
+        {QStringLiteral("voice_settings"), QJsonObject{{QStringLiteral("speed"), 1.15}}},   // faster pacing
     };
     QNetworkReply* reply = m_net->post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
     connect(reply, &QNetworkReply::finished, this, [this, reply, text] {

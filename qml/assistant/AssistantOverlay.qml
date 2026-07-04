@@ -52,14 +52,32 @@ Item {
         root._thinking = true
         root._awaitingContext = true
         root._closeOutRated = false
-        if (typeof MainController !== "undefined" && MainController.aiManager
-                && (Settings.dye.dyeBeanBrand.length > 0 || Settings.dye.dyeBeanType.length > 0)) {
-            MainController.aiManager.requestRecentShotContext(
-                Settings.dye.dyeBeanBrand, Settings.dye.dyeBeanType,
-                (typeof ProfileManager !== "undefined") ? ProfileManager.currentProfileName : "", -1)
+        // Pull the user's ACTUAL recent shots (their real history — this morning's included), not the
+        // narrow grind-calibration blob. ask() fires once they arrive (shotsFilteredReady).
+        if (typeof MainController !== "undefined" && MainController.shotHistory) {
+            MainController.shotHistory.requestShotsFiltered({}, 0, 10)
         } else {
-            root._askWithContext("")   // no bean set → converse without history
+            root._askWithContext("")
         }
+    }
+
+    // Turn recent shots into a compact history the AI can reason over.
+    function _buildHistory(results) {
+        if (!results || results.length === 0)
+            return ""
+        var lines = []
+        for (var i = 0; i < results.length && i < 10; i++) {
+            var s = results[i]
+            var bean = (((s.beanBrand || "") + " " + (s.beanType || "")).trim()) || "?"
+            var detail = []
+            if (s.grinderSetting && String(s.grinderSetting).length > 0) detail.push("grind " + s.grinderSetting)
+            if (Number(s.doseWeightG) > 0) detail.push("dose " + Number(s.doseWeightG).toFixed(1) + "g")
+            if (Number(s.durationSec) > 0) detail.push(Math.round(s.durationSec) + "s")
+            if (Number(s.enjoyment0to100) > 0) detail.push("rated " + s.enjoyment0to100 + "/100")
+            if (s.grindIssueDetected) detail.push("grind issue")
+            lines.push("- " + (s.dateTime || "") + "  " + bean + ": " + detail.join(", "))
+        }
+        return lines.join("\n")
     }
 
     // Build the system prompt WITH the real history and open the conversation.
@@ -71,24 +89,25 @@ Item {
         var name = root._userName.length > 0 ? root._userName : ""
         var bean = root._bean.length > 0 ? root._bean : "their coffee"
         var hist = (history && history.length > 0) ? history
-                 : "(no prior shots recorded on this coffee yet)"
+                 : "(no shots recorded yet)"
         var sys, seed
         if (root._state === "closeOut") {
             sys = "You are " + who + ", a warm, concise home espresso barista"
                 + (name ? " talking to " + name : "") + ".\n"
-                + "Their recent history on " + bean + ":\n" + hist + "\n\n"
+                + "Their recent shots (most recent first — dose, grind, time, rating):\n" + hist + "\n\n"
                 + "They just finished a shot. Using the history, comment briefly on how it likely went and offer at most "
                 + "one tweak for next time, or ask ONE short question. 1-2 short spoken sentences, conversational."
             seed = "I just pulled a shot."
         } else {
             sys = "You are " + who + ", a warm, concise home espresso barista"
                 + (name ? " talking to " + name : "") + ".\n"
-                + "Their recent dial-in history on " + bean + ":\n" + hist + "\n\n"
-                + "It is the " + root._partOfDay() + " and they are about to pull espresso. Greet them briefly"
-                + (name ? " by name" : "") + " and confirm the coffee if useful. You ALREADY KNOW the history above, so do "
-                + "NOT ask them to recap past shots — instead proactively suggest ONE specific change for THIS shot based on "
-                + "the history (e.g. recent shots ran fast or tasted sour → suggest a finer grind; slow or bitter → coarser). "
-                + "Keep every reply to 1-2 short spoken sentences, conversational, and adapt to their answers."
+                + "Their recent shots (most recent first — dose, grind, time, rating):\n" + hist + "\n\n"
+                + "It is the " + root._partOfDay() + " and they are about to pull espresso; their current coffee is " + bean + ".\n"
+                + "You ALREADY HAVE their shot history above — treat it as fact. NEVER say this is their first shot or that "
+                + "you lack data if any shots are listed. Greet them briefly" + (name ? " by name" : "")
+                + ", reference what you see (e.g. how this morning's shots on this coffee went), and proactively suggest ONE "
+                + "specific change for THIS shot based on the history (fast/sour → finer; slow/bitter → coarser). Do NOT ask "
+                + "them to recap past shots. Keep every reply to 1-2 short spoken sentences, conversational, and adapt."
             seed = "Hi — here to make espresso."
         }
         root._conv.ask(sys, seed)
@@ -144,14 +163,14 @@ Item {
             if (root._voice) root._voice.speak(response)
         }
     }
-    // Rich dial-in history arrived → now open the conversation grounded in it (so the AI KNOWS,
+    // Recent shots arrived → open the conversation grounded in the real history (so the AI KNOWS,
     // rather than asking). Gated on _awaitingContext so we only consume the request we fired.
     Connections {
-        target: (typeof MainController !== "undefined") ? MainController.aiManager : null
+        target: (typeof MainController !== "undefined") ? MainController.shotHistory : null
         ignoreUnknownSignals: true
-        function onRecentShotContextReady(context) {
+        function onShotsFilteredReady(results, isAppend, totalCount) {
             if (root._awaitingContext)
-                root._askWithContext(context)
+                root._askWithContext(root._buildHistory(results))
         }
     }
 

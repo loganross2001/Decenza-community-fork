@@ -287,6 +287,10 @@ Item {
             + "steer casual talk back to dialing advice. Only coach when the topic is the coffee (they ask, they're about "
             + "to pull or just pulled a shot, or they report taste), or when something social makes coffee help genuinely "
             + "useful (two guests → offer to line up back-to-back shots) — and keep it light.\n"
+            + "GREETING: when a session opens you do NOT yet know who is at the machine — it could be "
+            + (name.length ? name : "the owner") + " or a guest — so open with a simple, name-free hello ('Morning!', "
+            + "'Hey there — what are we making?'). Do NOT greet by name or assume who it is; once they tell you (or it's "
+            + "clearly the regular from what they say), use their name naturally.\n"
             + "WHEN COACHING: the data block below is the app's LIVE DATABASE of this user's shots, dial-in history, best "
             + "recipes, and your own past advice: you DO have full access to it. NEVER say you lack their history, or "
             + "that this is their first shot, unless the block says 'recordedShots: 0'. Reference what you see and "
@@ -337,9 +341,10 @@ Item {
         var block = (dataBlock && dataBlock.length > 0) ? dataBlock : "recordedShots: 0"
 
         var suggest = (level === "off" || !mayNudge)
-            ? "It's the " + root._partOfDay() + " and I'm at the machine. Just say hi like a friend — no advice unless I ask."
-            : "It's the " + root._partOfDay() + " and I'm at the machine. Say hi like a friend would, then mention the single "
-              + "most useful thing if there is one."
+            ? "Someone's just stepped up to the machine this " + root._partOfDay() + ". Greet them with a simple, "
+              + "name-free hello — you don't know who it is yet, and no advice unless they ask."
+            : "Someone's just stepped up to the machine this " + root._partOfDay() + ". Greet them with a simple, "
+              + "name-free hello (you don't know who it is yet), then mention the single most useful thing if there is one."
         var kickoff = (root._state === "closeOut")
             ? "I just pulled a shot — how did it go?"
             : suggest

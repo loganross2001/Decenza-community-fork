@@ -53,9 +53,9 @@ Item {
             width: parent.width * 0.80
             height: parent.height * 0.84
             radius: width * 0.46
-            color: Theme.accentColor
+            color: Theme.highlightColor
             border.width: Math.max(1, root.width * 0.012)
-            border.color: Qt.darker(Theme.accentColor, 1.3)
+            border.color: Qt.darker(Theme.highlightColor, 1.3)
         }
 
         // ---- eyebrows ----
@@ -83,7 +83,7 @@ Item {
                 radius: width / 2
                 color: "white"
                 border.width: Math.max(1, root.width * 0.008)
-                border.color: Qt.darker(Theme.accentColor, 1.3)
+                border.color: Qt.darker(Theme.highlightColor, 1.3)
                 x: head.x + head.width * (index === 0 ? 0.16 : 0.60)
                 y: head.y + head.height * 0.38
                 property real blinkScale: 1.0
@@ -116,7 +116,7 @@ Item {
             width: head.width * (0.30 + root._greetSmile * 0.14)
             height: Math.max(root.width * 0.03, root.width * 0.03 + root.mouthOpen * root.width * 0.14)
             radius: height / 2
-            color: Qt.darker(Theme.accentColor, 1.6)
+            color: Qt.darker(Theme.highlightColor, 1.6)
             x: head.x + head.width / 2 - width / 2
             y: head.y + head.height * 0.66
             Behavior on width { NumberAnimation { duration: 180; easing.type: Easing.OutQuad } }
@@ -128,7 +128,7 @@ Item {
                 opacity: 1.0 - Math.min(1.0, root.mouthOpen * 3)
                 ShapePath {
                     strokeWidth: Math.max(2, root.width * 0.02)
-                    strokeColor: Qt.darker(Theme.accentColor, 1.6)
+                    strokeColor: Qt.darker(Theme.highlightColor, 1.6)
                     fillColor: "transparent"
                     capStyle: ShapePath.RoundCap
                     startX: mouth.width * 0.12; startY: mouth.height * 0.35

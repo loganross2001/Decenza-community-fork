@@ -202,10 +202,6 @@ Item {
     // Kick off a conversation. First pull the user's REAL dial-in history for this bean so the
     // assistant KNOWS it (and can suggest), instead of asking. ask() fires once the history arrives.
     function _startConversation() {
-        console.log("[Barista] _startConversation state=", root._state,
-                    "conv=", !!root._conv, "configured=",
-                    (typeof MainController !== "undefined" && MainController.aiManager)
-                        ? MainController.aiManager.isConfigured : "no-aiManager")
         // _conv (aiManager.conversation) always exists — the real "can I chat?" test is isConfigured,
         // else we'd hang on "…" forever with no key (B2).
         if (!root._conv || typeof MainController === "undefined" || !MainController.aiManager
@@ -434,7 +430,6 @@ Item {
         target: root._orch
         function onStateChanged() {
             if (!root._orch) return
-            console.log("[Barista] onStateChanged ->", root._orch.state)
             root._collapsed = false   // a new greeting/close-out opens expanded
             if (root._orch.state === "greeting") {
                 // Launch the conversation FIRST — the decorative bell/avatar must never be able to

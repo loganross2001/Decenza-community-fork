@@ -86,10 +86,15 @@ Item {
                 border.color: Qt.darker(Theme.accentColor, 1.3)
                 x: head.x + head.width * (index === 0 ? 0.16 : 0.60)
                 y: head.y + head.height * 0.38
-                transformOrigin: Item.Center
-                scaleY: root._eyeOpen * blinkScale
                 property real blinkScale: 1.0
-                Behavior on scaleY { NumberAnimation { duration: 90 } }
+                // Vertical-only squash for the blink / eye-open state. QML Items have NO scaleY property
+                // (only uniform `scale`), so a Scale transform is the correct way to squash on one axis.
+                transform: Scale {
+                    origin.x: eyeWhite.width / 2
+                    origin.y: eyeWhite.height / 2
+                    yScale: root._eyeOpen * eyeWhite.blinkScale
+                    Behavior on yScale { NumberAnimation { duration: 90 } }
+                }
 
                 // pupil — drifts by state (idle wander / thinking up-aside)
                 Rectangle {

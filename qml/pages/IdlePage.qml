@@ -378,10 +378,6 @@ Page {
     // Auto-tare scale and announce presets when activePresetFunction changes
     onActivePresetFunctionChanged: {
         _publishOperationMode()
-        console.log("[Barista] activePresetFunction ->", activePresetFunction,
-                    "| Barista?", (typeof Barista !== "undefined"),
-                    "| orch?", (typeof Barista !== "undefined" && !!Barista.orchestrator),
-                    "| enabled?", (typeof Barista !== "undefined" && Barista.settings ? Barista.settings.enabled : "?"))
         // [barista-fork] hook — greet + suggest a plan when Espresso is selected (proactive barista)
         if (activePresetFunction === "espresso" && typeof Barista !== "undefined" && Barista.orchestrator)
             Barista.orchestrator.wake()

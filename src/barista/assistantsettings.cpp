@@ -181,6 +181,17 @@ void AssistantSettings::setAvatarEnabled(bool e) {
     emit avatarEnabledChanged();
 }
 
+QString AssistantSettings::avatarStyle() const {
+    return m_settings.value(QStringLiteral("barista/avatarStyle"), QStringLiteral("face")).toString();
+}
+
+void AssistantSettings::setAvatarStyle(const QString& s) {
+    if (avatarStyle() == s)
+        return;
+    m_settings.setValue(QStringLiteral("barista/avatarStyle"), s);
+    emit avatarStyleChanged();
+}
+
 bool AssistantSettings::consumeProactiveNudge(const QString& beanKey, int cooldownHours) {
     QString safe = beanKey;
     safe.replace(QRegularExpression(QStringLiteral("[^A-Za-z0-9]")), QStringLiteral("_"));

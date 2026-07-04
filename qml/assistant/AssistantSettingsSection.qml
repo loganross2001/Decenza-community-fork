@@ -77,6 +77,28 @@ ColumnLayout {
              color: Theme.textColor; font: Theme.bodyFont; Accessible.ignored: true }
     }
 
+    // Which character face to show
+    RowLayout {
+        Layout.fillWidth: true; spacing: Theme.spacingSmall
+        visible: root._settings ? root._settings.avatarEnabled : true
+        Tr { key: "barista.settings.avatarStyle"; fallback: "Character style"
+             Layout.fillWidth: true; color: Theme.textColor; font: Theme.bodyFont; Accessible.ignored: true }
+        ComboBox {
+            id: avatarStyleBox
+            Layout.preferredWidth: Theme.scaled(150)
+            textRole: "label"; valueRole: "value"
+            model: [
+                { value: "face", label: TranslationManager.translate("barista.settings.avatar.face", "Face") },
+                { value: "cup",  label: TranslationManager.translate("barista.settings.avatar.cup", "Coffee cup") },
+                { value: "orb",  label: TranslationManager.translate("barista.settings.avatar.orb", "Voice orb") },
+                { value: "bean", label: TranslationManager.translate("barista.settings.avatar.bean", "Coffee bean") }
+            ]
+            Component.onCompleted: { var i = indexOfValue(root._settings ? root._settings.avatarStyle : "face"); if (i >= 0) currentIndex = i }
+            onActivated: if (root._settings) root._settings.avatarStyle = currentValue
+            Accessible.name: TranslationManager.translate("barista.settings.avatarStyle", "Character style")
+        }
+    }
+
     // Assistant name
     Tr { key: "barista.settings.name"; fallback: "Assistant name"
          color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true }

@@ -23,6 +23,7 @@ class AssistantSettings : public QObject {
     Q_PROPERTY(double voiceSpeed READ voiceSpeed WRITE setVoiceSpeed NOTIFY voiceSpeedChanged)
     Q_PROPERTY(bool webSearchEnabled READ webSearchEnabled WRITE setWebSearchEnabled NOTIFY webSearchEnabledChanged)
     Q_PROPERTY(bool avatarEnabled READ avatarEnabled WRITE setAvatarEnabled NOTIFY avatarEnabledChanged)
+    Q_PROPERTY(QString avatarStyle READ avatarStyle WRITE setAvatarStyle NOTIFY avatarStyleChanged)
     Q_PROPERTY(QString proactivityLevel READ proactivityLevel WRITE setProactivityLevel NOTIFY proactivityLevelChanged)
 
 public:
@@ -70,6 +71,9 @@ public:
     bool avatarEnabled() const;                   // show the animated character face (default on)
     void setAvatarEnabled(bool e);
 
+    QString avatarStyle() const;                  // "face" | "cup" | "orb" | "bean" (default "face")
+    void setAvatarStyle(const QString& s);
+
     QString proactivityLevel() const;             // "off" | "greetings" | "full" (default "full")
     void setProactivityLevel(const QString& level);
 
@@ -92,6 +96,7 @@ signals:
     void voiceSpeedChanged();
     void webSearchEnabledChanged();
     void avatarEnabledChanged();
+    void avatarStyleChanged();
     void proactivityLevelChanged();
 
 private:

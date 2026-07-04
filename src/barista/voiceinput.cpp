@@ -6,8 +6,7 @@
 #include <QJniObject>
 #include <QJniEnvironment>
 #include <QPointer>
-#include <QMicrophonePermission>
-#include <QPermission>
+#include <QPermissions>   // QMicrophonePermission + QPermission live here (no per-class header)
 
 namespace {
 constexpr const char* kSpeechClass = "io/github/kulitorum/decenza_de1/DecenzaSpeech";

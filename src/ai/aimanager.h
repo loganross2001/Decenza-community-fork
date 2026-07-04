@@ -150,6 +150,8 @@ public:
     // recent advice) anchored on the latest shot for the current bean — falling back to the latest
     // shot overall when the bean name doesn't match. Emits baristaContextReady() on the main thread.
     Q_INVOKABLE void requestBaristaContext(const QString& beanBrand, const QString& beanType, const QString& profileName);
+    // Anchor shot id resolved by the last requestBaristaContext (0 if none) — for closed-loop turn stamping.
+    Q_INVOKABLE qint64 lastBaristaAnchorId() const { return m_lastBaristaAnchorId; }
 
     // Provider testing
     Q_INVOKABLE void testConnection();
@@ -306,6 +308,10 @@ private:
 
     // Serial counter for requestRecentShotContext (discard stale results)
     int m_contextSerial = 0;
+
+    // [barista-fork] anchor shot id from the last requestBaristaContext, so the overlay can stamp the
+    // barista's advice turns (setShotIdForCurrentTurn) into the recentAdvice closed loop.
+    qint64 m_lastBaristaAnchorId = 0;
 
 public:
     void reloadConversations() { loadConversationIndex(); }

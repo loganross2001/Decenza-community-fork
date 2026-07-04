@@ -39,8 +39,14 @@ void BaristaContextBuilder::build(const QString& beanBrand, const QString& beanT
     // (c) profile guidance — synchronous, from the curated corpus.
     m_profileBlock.clear();
     if (m_profileManager) {
-        const QString title = !profileName.isEmpty() ? profileName : m_profileManager->currentProfileName();
-        const QString kb = m_profileManager->profileKnowledgeContent(title).trimmed();
+        QString title = !profileName.isEmpty() ? profileName : m_profileManager->currentProfileName();
+        // currentProfileName decorates a modified profile ("*Title" / "Title (modified)"); the KB matches
+        // on the CLEAN title, so strip the decorations or the guidance silently drops when modified.
+        if (title.startsWith(QLatin1Char('*')))
+            title = title.mid(1);
+        if (title.endsWith(QStringLiteral(" (modified)")))
+            title.chop(QStringLiteral(" (modified)").size());
+        const QString kb = m_profileManager->profileKnowledgeContent(title.trimmed()).trimmed();
         if (!kb.isEmpty())
             m_profileBlock = QStringLiteral("\n\n## Profile guidance (respected sources)\n") + kb;
     }

@@ -1215,6 +1215,7 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
                                          grinderCalibration, recentAdvice]() {
             if (!self || serial != self->m_contextSerial)
                 return;   // stale — a newer request superseded this one
+            self->m_lastBaristaAnchorId = (anchorId > 0 && shot.isValid()) ? anchorId : 0;
             if (anchorId <= 0 || !shot.isValid()) {
                 emit self->baristaContextReady(QStringLiteral("recordedShots: 0"));
                 return;

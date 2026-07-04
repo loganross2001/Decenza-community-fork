@@ -65,6 +65,10 @@ public:
     QString proactivityLevel() const;             // "off" | "greetings" | "full" (default "full")
     void setProactivityLevel(const QString& level);
 
+    // Proactivity cooldown: returns true (and stamps "now") if the last proactive nudge for this bean was
+    // more than cooldownHours ago — so it doesn't re-raise the same suggestion on back-to-back shots.
+    Q_INVOKABLE bool consumeProactiveNudge(const QString& beanKey, int cooldownHours);
+
 signals:
     void enabledChanged();
     void voiceEnabledChanged();

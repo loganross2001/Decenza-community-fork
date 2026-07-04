@@ -1,5 +1,8 @@
 #include "assistantsettings.h"
 
+#include <QDateTime>
+#include <QRegularExpression>
+
 AssistantSettings::AssistantSettings(QObject* parent)
     : QObject(parent) {}
 
@@ -154,4 +157,18 @@ void AssistantSettings::setProactivityLevel(const QString& level) {
         return;
     m_settings.setValue(QStringLiteral("barista/proactivityLevel"), level);
     emit proactivityLevelChanged();
+}
+
+bool AssistantSettings::consumeProactiveNudge(const QString& beanKey, int cooldownHours) {
+    QString safe = beanKey;
+    safe.replace(QRegularExpression(QStringLiteral("[^A-Za-z0-9]")), QStringLiteral("_"));
+    if (safe.isEmpty())
+        safe = QStringLiteral("default");
+    const QString key = QStringLiteral("barista/nudge/") + safe;
+    const QDateTime now = QDateTime::currentDateTime();
+    const QDateTime last = QDateTime::fromString(m_settings.value(key).toString(), Qt::ISODate);
+    if (last.isValid() && last.secsTo(now) < static_cast<qint64>(cooldownHours) * 3600)
+        return false;   // still cooling down — don't re-raise the same nudge on a back-to-back shot
+    m_settings.setValue(key, now.toString(Qt::ISODate));
+    return true;
 }

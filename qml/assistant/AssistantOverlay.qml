@@ -128,6 +128,13 @@ Item {
         var h = new Date().getHours()
         return h < 12 ? "morning" : (h < 18 ? "afternoon" : "evening")
     }
+    // Stamp the assistant's upcoming turn with the anchor shot id so its advice enters the recentAdvice
+    // closed loop (its recommendation gets audited against the shot the user actually pulls next).
+    function _stampTurn() {
+        if (!root._conv || typeof MainController === "undefined" || !MainController.aiManager) return
+        var id = MainController.aiManager.lastBaristaAnchorId()
+        if (id > 0) root._conv.setShotIdForCurrentTurn(id)
+    }
 
     // Kick off a conversation. First pull the user's REAL dial-in history for this bean so the
     // assistant KNOWS it (and can suggest), instead of asking. ask() fires once the history arrives.
@@ -211,18 +218,25 @@ Item {
 
         // Proactivity level (user setting): what the assistant may VOLUNTEER (it always answers direct asks).
         var level = root._settings ? root._settings.proactivityLevel : "full"
+        // Cooldown: on back-to-back shots of the SAME bean (within 6h) don't re-raise a proactive nudge.
+        // Close-out always engages — it's feedback on the shot just pulled, not a repeated greeting nudge.
+        var mayNudge = (level !== "off") && root._settings
+                       && (root._state === "closeOut" || root._settings.consumeProactiveNudge(root._bean, 6))
         if (level === "off")
             persona += "\nOnly answer what the user asks; do NOT volunteer suggestions unless asked."
-        else
+        else if (mayNudge)
             persona += "\nBe proactive, but raise the SINGLE most useful thing — do NOT list multiple issues. "
                 + "If the recent shots for this bean show 3+ attempts with no rating improvement, name the dialing "
                 + "stall and propose a strategy change (a different variable, or a different profile) rather than "
                 + "another micro-adjustment. Mention bean freshness/degassing only if clearly relevant."
+        else
+            persona += "\nGreet warmly and briefly — you recently made a suggestion for this coffee, so don't "
+                + "re-raise it; only bring something up if the user asks or the data has clearly changed."
 
         // dataBlock is the pre-formatted, combined context (dial-in + bean profile + profile guidance).
         var block = (dataBlock && dataBlock.length > 0) ? dataBlock : "recordedShots: 0"
 
-        var suggest = (level === "off")
+        var suggest = (level === "off" || !mayNudge)
             ? "Greet me briefly and wait for me to ask before suggesting changes."
             : "Greet me and suggest one useful thing."
         var kickoff = (root._state === "closeOut")
@@ -236,6 +250,7 @@ Item {
             kickoff += " (I earlier agreed to set the grinder to " + root._pendingGrind.value
                      + " but haven't confirmed doing it — ask me early whether I actually set it.)"
 
+        root._stampTurn()
         root._conv.beginSession(persona + "\n\n" + block, kickoff)
     }
 
@@ -274,6 +289,7 @@ Item {
             MainController.shotHistory.requestUpdateShotMetadata(root._orch.lastShotId, meta)
         }
         root._thinking = true
+        root._stampTurn()
         root._conv.followUp(t)
     }
 

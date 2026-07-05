@@ -520,6 +520,24 @@ void AnthropicProvider::analyzeConversation(const QString& systemPrompt, const Q
         bpSchema["properties"] = bpProps;
         bp["input_schema"] = bpSchema;
         tools.append(bp);
+
+        // detect_grind_drift — has a fixed grind setting drifted faster/slower over time (grinder wear / aging beans)?
+        QJsonObject gd;
+        gd["name"] = QString("detect_grind_drift");
+        gd["description"] = QString(
+            "Check whether shots at a FIXED grind setting have drifted faster or slower over time (grinder burr "
+            "wear/seasoning, or the beans aging) — a simple recent-vs-older mean-duration comparison, not rigorous "
+            "statistics. Call when the user asks why the same setting isn't pulling like it used to. Optionally scope "
+            "to a bean and/or a specific setting; otherwise it uses their most-used setting.");
+        QJsonObject gdSchema;
+        gdSchema["type"] = QString("object");
+        QJsonObject gdProps;
+        gdProps["beanBrand"]      = strProp("Roaster / bean brand to scope to (optional; matched loosely).");
+        gdProps["beanType"]       = strProp("Bean name / type to scope to (optional; matched loosely).");
+        gdProps["grinderSetting"] = strProp("Specific grind setting to check (optional; exact match). Omit to use the most-used setting.");
+        gdSchema["properties"] = gdProps;
+        gd["input_schema"] = gdSchema;
+        tools.append(gd);
     }
     if (!tools.isEmpty())
         requestBody["tools"] = tools;

@@ -1575,6 +1575,82 @@ void AIManager::executeBaristaTool(const QString& name, const QJsonObject& input
         return;
     }
 
+    // detect_grind_drift — a LEAN, HONEST heuristic: at a FIXED grind setting, have shot times drifted over
+    // the run of shots (grinder burrs opening up / seasoning, or the bag aging)? Compares the mean duration of
+    // the OLDER half vs the RECENT half of shots at that setting. NOT statistical changepoint detection — a
+    // simple recent-vs-older comparison the barista can act on ("your 3.2 shots run faster now — try a hair finer").
+    if (name == QLatin1String("detect_grind_drift")) {
+        const QString beanBrand = input.value(QStringLiteral("beanBrand")).toString().trimmed();
+        const QString beanType  = input.value(QStringLiteral("beanType")).toString().trimmed();
+        const QString settingIn = input.value(QStringLiteral("grinderSetting")).toString().trimmed();
+        const QString dbPath = m_shotHistory->databasePath();
+        QThread* thread = QThread::create([=]() {
+            QJsonObject result;
+            const bool dbOk = withTempDb(dbPath, "barista_grind_drift", [&](QSqlDatabase& db) {
+                QString beanWhere;
+                if (!beanBrand.isEmpty()) beanWhere += QStringLiteral(" AND bean_brand LIKE :brand");
+                if (!beanType.isEmpty())  beanWhere += QStringLiteral(" AND bean_type LIKE :type");
+                const auto bindBean = [&](QSqlQuery& q) {
+                    if (!beanBrand.isEmpty()) q.bindValue(QStringLiteral(":brand"), QStringLiteral("%") + beanBrand + QStringLiteral("%"));
+                    if (!beanType.isEmpty())  q.bindValue(QStringLiteral(":type"),  QStringLiteral("%") + beanType  + QStringLiteral("%"));
+                };
+                // Resolve the setting: explicit, else the most-frequent non-empty setting for this bean (or overall).
+                QString setting = settingIn;
+                if (setting.isEmpty()) {
+                    QSqlQuery sq(db);
+                    sq.prepare(QStringLiteral("SELECT grinder_setting, COUNT(*) c FROM shots WHERE grinder_setting IS NOT NULL "
+                                              "AND grinder_setting != ''") + beanWhere
+                               + QStringLiteral(" GROUP BY grinder_setting ORDER BY c DESC, MAX(timestamp) DESC LIMIT 1"));
+                    bindBean(sq);
+                    if (sq.exec() && sq.next()) setting = sq.value(0).toString().trimmed();
+                }
+                if (setting.isEmpty()) {
+                    result[QStringLiteral("error")] = QStringLiteral("no grind setting found to analyze");
+                    return;
+                }
+                // Durations at that setting, oldest first.
+                QSqlQuery q(db);
+                q.prepare(QStringLiteral("SELECT duration_seconds, timestamp FROM shots WHERE grinder_setting = :setting "
+                                         "AND duration_seconds > 0") + beanWhere + QStringLiteral(" ORDER BY timestamp ASC"));
+                q.bindValue(QStringLiteral(":setting"), setting);
+                bindBean(q);
+                QVector<double> durs; QVector<qint64> ts;
+                if (q.exec()) while (q.next()) { durs.append(q.value(0).toDouble()); ts.append(q.value(1).toLongLong()); }
+                result[QStringLiteral("grinderSetting")] = setting;
+                result[QStringLiteral("shotCount")] = durs.size();
+                if (durs.size() < 6) {
+                    result[QStringLiteral("driftDetected")] = false;
+                    result[QStringLiteral("note")] = QStringLiteral("not enough shots at this setting to judge drift (need ~6+)");
+                    return;
+                }
+                const int half = durs.size() / 2;
+                const auto mean = [](const QVector<double>& v, int lo, int hi) {
+                    double s = 0; for (int i = lo; i < hi; ++i) s += v[i]; return (hi > lo) ? s / (hi - lo) : 0.0;
+                };
+                const double olderMean  = mean(durs, 0, half);
+                const double recentMean = mean(durs, durs.size() - half, durs.size());
+                const double shift = recentMean - olderMean;
+                const double spanDays = (ts.last() - ts.first()) / 86400.0;
+                result[QStringLiteral("spanDays")]              = QString::number(spanDays, 'f', 1).toDouble();
+                result[QStringLiteral("olderMeanDurationSec")]  = QString::number(olderMean, 'f', 1).toDouble();
+                result[QStringLiteral("recentMeanDurationSec")] = QString::number(recentMean, 'f', 1).toDouble();
+                result[QStringLiteral("shiftSec")]              = QString::number(shift, 'f', 1).toDouble();
+                result[QStringLiteral("driftDetected")]         = (qAbs(shift) >= 3.0);
+                result[QStringLiteral("direction")] = (shift < 0) ? QStringLiteral("faster/shorter") : QStringLiteral("slower/longer");
+                result[QStringLiteral("note")] = QStringLiteral(
+                    "Simple recent-vs-older mean-duration comparison at a fixed setting, not a statistical changepoint. "
+                    "A faster drift can mean the grind opened up (burr wear/seasoning) OR the beans aged; a slower drift "
+                    "the opposite. If the drift is real, a small grind nudge (finer if faster, coarser if slower) re-centers it.");
+            });
+            if (!dbOk && !result.contains(QStringLiteral("error")))
+                result[QStringLiteral("error")] = QStringLiteral("shot database unavailable");
+            QMetaObject::invokeMethod(qApp, [done, result]() { done(result); }, Qt::QueuedConnection);
+        });
+        connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+        thread->start();
+        return;
+    }
+
     if (name != QLatin1String("query_shots")) {
         done(QJsonObject{{QStringLiteral("error"), QStringLiteral("unknown tool: ") + name}});
         return;

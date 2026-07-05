@@ -372,7 +372,9 @@ Item {
                 + "Use compare_shots (2–5 shotIds) to see what changed between shots — the ratio/grind deltas and which "
                 + "quality verdicts flipped — e.g. \"why is today worse than last week\" or \"did going coarser fix the "
                 + "channeling\". Use get_bean_profile to pull ANY bean's freshness (days off roast / days since thaw) and "
-                + "history, or ANY profile's design intent, when it's not the one already in your context."
+                + "history, or ANY profile's design intent, when it's not the one already in your context. Use "
+                + "detect_grind_drift when they ask why the same grind setting isn't pulling like it used to — it checks "
+                + "whether shots at a fixed setting have drifted faster/slower over time (grinder wear or aging beans)."
 
         // dataBlock is the pre-formatted, combined context (dial-in + bean profile + profile guidance).
         var block = (dataBlock && dataBlock.length > 0) ? dataBlock : "recordedShots: 0"

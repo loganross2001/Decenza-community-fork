@@ -423,10 +423,10 @@ void AnthropicProvider::analyzeConversation(const QString& systemPrompt, const Q
     requestBody["max_tokens"] = 4096;   // [barista-fork] was 1024 — short replies were truncating mid-sentence
     requestBody["system"] = buildCachedSystemPrompt(systemPrompt);
     requestBody["messages"] = messagesWithCachedFirstUser(messages);
-    // [barista-fork] Tools — barista only. web_search runs on Anthropic's side (resume on "pause_turn");
-    // query_shots is CLIENT-side (we run the DB query and feed the tool_result back on "tool_use"). Both can
-    // coexist. When neither option is set (advisor/coach, or a non-Anthropic-tool caller) the array is empty
-    // and "tools" is omitted entirely — byte-identical to the original request.
+    // [barista-fork] Tools. web_search runs on Anthropic's side (resume on "pause_turn"); the client-side
+    // tools (registered via setClientTools) are CLIENT-side (we run them and feed the tool_result back on
+    // "tool_use"). Both can coexist. When neither option is set (advisor/coach, or a caller with no client
+    // tools) the array is empty and "tools" is omitted entirely — byte-identical to the original request.
     QJsonArray tools;
     if (options.webSearch) {
         QJsonObject ws;
@@ -435,109 +435,13 @@ void AnthropicProvider::analyzeConversation(const QString& systemPrompt, const Q
         ws["max_uses"] = 3;
         tools.append(ws);
     }
-    if (options.clientShotTool && m_toolExecutor) {
-        QJsonObject qs;
-        qs["name"] = QString("query_shots");
-        qs["description"] = QString(
-            "Look up the user's espresso shots from their FULL local shot history on demand — beyond the "
-            "summary already in the data block. Use it for specific shots, counts, or date/bean ranges "
-            "(e.g. 'my best shot on this bean', 'shots pulled in June', 'how many shots total', 'first shot "
-            "ever'). Returns a compact list of shot summaries, each with a shotId you can pass to "
-            "get_shot_detail to dig into one shot.");
-        QJsonObject schema;
-        schema["type"] = QString("object");
-        QJsonObject props;
-        const auto strProp = [](const QString& d){ QJsonObject o; o["type"] = QString("string"); o["description"] = d; return o; };
-        const auto intProp = [](const QString& d){ QJsonObject o; o["type"] = QString("integer"); o["description"] = d; return o; };
-        props["beanBrand"]    = strProp("Filter by roaster/brand (case-insensitive substring).");
-        props["beanType"]     = strProp("Filter by coffee/bean name (case-insensitive substring).");
-        props["sinceDate"]    = strProp("Only shots on/after this date, YYYY-MM-DD.");
-        props["untilDate"]    = strProp("Only shots on/before this date, YYYY-MM-DD.");
-        props["sinceDaysAgo"] = intProp("Alternative to sinceDate: only shots within the last N days.");
-        props["sortBy"]       = strProp("'recent' (default, newest first) or 'bestEnjoyment' (highest rated first).");
-        props["limit"]        = intProp("Max shots to return (default 15, capped at 50).");
-        schema["properties"] = props;
-        qs["input_schema"] = schema;
-        tools.append(qs);
-
-        // get_shot_detail — the follow-up to query_shots: pull ONE shot's full dial-in + quality analysis so
-        // the barista can coach on what actually happened (channeling, truncated pour, grind/temp issues, notes)
-        // instead of just the summary row. Same client-side tool-loop as query_shots.
-        QJsonObject sd;
-        sd["name"] = QString("get_shot_detail");
-        sd["description"] = QString(
-            "Get the full detail for ONE espresso shot by its shotId (from a query_shots result): exact "
-            "dial-in (dose, yield, ratio, grind, temperature, duration, profile), the shot's quality "
-            "analysis (channeling, truncated/short pour, grind-too-coarse/fine, temperature stability), TDS/EY "
-            "if measured, and the user's notes. Use it after query_shots to actually diagnose or coach on a "
-            "specific shot, not just list it.");
-        QJsonObject sdSchema;
-        sdSchema["type"] = QString("object");
-        QJsonObject sdProps;
-        sdProps["shotId"] = intProp("The shotId of the shot to inspect (from a query_shots result).");
-        sdSchema["properties"] = sdProps;
-        sdSchema["required"] = QJsonArray{ QString("shotId") };
-        sd["input_schema"] = sdSchema;
-        tools.append(sd);
-
-        // compare_shots — diff 2-5 shots side by side (signed deltas + which quality verdicts flipped).
-        QJsonObject cs;
-        cs["name"] = QString("compare_shots");
-        cs["description"] = QString(
-            "Compare 2 to 5 shots by their shotIds (from query_shots results): per-shot dial-in scalars plus a "
-            "consecutive-changes diff showing what moved (ratio, dose, grind, duration, enjoyment) AND which "
-            "quality verdicts flipped (e.g. \"channeling: yes -> no\"). Use it to answer \"why is today worse "
-            "than last week\" or \"did the grind change fix the channeling\".");
-        QJsonObject csSchema;
-        csSchema["type"] = QString("object");
-        QJsonObject csProps;
-        QJsonObject shotIds;
-        shotIds["type"] = QString("array");
-        shotIds["description"] = QString("2 to 5 shotIds to compare, in the order you want them diffed (from query_shots results).");
-        QJsonObject shotIdsItems;
-        shotIdsItems["type"] = QString("integer");
-        shotIds["items"] = shotIdsItems;
-        csProps["shotIds"] = shotIds;
-        csSchema["properties"] = csProps;
-        csSchema["required"] = QJsonArray{ QString("shotIds") };
-        cs["input_schema"] = csSchema;
-        tools.append(cs);
-
-        // get_bean_profile — any bean's freshness + history, or any profile's design intent, on demand.
-        QJsonObject bp;
-        bp["name"] = QString("get_bean_profile");
-        bp["description"] = QString(
-            "Look up ANY bean's freshness and history, or ANY profile's design intent, beyond the current one "
-            "already in your context. Give a bean (roaster and/or bean name) to get its days-off-roast (or "
-            "days-since-thaw if it was frozen), roast level, shot count, best/median enjoyment, and best-rated "
-            "recipe; give a profileName to get that profile's curated design intent. Provide at least one.");
-        QJsonObject bpSchema;
-        bpSchema["type"] = QString("object");
-        QJsonObject bpProps;
-        bpProps["beanBrand"]   = strProp("Roaster / bean brand to look up (optional; matched loosely).");
-        bpProps["beanType"]    = strProp("Bean name / type to look up (optional; matched loosely).");
-        bpProps["profileName"] = strProp("Profile name whose design intent to look up (optional; matched loosely).");
-        bpSchema["properties"] = bpProps;
-        bp["input_schema"] = bpSchema;
-        tools.append(bp);
-
-        // detect_grind_drift — has a fixed grind setting drifted faster/slower over time (grinder wear / aging beans)?
-        QJsonObject gd;
-        gd["name"] = QString("detect_grind_drift");
-        gd["description"] = QString(
-            "Check whether shots at a FIXED grind setting have drifted faster or slower over time (grinder burr "
-            "wear/seasoning, or the beans aging) — a simple recent-vs-older mean-duration comparison, not rigorous "
-            "statistics. Call when the user asks why the same setting isn't pulling like it used to. Optionally scope "
-            "to a bean and/or a specific setting; otherwise it uses their most-used setting.");
-        QJsonObject gdSchema;
-        gdSchema["type"] = QString("object");
-        QJsonObject gdProps;
-        gdProps["beanBrand"]      = strProp("Roaster / bean brand to scope to (optional; matched loosely).");
-        gdProps["beanType"]       = strProp("Bean name / type to scope to (optional; matched loosely).");
-        gdProps["grinderSetting"] = strProp("Specific grind setting to check (optional; exact match). Omit to use the most-used setting.");
-        gdSchema["properties"] = gdProps;
-        gd["input_schema"] = gdSchema;
-        tools.append(gd);
+    // Client-side tools are registered by a feature module (the barista) via setClientTools(); this file has
+    // no knowledge of the specific tools — it just appends the registered definitions when the caller opts in.
+    // When no tools are registered (or the caller left clientTools off) the array stays empty and "tools" is
+    // omitted — byte-identical to the original request. The generic tool_use loop in onAnalysisReply runs them.
+    if (options.clientTools && m_toolExecutor && !m_clientToolDefs.isEmpty()) {
+        for (const QJsonValue& def : m_clientToolDefs)
+            tools.append(def);
     }
     if (!tools.isEmpty())
         requestBody["tools"] = tools;
@@ -654,11 +558,12 @@ void AnthropicProvider::onAnalysisReply(QNetworkReply* reply)
                                                  // text blocks at citation boundaries; a "\n" join breaks it.
     }
 
-    // [barista-fork] CLIENT tool (query_shots): the model asked us to run it. Execute each tool_use block via
-    // the injected executor, append the assistant tool_use turn + a user tool_result turn, and re-POST — the
-    // standard Anthropic tool loop, bounded by MAX_TOOL_ROUNDS. Only barista requests carry the tool, so the
-    // advisor (which never sends tools) never receives a "tool_use" stop_reason and this branch is inert for it.
-    // (web_search is server-side and uses "pause_turn", not "tool_use" — that path below is untouched.)
+    // [barista-fork] CLIENT tools: the model asked us to run one. Execute each tool_use block via the
+    // registered executor (see setClientTools), append the assistant tool_use turn + a user tool_result turn,
+    // and re-POST — the standard Anthropic tool loop, bounded by MAX_TOOL_ROUNDS. Only callers that enable
+    // client tools carry them, so the advisor (which never sends tools) never receives a "tool_use" stop_reason
+    // and this branch is inert for it. (web_search is server-side and uses "pause_turn", not "tool_use" — that
+    // path below is untouched.)
     if (stopReason == QLatin1String("tool_use") && m_toolExecutor && m_toolRounds < MAX_TOOL_ROUNDS) {
         // Collect every tool_use block up front — the API may batch several parallel calls in one turn.
         QVector<QJsonObject> toolUses;

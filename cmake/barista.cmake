@@ -21,6 +21,16 @@ qt_add_resources(Decenza "barista_extracted_qml"
         ${CMAKE_CURRENT_SOURCE_DIR}/qml/assistant/CoachingCard.qml
 )
 
+# BaristaTools is the extracted home of the barista's private client-side AI tool definitions + executor
+# (query_shots, get_shot_detail, compare_shots, get_bean_profile, detect_grind_drift). It is registered
+# UNCONDITIONALLY — the shared, always-compiled aimanager.cpp references BaristaTools::toolDefinitions()/
+# executeTool(), so a DECENZA_BARISTA=OFF build must still get the definition or it fails to link. The module
+# depends only on upstream files (shothistorystorage.h, shotsummarizer.h, dbutils.h), so it compiles standalone.
+target_sources(Decenza PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristatools.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristatools.cpp
+)
+
 if(DECENZA_BARISTA)
     target_sources(Decenza PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristamodule.h

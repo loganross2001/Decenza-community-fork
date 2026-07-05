@@ -26,10 +26,10 @@ public:
     };
 
     // [barista-fork] Per-request options threaded through analyzeConversation. Only the barista sets
-    // webSearch / clientShotTool; every other caller uses the defaults (off), so the advisor/coach are unaffected.
+    // webSearch / clientTools; every other caller uses the defaults (off), so the advisor/coach are unaffected.
     struct RequestOptions {
         bool webSearch = false;
-        bool clientShotTool = false;   // the barista's on-demand query_shots tool (client-side, full history)
+        bool clientTools = false;   // enable the registered client-side tools (see setClientTools) for this turn
     };
 
     explicit AIProvider(QNetworkAccessManager* networkManager, QObject* parent = nullptr);
@@ -153,13 +153,18 @@ public:
                              const RequestOptions& options) override;
     void testConnection() override;
 
-    // [barista-fork] Inject the client-tool executor. AIManager runs the actual DB query OFF the main thread
-    // and delivers the JSON result via the `done` callback (invoked back on the main thread); the provider
-    // only handles the tool_use protocol. Async so the tablet UI never freezes on a fresh-connection query
-    // mid "thinking" animation. Set once at construction.
-    void setToolExecutor(std::function<void(const QString&, const QJsonObject&,
-                                            std::function<void(QJsonValue)>)> fn) {
-        m_toolExecutor = std::move(fn);
+    // [barista-fork] Generic client-side-tool seam. A feature module (the barista) registers BOTH the tool
+    // JSON definitions and the executor here; the provider knows nothing about which tools they are. The
+    // definitions are appended to the request when RequestOptions.clientTools is set, and the generic
+    // tool_use loop in onAnalysisReply drives the executor. The executor runs the actual work OFF the main
+    // thread and delivers the JSON result via the `done` callback (invoked back on the main thread), so the
+    // tablet UI never freezes mid "thinking" animation. Set once at construction; callers that never enable
+    // clientTools (advisor/coach) are entirely unaffected.
+    void setClientTools(const QJsonArray& defs,
+                        std::function<void(const QString&, const QJsonObject&,
+                                           std::function<void(QJsonValue)>)> exec) {
+        m_clientToolDefs = defs;
+        m_toolExecutor = std::move(exec);
     }
 
 private slots:
@@ -177,9 +182,11 @@ private:
     QString m_accumulatedText;
     static constexpr int MAX_CONTINUATIONS = 2;
 
-    // [barista-fork] client-side tool loop (query_shots). On stop_reason "tool_use" we run m_toolExecutor,
-    // append the assistant tool_use turn + our tool_result, and re-POST — bounded by MAX_TOOL_ROUNDS.
-    // Only the barista sends the tool, so this path is inert for the advisor (it never gets a tool_use stop).
+    // [barista-fork] generic client-side tool loop. On stop_reason "tool_use" we run m_toolExecutor, append
+    // the assistant tool_use turn + our tool_result, and re-POST — bounded by MAX_TOOL_ROUNDS. The tool
+    // definitions + executor are supplied by a feature module via setClientTools(); only callers that enable
+    // RequestOptions.clientTools send them, so this path is inert for the advisor (it never gets a tool_use stop).
+    QJsonArray m_clientToolDefs;   // registered client-tool JSON defs, appended to the request when clientTools is on
     std::function<void(const QString&, const QJsonObject&, std::function<void(QJsonValue)>)> m_toolExecutor;
     int m_toolRounds = 0;
     static constexpr int MAX_TOOL_ROUNDS = 4;

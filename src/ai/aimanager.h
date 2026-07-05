@@ -162,15 +162,10 @@ public:
     Q_INVOKABLE void analyze(const QString& systemPrompt, const QString& userPrompt);
 
     // Multi-turn conversation - sends system prompt and full message array to current provider.
-    // [barista-fork] clientShotTool enables the barista's query_shots tool (default off — advisor unaffected).
+    // [barista-fork] clientTools enables the barista's registered client-side tools (default off — advisor
+    // unaffected). The tool definitions + executor live in src/barista/baristatools.{h,cpp}.
     void analyzeConversation(const QString& systemPrompt, const QJsonArray& messages,
-                             bool webSearch = false, bool clientShotTool = false);
-
-    // [barista-fork] Executes the barista's client-side tools (currently query_shots) against the local shot
-    // DB OFF the main thread, delivering the JSON result via `done` (invoked on the main thread). Called by
-    // the Anthropic provider during the tool loop; async so a fresh-connection query never freezes the UI.
-    void executeBaristaTool(const QString& name, const QJsonObject& input,
-                            std::function<void(QJsonValue)> done);
+                             bool webSearch = false, bool clientTools = false);
 
     // Extract the trailing fenced ```json block from an assistant message.
     // The shot-analysis system prompt asks the model to append a `nextShot`

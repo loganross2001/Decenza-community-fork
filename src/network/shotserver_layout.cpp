@@ -3063,6 +3063,7 @@ QString ShotServer::generateLayoutPage() const
                     document.getElementById("spShowDoseYield").checked = typeof props.shotPlanShowDoseYield === "boolean" ? props.shotPlanShowDoseYield : true;
                     document.getElementById("spShowSteamPlan").checked = typeof props.shotPlanShowSteamPlan === "boolean" ? props.shotPlanShowSteamPlan : true;
                     document.getElementById("spFormat").value = (props.shotPlanFormat === "compact" || props.shotPlanFormat === "stacked" || props.shotPlanFormat === "plain") ? props.shotPlanFormat : "sentence";
+                    (function(){ var spPlain = document.getElementById("spFormat").value === "plain"; ["spShowProfile","spShowRoaster","spShowCoffee","spShowGrind","spShowRoastDate","spShowDoseYield"].forEach(function(cid){ document.getElementById(cid).disabled = spPlain; }); })();
                     document.getElementById("ssShotPlanSettings").style.display = "";
                 } else {
                     document.getElementById("ssNoSettings").style.display = "";
@@ -3105,6 +3106,8 @@ QString ShotServer::generateLayoutPage() const
             apiPost("/api/layout/item", {itemId: id, key: "shotShowLabels", value: showLabels}, function() {});
             apiPost("/api/layout/item", {itemId: id, key: "shotShowPhaseLabels", value: showPhaseLabels}, function() {});
         } else if (ssEditingType === "shotPlan") {
+            var spPlain = document.getElementById("spFormat").value === "plain";
+            ["spShowProfile","spShowRoaster","spShowCoffee","spShowGrind","spShowRoastDate","spShowDoseYield"].forEach(function(cid){ document.getElementById(cid).disabled = spPlain; });
             apiPost("/api/layout/item", {itemId: id, key: "shotPlanShowProfile", value: document.getElementById("spShowProfile").checked}, function() {});
             apiPost("/api/layout/item", {itemId: id, key: "shotPlanShowRoaster", value: document.getElementById("spShowRoaster").checked}, function() {});
             apiPost("/api/layout/item", {itemId: id, key: "shotPlanShowCoffee", value: document.getElementById("spShowCoffee").checked}, function() {});

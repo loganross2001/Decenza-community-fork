@@ -1163,6 +1163,7 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
         QJsonObject beanBestShot;
         QJsonObject grinderContext;
         QJsonObject grinderCalibration;
+        QJsonObject fullHistory;
 
         withTempDb(dbPath, "barista_ctx", [&](QSqlDatabase& db) {
             // Anchor: latest shot for the current bean; else latest overall (robust to bean-name drift).
@@ -1209,11 +1210,43 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
                     recentAdvice = DialingBlocks::buildRecentAdviceBlock(db, in);
                 }
             }
+
+            // [barista-fork] FULL-HISTORY AWARENESS: the true extent of the local shot DB (which holds
+            // EVERY shot), as aggregates only — so the assistant knows their whole history and never
+            // claims it "only has recent shots". Not every shot (token cost); the dial-in blocks above
+            // already carry the detailed recent + best-shot data.
+            {
+                QSqlQuery q(db);
+                if (q.exec("SELECT COUNT(*), MIN(timestamp), MAX(timestamp) FROM shots") && q.next()) {
+                    const int total = q.value(0).toInt();
+                    fullHistory["totalShots"] = total;
+                    if (total > 0) {
+                        fullHistory["earliest"] = QDateTime::fromSecsSinceEpoch(q.value(1).toLongLong()).toString(QStringLiteral("yyyy-MM-dd"));
+                        fullHistory["latest"]   = QDateTime::fromSecsSinceEpoch(q.value(2).toLongLong()).toString(QStringLiteral("yyyy-MM-dd"));
+                    }
+                }
+                QSqlQuery bq(db);
+                if (bq.exec("SELECT bean_brand, bean_type, COUNT(*) c, MIN(timestamp) mn, MAX(timestamp) mx "
+                            "FROM shots GROUP BY bean_brand, bean_type ORDER BY c DESC LIMIT 12")) {
+                    QJsonArray beans;
+                    while (bq.next()) {
+                        QJsonObject b;
+                        b["brand"]     = bq.value(0).toString();
+                        b["type"]      = bq.value(1).toString();
+                        b["shots"]     = bq.value(2).toInt();
+                        b["firstDate"] = QDateTime::fromSecsSinceEpoch(bq.value(3).toLongLong()).toString(QStringLiteral("yyyy-MM-dd"));
+                        b["lastDate"]  = QDateTime::fromSecsSinceEpoch(bq.value(4).toLongLong()).toString(QStringLiteral("yyyy-MM-dd"));
+                        beans.append(b);
+                    }
+                    if (!beans.isEmpty())
+                        fullHistory["beans"] = beans;
+                }
+            }
         });
 
         QMetaObject::invokeMethod(qApp, [self, serial, shot, anchorId, beanFilterMissed,
                                          dialInSessions, bestRecentShot, beanBestShot, grinderContext,
-                                         grinderCalibration, recentAdvice]() {
+                                         grinderCalibration, recentAdvice, fullHistory]() {
             if (!self || serial != self->m_baristaContextSerial)
                 return;   // stale — a newer request superseded this one
             self->m_lastBaristaAnchorId = (anchorId > 0 && shot.isValid()) ? anchorId : 0;
@@ -1228,6 +1261,8 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
             }
             self->enrichUserPromptObject(obj, shot, dialInSessions, bestRecentShot, grinderContext,
                                          recentAdvice, grinderCalibration, beanBestShot);
+            if (!fullHistory.isEmpty())
+                obj.insert(QStringLiteral("fullHistory"), fullHistory);
             QString block;
             if (beanFilterMissed)
                 block += QStringLiteral("NOTE: No shots recorded under the exact current bean name — "

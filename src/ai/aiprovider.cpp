@@ -442,7 +442,8 @@ void AnthropicProvider::analyzeConversation(const QString& systemPrompt, const Q
             "Look up the user's espresso shots from their FULL local shot history on demand — beyond the "
             "summary already in the data block. Use it for specific shots, counts, or date/bean ranges "
             "(e.g. 'my best shot on this bean', 'shots pulled in June', 'how many shots total', 'first shot "
-            "ever'). Returns a compact list of shot summaries.");
+            "ever'). Returns a compact list of shot summaries, each with a shotId you can pass to "
+            "get_shot_detail to dig into one shot.");
         QJsonObject schema;
         schema["type"] = QString("object");
         QJsonObject props;
@@ -458,6 +459,26 @@ void AnthropicProvider::analyzeConversation(const QString& systemPrompt, const Q
         schema["properties"] = props;
         qs["input_schema"] = schema;
         tools.append(qs);
+
+        // get_shot_detail — the follow-up to query_shots: pull ONE shot's full dial-in + quality analysis so
+        // the barista can coach on what actually happened (channeling, truncated pour, grind/temp issues, notes)
+        // instead of just the summary row. Same client-side tool-loop as query_shots.
+        QJsonObject sd;
+        sd["name"] = QString("get_shot_detail");
+        sd["description"] = QString(
+            "Get the full detail for ONE espresso shot by its shotId (from a query_shots result): exact "
+            "dial-in (dose, yield, ratio, grind, temperature, duration, profile), the shot's quality "
+            "analysis (channeling, truncated/short pour, grind-too-coarse/fine, temperature stability), TDS/EY "
+            "if measured, and the user's notes. Use it after query_shots to actually diagnose or coach on a "
+            "specific shot, not just list it.");
+        QJsonObject sdSchema;
+        sdSchema["type"] = QString("object");
+        QJsonObject sdProps;
+        sdProps["shotId"] = intProp("The shotId of the shot to inspect (from a query_shots result).");
+        sdSchema["properties"] = sdProps;
+        sdSchema["required"] = QJsonArray{ QString("shotId") };
+        sd["input_schema"] = sdSchema;
+        tools.append(sd);
     }
     if (!tools.isEmpty())
         requestBody["tools"] = tools;

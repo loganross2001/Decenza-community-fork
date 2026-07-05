@@ -1289,8 +1289,70 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
 void AIManager::executeBaristaTool(const QString& name, const QJsonObject& input,
                                    std::function<void(QJsonValue)> done)
 {
-    if (name != QLatin1String("query_shots") || !m_shotHistory) {
-        done(QJsonObject{{QStringLiteral("error"), QStringLiteral("unknown tool or shot history unavailable")}});
+    if (!m_shotHistory) {
+        done(QJsonObject{{QStringLiteral("error"), QStringLiteral("shot history unavailable")}});
+        return;
+    }
+
+    // get_shot_detail — deep-dive ONE shot the barista already learned of via query_shots. Returns the full
+    // per-shot projection (dial-in scalars + the five quality detectors + notes) minus the heavy time-series
+    // curves, so the barista can actually coach ("that shot channeled", "grind was too coarse") rather than
+    // just list. Reuses the exact load path MCP shots_detail uses; runs off the main thread like query_shots.
+    if (name == QLatin1String("get_shot_detail")) {
+        const qint64 shotId = input.value(QStringLiteral("shotId")).toVariant().toLongLong();
+        if (shotId <= 0) {
+            done(QJsonObject{{QStringLiteral("error"),
+                QStringLiteral("get_shot_detail needs a positive shotId (from a query_shots result)")}});
+            return;
+        }
+        const QString dbPath = m_shotHistory->databasePath();
+        QThread* thread = QThread::create([=]() {
+            QJsonObject result;
+            const bool dbOk = withTempDb(dbPath, "barista_shot_detail", [&](QSqlDatabase& db) {
+                ShotRecord record = ShotHistoryStorage::loadShotRecordStatic(db, shotId);
+                ShotProjection shot = ShotHistoryStorage::convertShotRecord(record);
+                if (!shot.isValid()) {
+                    result[QStringLiteral("error")] = QStringLiteral("shot not found: ") + QString::number(shotId);
+                    return;
+                }
+                QJsonObject o = shot.toJsonObject();
+                // Drop the heavy per-sample curves + debug/profile blobs — the barista coaches on scalars and
+                // detector verdicts, not raw traces (mirrors MCP shots_detail's "summary" strip).
+                static const char* heavy[] = {
+                    "pressure", "flow", "temperature", "temperatureMix", "resistance", "conductance",
+                    "darcyResistance", "conductanceDerivative", "waterDispensed", "pressureGoal", "flowGoal",
+                    "temperatureGoal", "weight", "weightFlowRate", "debugLog", "profileJson", "beanBaseJson"
+                };
+                for (const char* k : heavy)
+                    o.remove(QLatin1String(k));
+                // Drop each detector's scratch `gates` — expose only the user-facing verdict scalars, never the
+                // internal thresholds (same reason MCP strips them: they read like dialing knobs but aren't).
+                if (o.contains(QStringLiteral("detectorResults"))) {
+                    QJsonObject dr = o.value(QStringLiteral("detectorResults")).toObject();
+                    for (const QString& dk : {QStringLiteral("grind"), QStringLiteral("channeling"),
+                                              QStringLiteral("flowTrend"), QStringLiteral("preinfusion")}) {
+                        if (!dr.contains(dk))
+                            continue;
+                        QJsonObject d = dr.value(dk).toObject();
+                        d.remove(QStringLiteral("gates"));
+                        dr[dk] = d;
+                    }
+                    o[QStringLiteral("detectorResults")] = dr;
+                }
+                result = o;
+            });
+            // DB-open failure must surface as an error, not an empty object — same rule as query_shots.
+            if (!dbOk && !result.contains(QStringLiteral("error")))
+                result[QStringLiteral("error")] = QStringLiteral("shot database unavailable");
+            QMetaObject::invokeMethod(qApp, [done, result]() { done(result); }, Qt::QueuedConnection);
+        });
+        connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+        thread->start();
+        return;
+    }
+
+    if (name != QLatin1String("query_shots")) {
+        done(QJsonObject{{QStringLiteral("error"), QStringLiteral("unknown tool: ") + name}});
         return;
     }
 
@@ -1354,6 +1416,8 @@ void AIManager::executeBaristaTool(const QString& name, const QJsonObject& input
             if (q.exec()) {
                 while (q.next()) {
                     QJsonObject s;
+                    // shotId lets the barista follow up with get_shot_detail on any listed shot.
+                    s[QStringLiteral("shotId")] = q.value(0).toLongLong();
                     s[QStringLiteral("date")] = QDateTime::fromSecsSinceEpoch(q.value(1).toLongLong())
                                                     .toString(QStringLiteral("yyyy-MM-dd HH:mm"));
                     const QString profile = q.value(2).toString().trimmed();

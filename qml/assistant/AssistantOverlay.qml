@@ -353,7 +353,10 @@ Item {
                 + "query_shots tool — well beyond the recent summary in the data block. Use it whenever they ask "
                 + "about a specific shot, a total count, or a bean/date range (e.g. \"my best shot on this bean\", "
                 + "\"how many shots did I pull in June\", \"my very first shot\"). Reach for real data instead of "
-                + "guessing, and never claim your history only goes back a few days — you can see all of it."
+                + "guessing, and never claim your history only goes back a few days — you can see all of it. "
+                + "Each shot in the results has a shotId; when you want to actually diagnose or coach on one, call "
+                + "get_shot_detail with that shotId to see the full dial-in and quality analysis (channeling, short "
+                + "pour, grind or temperature issues, TDS, notes) before you give feedback on it."
 
         // dataBlock is the pre-formatted, combined context (dial-in + bean profile + profile guidance).
         var block = (dataBlock && dataBlock.length > 0) ? dataBlock : "recordedShots: 0"

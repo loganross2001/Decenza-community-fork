@@ -1014,17 +1014,6 @@ QString ShotSummarizer::shotAnalysisSystemPrompt(const QString& beverageType, co
         "applied. When advising on a specific older shot's grinder/bean, treat\n"
         "the session context as a best-effort inference, not a guaranteed\n"
         "match for that shot's actual recorded data.\n\n"
-        "**`bestRecentShot`** / **`beanBestShot`** (when present): the user's\n"
-        "highest-rated past shot to anchor advice on what success looked like.\n"
-        "`bestRecentShot` is the best on this PROFILE (any bean). `beanBestShot`\n"
-        "is the best on THIS bean specifically — prefer it when present, because\n"
-        "the recipe transfers most directly to the bean in front of the user.\n"
-        "`beanBestShot.scope` is `\"beanAndPerson\"` when it is the active\n"
-        "barista's own best on this bean, or `\"bean\"` when it is the best\n"
-        "across anyone who pulled this bean. Both carry `grinderSetting`,\n"
-        "`doseG`, `yieldG`, `temperatureOverrideC`, `enjoyment0to100`, and a\n"
-        "`changeFromBest` diff vs the current shot — cite the specific settings\n"
-        "and the shot's local date/time, never the numeric id.\n\n"
         "**`recentAdvice`** (when present): an array of up to 3 of YOUR own\n"
         "prior recommendations on this profile, paired with the user's actual\n"
         "follow-up shot. Each entry carries `turnsAgo`, the prior\n"
@@ -1104,7 +1093,6 @@ QString ShotSummarizer::shotAnalysisSystemPrompt(const QString& beverageType, co
         "Schema:\n\n"
         "- `grinderSetting` (string) — REQUIRED iff you recommend moving grind. Omit when grind is unchanged.\n"
         "- `doseG` (number) — REQUIRED iff you recommend moving dose. Omit when dose is unchanged.\n"
-        "- `temperatureC` (number) — REQUIRED iff you recommend changing brew temperature. Absolute target in degrees Celsius. Omit when temperature is unchanged.\n"
         "- `profileTitle` (string) — REQUIRED iff you recommend switching profile. The title (`result.profile.title`), not the filename. Omit otherwise.\n"
         "- `expectedDurationSec` ([low, high]) — REQUIRED. Predicted duration window if your recommendation is followed.\n"
         "- `expectedFlowMlPerSec` ([low, high]) — REQUIRED.\n"
@@ -1119,16 +1107,6 @@ QString ShotSummarizer::shotAnalysisSystemPrompt(const QString& beverageType, co
         "  \"expectedFlowMlPerSec\": [1.0, 1.5],\n"
         "  \"successCondition\": \"durationSec in [32,38] AND flowMlPerSec in [1.0,1.5]\",\n"
         "  \"reasoning\": \"Slow flow toward profile target without going past the choke point\"\n"
-        "}\n"
-        "```\n\n"
-        "Example (temperature change):\n\n"
-        "```json\n"
-        "{\n"
-        "  \"temperatureC\": 92.0,\n"
-        "  \"expectedDurationSec\": [28, 34],\n"
-        "  \"expectedFlowMlPerSec\": [1.5, 2.0],\n"
-        "  \"successCondition\": \"score >= 70 AND less sour\",\n"
-        "  \"reasoning\": \"Raise brew temperature to extract more and reduce sourness\"\n"
         "}\n"
         "```\n\n"
         "The block must be the LAST content in your response. Use the `json`\n"
@@ -1334,7 +1312,7 @@ The "Common Espresso Patterns" section below tells you the **direction** of grin
 
 ## Common Espresso Patterns
 
-**Lever ordering.** Grind and ratio are the primary espresso levers — settle those first. Temperature is a smaller, later adjustment; don't reach for it to fix sourness or bitterness until grind and ratio are dialed. (Exception: when a profile was deliberately built around a specific temperature, respect the author's intent — see the "Profile Intent is the Reference Frame" note.)
+**Lever ordering.** Grind and ratio are the primary espresso levers — settle those first. Temperature is a smaller, later adjustment; don't reach for it to fix sourness or bitterness until grind and ratio are dialed. (Exception: when the profile's description calls out temperature as central to its design, respect the author's intent — see the "Profile Intent is the Reference Frame" note.)
 
 ### The Gusher
 - **Symptoms**: Very fast shot (<20s), flow way above target, thin/watery taste
@@ -1354,12 +1332,13 @@ The "Common Espresso Patterns" section below tells you the **direction** of grin
 ### The Sour Shot
 - **Symptoms**: Bright acidity, thin body, tea-like, possibly underextracted
 - **Possible causes**: Ratio too short, shot too fast, grind too coarse (temperature too low is a secondary cause)
-- **Fix**: Grind finer, or pull longer (lengthen the ratio) — settle those first; raise temp 2°C only after (one at a time!). But if the finer grind *itself* makes the shot channel, finer extracts *less* — go coarser instead.
+- **Fix**: One change at a time! Grind finer, or pull longer (lengthen the ratio) — settle those first; raise temp 2°C only after.
+- **Caveat**: If channeling appears *after* going finer, re-check puck prep first (see The Channeler); if it persists, step back to the previous grind setting — past that point, finer extracts *less*.
 
 ### The Bitter Shot
 - **Symptoms**: Harsh, astringent, dry finish, overextracted
 - **Possible causes**: Ratio too long, shot too slow, grind too fine (temperature too high is a secondary cause)
-- **Fix**: Grind coarser, or cut the shot earlier — settle those first; drop temp 2°C only after (one at a time!)
+- **Fix**: One change at a time! Grind coarser, or cut the shot earlier — settle those first; drop temp 2°C only after.
 
 ### The Hollow Shot
 - **Symptoms**: Lacks body, feels empty in the middle, thin mouthfeel
@@ -1458,13 +1437,15 @@ The data shows the same format as espresso shots — phase breakdown with pressu
 
 ## Common Filter Issues
 
+**Lever ordering.** Grind and brew time are the primary levers here too — settle those first; temperature 2-3°C adjustments come after. (Exceptions: when the profile's design pins the grind — see the grind-advice rule above — or its description calls out temperature as central, follow the profile's intent per the "Profile Intent is the Reference Frame" note.)
+
 ### Astringent / Dry Finish
 - **Cause**: Over-extraction, often from too fine a grind or too high a temperature
-- **Fix**: Grind coarser or reduce temperature 2-3°C
+- **Fix**: Grind coarser; reduce temperature 2-3°C only after
 
 ### Thin / Watery / Hollow
 - **Cause**: Under-extraction from too coarse a grind, too low temperature, or insufficient contact time
-- **Fix**: Grind finer or increase temperature 2-3°C
+- **Fix**: Grind finer, or extend contact time; increase temperature 2-3°C only after
 
 ### Bitter / Harsh
 - **Cause**: Over-extraction or water too hot
@@ -1565,6 +1546,8 @@ double ShotSummarizer::calculateMin(const QVector<QPointF>& data, double startTi
 
 QString ShotSummarizer::sharedCorePhilosophy()
 {
+    // The bolded title "Profile Intent is the Reference Frame" is referenced verbatim
+    // by the "Lever ordering" notes in espressoSystemPrompt() and filterSystemPrompt().
     return QStringLiteral(R"(## Core Philosophy
 
 **Taste is King.** Numbers are tools to understand taste, not goals in themselves. A shot that tastes great with "wrong" numbers is a great shot. A shot with "perfect" numbers that tastes bad needs fixing.

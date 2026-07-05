@@ -583,6 +583,28 @@ void SettingsApp::setScreenCaptureEnabled(bool enabled) {
     }
 }
 
+bool SettingsApp::steamCoachVisualEnabled() const {
+    return m_settings.value("steam/steamCoachVisualEnabled", false).toBool();
+}
+
+void SettingsApp::setSteamCoachVisualEnabled(bool enabled) {
+    if (steamCoachVisualEnabled() != enabled) {
+        m_settings.setValue("steam/steamCoachVisualEnabled", enabled);
+        emit steamCoachVisualEnabledChanged();
+    }
+}
+
+bool SettingsApp::steamCoachAudioEnabled() const {
+    return m_settings.value("steam/steamCoachAudioEnabled", false).toBool();
+}
+
+void SettingsApp::setSteamCoachAudioEnabled(bool enabled) {
+    if (steamCoachAudioEnabled() != enabled) {
+        m_settings.setValue("steam/steamCoachAudioEnabled", enabled);
+        emit steamCoachAudioEnabledChanged();
+    }
+}
+
 // Device identity
 QString SettingsApp::deviceId() const {
     QString id = m_settings.value("device/uuid").toString();
@@ -623,16 +645,5 @@ void SettingsApp::setLiveCoachingEnabled(bool enabled) {
     if (liveCoachingEnabled() != enabled) {
         m_settings.setValue("espresso/liveCoachingEnabled", enabled);
         emit liveCoachingEnabledChanged();
-    }
-}
-
-bool SettingsApp::liveSteamCoachingEnabled() const {
-    return m_settings.value("steam/liveSteamCoachingEnabled", true).toBool();
-}
-
-void SettingsApp::setLiveSteamCoachingEnabled(bool enabled) {
-    if (liveSteamCoachingEnabled() != enabled) {
-        m_settings.setValue("steam/liveSteamCoachingEnabled", enabled);
-        emit liveSteamCoachingEnabledChanged();
     }
 }

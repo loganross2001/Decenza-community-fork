@@ -599,7 +599,7 @@ Page {
         anchors.leftMargin: Theme.spacingMedium
         anchors.rightMargin: Theme.spacingMedium
         coach: MainController.liveShotCoach
-        enabled: Settings.app.liveCoachingEnabled
+        coachEnabled: Settings.app.liveCoachingEnabled
         // No outer visible binding: the banner self-gates on an active cue via its
         // internal shouldShow/opacity (cues only fire during a shot), so it can run
         // its own 220 ms fade-out at shot end instead of being cut off by a phase flip.

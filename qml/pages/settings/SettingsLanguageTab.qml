@@ -617,9 +617,9 @@ Item {
                         Item { Layout.fillWidth: true }
 
                         StyledSwitch {
-                            checked: Settings.app.liveSteamCoachingEnabled
+                            checked: Settings.app.steamCoachVisualEnabled
                             accessibleName: TranslationManager.translate("settings.accessibility.steamCoachingEnable", "Steam Coaching Cues")
-                            onCheckedChanged: Settings.app.liveSteamCoachingEnabled = checked
+                            onCheckedChanged: Settings.app.steamCoachVisualEnabled = checked
                         }
                     }
 

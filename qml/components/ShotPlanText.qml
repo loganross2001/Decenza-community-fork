@@ -16,15 +16,18 @@ Item {
     signal clicked()
 
     // Display format (per-instance, chosen in the layout editor): "sentence" (default — the full
-    // "Brew … using … at …" line), "compact" (short ·-separated fragments, no sentence), or "stacked"
-    // (sentence on the first line, the details wrapping onto following lines — never truncated).
+    // "Brew … using … at …" line), "compact" (short ·-separated fragments, no sentence), "stacked"
+    // (sentence on line 1, details wrapping onto following lines), or "plain" (a dot-free recipe
+    // sentence that IGNORES the per-field toggles). Only "stacked"/"plain" wrap (up to 3 lines, then
+    // truncate); "sentence"/"compact" stay one line and elide. Multi-line formats suit center/growable
+    // zones — in a fixed-height bar (status/lower-mid) a 3-line plan overflows, so pick them there advisedly.
     property string format: "sentence"
     // The width the widget has to render in (ShotPlanItem passes the tile width). 0 = unconstrained
     // (natural size, legacy behaviour). When >0 the text is capped to it so it wraps/elides instead of
     // silently overflowing the tile.
     property real availableWidth: 0
 
-    // Visibility flags (passed through by ShotPlanItem/PlanItem) — one per Shot Plan display option:
+    // Visibility flags (passed through by ShotPlanItem) — one per Shot Plan display option:
     // Profile & temperature, Roaster, Coffee, Grind (+ RPM), Roast date, Dose & yield. Each toggles
     // its segment both in the sentence/tail and in the fallback fragment list.
     property bool showProfile: true
@@ -90,7 +93,10 @@ Item {
     // profiles ("tea"/"tea_portafilter"). Cleaning/descale profiles get their own
     // sentence in _build() — no bean/dose tail, plus the do-not-load-coffee warning.
     readonly property string _bevType: ProfileManager.currentProfileBeverageType
-    readonly property bool _isCleaning: _bevType === "cleaning" || _bevType === "descale"
+    // The cleaning/descale/calibrate no-coffee tier is Profile::isMaintenanceBeverageType
+    // in C++ — the same call the shot-history, Visualizer and MCP gates make — so this
+    // warning genuinely can't drift from them.
+    readonly property bool _isCleaning: ProfileManager.currentProfileIsMaintenance
     readonly property string _beverage: {
         var _ = TranslationManager.translationVersion   // re-evaluate on a live language switch
         if (_bevType === "espresso") return TranslationManager.translate("idle.button.espresso", "Espresso")
@@ -104,10 +110,12 @@ Item {
 
     // ONE renderer for both the plain `text` (a11y label + `visible: text !== ""` check) and the bolded
     // `_rich` (display), so they can NEVER drift. fmt(value, live) formats one value: plain %-escapes,
-    // rich HTML-escapes and bolds live values. Core sentence is yield + profile + temp; enabled extras
-    // (dose, roaster, grind, roast date) trail after it, else it degrades to a fragment list.
-    // blockSep separates the core sentence from its trailing details — the same `sep` for one-line
-    // formats, a line break for "stacked". "compact" skips the sentence entirely (fragment list).
+    // rich HTML-escapes and bolds live values. Core sentence is profile + temp (plus yield when the
+    // profile has a target weight); enabled extras (dose, roaster, coffee, grind, roast date) trail
+    // after it, else it degrades to a fragment list. blockSep separates the core sentence from its
+    // trailing details — the same `sep` for one-line formats, a line break for "stacked" on the DISPLAY
+    // path only (the a11y `text` always passes dots, so the spoken string stays one sentence); "compact"
+    // skips the sentence entirely (fragment list).
     function _build(fmt, sep, blockSep) {
         var _ = TranslationManager.translationVersion
         // Cleaning/descale run — beans are the enemy here. Short sentence, no
@@ -125,9 +133,16 @@ Item {
             : (grindSize.length > 0 ? TranslationManager.translate("shotplan.grind", "grind %1").arg(fmt(_grindStr, true))
                                     : fmt(_grindStr, true))
         var roasted = (_roastDateStr !== "") ? TranslationManager.translate("shotplan.roasted", "roasted %1").arg(fmt(_roastDateStr, true)) : ""
-        if (root.format !== "compact" && _yieldStr !== "" && _profileStr !== "" && _tempStr !== "") {
-            var s = TranslationManager.translate("shotplan.sentence", "Brew %1 of %2, using %3 at %4")
-                .arg(fmt(_yieldStr, true)).arg(fmt(_beverage, false)).arg(fmt(_profileStr, true)).arg(fmt(_tempStr, true))
+        if (root.format !== "compact" && _profileStr !== "" && _tempStr !== "") {
+            // Yield is legitimately absent for profiles with no target weight (filter,
+            // tea, …) — keep the sentence form so the beverage word survives, instead of
+            // dropping to the beverage-less fragment list. Separate full template (not
+            // string surgery) so translators control word order in both forms.
+            var s = (_yieldStr !== "")
+                ? TranslationManager.translate("shotplan.sentence", "Brew %1 of %2, using %3 at %4")
+                    .arg(fmt(_yieldStr, true)).arg(fmt(_beverage, false)).arg(fmt(_profileStr, true)).arg(fmt(_tempStr, true))
+                : TranslationManager.translate("shotplan.sentenceNoYield", "Brew %1, using %2 at %3")
+                    .arg(fmt(_beverage, false)).arg(fmt(_profileStr, true)).arg(fmt(_tempStr, true))
             var tail = []
             if (dose !== "") tail.push(dose)
             if (_roasterStr !== "") tail.push(fmt(_roasterStr, true))
@@ -149,9 +164,10 @@ Item {
     }
 
     // "plain" format: a single, dot-free recipe sentence — IGNORES the per-field toggles.
-    //   "Pull a <yield> espresso shot using <dose> grams of <roaster> <coffee> coffee beans"
-    // Single output weight (no "36.0 → 41.8" arrow), no · separators, no profile/temp line — the user
-    // keeps profile & temperature on the brew bar below. blockSep is unused (single line).
+    //   "Pull a <yield> coffee shot using <dose> grams of <roaster> <coffee> coffee beans"
+    // "coffee" (not a beverage-specific word) so it reads sensibly for any coffee profile. Single output
+    // weight (no "36.0 → 41.8" arrow), no · separators, no profile/temp line — the user keeps profile &
+    // temperature on the brew bar below. blockSep is unused (single line).
     function _buildPlain(fmt, blockSep) {
         var _ = TranslationManager.translationVersion
         // A cleaning/descale run still takes precedence — no recipe, just the warning.
@@ -162,8 +178,8 @@ Item {
         }
         var yieldTxt = (targetWeight > 0) ? (targetWeight.toFixed(1) + "g") : ""
         var line = (yieldTxt !== "")
-            ? TranslationManager.translate("shotplan.plain.pull", "Pull a %1 espresso shot").arg(fmt(yieldTxt, true))
-            : TranslationManager.translate("shotplan.plain.pullNoYield", "Pull an espresso shot")
+            ? TranslationManager.translate("shotplan.plain.pull", "Pull a %1 coffee shot").arg(fmt(yieldTxt, true))
+            : TranslationManager.translate("shotplan.plain.pullNoYield", "Pull a coffee shot")
         if (dose > 0) {
             var beans = []
             if (roasterBrand.length > 0) beans.push(roasterBrand)
@@ -182,10 +198,9 @@ Item {
     readonly property string text: root.format === "plain"
         ? _buildPlain(function(v, live) { return _argSafe(v) }, ". ")
         : _build(function(v, live) { return _argSafe(v) }, "  ·  ", "  ·  ")
-    // Rich: same content, live values bolded, all HTML-escaped; the styled bold safe-dot · separator.
-    // "stacked" breaks the sentence and its details onto separate lines; "plain" is a two-line template.
+    // Rich: same content, live values bolded, all HTML-escaped; joined with Theme.bulletSep.
+    // "stacked" breaks the sentence and its details onto separate lines; "plain" is its own template.
     // A cleaning/descale notice is bolded WHOLE — it's a warning, not a plan.
-    readonly property string _richSep: " <font size=\"+1\"><b>·</b></font> "
     readonly property string _rich: {
         if (root.format === "plain") {
             var p = _buildPlain(function(v, live) {
@@ -197,7 +212,7 @@ Item {
         var r = _build(function(v, live) {
             var e = Theme.escapeHtml(_argSafe(v))
             return live ? ("<b>" + e + "</b>") : e
-        }, _richSep, root.format === "stacked" ? "<br>" : _richSep)
+        }, Theme.bulletSep, root.format === "stacked" ? "<br>" : Theme.bulletSep)
         return (_isCleaning && r !== "") ? ("<b>" + r + "</b>") : r
     }
 

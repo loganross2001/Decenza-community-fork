@@ -59,7 +59,7 @@ Page {
             } else {
                 parts.push(step.pressure.toFixed(2) + " bar")
             }
-            parts.push(step.temperature.toFixed(0) + " degrees")
+            parts.push(Theme.cToDisplay(step.temperature).toFixed(0) + " degrees")
             parts.push(step.seconds.toFixed(0) + " seconds")
             parts.push(step.transition === "smooth" ? "smooth transition" : "fast transition")
         } else {
@@ -77,7 +77,7 @@ Page {
                 }
             }
             if (step.temperature !== prev.temperature) {
-                parts.push(step.temperature.toFixed(0) + " degrees")
+                parts.push(Theme.cToDisplay(step.temperature).toFixed(0) + " degrees")
             }
             if (step.seconds !== prev.seconds) {
                 parts.push(step.seconds.toFixed(0) + " seconds")

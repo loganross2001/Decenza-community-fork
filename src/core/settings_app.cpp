@@ -413,17 +413,6 @@ void SettingsApp::setAutoCheckUpdates(bool enabled) {
     }
 }
 
-bool SettingsApp::coachAfterEachShot() const {
-    return m_settings.value("postShotReview/coachAfterEachShot", false).toBool();
-}
-
-void SettingsApp::setCoachAfterEachShot(bool enabled) {
-    if (coachAfterEachShot() != enabled) {
-        m_settings.setValue("postShotReview/coachAfterEachShot", enabled);
-        emit coachAfterEachShotChanged();
-    }
-}
-
 bool SettingsApp::betaUpdatesEnabled() const {
     return m_settings.value("updates/betaEnabled", false).toBool();
 }
@@ -496,8 +485,17 @@ QString SettingsApp::temperatureUnit() const {
 }
 
 void SettingsApp::setTemperatureUnit(const QString& unit) {
-    if (temperatureUnit() != unit) {
-        m_settings.setValue("display/temperatureUnit", unit);
+    // Normalise + whitelist so a malformed value (e.g. from an imported settings
+    // file during device-to-device migration) can't be stored and silently
+    // re-exported as garbage. Anything outside {celsius, fahrenheit} degrades to
+    // celsius — loudly, not silently.
+    QString normalized = unit.trimmed().toLower();
+    if (normalized != QLatin1String("celsius") && normalized != QLatin1String("fahrenheit")) {
+        qWarning() << "SettingsApp: invalid temperatureUnit" << unit << "- coercing to celsius";
+        normalized = QStringLiteral("celsius");
+    }
+    if (temperatureUnit() != normalized) {
+        m_settings.setValue("display/temperatureUnit", normalized);
         emit temperatureUnitChanged();
     }
 }
@@ -585,6 +583,38 @@ void SettingsApp::setScreenCaptureEnabled(bool enabled) {
     }
 }
 
+// Device identity
+QString SettingsApp::deviceId() const {
+    QString id = m_settings.value("device/uuid").toString();
+    if (id.isEmpty()) {
+        id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        const_cast<QSettings&>(m_settings).setValue("device/uuid", id);
+    }
+    return id;
+}
+
+// Pocket app pairing
+QString SettingsApp::pocketPairingToken() const {
+    return m_settings.value("pocket/pairingToken").toString();
+}
+
+void SettingsApp::setPocketPairingToken(const QString& token) {
+    m_settings.setValue("pocket/pairingToken", token);
+}
+
+// [barista-fork] AI coaching settings (re-added during the upstream re-baseline — the merge took
+// upstream's settings_app.cpp, which lacks these; the declarations live in settings_app.h).
+bool SettingsApp::coachAfterEachShot() const {
+    return m_settings.value("postShotReview/coachAfterEachShot", false).toBool();
+}
+
+void SettingsApp::setCoachAfterEachShot(bool enabled) {
+    if (coachAfterEachShot() != enabled) {
+        m_settings.setValue("postShotReview/coachAfterEachShot", enabled);
+        emit coachAfterEachShotChanged();
+    }
+}
+
 bool SettingsApp::liveCoachingEnabled() const {
     return m_settings.value("espresso/liveCoachingEnabled", true).toBool();
 }
@@ -605,23 +635,4 @@ void SettingsApp::setLiveSteamCoachingEnabled(bool enabled) {
         m_settings.setValue("steam/liveSteamCoachingEnabled", enabled);
         emit liveSteamCoachingEnabledChanged();
     }
-}
-
-// Device identity
-QString SettingsApp::deviceId() const {
-    QString id = m_settings.value("device/uuid").toString();
-    if (id.isEmpty()) {
-        id = QUuid::createUuid().toString(QUuid::WithoutBraces);
-        const_cast<QSettings&>(m_settings).setValue("device/uuid", id);
-    }
-    return id;
-}
-
-// Pocket app pairing
-QString SettingsApp::pocketPairingToken() const {
-    return m_settings.value("pocket/pairingToken").toString();
-}
-
-void SettingsApp::setPocketPairingToken(const QString& token) {
-    m_settings.setValue("pocket/pairingToken", token);
 }

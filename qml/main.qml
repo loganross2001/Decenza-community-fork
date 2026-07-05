@@ -537,7 +537,11 @@ ApplicationWindow {
     // Latched by the milk auto-capture (IdlePage/SteamPage) to the milk weight
     // measured for the upcoming steam session. Committed atomically with the actual
     // duration when the session ends, so "use as baseline" never adopts a mismatched
-    // (milk, time) pair. 0 = no milk measured this session.
+    // (milk, time) pair. 0 = no milk measured this session. Reset points: pitcher
+    // change and session end (both below), plus IdlePage's fresh-steam-attempt zero
+    // when steam is re-selected. Mirrored read-only by SteamPlanText and
+    // MilkWeightItem; read by SteamPage's captured-milk fallback and SteamItem's
+    // popup preset tap.
     property real sessionMeasuredMilkG: 0
     // The captured milk is specific to the selected pitcher's tare + calibration, so
     // drop it when the pitcher changes — otherwise a new pitcher's steam could scale to
@@ -3202,13 +3206,14 @@ ApplicationWindow {
         cleaned = cleaned.replace(/\.(json|tcl|txt)$/i, "")
         // Replace underscores and hyphens with spaces
         cleaned = cleaned.replace(/[_-]/g, " ")
-        // Expand units for natural speech
-        var degreesWord = Theme.tempIsFahrenheit() ? " degrees Fahrenheit" : " degrees Celsius"
+        // Expand units for natural speech. Both the °C/°F symbols and a bare "88C"
+        // (common in Celsius-authored profile names like gagne_88C) always denote
+        // their own unit regardless of the display setting, so map them literally —
+        // the app's own converted read-outs always emit an explicit "°F"/"°C", never
+        // a bare number+C, so this never mislabels a converted value.
         cleaned = cleaned.replace(/°F/g, " degrees Fahrenheit")
-        // The °C / °F symbols denote their own unit regardless of the display setting
-        // (Celsius-only pages keep °C even in Fahrenheit mode), so map them literally.
         cleaned = cleaned.replace(/°C/g, " degrees Celsius")
-        cleaned = cleaned.replace(/(\d)\s*C\b/g, "$1" + degreesWord)  // bare "72C" (no symbol) -> current unit
+        cleaned = cleaned.replace(/(\d)\s*C\b/g, "$1 degrees Celsius")  // bare "88C" (Celsius-authored)
         cleaned = cleaned.replace(/(\d)\s*ml\b/gi, "$1 milliliters")
         cleaned = cleaned.replace(/(\d)\s*g\b/g, "$1 grams")
         cleaned = cleaned.replace(/(\d)\s*bar\b/gi, "$1 bar")

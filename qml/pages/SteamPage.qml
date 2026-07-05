@@ -35,7 +35,9 @@ Page {
                 steamPage.syncSteamTimeout()
                 Settings.brew.steamFlow = getCurrentPitcherFlow()
                 Settings.brew.steamTemperature = getCurrentPitcherTemperature()
-                steamTempSlider.value = Theme.cToDisplay(getCurrentPitcherTemperature())
+                // steamTempSlider.value re-derives from Settings.brew.steamTemperature
+                // via its cToDisplay binding — no imperative write (that would freeze
+                // the binding at an untagged display-unit snapshot).
                 // Start heating steam heater (ignores keepSteamHeaterOn - user wants to steam)
                 // startSteamHeating clears steamDisabled flag automatically
                 MainController.startSteamHeating("steampage-activated")
@@ -234,9 +236,10 @@ Page {
     function saveCurrentPitcher(duration, flow, temperature) {
         var name = getCurrentPitcherName()
         if (name && !isCurrentPitcherDisabled()) {
-            // temperature (when provided) is Celsius; the slider fallback is in the
-            // display unit, so convert it back to Celsius for storage.
-            var temp = (temperature !== undefined) ? temperature : Theme.displayToC(steamTempSlider.value)
+            // temperature (when provided) is Celsius; otherwise fall back to the
+            // stored (Celsius) steam temperature — never the display widget, whose
+            // value carries no unit tag once read imperatively.
+            var temp = (temperature !== undefined) ? temperature : Settings.brew.steamTemperature
             Settings.brew.updateSteamPitcherPreset(Settings.brew.selectedSteamPitcher, name, duration, flow, temp)
         }
     }
@@ -320,24 +323,26 @@ Page {
     }
 
     // Sync steamTimeout to the selected preset WITHOUT clobbering a weight-scaled
-    // value. If milk is on the scale now, use the scaled time. If the preset is
-    // calibrated but milk isn't on the scale (e.g. lifted to the wand / arriving
-    // from the home-screen steam flow), keep the current steamTimeout — it was
-    // already scaled from the measured milk. Only fall back to the fixed reference
-    // duration when the preset isn't calibrated.
+    // value. Milk to scale against = the scale reading now, else the milk captured
+    // this session (or the last reading seen on this page — lastOnScaleMilk survives
+    // session end); the scaled-or-base resolution itself is the shared SettingsBrew
+    // helper. Kept-current cases: a calibrated preset already scaled for this
+    // selection with nothing to scale against right now (pitcher lifted to the wand,
+    // or weight-timing toggled off while the scaled flag is still latched) — writing
+    // the base duration then would discard the measured-milk scaling.
     function syncSteamTimeout() {
-        var live = scaledSteamTimeout()
-        if (live <= 0) {
-            var cap = capturedMilkForScaling()   // pitcher lifted: use the captured milk
-            if (cap > 0) live = steamTimeForMilk(cap)
+        if (isCurrentPitcherDisabled()) return   // heater is off — keep whatever's set
+        var milk = currentMeasuredMilk()
+        if (milk <= 0) milk = capturedMilkForScaling()   // pitcher lifted: use the captured milk
+        var scaled = steamTimeForMilk(milk)
+        if (scaled > 0) steamPage.steamTimeoutScaled = true
+        // Write the shared scaled-or-base resolution — UNLESS this selection was
+        // already scaled from measured milk and the pitcher is merely lifted
+        // (calibrated preset, nothing on the scale): keep that value.
+        if (scaled > 0 || getCurrentPitcherCalibMilk() <= 0 || !steamPage.steamTimeoutScaled) {
+            Settings.brew.steamTimeout = Settings.brew.effectiveSteamDurationSec(
+                Settings.brew.selectedSteamPitcher, milk)
         }
-        if (live > 0) {
-            Settings.brew.steamTimeout = live
-            steamPage.steamTimeoutScaled = true
-        } else if (getCurrentPitcherCalibMilk() <= 0 || !steamPage.steamTimeoutScaled) {
-            Settings.brew.steamTimeout = getCurrentPitcherDuration()
-        }
-        // else: calibrated AND scaled for this selection, pitcher just lifted -> keep it
     }
 
     // Steam view mode: "timer" (default) or "chart"
@@ -1182,9 +1187,10 @@ Page {
                                         var flow = modelData.flow !== undefined ? modelData.flow : 150
                                         durationSlider.value = modelData.duration
                                         flowSlider.value = flow
-                                        // Compute once so the test and the value can't disagree on a fresh telemetry tick.
-                                        var scaled = scaledSteamTimeout()
-                                        Settings.brew.steamTimeout = scaled > 0 ? scaled : modelData.duration
+                                        // Scaled-or-base resolved by the shared SettingsBrew helper,
+                                        // evaluated once so a fresh telemetry tick can't split the decision.
+                                        Settings.brew.steamTimeout = Settings.brew.effectiveSteamDurationSec(
+                                            Settings.brew.selectedSteamPitcher, currentMeasuredMilk())
                                         Settings.brew.steamFlow = flow
                                         MainController.startSteamHeating(reason)
                                     }
@@ -1570,9 +1576,11 @@ Page {
                             KeyNavigation.tab: pitcherWeightInput
                             KeyNavigation.backtab: flowSlider
                             onValueModified: function(newValue) {
-                                // newValue is in the display unit; keep tracking it live.
-                                steamTempSlider.value = newValue
-                                // saveCurrentPitcher stores Celsius, so convert first.
+                                // newValue is in the display unit. Write through in Celsius;
+                                // the value binding re-derives from Settings.brew.steamTemperature
+                                // (updated via saveCurrentPitcher's preset-changed signal), so we
+                                // never imperatively write the slider — that would freeze its
+                                // binding at an untagged display-unit snapshot.
                                 saveCurrentPitcher(durationSlider.value, flowSlider.value, Theme.displayToC(newValue))
                             }
                             onValueCommitted: function(newValue) {
@@ -1780,7 +1788,7 @@ Page {
                         }
                     }
 
-                    // Master on/off (on by default; calibrating sets the reference). Off = plain
+                    // Master on/off (off by default; calibrating turns it on). Off = plain
                     // fixed-duration steaming; the calibration is kept for when you re-enable.
                     StyledSwitch {
                         Layout.fillWidth: true
@@ -2055,21 +2063,6 @@ Page {
             color: Theme.primaryContrastColor
             font: Theme.bodyFont
         }
-    }
-
-    // Live during-steam coaching cues (stretch -> roll -> almost -> stop), driven
-    // by LiveSteamCoach off the elapsed steam time. Self-gates on an active cue and
-    // speaks via AccessibilityManager; only shows while steaming.
-    LiveCoachingBanner {
-        z: 1000
-        anchors.top: parent.top
-        anchors.topMargin: Theme.scaled(110)
-        anchors.left: parent.left
-        anchors.right: parent.right
-        anchors.leftMargin: Theme.spacingMedium
-        anchors.rightMargin: Theme.spacingMedium
-        coach: MainController.liveSteamCoach
-        enabled: Settings.app.liveSteamCoachingEnabled
     }
 
     // Small flashing reminder while the milk pitcher is settling on the scale
@@ -2466,7 +2459,7 @@ Page {
             // sets selectedSteamPitcher, so the subsequent startSteamHeating/
             // applySteamSettings push the per-pitcher temperature to the machine.
             var temp = getCurrentPitcherTemperature()
-            steamTempSlider.value = Theme.cToDisplay(temp)
+            // Slider re-derives from steamTemperature via its cToDisplay binding.
             Settings.brew.steamTemperature = temp
         }
         function onSteamPitcherPresetsChanged() {
@@ -2477,7 +2470,7 @@ Page {
             // applySteamSettings (back-navigation, keepSteamHeaterOn) pushes the
             // current value rather than a stale one.
             var temp = getCurrentPitcherTemperature()
-            steamTempSlider.value = Theme.cToDisplay(temp)
+            // Slider re-derives from steamTemperature via its cToDisplay binding.
             Settings.brew.steamTemperature = temp
         }
     }

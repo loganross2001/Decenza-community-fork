@@ -1040,7 +1040,7 @@ KeyboardAwareContainer {
                                         var level = DE1Device.waterLevelMm
                                         var ml = DE1Device.waterLevelMl
                                         var percent = DE1Device.waterLevel
-                                        return ml + " ml (" + percent.toFixed(0) + "%) • " + level.toFixed(1) + " mm"
+                                        return ml + " ml (" + percent.toFixed(0) + "%) · " + level.toFixed(1) + " mm"
                                     }
                                     color: Theme.textColor
                                     font.pixelSize: Theme.scaled(18)
@@ -1115,6 +1115,7 @@ KeyboardAwareContainer {
                         Text {
                             text: TranslationManager.translate("settings.options.temperatureUnit", "Temperature unit")
                             color: Theme.textColor
+                            font.family: Theme.bodyFont.family
                             font.pixelSize: Theme.scaled(16)
                             font.bold: true
                         }

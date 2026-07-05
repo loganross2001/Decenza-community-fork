@@ -62,7 +62,9 @@ FocusScope {
 
     function announceCurrentPill() {
         if (typeof AccessibilityManager !== "undefined" && AccessibilityManager.enabled && presets.length > 0) {
-            var name = presets[focusedIndex].name || ""
+            // Route through pillLayoutName so keyboard/switch-access announcements match what
+            // touch/screen-reader-tap users hear (e.g. pillLabelFn's "Small Pitcher" transform).
+            var name = pillLayoutName(focusedIndex)
             var modifiedText = (root.modified && focusedIndex === selectedIndex) ? ", " + TranslationManager.translate("presets.unsaved", "unsaved changes") : ""
             var status = focusedIndex === selectedIndex ? ", " + TranslationManager.translate("presets.selected", "selected") : ""
             AccessibilityManager.announce(name + modifiedText + status)
@@ -117,6 +119,7 @@ FocusScope {
     onPresetsChanged: recalcTimer.restart()
     onEffectiveMaxWidthChanged: recalcTimer.restart()
     onPillSuffixFnChanged: recalcTimer.restart()
+    onPillLabelFnChanged: recalcTimer.restart()
     // Dirty-state changes alter pill widths ("*Name" / " (modified)") so they trigger a
     // layout recalc. Because `modified` is a bindable property, we get changes from any
     // upstream source (ProfileManager, Settings, etc.) via the QML binding system without
@@ -317,9 +320,16 @@ FocusScope {
 
                             onAccessibleClicked: {
                                 if (!modelData || !modelData.preset) return
-                                // Announce selection for accessibility feedback
+                                // Announce selection for accessibility feedback. Route through
+                                // pillDisplayName so the tap announcement matches what focus
+                                // announces (e.g. pillLabelFn's "Small Pitcher" transform).
+                                // pillDisplayName reads the LIVE presets list with this row's
+                                // index, which the 1ms rowsModel rebuild can leave stale after
+                                // a deletion/reorder — fall back to the row's snapshot name
+                                // rather than announcing nothing.
                                 if (typeof AccessibilityManager !== "undefined" && AccessibilityManager.enabled) {
-                                    AccessibilityManager.announce(modelData.preset.name + " " + TranslationManager.translate("presetPill.selected", "selected"))
+                                    var announceName = pillDisplayName(modelData.index) || modelData.preset.name
+                                    AccessibilityManager.announce(announceName + " " + TranslationManager.translate("presetPill.selected", "selected"))
                                 }
                                 root.presetSelected(modelData.index)
                             }

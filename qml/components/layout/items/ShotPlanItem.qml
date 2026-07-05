@@ -22,18 +22,27 @@ Item {
     readonly property bool showRoastDate: modelData.shotPlanShowRoastDate === true
     readonly property bool showDoseYield: modelData.shotPlanShowDoseYield !== false
     readonly property bool showSteamPlan: modelData.shotPlanShowSteamPlan !== false
-    // Display format: "sentence" (default) | "compact" | "stacked". Fixes the run-on/truncation
-    // by letting the user pick a shape that fits their tile.
+    // Display format: "sentence" (default) | "compact" | "stacked" | "plain". Picked in the layout
+    // editor. Only "stacked"/"plain" wrap (up to 3 lines) when the tile is taller; "sentence"/"compact"
+    // stay one line and elide. (Multi-line formats suit center/growable zones — see ShotPlanText.)
     readonly property string format: modelData.shotPlanFormat || "sentence"
 
     // Steam context = steam selected on the idle screen, OR the full steam page, OR the
     // machine actively steaming. Theme.currentPageObjectName (set by main.qml's
     // page-change handler) and Theme.currentOperationMode (published by IdlePage) are
     // singleton properties, so these are plain reactive bindings.
-    readonly property bool _steamMode: showSteamPlan && (
+    readonly property bool _steamContext: showSteamPlan && (
         Theme.currentOperationMode === "steam"
         || Theme.currentPageObjectName === "steamPage"
         || (typeof MachineState !== "undefined" && MachineState.phase === MachineStateType.Phase.Steaming))
+    // Only actually swap when the steam plan has something to say — with the "Off"
+    // pitcher its text is empty, and swapping then would blank the whole widget while
+    // leaving a phantom focusable a11y node. Fall back to the shot plan instead.
+    // (A stale preset index is NOT guaranteed empty: a remembered lastSteamMilkG still
+    // renders a milk-only fragment. Both SteamPlanText instances bind identically, so
+    // either text suffices; check both for safety.)
+    readonly property bool _steamMode: _steamContext
+        && (compactSteamPlan.text !== "" || fullSteamPlan.text !== "")
 
     // Open the single global Brew Settings dialog (hosted at the app root) via the
     // window, so this works wherever the tile is placed — including the persistent
@@ -46,7 +55,7 @@ Item {
     implicitWidth: isCompact ? compactContent.implicitWidth : fullContent.implicitWidth
     implicitHeight: isCompact ? compactContent.implicitHeight : fullContent.implicitHeight
 
-    // Showing the steam plan the widget is a read-only summary; otherwise it opens
+    // When showing the steam plan the widget is a read-only summary; otherwise it opens
     // Brew Settings on tap, so it's an activatable button.
     Accessible.role: root._steamMode ? Accessible.StaticText : Accessible.Button
     Accessible.name: {

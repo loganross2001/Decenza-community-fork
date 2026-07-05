@@ -140,6 +140,44 @@ Item {
         root._resumeMicAfterLocal()
     }
 
+    // [barista-fork] Arm the apply/skip chip ONLY when the recommendation is a REAL change from the
+    // live recipe — the model often echoes the current dose/yield/grind in its structuredNext block,
+    // which must NOT pop "apply or skip?" with nothing to actually change. Compares each proposed
+    // field to the same current value applyFromNext would overwrite (baristaactions.cpp).
+    function _nextDiffersFromCurrent(nx) {
+        if (!nx) return false
+        var eps = 0.05
+        // Grinder dial (string): a genuinely different setting than the one on file.
+        var g = String(nx.grinderSetting || "").trim()
+        if (g.length > 0 && g !== String(Settings.dye.dyeGrinderSetting || "").trim())
+            return true
+        // Dose in.
+        var dose = Number(nx.doseG)
+        if (dose > 0 && Math.abs(dose - Number(Settings.dye.dyeBeanWeight)) > eps)
+            return true
+        // Explicit yield out.
+        var yieldG = Number(nx.targetWeightG)
+        if (yieldG > 0 && Math.abs(yieldG - Number(ProfileManager.targetWeight)) > eps)
+            return true
+        // Ratio → the yield it would imply (mirrors applyFromNext: only when no explicit yield).
+        var ratio = Number(nx.ratio)
+        if (ratio >= 1.0 && yieldG <= 0) {
+            var baseDose = dose > 0 ? dose : Number(Settings.dye.dyeBeanWeight)
+            if (baseDose > 0 && Math.abs(baseDose * ratio - Number(ProfileManager.targetWeight)) > eps)
+                return true
+        }
+        // Temperature vs the current effective temp (override if set, else the profile's).
+        var temp = Number(nx.temperatureC)
+        if (temp > 0) {
+            var curTemp = Settings.brew.hasTemperatureOverride
+                          ? Number(Settings.brew.temperatureOverride)
+                          : Number(ProfileManager.profileTargetTemperature)
+            if (Math.abs(temp - curTemp) > 0.2)
+                return true
+        }
+        return false
+    }
+
     // Who the assistant is talking to: the user's chosen name, else the active barista.
     readonly property string _userName: {
         if (_settings && _settings.userName && _settings.userName.length > 0) return _settings.userName
@@ -527,9 +565,9 @@ Item {
             // Require an ACTIONABLE field — a bare "expectation" (or an echo the model tacked on) must not
             // pop an "apply or skip?" with nothing to apply.
             var nx = root._conv ? root._conv.structuredNextForLastAssistantTurnMap() : null
-            var actionable = nx && (String(nx.grinderSetting || "").length > 0
-                                    || Number(nx.doseG) > 0 || Number(nx.targetWeightG) > 0
-                                    || Number(nx.ratio) > 0 || Number(nx.temperatureC) > 0)
+            // Arm ONLY for a recommendation that actually CHANGES the recipe (not a bare "expectation"
+            // and not an echo of the current dose/yield/grind the model tacked on).
+            var actionable = root._nextDiffersFromCurrent(nx)
             if (actionable) {
                 root._pendingNext = nx
                 root._awaitConfirm = true
@@ -654,17 +692,31 @@ Item {
             // The assistant's line (or a thinking indicator) — fills the panel so the input pins to the bottom.
             // Secondary when the character is shown (the user doesn't need to read everything), but still visible
             // so errors, the action chip, and the listening partial stay readable.
-            Text {
-                id: msgText
+            // [barista-fork] Long answers must SCROLL within the panel — a bare Text with fillHeight
+            // overflowed its box and rendered ON TOP OF the chip/input below it (the "text writing over
+            // itself"). Bound + clip it in a Flickable; reset to the top on each new answer so it reads
+            // top-first, and the user can drag to scroll a long reply.
+            Flickable {
+                id: msgFlick
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                verticalAlignment: Text.AlignTop
-                wrapMode: Text.WordWrap
-                color: avatar.visible ? Theme.textSecondaryColor : Theme.textColor
-                font: avatar.visible ? Theme.bodyFont : Theme.subtitleFont
-                text: (root._thinking && root._message.length === 0)
-                      ? TranslationManager.translate("barista.thinking", "…")
-                      : root._message
+                clip: true
+                contentWidth: width
+                contentHeight: msgText.implicitHeight
+                boundsBehavior: Flickable.StopAtBounds
+
+                Text {
+                    id: msgText
+                    width: msgFlick.width
+                    verticalAlignment: Text.AlignTop
+                    wrapMode: Text.WordWrap
+                    color: avatar.visible ? Theme.textSecondaryColor : Theme.textColor
+                    font: avatar.visible ? Theme.bodyFont : Theme.subtitleFont
+                    text: (root._thinking && root._message.length === 0)
+                          ? TranslationManager.translate("barista.thinking", "…")
+                          : root._message
+                    onTextChanged: msgFlick.contentY = 0   // a new answer → show it from the top
+                }
             }
 
             // Apply-on-confirm chip: appears when a recommendation (or a grind reminder) is pending.

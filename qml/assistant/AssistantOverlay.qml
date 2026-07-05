@@ -174,7 +174,7 @@ Item {
         root._thinking = false
         root._pendingBegin = null
         // SF-1: clear web search so it can't leak onto a later advisor turn on the same conversation key.
-        if (root._conv) { root._conv.webSearchEnabled = false; root._conv.verbatimPairs = 2 }
+        if (root._conv) { root._conv.webSearchEnabled = false; root._conv.toolsEnabled = false; root._conv.verbatimPairs = 2 }
     }
     // SF-4: the preempted greeting couldn't beginSession because a close-out reply was mid-flight. Its reply
     // has now landed (conversation is free), so open the greeting — deferred to avoid re-entering the AI stack.
@@ -188,6 +188,7 @@ Item {
             if (typeof MainController !== "undefined" && MainController.aiManager)
                 MainController.aiManager.switchConversation(root._sessBrand, root._sessType, root._sessProf)
             root._conv.webSearchEnabled = pb.webOn
+            root._conv.toolsEnabled = pb.toolsOn
             root._conv.verbatimPairs = 8
             root._thinking = true
             root._stampTurn()
@@ -343,6 +344,17 @@ Item {
             persona += "\nYou cannot browse the web in this session. If asked about outside info, say so "
                 + "briefly and work from the data block."
 
+        // query_shots client tool (Anthropic only) — the barista can pull ANY shot from the user's FULL local
+        // history on demand, so it's never limited to the recent summary in the data block.
+        var toolsOn = typeof MainController !== "undefined" && MainController.aiManager
+                      && MainController.aiManager.selectedProvider === "anthropic"
+        if (toolsOn)
+            persona += "\nYou can look up the user's espresso shots from their FULL history at any time using the "
+                + "query_shots tool — well beyond the recent summary in the data block. Use it whenever they ask "
+                + "about a specific shot, a total count, or a bean/date range (e.g. \"my best shot on this bean\", "
+                + "\"how many shots did I pull in June\", \"my very first shot\"). Reach for real data instead of "
+                + "guessing, and never claim your history only goes back a few days — you can see all of it."
+
         // dataBlock is the pre-formatted, combined context (dial-in + bean profile + profile guidance).
         var block = (dataBlock && dataBlock.length > 0) ? dataBlock : "recordedShots: 0"
 
@@ -363,11 +375,12 @@ Item {
                      + " but haven't confirmed doing it — ask me early whether I actually set it.)"
 
         root._conv.webSearchEnabled = webOn   // barista session only; reset by ask()/resetInMemory()
+        root._conv.toolsEnabled = toolsOn     // barista session only; the query_shots opt-in (reset the same way)
         root._conv.verbatimPairs = 8          // keep more of the chat verbatim so casual context survives the session
         root._stampTurn()
         var _sys = persona + "\n\n" + block
         if (!root._conv.beginSession(_sys, kickoff))   // SF-4: busy (a prior turn in flight) → retry when free
-            root._pendingBegin = { "sys": _sys, "kick": kickoff, "webOn": webOn }
+            root._pendingBegin = { "sys": _sys, "kick": kickoff, "webOn": webOn, "toolsOn": toolsOn }
     }
 
     function _send(text) {

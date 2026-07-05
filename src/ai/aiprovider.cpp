@@ -6,6 +6,8 @@
 #include <QTimer>
 #include <QUrl>
 #include <QVariant>
+#include <QVector>
+#include <memory>
 
 // ============================================================================
 // AIProvider base class
@@ -413,6 +415,7 @@ void AnthropicProvider::analyzeConversation(const QString& systemPrompt, const Q
     m_retryCount = 0;
     m_continuations = 0;          // [barista-fork]
     m_accumulatedText.clear();    // [barista-fork]
+    m_toolRounds = 0;             // [barista-fork] reset the client-tool loop counter per turn
     ++m_reqGen;
 
     QJsonObject requestBody;
@@ -420,17 +423,44 @@ void AnthropicProvider::analyzeConversation(const QString& systemPrompt, const Q
     requestBody["max_tokens"] = 4096;   // [barista-fork] was 1024 — short replies were truncating mid-sentence
     requestBody["system"] = buildCachedSystemPrompt(systemPrompt);
     requestBody["messages"] = messagesWithCachedFirstUser(messages);
-    // [barista-fork] server-side web search — barista only (options.webSearch). Runs on Anthropic's side;
-    // no client tool loop, we only resume on stop_reason "pause_turn" (see onAnalysisReply).
+    // [barista-fork] Tools — barista only. web_search runs on Anthropic's side (resume on "pause_turn");
+    // query_shots is CLIENT-side (we run the DB query and feed the tool_result back on "tool_use"). Both can
+    // coexist. When neither option is set (advisor/coach, or a non-Anthropic-tool caller) the array is empty
+    // and "tools" is omitted entirely — byte-identical to the original request.
+    QJsonArray tools;
     if (options.webSearch) {
         QJsonObject ws;
         ws["type"] = QString("web_search_20260209");
         ws["name"] = QString("web_search");
         ws["max_uses"] = 3;
-        QJsonArray tools;
         tools.append(ws);
-        requestBody["tools"] = tools;
     }
+    if (options.clientShotTool && m_toolExecutor) {
+        QJsonObject qs;
+        qs["name"] = QString("query_shots");
+        qs["description"] = QString(
+            "Look up the user's espresso shots from their FULL local shot history on demand — beyond the "
+            "summary already in the data block. Use it for specific shots, counts, or date/bean ranges "
+            "(e.g. 'my best shot on this bean', 'shots pulled in June', 'how many shots total', 'first shot "
+            "ever'). Returns a compact list of shot summaries.");
+        QJsonObject schema;
+        schema["type"] = QString("object");
+        QJsonObject props;
+        const auto strProp = [](const QString& d){ QJsonObject o; o["type"] = QString("string"); o["description"] = d; return o; };
+        const auto intProp = [](const QString& d){ QJsonObject o; o["type"] = QString("integer"); o["description"] = d; return o; };
+        props["beanBrand"]    = strProp("Filter by roaster/brand (case-insensitive substring).");
+        props["beanType"]     = strProp("Filter by coffee/bean name (case-insensitive substring).");
+        props["sinceDate"]    = strProp("Only shots on/after this date, YYYY-MM-DD.");
+        props["untilDate"]    = strProp("Only shots on/before this date, YYYY-MM-DD.");
+        props["sinceDaysAgo"] = intProp("Alternative to sinceDate: only shots within the last N days.");
+        props["sortBy"]       = strProp("'recent' (default, newest first) or 'bestEnjoyment' (highest rated first).");
+        props["limit"]        = intProp("Max shots to return (default 15, capped at 50).");
+        schema["properties"] = props;
+        qs["input_schema"] = schema;
+        tools.append(qs);
+    }
+    if (!tools.isEmpty())
+        requestBody["tools"] = tools;
 
     sendRequest(requestBody);
 }
@@ -544,6 +574,62 @@ void AnthropicProvider::onAnalysisReply(QNetworkReply* reply)
                                                  // text blocks at citation boundaries; a "\n" join breaks it.
     }
 
+    // [barista-fork] CLIENT tool (query_shots): the model asked us to run it. Execute each tool_use block via
+    // the injected executor, append the assistant tool_use turn + a user tool_result turn, and re-POST — the
+    // standard Anthropic tool loop, bounded by MAX_TOOL_ROUNDS. Only barista requests carry the tool, so the
+    // advisor (which never sends tools) never receives a "tool_use" stop_reason and this branch is inert for it.
+    // (web_search is server-side and uses "pause_turn", not "tool_use" — that path below is untouched.)
+    if (stopReason == QLatin1String("tool_use") && m_toolExecutor && m_toolRounds < MAX_TOOL_ROUNDS) {
+        // Collect every tool_use block up front — the API may batch several parallel calls in one turn.
+        QVector<QJsonObject> toolUses;
+        for (const QJsonValue& v : content) {
+            const QJsonObject block = v.toObject();
+            if (block["type"].toString() == QLatin1String("tool_use"))
+                toolUses.append(block);
+        }
+        if (!toolUses.isEmpty()) {
+            ++m_toolRounds;
+            if (!text.isEmpty()) m_accumulatedText += text;   // keep prose written before the tool call (mirrors pause_turn)
+            setStatus(Status::Busy);           // stay Busy while the DB queries run (line 499 already set Ready)
+            const int gen = m_reqGen;           // guard: a superseded turn's late callback must NOT re-POST
+            auto pending = std::make_shared<int>(toolUses.size());
+            auto results = std::make_shared<QJsonArray>();
+            for (const QJsonObject& block : toolUses) {
+                const QString id = block["id"].toString();
+                m_toolExecutor(block["name"].toString(), block["input"].toObject(),
+                    [this, gen, id, pending, results, content](QJsonValue result) {
+                        if (gen != m_reqGen) return;   // a newer turn started — drop this stale result
+                        // Anthropic wants tool_result.content as a string; JSON-stringify arrays/objects.
+                        QString contentStr;
+                        if (result.isString())      contentStr = result.toString();
+                        else if (result.isArray())  contentStr = QString::fromUtf8(QJsonDocument(result.toArray()).toJson(QJsonDocument::Compact));
+                        else                        contentStr = QString::fromUtf8(QJsonDocument(result.toObject()).toJson(QJsonDocument::Compact));
+                        QJsonObject tr;
+                        tr["type"] = QString("tool_result");
+                        tr["tool_use_id"] = id;
+                        tr["content"] = contentStr;
+                        if (result.isObject() && result.toObject().contains(QStringLiteral("error")))
+                            tr["is_error"] = true;   // documented Anthropic signal — helps the model recover
+                        results->append(tr);
+                        if (--(*pending) > 0)
+                            return;              // wait for the remaining tool calls in this turn
+                        // All results in — append the assistant tool_use turn + our tool_result turn, re-POST.
+                        QJsonObject body = m_pendingRequestBody;
+                        QJsonArray msgs = body["messages"].toArray();
+                        QJsonObject asst;  asst["role"] = QString("assistant"); asst["content"] = content;   // tool_use turn, verbatim
+                        msgs.append(asst);
+                        QJsonObject usr;   usr["role"]  = QString("user");      usr["content"]  = *results;   // our results
+                        msgs.append(usr);
+                        body["messages"] = msgs;
+                        setStatus(Status::Busy);
+                        sendRequest(body);
+                    });
+            }
+            return;   // async — the completion callback re-POSTs once every query has returned
+        }
+        // No tool_use blocks despite the stop_reason — fall through and emit whatever text exists.
+    }
+
     // [barista-fork] Server-side search paused mid-turn: resume by re-POSTing the turn with the assistant
     // content appended verbatim (the API detects the trailing tool block and continues). Bounded loop.
     if (stopReason == QLatin1String("pause_turn") && m_continuations < MAX_CONTINUATIONS) {
@@ -564,6 +650,12 @@ void AnthropicProvider::onAnalysisReply(QNetworkReply* reply)
     text = m_accumulatedText + text;
     m_accumulatedText.clear();
     if (text.trimmed().isEmpty()) {
+        // [barista-fork] The client tool loop hit MAX_TOOL_ROUNDS (or returned no prose) — degrade to a
+        // friendly message instead of surfacing an error to the user.
+        if (stopReason == QLatin1String("tool_use")) {
+            emit analysisComplete(QStringLiteral("I dug through your shot history but couldn't quite finish that — ask me again?"));
+            return;
+        }
         emit analysisFailed("Anthropic returned empty response content");
         return;
     }

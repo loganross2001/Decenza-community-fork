@@ -110,6 +110,11 @@ void AIManager::createProviders()
     connect(anthropic, &AIProvider::analysisComplete, this, &AIManager::onAnalysisComplete);
     connect(anthropic, &AIProvider::analysisFailed, this, &AIManager::onAnalysisFailed);
     connect(anthropic, &AIProvider::testResult, this, &AIManager::onTestResult);
+    // [barista-fork] wire the client-tool executor so the barista's query_shots can hit the local shot DB.
+    anthropic->setToolExecutor([this](const QString& name, const QJsonObject& input,
+                                      std::function<void(QJsonValue)> done) {
+        executeBaristaTool(name, input, std::move(done));
+    });
     m_anthropicProvider.reset(anthropic);
 
     // Create Gemini provider
@@ -1277,6 +1282,124 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
     thread->start();
 }
 
+// [barista-fork] Run a barista client-tool query against the local shot DB on a background thread and deliver
+// the JSON result to `done` on the main thread. query_shots is a READ-ONLY lookup across the user's FULL shot
+// history (any roaster/bean, any date range) — the "access to everything" the barista promised. Kept off the
+// main thread because withTempDb opens a fresh connection each call and the target is a slow tablet.
+void AIManager::executeBaristaTool(const QString& name, const QJsonObject& input,
+                                   std::function<void(QJsonValue)> done)
+{
+    if (name != QLatin1String("query_shots") || !m_shotHistory) {
+        done(QJsonObject{{QStringLiteral("error"), QStringLiteral("unknown tool or shot history unavailable")}});
+        return;
+    }
+
+    // Parse + clamp inputs on the main thread (cheap), then hand pure values to the worker.
+    const QString beanBrand = input.value(QStringLiteral("beanBrand")).toString().trimmed();
+    const QString beanType  = input.value(QStringLiteral("beanType")).toString().trimmed();
+    const QString sortBy    = input.value(QStringLiteral("sortBy")).toString().trimmed();
+    int limit = input.value(QStringLiteral("limit")).toInt(15);
+    if (limit <= 0) limit = 15;
+    if (limit > 50) limit = 50;
+
+    // Resolve date filters to epoch bounds here so the worker stays pure. sinceDate wins over sinceDaysAgo.
+    qint64 sinceEpoch = 0, untilEpoch = 0;
+    if (const int days = input.value(QStringLiteral("sinceDaysAgo")).toInt(0); days > 0)
+        sinceEpoch = QDateTime::currentDateTime().addDays(-days).toSecsSinceEpoch();
+    if (const QDate d = QDate::fromString(input.value(QStringLiteral("sinceDate")).toString().trimmed(),
+                                          QStringLiteral("yyyy-MM-dd")); d.isValid())
+        sinceEpoch = QDateTime(d, QTime(0, 0)).toSecsSinceEpoch();
+    if (const QDate d = QDate::fromString(input.value(QStringLiteral("untilDate")).toString().trimmed(),
+                                          QStringLiteral("yyyy-MM-dd")); d.isValid())
+        untilEpoch = QDateTime(d, QTime(23, 59, 59)).toSecsSinceEpoch();
+
+    const bool bestFirst = (sortBy.compare(QLatin1String("bestEnjoyment"), Qt::CaseInsensitive) == 0);
+    const QString dbPath = m_shotHistory->databasePath();
+
+    QThread* thread = QThread::create([=]() {
+        QJsonArray shots;
+        qint64 totalMatched = 0;
+        QString errMsg;
+        const bool dbOk = withTempDb(dbPath, "barista_query_shots", [&](QSqlDatabase& db) {
+            QString where = QStringLiteral(" WHERE 1=1");
+            if (!beanBrand.isEmpty()) where += QStringLiteral(" AND bean_brand LIKE :brand");
+            if (!beanType.isEmpty())  where += QStringLiteral(" AND bean_type LIKE :type");
+            if (sinceEpoch > 0)       where += QStringLiteral(" AND timestamp >= :since");
+            if (untilEpoch > 0)       where += QStringLiteral(" AND timestamp <= :until");
+            const auto bind = [&](QSqlQuery& q) {
+                if (!beanBrand.isEmpty()) q.bindValue(QStringLiteral(":brand"), QStringLiteral("%") + beanBrand + QStringLiteral("%"));
+                if (!beanType.isEmpty())  q.bindValue(QStringLiteral(":type"),  QStringLiteral("%") + beanType  + QStringLiteral("%"));
+                if (sinceEpoch > 0)       q.bindValue(QStringLiteral(":since"), sinceEpoch);
+                if (untilEpoch > 0)       q.bindValue(QStringLiteral(":until"), untilEpoch);
+            };
+
+            // Total matched — lets the barista answer "how many" even when the returned list is capped.
+            QSqlQuery cq(db);
+            cq.prepare(QStringLiteral("SELECT COUNT(*) FROM shots") + where);
+            bind(cq);
+            if (cq.exec() && cq.next())
+                totalMatched = cq.value(0).toLongLong();
+            else
+                errMsg = QStringLiteral("count: ") + cq.lastError().text();
+
+            const QString order = bestFirst
+                ? QStringLiteral(" ORDER BY enjoyment DESC, timestamp DESC")
+                : QStringLiteral(" ORDER BY timestamp DESC");
+            QSqlQuery q(db);
+            q.prepare(QStringLiteral(
+                "SELECT id, timestamp, profile_name, dose_weight, final_weight, duration_seconds, "
+                "enjoyment, grinder_setting, bean_brand, bean_type, espresso_notes FROM shots")
+                + where + order + QStringLiteral(" LIMIT ") + QString::number(limit));
+            bind(q);
+            if (q.exec()) {
+                while (q.next()) {
+                    QJsonObject s;
+                    s[QStringLiteral("date")] = QDateTime::fromSecsSinceEpoch(q.value(1).toLongLong())
+                                                    .toString(QStringLiteral("yyyy-MM-dd HH:mm"));
+                    const QString profile = q.value(2).toString().trimmed();
+                    if (!profile.isEmpty()) s[QStringLiteral("profile")] = profile;
+                    const double dose  = q.value(3).toDouble();
+                    const double yield = q.value(4).toDouble();
+                    if (dose  > 0) s[QStringLiteral("doseG")]  = QString::number(dose,  'f', 1).toDouble();
+                    if (yield > 0) s[QStringLiteral("yieldG")] = QString::number(yield, 'f', 1).toDouble();
+                    if (dose > 0 && yield > 0) s[QStringLiteral("ratio")] = QString::number(yield / dose, 'f', 2).toDouble();
+                    if (const double dur = q.value(5).toDouble(); dur > 0)
+                        s[QStringLiteral("durationSec")] = QString::number(dur, 'f', 0).toInt();
+                    if (const int enjoy = q.value(6).toInt(); enjoy > 0)
+                        s[QStringLiteral("enjoyment0to100")] = enjoy;
+                    if (const QString grind = q.value(7).toString().trimmed(); !grind.isEmpty())
+                        s[QStringLiteral("grind")] = grind;
+                    if (const QString brand = q.value(8).toString().trimmed(); !brand.isEmpty())
+                        s[QStringLiteral("roaster")] = brand;
+                    if (const QString type = q.value(9).toString().trimmed(); !type.isEmpty())
+                        s[QStringLiteral("bean")] = type;
+                    if (const QString notes = q.value(10).toString().trimmed(); !notes.isEmpty())
+                        s[QStringLiteral("notes")] = notes.left(240);
+                    shots.append(s);
+                }
+            } else {
+                errMsg = QStringLiteral("query: ") + q.lastError().text();
+            }
+        });
+
+        // A DB-open or query failure must surface as an error — NOT as an empty result, or the barista
+        // would falsely tell the user they have no shot history (the exact bug this tool exists to prevent).
+        QJsonObject result;
+        if (!dbOk)
+            result[QStringLiteral("error")] = QStringLiteral("shot database unavailable");
+        else if (!errMsg.isEmpty())
+            result[QStringLiteral("error")] = QStringLiteral("shot query failed: ") + errMsg;
+        else {
+            result[QStringLiteral("matchedCount")]  = totalMatched;
+            result[QStringLiteral("returnedCount")] = static_cast<int>(shots.size());
+            result[QStringLiteral("shots")] = shots;
+        }
+        QMetaObject::invokeMethod(qApp, [done, result]() { done(result); }, Qt::QueuedConnection);
+    });
+    connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+    thread->start();
+}
+
 void AIManager::testConnection()
 {
     AIProvider* provider = currentProvider();
@@ -1323,7 +1446,8 @@ void AIManager::analyze(const QString& systemPrompt, const QString& userPrompt)
     provider->analyze(systemPrompt, userPrompt);
 }
 
-void AIManager::analyzeConversation(const QString& systemPrompt, const QJsonArray& messages, bool webSearch)
+void AIManager::analyzeConversation(const QString& systemPrompt, const QJsonArray& messages,
+                                    bool webSearch, bool clientShotTool)
 {
     if (m_analyzing) {
         emit conversationErrorOccurred("Analysis already in progress");
@@ -1366,7 +1490,7 @@ void AIManager::analyzeConversation(const QString& systemPrompt, const QJsonArra
     m_lastUserPrompt = QString("[Conversation with %1 messages]").arg(apiMessages.size());
 
     logPrompt(selectedProvider(), systemPrompt, m_lastUserPrompt);
-    provider->analyzeConversation(systemPrompt, apiMessages, AIProvider::RequestOptions{webSearch});
+    provider->analyzeConversation(systemPrompt, apiMessages, AIProvider::RequestOptions{webSearch, clientShotTool});
 }
 
 void AIManager::refreshOllamaModels()

@@ -75,6 +75,7 @@ void AIConversation::ask(const QString& systemPrompt, const QString& userMessage
     }
 
     if (m_webSearchEnabled) { m_webSearchEnabled = false; emit webSearchEnabledChanged(); }   // [barista-fork] advisor entry — never inherit the barista's web search
+    if (m_toolsEnabled) { m_toolsEnabled = false; emit toolsEnabledChanged(); }   // [barista-fork] advisor entry — never inherit the barista's query_shots tool
     if (m_verbatimPairs != MAX_VERBATIM_PAIRS) { m_verbatimPairs = MAX_VERBATIM_PAIRS; emit verbatimPairsChanged(); }   // [barista-fork]
 
     // Clear previous conversation and start fresh
@@ -184,6 +185,7 @@ void AIConversation::resetInMemory()
     m_lastResponse.clear();
     m_errorMessage.clear();
     if (m_webSearchEnabled) { m_webSearchEnabled = false; emit webSearchEnabledChanged(); }   // [barista-fork]
+    if (m_toolsEnabled) { m_toolsEnabled = false; emit toolsEnabledChanged(); }   // [barista-fork]
     if (m_verbatimPairs != MAX_VERBATIM_PAIRS) { m_verbatimPairs = MAX_VERBATIM_PAIRS; emit verbatimPairsChanged(); }   // [barista-fork]
     emit historyChanged();
     emit canRetryChanged();
@@ -436,7 +438,7 @@ void AIConversation::sendRequest()
     trimHistory();
 
     qDebug() << "AIConversation: Sending request with" << m_messages.size() << "messages";
-    m_aiManager->analyzeConversation(m_systemPrompt, m_messages, m_webSearchEnabled);
+    m_aiManager->analyzeConversation(m_systemPrompt, m_messages, m_webSearchEnabled, m_toolsEnabled);
 }
 
 void AIConversation::onAnalysisComplete(const QString& response)

@@ -5,11 +5,13 @@
 #include <QStringList>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QJsonValue>
 #include <QVariantMap>
 #include <QVariantList>
 #include <QPair>
 #include <memory>
 #include <optional>
+#include <functional>
 
 #include "../history/shotprojection.h"
 #include "../history/shothistory_types.h"
@@ -159,8 +161,16 @@ public:
     // Generic analysis - sends system prompt and user prompt to current provider
     Q_INVOKABLE void analyze(const QString& systemPrompt, const QString& userPrompt);
 
-    // Multi-turn conversation - sends system prompt and full message array to current provider
-    void analyzeConversation(const QString& systemPrompt, const QJsonArray& messages, bool webSearch = false);
+    // Multi-turn conversation - sends system prompt and full message array to current provider.
+    // [barista-fork] clientShotTool enables the barista's query_shots tool (default off — advisor unaffected).
+    void analyzeConversation(const QString& systemPrompt, const QJsonArray& messages,
+                             bool webSearch = false, bool clientShotTool = false);
+
+    // [barista-fork] Executes the barista's client-side tools (currently query_shots) against the local shot
+    // DB OFF the main thread, delivering the JSON result via `done` (invoked on the main thread). Called by
+    // the Anthropic provider during the tool loop; async so a fresh-connection query never freezes the UI.
+    void executeBaristaTool(const QString& name, const QJsonObject& input,
+                            std::function<void(QJsonValue)> done);
 
     // Extract the trailing fenced ```json block from an assistant message.
     // The shot-analysis system prompt asks the model to append a `nextShot`

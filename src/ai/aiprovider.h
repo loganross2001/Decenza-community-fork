@@ -4,6 +4,7 @@
 #include <QString>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QJsonValue>
 #include <QList>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -25,9 +26,10 @@ public:
     };
 
     // [barista-fork] Per-request options threaded through analyzeConversation. Only the barista sets
-    // webSearch; every other caller uses the default (off), so the advisor/coach are unaffected.
+    // webSearch / clientShotTool; every other caller uses the defaults (off), so the advisor/coach are unaffected.
     struct RequestOptions {
         bool webSearch = false;
+        bool clientShotTool = false;   // the barista's on-demand query_shots tool (client-side, full history)
     };
 
     explicit AIProvider(QNetworkAccessManager* networkManager, QObject* parent = nullptr);
@@ -151,6 +153,15 @@ public:
                              const RequestOptions& options) override;
     void testConnection() override;
 
+    // [barista-fork] Inject the client-tool executor. AIManager runs the actual DB query OFF the main thread
+    // and delivers the JSON result via the `done` callback (invoked back on the main thread); the provider
+    // only handles the tool_use protocol. Async so the tablet UI never freezes on a fresh-connection query
+    // mid "thinking" animation. Set once at construction.
+    void setToolExecutor(std::function<void(const QString&, const QJsonObject&,
+                                            std::function<void(QJsonValue)>)> fn) {
+        m_toolExecutor = std::move(fn);
+    }
+
 private slots:
     void onAnalysisReply(QNetworkReply* reply);
     void onTestReply(QNetworkReply* reply);
@@ -165,6 +176,13 @@ private:
     int m_continuations = 0;
     QString m_accumulatedText;
     static constexpr int MAX_CONTINUATIONS = 2;
+
+    // [barista-fork] client-side tool loop (query_shots). On stop_reason "tool_use" we run m_toolExecutor,
+    // append the assistant tool_use turn + our tool_result, and re-POST — bounded by MAX_TOOL_ROUNDS.
+    // Only the barista sends the tool, so this path is inert for the advisor (it never gets a tool_use stop).
+    std::function<void(const QString&, const QJsonObject&, std::function<void(QJsonValue)>)> m_toolExecutor;
+    int m_toolRounds = 0;
+    static constexpr int MAX_TOOL_ROUNDS = 4;
 
     // Wrap the first user message's content in a structured block carrying
     // cache_control: ephemeral when its content is currently a plain string.

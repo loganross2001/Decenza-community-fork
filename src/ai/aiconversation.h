@@ -42,6 +42,9 @@ class AIConversation : public QObject {
     // [barista-fork] transient (NOT persisted): the barista sets this per session so its turns request
     // web search; reset in ask()/resetInMemory() so the shared conversation can't leak it to the advisor.
     Q_PROPERTY(bool webSearchEnabled READ webSearchEnabled WRITE setWebSearchEnabled NOTIFY webSearchEnabledChanged)
+    // [barista-fork] transient (NOT persisted): the barista sets this so its turns offer the query_shots tool.
+    // Reset in ask()/resetInMemory() alongside webSearchEnabled so the advisor never inherits it.
+    Q_PROPERTY(bool toolsEnabled READ toolsEnabled WRITE setToolsEnabled NOTIFY toolsEnabledChanged)
     Q_PROPERTY(int verbatimPairs READ verbatimPairs WRITE setVerbatimPairs NOTIFY verbatimPairsChanged)
 
 public:
@@ -59,6 +62,8 @@ public:
     QString contextLabel() const { return m_contextLabel; }
     bool webSearchEnabled() const { return m_webSearchEnabled; }
     void setWebSearchEnabled(bool e) { if (m_webSearchEnabled != e) { m_webSearchEnabled = e; emit webSearchEnabledChanged(); } }
+    bool toolsEnabled() const { return m_toolsEnabled; }
+    void setToolsEnabled(bool e) { if (m_toolsEnabled != e) { m_toolsEnabled = e; emit toolsEnabledChanged(); } }
     // [barista-fork] transient per-session override of how many recent user+assistant pairs stay verbatim
     // (the barista widens it so casual context — "Scott's here, two coffees" — survives a whole session).
     int verbatimPairs() const { return m_verbatimPairs; }
@@ -288,6 +293,7 @@ signals:
     void canRetryChanged();
     void contextLabelChanged();
     void webSearchEnabledChanged();
+    void toolsEnabledChanged();
     void verbatimPairsChanged();
     void providerChanged();
     void savedConversationChanged();
@@ -363,6 +369,7 @@ private:
     AIManager* m_aiManager;
     QString m_systemPrompt;
     bool m_webSearchEnabled = false;   // [barista-fork] transient per-session (not persisted)
+    bool m_toolsEnabled = false;       // [barista-fork] transient per-session (not persisted) — query_shots opt-in
     int m_verbatimPairs = MAX_VERBATIM_PAIRS;   // [barista-fork] transient per-session (not persisted)
     // Array of {role, content[, shotId?, structuredNext?]} objects.
     // shotId is the resolved shot id the advisor was asked about for

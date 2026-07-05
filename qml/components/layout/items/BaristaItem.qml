@@ -41,7 +41,7 @@ Item {
             spacing: Theme.spacingSmall
 
             Image {
-                source: "qrc:/icons/sparkle.svg"
+                source: "qrc:/icons/barista.svg"
                 sourceSize.height: Theme.scaled(20)
                 fillMode: Image.PreserveAspectFit
                 Accessible.ignored: true
@@ -82,7 +82,7 @@ Item {
             anchors.fill: parent
             translationKey: "idle.button.barista"
             translationFallback: "Barista"
-            iconSource: "qrc:/icons/sparkle.svg"
+            iconSource: "qrc:/icons/barista.svg"
             iconSize: Theme.scaled(43)
             backgroundColor: Theme.primaryColor
             onClicked: root.openBarista()

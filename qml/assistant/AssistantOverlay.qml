@@ -296,13 +296,16 @@ Item {
             + "that this is their first shot, unless the block says 'recordedShots: 0'. Reference what you see and "
             + "suggest ONE concrete change for the next shot when it helps (fast/sour → finer; slow/bitter → coarser). "
             + "Recall your past advice and pick up where you left off. Adapt to their replies.\n"
-            + "WHEN you recommend a concrete change, append EXACTLY ONE fenced block at the very END, with only the "
-            + "field(s) you're changing:\n"
-            + "```json\n{\"grinderSetting\":\"4.75\",\"doseG\":18.0,\"targetWeightG\":36.0,\"temperatureC\":92.0,\"expectation\":\"less sour\"}\n```\n"
-            + "grinderSetting = grinder dial (off-machine), doseG = grams in, targetWeightG = grams out (yield/ratio), "
-            + "temperatureC = brew temp. The app applies it when the user says OK, so give real values. Omit the block "
-            + "entirely if you're not changing anything — never attach it to casual chat, only when actually recommending "
-            + "a machine or grinder change."
+            + "WHEN you recommend a concrete change — OR the user asks to set a specific input weight, output weight, "
+            + "ratio, temperature, or grind — append EXACTLY ONE fenced block at the very END, with ONLY the field(s) "
+            + "that actually CHANGE:\n"
+            + "```json\n{\"grinderSetting\":\"4.75\",\"doseG\":18.0,\"targetWeightG\":36.0,\"ratio\":2.0,\"temperatureC\":92.0,\"expectation\":\"less sour\"}\n```\n"
+            + "grinderSetting = grinder dial (off-machine), doseG = grams IN (input dose), targetWeightG = grams OUT "
+            + "(output/yield), ratio = brew ratio e.g. 2.0 for 1:2.0 (the app computes yield = doseG × ratio, so for a "
+            + "ratio change you can send just doseG + ratio and skip targetWeightG), temperatureC = brew temp. Give REAL "
+            + "numbers — the app applies them when the user says OK. If the user names a target ('make it 40 out', "
+            + "'go 1:2.5', '18 in'), you MUST include that value in the block so it gets applied. Do NOT emit the block "
+            + "to acknowledge, to restate the CURRENT settings unchanged, or in casual chat — only when a value truly changes."
 
         // Proactivity level (user setting): what the assistant may VOLUNTEER (it always answers direct asks).
         var level = root._settings ? root._settings.proactivityLevel : "full"
@@ -483,12 +486,17 @@ Item {
             root._speakSanitised(response)               // (also strips fenced blocks before TTS)
             root._resetSilence()   // keep the mic session alive while we're conversing
             // If this turn carried a concrete recommendation, arm apply-on-confirm + show the chip.
+            // Require an ACTIONABLE field — a bare "expectation" (or an echo the model tacked on) must not
+            // pop an "apply or skip?" with nothing to apply.
             var nx = root._conv ? root._conv.structuredNextForLastAssistantTurnMap() : null
-            if (nx && Object.keys(nx).length > 0) {
+            var actionable = nx && (String(nx.grinderSetting || "").length > 0
+                                    || Number(nx.doseG) > 0 || Number(nx.targetWeightG) > 0
+                                    || Number(nx.ratio) > 0 || Number(nx.temperatureC) > 0)
+            if (actionable) {
                 root._pendingNext = nx
                 root._awaitConfirm = true
             } else {
-                root._pendingNext = null   // no recommendation this turn → drop any stale chip (S11)
+                root._pendingNext = null   // no actionable recommendation this turn → drop any stale chip (S11)
                 root._awaitConfirm = false
             }
             // Turn done. If it will speak, `speaking` is already true → skip; onSpeakingChanged(false)

@@ -55,6 +55,20 @@ QVariantMap BaristaActions::applyFromNext(const QVariantMap& next, qint64 anchor
             applied << QStringLiteral("yield %1 g").arg(yield, 0, 'f', 1);
         } else { rejected << QStringLiteral("yield"); }
     }
+    // Ratio (e.g. 2.0 for 1:2.0): compute the yield from ratio × the (current or just-set) dose, so a
+    // "make it 1:2.5" request applies without the model doing the arithmetic. An explicit targetWeightG
+    // wins; ratio only fills in when no yield was given.
+    const double ratio = next.value("ratio").toDouble();
+    if (brew && dye && ratio >= 1.0 && ratio <= 5.0 && yield <= 0) {
+        const double baseDose = dye->dyeBeanWeight();   // reflects the dose just applied above, if any
+        const double computedYield = baseDose * ratio;
+        if (baseDose > 0 && computedYield >= 10.0 && computedYield <= 120.0) {
+            m_undo["targetWeightG_had"] = brew->hasBrewYieldOverride();
+            m_undo["targetWeightG"] = brew->brewYieldOverride();
+            brew->setBrewYieldOverride(computedYield);
+            applied << QStringLiteral("ratio 1:%1 → yield %2 g").arg(ratio, 0, 'f', 2).arg(computedYield, 0, 'f', 1);
+        } else { rejected << QStringLiteral("ratio"); }
+    }
     const double temp = next.value("temperatureC").toDouble();
     if (brew && temp > 0) {
         if (temp >= 80.0 && temp <= 100.0) {

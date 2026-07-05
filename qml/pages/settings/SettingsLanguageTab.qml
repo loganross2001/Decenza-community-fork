@@ -626,7 +626,38 @@ Item {
                     Tr {
                         Layout.fillWidth: true
                         key: "settings.accessibility.steamCoachingDesc"
-                        fallback: "Short on-screen tips while steaming milk (stretch, roll, stop)"
+                        fallback: "Short on-screen tips while steaming milk (stretch, roll, almost, done)"
+                        color: Theme.textSecondaryColor
+                        font.pixelSize: Theme.scaled(11)
+                        wrapMode: Text.WordWrap
+                    }
+
+                    // Spoken during-steam coaching cues — the accessibility-relevant
+                    // half. Independent of the visual banner above.
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: Theme.scaled(8)
+
+                        Tr {
+                            key: "settings.accessibility.steamCoachingSpeak"
+                            fallback: "Speak Steam Coaching Cues"
+                            color: Theme.textColor
+                            font.pixelSize: Theme.scaled(14)
+                        }
+
+                        Item { Layout.fillWidth: true }
+
+                        StyledSwitch {
+                            checked: Settings.app.steamCoachAudioEnabled
+                            accessibleName: TranslationManager.translate("settings.accessibility.steamCoachingSpeak", "Speak Steam Coaching Cues")
+                            onCheckedChanged: Settings.app.steamCoachAudioEnabled = checked
+                        }
+                    }
+
+                    Tr {
+                        Layout.fillWidth: true
+                        key: "settings.accessibility.steamCoachingSpeakDesc"
+                        fallback: "Speak the steam cues aloud while steaming milk"
                         color: Theme.textSecondaryColor
                         font.pixelSize: Theme.scaled(11)
                         wrapMode: Text.WordWrap

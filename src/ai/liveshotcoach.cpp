@@ -232,6 +232,13 @@ void LiveShotCoach::emitCue(const QString& id, const QString& text,
     m_cueSpeak = willSpeak;
     m_cueActive = true;
     emit cueChanged();
+
+    // Voice: upstream's banner is visual-only now, so the coach owns the speak
+    // request. Interrupt (assertive) only for urgent "caution" cues, matching the
+    // old banner's `urgent = severity === "caution"`. The extractionAnnouncements
+    // gate is applied at the connection in main.cpp.
+    if (willSpeak)
+        emit speakRequested(text, severity == QStringLiteral("caution"));
 }
 
 void LiveShotCoach::clearCue() {

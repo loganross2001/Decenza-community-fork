@@ -598,6 +598,10 @@ Page {
         anchors.right: parent.right
         anchors.leftMargin: Theme.spacingMedium
         anchors.rightMargin: Theme.spacingMedium
+        // Anchors pin top/left/right but not bottom, so give the overlay a real
+        // height (it self-gates via opacity, not height — a z:10 overlay, so
+        // reserving implicitHeight doesn't displace page content).
+        height: implicitHeight
         coach: MainController.liveShotCoach
         coachEnabled: Settings.app.liveCoachingEnabled
         // No outer visible binding: the banner self-gates on an active cue via its

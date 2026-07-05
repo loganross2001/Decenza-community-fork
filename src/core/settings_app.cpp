@@ -17,6 +17,19 @@ SettingsApp::SettingsApp(QObject* parent)
     , m_settings("DecentEspresso", "DE1Qt")
     , m_use12HourTime(QLocale::system().timeFormat(QLocale::ShortFormat).contains("AP", Qt::CaseInsensitive))
 {
+    // One-time migration: the old combined `steam/liveSteamCoachingEnabled` flag
+    // (default ON, gated both banner + voice) was split into steamCoachVisualEnabled
+    // + steamCoachAudioEnabled (both default OFF). Seed the new keys from the old one
+    // so existing users don't silently lose steam coaching on update, then drop the
+    // stale key so this runs exactly once.
+    if (m_settings.contains("steam/liveSteamCoachingEnabled")) {
+        const bool wasOn = m_settings.value("steam/liveSteamCoachingEnabled", true).toBool();
+        if (!m_settings.contains("steam/steamCoachVisualEnabled"))
+            m_settings.setValue("steam/steamCoachVisualEnabled", wasOn);
+        if (!m_settings.contains("steam/steamCoachAudioEnabled"))
+            m_settings.setValue("steam/steamCoachAudioEnabled", wasOn);
+        m_settings.remove("steam/liveSteamCoachingEnabled");
+    }
 }
 
 // Platform capabilities

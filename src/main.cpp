@@ -1212,6 +1212,16 @@ int main(int argc, char *argv[])
     QObject::connect(mainController.liveSteamCoach(), &LiveSteamCoach::speakRequested,
                      &accessibilityManager, &AccessibilityManager::announceCoaching);
 
+    // Shot-coach voice: unlike steam (which has its own audio opt-in), during-shot
+    // cues have always been gated on the user's extractionAnnouncements preference
+    // and spoken via announce() — preserve that exactly (the old visual+voice
+    // banner did the gate in QML; the banner is visual-only now).
+    QObject::connect(mainController.liveShotCoach(), &LiveShotCoach::speakRequested,
+                     &accessibilityManager, [&accessibilityManager](const QString& text, bool interrupt) {
+                         if (accessibilityManager.extractionAnnouncementsEnabled())
+                             accessibilityManager.announce(text, interrupt);
+                     });
+
     // Now that all managers exist, finish MCP server setup
     mcpServer.setAccessibilityManager(&accessibilityManager);
     mcpServer.registerAllTools();

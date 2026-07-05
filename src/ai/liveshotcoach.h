@@ -80,6 +80,13 @@ signals:
     // cueActive / cueSpeak always change together (one emitCue / clearCue call).
     void cueChanged();
 
+    // Voice request for a spoken cue. Emitted from emitCue only when the cue is
+    // speakable (cueSpeak). Wired once (main.cpp) through AccessibilityManager::
+    // announce, gated on the user's extractionAnnouncements preference — so the
+    // during-shot voice respects the same toggle it always did. `interrupt` is
+    // assertive (true) only for urgent "caution" cues.
+    void speakRequested(const QString& text, bool interrupt);
+
 private slots:
     void onShotSampleReceived(const ShotSample& sample);
     void onPhaseChanged();

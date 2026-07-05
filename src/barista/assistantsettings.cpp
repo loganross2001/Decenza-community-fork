@@ -66,7 +66,7 @@ void AssistantSettings::setUserName(const QString& name) {
 }
 
 QString AssistantSettings::bellSound() const {
-    return m_settings.value(QStringLiteral("barista/bellSound"), QStringLiteral("ding")).toString();
+    return m_settings.value(QStringLiteral("barista/bellSound"), QStringLiteral("poof")).toString();
 }
 
 void AssistantSettings::setBellSound(const QString& sound) {
@@ -74,6 +74,18 @@ void AssistantSettings::setBellSound(const QString& sound) {
         return;
     m_settings.setValue(QStringLiteral("barista/bellSound"), sound);
     emit bellSoundChanged();
+}
+
+// The user's own bell sound file (an absolute path on the device), used when bellSound == "custom".
+QString AssistantSettings::bellCustomPath() const {
+    return m_settings.value(QStringLiteral("barista/bellCustomPath"), QString()).toString();
+}
+
+void AssistantSettings::setBellCustomPath(const QString& path) {
+    if (bellCustomPath() == path)
+        return;
+    m_settings.setValue(QStringLiteral("barista/bellCustomPath"), path);
+    emit bellCustomPathChanged();
 }
 
 QString AssistantSettings::ttsProvider() const {

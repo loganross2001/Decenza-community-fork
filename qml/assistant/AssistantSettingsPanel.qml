@@ -167,7 +167,8 @@ Rectangle {
         ComboBox {
             id: bellBox
             Layout.fillWidth: true
-            model: ["ding", "tick", "frameclick1", "frameclick2", "frameclick3", "off"]
+            // "custom" plays a file picked in Settings → AI (bellCustomPath); set it there first.
+            model: ["poof", "ding", "off", "custom"]
             Accessible.name: TranslationManager.translate("barista.settings.bell", "Bell")
             Component.onCompleted: {
                 var i = root._settings ? model.indexOf(root._settings.bellSound) : -1

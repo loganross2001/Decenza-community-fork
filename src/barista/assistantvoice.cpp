@@ -229,7 +229,16 @@ void AssistantVoice::playBell() {
 void AssistantVoice::previewBell(const QString& name) {
     if (!m_bell || name.isEmpty() || name == QLatin1String("off"))
         return;
-    m_bell->setSource(QUrl(QStringLiteral("qrc:/sounds/%1.wav").arg(name)));
+    if (name == QLatin1String("custom")) {
+        // The user's own sound file picked from the tablet (Settings → AI → Bell → Custom…). Stored as a
+        // URL by the file picker (file:// on desktop, content:// on Android) — play it directly.
+        const QString u = m_settings ? m_settings->bellCustomPath() : QString();
+        if (u.isEmpty())
+            return;
+        m_bell->setSource(QUrl(u));
+    } else {
+        m_bell->setSource(QUrl(QStringLiteral("qrc:/sounds/%1.wav").arg(name)));
+    }
     m_bell->play();
 }
 

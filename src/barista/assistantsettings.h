@@ -15,6 +15,7 @@ class AssistantSettings : public QObject {
     Q_PROPERTY(QString voiceName READ voiceName WRITE setVoiceName NOTIFY voiceNameChanged)
     Q_PROPERTY(QString userName READ userName WRITE setUserName NOTIFY userNameChanged)
     Q_PROPERTY(QString bellSound READ bellSound WRITE setBellSound NOTIFY bellSoundChanged)
+    Q_PROPERTY(QString bellCustomPath READ bellCustomPath WRITE setBellCustomPath NOTIFY bellCustomPathChanged)
     Q_PROPERTY(QString ttsProvider READ ttsProvider WRITE setTtsProvider NOTIFY ttsProviderChanged)
     Q_PROPERTY(QString openaiVoice READ openaiVoice WRITE setOpenaiVoice NOTIFY openaiVoiceChanged)
     Q_PROPERTY(QString openaiApiKey READ openaiApiKey WRITE setOpenaiApiKey NOTIFY openaiApiKeyChanged)
@@ -44,7 +45,9 @@ public:
     QString userName() const;                     // what the assistant calls the user in greetings
     void setUserName(const QString& name);
 
-    QString bellSound() const;                    // "ding" | "tick" | ... | "off"
+    QString bellSound() const;                    // "poof" | "ding" | ... | "off" | "custom"
+    void setBellCustomPath(const QString& path);
+    QString bellCustomPath() const;               // user-picked sound file (absolute path), for "custom"
     void setBellSound(const QString& sound);
 
     QString ttsProvider() const;                  // "native" | "openai" | "elevenlabs"
@@ -88,6 +91,7 @@ signals:
     void voiceNameChanged();
     void userNameChanged();
     void bellSoundChanged();
+    void bellCustomPathChanged();
     void ttsProviderChanged();
     void openaiVoiceChanged();
     void openaiApiKeyChanged();

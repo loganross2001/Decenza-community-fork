@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Dialogs
 import Decenza
 
 // [barista-fork] Barista-assistant settings, hosted in the main Settings → AI tab via a Loader hook
@@ -190,14 +191,53 @@ ColumnLayout {
         }
     }
 
-    // Bell
+    // Bell — the greeting chime. "poof" is the soft default; "off" silences it; "custom" plays your own file.
     Tr { key: "barista.settings.bell"; fallback: "Bell"
          color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true }
     ComboBox {
+        id: bellCombo
         Layout.fillWidth: true
-        model: ["ding", "tick", "frameclick1", "frameclick2", "frameclick3", "off"]
+        model: ["poof", "ding", "off", "custom"]
         Component.onCompleted: { var i = root._settings ? model.indexOf(root._settings.bellSound) : -1; if (i >= 0) currentIndex = i }
-        onActivated: { if (root._settings) root._settings.bellSound = currentText; if (root._voice) root._voice.previewBell(currentText) }
+        onActivated: {
+            if (root._settings) root._settings.bellSound = currentText
+            if (currentText === "custom") {
+                if (root._settings && root._settings.bellCustomPath.length === 0) bellFileDialog.open()
+                else if (root._voice) root._voice.previewBell("custom")
+            } else if (root._voice) {
+                root._voice.previewBell(currentText)
+            }
+        }
+    }
+    // Custom-sound chooser — only shown for "custom". Plays your own .wav from the tablet.
+    RowLayout {
+        Layout.fillWidth: true
+        spacing: Theme.spacingSmall
+        visible: root._settings && root._settings.bellSound === "custom"
+        Button {
+            text: TranslationManager.translate("barista.settings.bellChoose", "Choose sound file…")
+            onClicked: bellFileDialog.open()
+        }
+        Text {
+            Layout.fillWidth: true
+            elide: Text.ElideMiddle
+            color: Theme.textSecondaryColor
+            font: Theme.labelFont
+            text: {
+                var p = (root._settings && root._settings.bellCustomPath) ? String(root._settings.bellCustomPath) : ""
+                if (p.length === 0) return TranslationManager.translate("barista.settings.bellNoFile", "No file chosen")
+                return decodeURIComponent(p.substring(p.lastIndexOf("/") + 1))
+            }
+        }
+    }
+    FileDialog {
+        id: bellFileDialog
+        title: TranslationManager.translate("barista.settings.bellChoose", "Choose sound file…")
+        nameFilters: ["Sound files (*.wav *.mp3)", "All files (*)"]
+        onAccepted: {
+            if (root._settings) root._settings.bellCustomPath = String(selectedFile)
+            if (root._voice) root._voice.previewBell("custom")
+        }
     }
 
     // Speak / mute

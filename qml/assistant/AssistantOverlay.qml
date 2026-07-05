@@ -299,8 +299,8 @@ Item {
             + "their history — treat it as authoritative; NEVER claim you only have recent shots or history back to "
             + "some recent date. Reference what you see, recall your past advice, and pick up where you left off.\n"
             + "DIALING FRAMEWORK — suggest ONE concrete change for the next shot when it helps. Read taste on two axes: "
-            + "sour/sharp ↔ bitter/harsh, and weak/watery ↔ strong/intense. Sour+weak → grind finer (or tighten the "
-            + "ratio); bitter+strong → grind coarser (or open the ratio); nudge dose for strength. GUARD-RAIL: finer does "
+            + "sour/sharp ↔ bitter/harsh, and weak/watery ↔ strong/intense. Sour+weak → grind finer (or lengthen the "
+            + "ratio for more yield); bitter+strong → grind coarser (or shorten the ratio for less yield); nudge dose for strength. GUARD-RAIL: finer does "
             + "NOT always extract more — if a shot CHANNELS or CHOKES at a fine grind, going finer extracts LESS and less "
             + "evenly, so go COARSER (maybe a slightly lower dose), never chase it finer. Temperature is the LAST lever: "
             + "settle grind and ratio first, and don't fix sourness with temp before those — BUT if the profile was "
@@ -308,6 +308,10 @@ Item {
             + "grind change, rule out: days off roast or a recent freeze→thaw (a bag under ~5 days runs fast and "
             + "unstable — don't chase it finer), dose consistency vs the last shots, and — if taste won't respond to "
             + "grind or ratio — water. Expect to grind finer as a bag ages. Adapt to their replies.\n"
+            + "AT CLOSE-OUT (after a shot): ask once, lightly, what it TASTED like on those two axes — sour/sharp or "
+            + "bitter/harsh, thin or punchy — because that descriptor is the real dialing signal. Keep it to one natural "
+            + "question, and treat it as SEPARATE from how much they liked it (an optional 0–100 number). If they just "
+            + "give a word or a number, take it and move on — never nag or quiz them.\n"
             + "WHEN you recommend a concrete change — OR the user asks to set a specific input weight, output weight, "
             + "ratio, temperature, or grind — append EXACTLY ONE fenced block at the very END, with ONLY the field(s) "
             + "that actually CHANGE:\n"
@@ -436,6 +440,7 @@ Item {
             var TASTE = ["sour", "bitter", "burnt", "balanced", "good", "great", "perfect", "nice", "delicious",
                 "love", "lovely", "bad", "thin", "watery", "harsh", "weak", "strong", "rich", "smooth", "sweet",
                 "sweeter", "acidic", "fruity", "chocolate", "chocolatey", "nutty", "bright", "muddy", "astringent",
+                "sharp", "punchy", "intense",
                 "tasty", "taste", "tasted", "tastes", "flavor", "flavour", "crema", "balance", "shot"]
             var hasTaste = w.some(function(x) { return TASTE.indexOf(x) >= 0 })
             if (!isConfirmation && w.length >= 2 && hasTaste) {

@@ -21,8 +21,12 @@ Item {
     property real _held: 0
     property bool _wasEmpty: true
     function _liveNet() { return Math.max(0, MachineState.scaleWeight - Settings.brew.doseCupTareWeight) }
+    // Live only with a saved dose-cup tare AND a plausible dose net — a brew cup's net (>55g) or an
+    // untared cup would otherwise read its gross weight as "beans". Falls through to the recorded dose.
     readonly property bool _loaded: root.scaleConnected
+        && Settings.brew.doseCupTareWeight > 0
         && MachineState.scaleWeight > (Settings.brew.doseCupTareWeight + 0.3)
+        && root._liveNet() <= 55
 
     Connections {
         target: MachineState

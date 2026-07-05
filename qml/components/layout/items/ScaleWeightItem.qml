@@ -64,13 +64,15 @@ Item {
             return Math.max(0, w - (steaming ? root._pitcherWeight() : Settings.brew.doseCupTareWeight))
         }
         if (root.dataMode === "beansHold") {
-            // Held captured dose if we have one this cycle, else live net beans.
+            // Held captured dose if we have one this cycle, else live net beans — but only with a saved
+            // tare AND a plausible dose net (a brew cup / untared cup would read gross); else the recorded dose.
             if (root._heldDose > 0) return root._heldDose
-            return Math.max(0, w - Settings.brew.doseCupTareWeight)
+            var live = (Settings.brew.doseCupTareWeight <= 0) ? 0 : Math.max(0, w - Settings.brew.doseCupTareWeight)
+            return (live > 0.3 && live <= 55) ? live : Settings.dye.dyeBeanWeight
         }
         if (root.dataMode === "expectedYield") {
-            // Target espresso output = dose x ratio (ProfileManager keeps this as
-            // the active stop-at-weight target when brewing by ratio).
+            // The active stop-at-weight target (ProfileManager.targetWeight): the brew-yield override when set
+            // — which equals dose × ratio in brew-by-ratio mode — else the profile's fixed target. Needs no scale.
             return ProfileManager.targetWeight
         }
         return w
@@ -90,7 +92,8 @@ Item {
 
     // Scale warning: saved BLE scale not connected or connection failed, or app fell back to simulated scale
     // Don't warn if a USB scale is connected — it satisfies the "have a real scale" requirement (not available on iOS)
-    property bool showScaleWarning: (!root.scaleConnected || root.isFlowScale)
+    property bool showScaleWarning: root.dataMode !== "expectedYield"   // computed target needs no scale
+        && (!root.scaleConnected || root.isFlowScale)
         && (BLEManager.scaleConnectionFailed || Settings.primaryScaleAddress !== "")
         && (Qt.platform.os === "ios" || !UsbScaleManager.scaleConnected)
 
@@ -205,7 +208,8 @@ Item {
             id: compactScaleRow
             anchors.centerIn: parent
             spacing: Theme.spacingSmall
-            visible: root.scaleConnected && !root.showScaleWarning
+            // expectedYield is a computed target — show it even with no scale connected.
+            visible: (root.scaleConnected || root.dataMode === "expectedYield") && !root.showScaleWarning
 
             ThemedIcon {
                 anchors.verticalCenter: parent.verticalCenter
@@ -236,6 +240,7 @@ Item {
         Text {
             anchors.centerIn: parent
             visible: !root.scaleConnected && !root.showScaleWarning && !root.isFlowScale
+                     && root.dataMode !== "expectedYield"
             text: "--"
             color: Theme.textSecondaryColor
             font: Theme.bodyFont
@@ -346,7 +351,8 @@ Item {
 
             Text {
                 Layout.alignment: Qt.AlignHCenter
-                visible: root.scaleConnected && !root.showScaleWarning
+                // expectedYield is a computed target — show it even with no scale connected.
+                visible: (root.scaleConnected || root.dataMode === "expectedYield") && !root.showScaleWarning
                 text: root.weightText()
                 color: root.scaleColor(fullTapArea.pressed)
                 font: Theme.valueFont
@@ -356,6 +362,7 @@ Item {
             Text {
                 Layout.alignment: Qt.AlignHCenter
                 visible: !root.scaleConnected && !root.showScaleWarning
+                         && root.dataMode !== "expectedYield"
                 text: "--"
                 color: Theme.textSecondaryColor
                 font: Theme.valueFont

@@ -479,6 +479,47 @@ void AnthropicProvider::analyzeConversation(const QString& systemPrompt, const Q
         sdSchema["required"] = QJsonArray{ QString("shotId") };
         sd["input_schema"] = sdSchema;
         tools.append(sd);
+
+        // compare_shots — diff 2-5 shots side by side (signed deltas + which quality verdicts flipped).
+        QJsonObject cs;
+        cs["name"] = QString("compare_shots");
+        cs["description"] = QString(
+            "Compare 2 to 5 shots by their shotIds (from query_shots results): per-shot dial-in scalars plus a "
+            "consecutive-changes diff showing what moved (ratio, dose, grind, duration, enjoyment) AND which "
+            "quality verdicts flipped (e.g. \"channeling: yes -> no\"). Use it to answer \"why is today worse "
+            "than last week\" or \"did the grind change fix the channeling\".");
+        QJsonObject csSchema;
+        csSchema["type"] = QString("object");
+        QJsonObject csProps;
+        QJsonObject shotIds;
+        shotIds["type"] = QString("array");
+        shotIds["description"] = QString("2 to 5 shotIds to compare, in the order you want them diffed (from query_shots results).");
+        QJsonObject shotIdsItems;
+        shotIdsItems["type"] = QString("integer");
+        shotIds["items"] = shotIdsItems;
+        csProps["shotIds"] = shotIds;
+        csSchema["properties"] = csProps;
+        csSchema["required"] = QJsonArray{ QString("shotIds") };
+        cs["input_schema"] = csSchema;
+        tools.append(cs);
+
+        // get_bean_profile — any bean's freshness + history, or any profile's design intent, on demand.
+        QJsonObject bp;
+        bp["name"] = QString("get_bean_profile");
+        bp["description"] = QString(
+            "Look up ANY bean's freshness and history, or ANY profile's design intent, beyond the current one "
+            "already in your context. Give a bean (roaster and/or bean name) to get its days-off-roast (or "
+            "days-since-thaw if it was frozen), roast level, shot count, best/median enjoyment, and best-rated "
+            "recipe; give a profileName to get that profile's curated design intent. Provide at least one.");
+        QJsonObject bpSchema;
+        bpSchema["type"] = QString("object");
+        QJsonObject bpProps;
+        bpProps["beanBrand"]   = strProp("Roaster / bean brand to look up (optional; matched loosely).");
+        bpProps["beanType"]    = strProp("Bean name / type to look up (optional; matched loosely).");
+        bpProps["profileName"] = strProp("Profile name whose design intent to look up (optional; matched loosely).");
+        bpSchema["properties"] = bpProps;
+        bp["input_schema"] = bpSchema;
+        tools.append(bp);
     }
     if (!tools.isEmpty())
         requestBody["tools"] = tools;

@@ -551,6 +551,16 @@ ApplicationWindow {
         function onSelectedSteamPitcherChanged() { root.sessionMeasuredMilkG = 0 }
     }
 
+    // Live dose-weighing state, pushed by IdlePage (Bindings next to its
+    // beanCapture engine) while the idle page is showing: the virtual-zero net-bean
+    // weight while an uncaptured dose sits on the scale (-1 otherwise), and the
+    // brief "dose captured" accent flash (IdlePage's beanCaptureShown). Mirrored
+    // read-only by DoseWeightItem so the Beans widget ticks live during weighing
+    // with the same net the capture engine tracks — the widget never re-derives
+    // scale state itself.
+    property real doseLiveNetG: -1
+    property bool doseCaptureFlash: false
+
     // Save the most recent steam session as an atomic (milk weight, duration) pair
     // so steam setup can adopt it as a baseline. Both fields are written together at
     // session end — only when this session actually had a measured milk weight,
@@ -728,6 +738,15 @@ ApplicationWindow {
             case "update": updateDialog.open(); break
             case "chargingMismatch": chargingMismatchDialog.open(); break
             case "bleError":
+                // Skip a stale generic connection error if the DE1 has since
+                // reconnected (e.g. an overnight link drop that self-healed while
+                // the popup sat behind the screensaver queue, #1423). Permission
+                // errors still need the user to act, so they always show.
+                if (!next.params.isLocationError && !next.params.isBluetoothError
+                        && DE1Device && DE1Device.connected) {
+                    showNextPendingPopup()  // Skip stale connection error, show next
+                    break
+                }
                 bleErrorDialog.errorMessage = next.params.errorMessage || ""
                 bleErrorDialog.isLocationError = next.params.isLocationError || false
                 bleErrorDialog.isBluetoothError = next.params.isBluetoothError || false

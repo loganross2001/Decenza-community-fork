@@ -23,23 +23,17 @@ Item {
         return null
     }
 
-    // Highlight this button while its mode is the one currently selected on the
-    // home screen (its presets are expanded), so you can see which screen you're in.
-    // Mirror idlePage.activePresetFunction into a local reactive property. Reading
-    // it directly through the `var idlePage` does NOT register a QML binding
-    // dependency, so isActive never re-evaluated on tap. Track it explicitly.
-    property string _activeFn: root.idlePage ? root.idlePage.activePresetFunction : ""
-    Connections {
-        target: root.idlePage
-        ignoreUnknownSignals: true
-        function onActivePresetFunctionChanged() {
-            root._activeFn = root.idlePage ? root.idlePage.activePresetFunction : ""
-        }
-    }
-    readonly property bool isActive: _activeFn === "hotwater" || presetPopup.visible
+    // Highlight this button while its mode is selected on the home screen (the
+    // centre preset row is expanded), or — in compact mode, where tapping opens
+    // presetPopup instead of setting activePresetFunction — while its popup is open.
+    readonly property bool isActive:
+        (idlePage ? idlePage.activePresetFunction : "") === "hotwater" || presetPopup.visible
 
-    implicitWidth: isCompact ? compactContent.implicitWidth : fullContent.implicitWidth
-    implicitHeight: isCompact ? compactContent.implicitHeight : fullContent.implicitHeight
+    // Compact (bar) rendering only: full-size placements of this type compile to
+    // CustomItem in LayoutItemDelegate (isCompiled), so this item never loads
+    // non-compact and carries no full-mode rendering.
+    implicitWidth: compactContent.implicitWidth
+    implicitHeight: compactContent.implicitHeight
 
     function togglePresets() {
         if (root.isCompact) {
@@ -98,35 +92,11 @@ Item {
             supportLongPress: true
             supportDoubleClick: true
             accessibleName: TranslationManager.translate("idle.button.hotwater", "Hot Water")
+                            + (root.isActive ? ", " + TranslationManager.translate("accessibility.selected", "selected") : "")
             accessibleDescription: TranslationManager.translate("idle.accessible.hotwater.hint", "Tap to toggle presets. Double-tap or long-press to configure hot water.")
             onAccessibleClicked: root.togglePresets()
             onAccessibleDoubleClicked: root.goToHotWater()
             onAccessibleLongPressed: root.goToHotWater()
-        }
-    }
-
-    // --- FULL MODE ---
-    Item {
-        id: fullContent
-        visible: !root.isCompact
-        anchors.fill: parent
-        implicitWidth: Theme.scaled(150)
-        implicitHeight: Theme.scaled(120)
-
-        ActionButton {
-            anchors.fill: parent
-            translationKey: "idle.button.hotwater"
-            translationFallback: "Hot Water"
-            iconSource: "qrc:/icons/water.svg"
-            enabled: DE1Device.guiEnabled
-            active: root.isActive
-            backgroundColor: root.isActive ? Theme.accentColor : Theme.primaryColor
-            supportDoubleClick: true
-            onClicked: root.togglePresets()
-            onPressAndHold: root.goToHotWater()
-            onDoubleClicked: root.goToHotWater()
-
-            Accessible.description: TranslationManager.translate("idle.accessible.hotwater.description", "Dispense hot water. Double-tap or long-press to configure.")
         }
     }
 

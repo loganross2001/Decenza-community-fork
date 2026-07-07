@@ -645,14 +645,15 @@ private slots:
     // Layout: configurable-type allowlist + per-instance "configured" gate
     // ==========================================
 
-    // typeHasOptions is the single source of truth for which widget types expose
-    // per-instance options (drives the editor's gear indicator + open routing).
-    // Pin the allowlist so dropping a type or breaking the screensaver prefix
-    // match is a visible, deliberate change.
+    // typeHasOptions is derived from the readout capability schema plus the
+    // bespoke-editor set (single source of truth for the editor's gear
+    // indicator + open routing). Pin the configurable set so dropping a type
+    // or breaking the screensaver prefix match is a visible, deliberate change.
     void typeHasOptionsAllowlist() {
         const QStringList configurable = {
             "custom", "scaleWeight", "shotPlan", "sleep", "machineStatus",
-            "temperature", "steamTemperature", "waterLevel", "clock", "lastShot"
+            "temperature", "steamTemperature", "waterLevel", "clock", "lastShot",
+            "batteryLevel", "scaleBattery", "doseWeight", "milkWeight", "profileName"
         };
         for (const QString& t : configurable)
             QVERIFY2(SettingsNetwork::typeHasOptions(t), qPrintable("expected configurable: " + t));
@@ -672,6 +673,153 @@ private slots:
         QVERIFY(!SettingsNetwork::typeHasOptions("pageTitle"));
         QVERIFY(!SettingsNetwork::typeHasOptions("espresso"));
         QVERIFY(!SettingsNetwork::typeHasOptions(""));
+    }
+
+    // The capability schema drives the unified readout options editor (which
+    // sections it shows) and the web editor's injected WIDGET_CAPABILITIES.
+    // Pin the per-type keys and the schema↔typeHasOptions agreement.
+    void optionKeysForTypeSchema() {
+        QCOMPARE(SettingsNetwork::optionKeysForType("scaleWeight"),
+                 (QStringList{"dataMode", "displayMode", "showRatio", "color"}));
+        QCOMPARE(SettingsNetwork::optionKeysForType("temperature"),
+                 (QStringList{"displayMode", "color"}));
+        QCOMPARE(SettingsNetwork::optionKeysForType("batteryLevel"),
+                 (QStringList{"displayMode", "color"}));
+        // profileName has no meaningful icon form — color only.
+        QCOMPARE(SettingsNetwork::optionKeysForType("profileName"), (QStringList{"color"}));
+        // Bespoke-editor and unknown types carry no readout keys.
+        QVERIFY(SettingsNetwork::optionKeysForType("custom").isEmpty());
+        QVERIFY(SettingsNetwork::optionKeysForType("shotPlan").isEmpty());
+        QVERIFY(SettingsNetwork::optionKeysForType("espresso").isEmpty());
+        QVERIFY(SettingsNetwork::optionKeysForType("").isEmpty());
+
+        // Every type with readout keys must be configurable.
+        const QStringList readouts = {
+            "machineStatus", "temperature", "steamTemperature", "waterLevel", "clock",
+            "scaleWeight", "batteryLevel", "scaleBattery", "doseWeight", "milkWeight",
+            "profileName"
+        };
+        for (const QString& t : readouts) {
+            QVERIFY2(!SettingsNetwork::optionKeysForType(t).isEmpty(), qPrintable("expected keys: " + t));
+            QVERIFY2(SettingsNetwork::typeHasOptions(t), qPrintable("schema/gate disagree: " + t));
+        }
+
+        // The web editor's JSON carries the same table: readouts map to their
+        // keys, bespoke types to an empty array (present = has options).
+        const QJsonObject caps = SettingsNetwork::readoutCapabilitiesJson();
+        for (const QString& t : readouts) {
+            QVERIFY2(caps.contains(t), qPrintable("missing from web JSON: " + t));
+            QCOMPARE(caps.value(t).toArray(),
+                     QJsonArray::fromStringList(SettingsNetwork::optionKeysForType(t)));
+        }
+        for (const QString& t : {QStringLiteral("custom"), QStringLiteral("sleep"),
+                                 QStringLiteral("shotPlan"), QStringLiteral("lastShot")}) {
+            QVERIFY2(caps.contains(t), qPrintable("bespoke missing from web JSON: " + t));
+            QVERIFY(caps.value(t).toArray().isEmpty());
+        }
+        QVERIFY(!caps.contains("espresso"));
+
+        // Generic invariants over EVERY entry, so future types are covered
+        // without extending the hand-pinned lists above:
+        const QSet<QString> knownKeys = {
+            QStringLiteral("dataMode"), QStringLiteral("displayMode"),
+            QStringLiteral("showRatio"), QStringLiteral("color")
+        };
+        for (const QString& t : caps.keys()) {
+            // Web JSON and the QML-facing keys must agree for every type. A
+            // type placed in both the schema and the bespoke set would break
+            // this (JSON's empty array vs the schema's keys) — exactly the
+            // app/web divergence this table exists to prevent.
+            QCOMPARE(caps.value(t).toArray(),
+                     QJsonArray::fromStringList(SettingsNetwork::optionKeysForType(t)));
+            // Screensavers stay a prefix rule on both sides — a screensaver
+            // schema entry would give the web editor selectors the QML
+            // screensaver popup doesn't have.
+            QVERIFY2(!t.startsWith("screensaver"), qPrintable("screensaver leaked into schema: " + t));
+            // Editors dispatch on exactly these key strings; a typo'd key
+            // ("colour", "display") would silently render nothing anywhere.
+            const QJsonArray keys = caps.value(t).toArray();
+            for (const auto& k : keys)
+                QVERIFY2(knownKeys.contains(k.toString()), qPrintable(t + " has unknown key: " + k.toString()));
+        }
+        QVERIFY(SettingsNetwork::optionKeysForType("screensaverFlipClock").isEmpty());
+        // Pin the entry count so adding a configurable type is as deliberate a
+        // change as removing one (every entry changes web-editor behavior).
+        QCOMPARE(caps.size(), 15);
+    }
+
+    // The widget catalog drives the in-app palette, chip names, the library
+    // card, and the web editor's injected WIDGET_CATALOG. Pin invariants, not
+    // the full list, so adding a widget stays a one-table edit.
+    void widgetCatalogInvariants() {
+        const QVariantList catalog = SettingsNetwork::widgetCatalog();
+        const QVariantMap chips = SettingsNetwork::widgetChipNames();
+        const QVariantList cats = SettingsNetwork::widgetCategoryNames();
+        // The `cat` integers in the catalog are positional — pin the category
+        // names in order so a reorder without renumbering is caught.
+        QCOMPARE(cats.size(), 4);
+        const QStringList kCatOrder = {"Actions", "Readouts", "Utility", "Screensavers"};
+        for (int i = 0; i < cats.size(); ++i)
+            QCOMPARE(cats[i].toMap().value("fallback").toString(), kCatOrder[i]);
+        QVERIFY(catalog.size() >= 36);
+
+        QSet<QString> seen;
+        for (const QVariant& v : catalog) {
+            const QVariantMap e = v.toMap();
+            const QString type = e.value("type").toString();
+            QVERIFY2(!seen.contains(type), qPrintable("duplicate catalog type: " + type));
+            seen.insert(type);
+            const int cat = e.value("cat").toInt();
+            QVERIFY2(cat >= 0 && cat < cats.size(), qPrintable("bad category: " + type));
+            QVERIFY2(!e.value("label").toString().isEmpty(), qPrintable("empty label: " + type));
+            QVERIFY2(!e.value("labelKey").toString().isEmpty(), qPrintable("empty labelKey: " + type));
+            QVERIFY2(chips.contains(type), qPrintable("missing chip name: " + type));
+            // A typo'd flag would silently lose the web chip/menu coloring.
+            const QString flag = e.value("flag").toString();
+            QVERIFY2(flag.isEmpty() || flag == "special" || flag == "screensaver",
+                     qPrintable(type + " has unknown flag: " + flag));
+        }
+        // Every chip entry (incl. aliases) carries a usable key + fallback —
+        // an aggregate-initialized row with missing trailing fields would
+        // otherwise render blank chip labels.
+        for (auto it = chips.constBegin(); it != chips.constEnd(); ++it) {
+            const QVariantMap c = it.value().toMap();
+            QVERIFY2(!c.value("key").toString().isEmpty(), qPrintable("empty chip key: " + it.key()));
+            QVERIFY2(!c.value("fallback").toString().isEmpty(), qPrintable("empty chip fallback: " + it.key()));
+        }
+        // Legacy alias keeps a chip name without appearing in the palette.
+        QVERIFY(chips.contains("connectionStatus"));
+        QVERIFY(!seen.contains("connectionStatus"));
+
+        // Every configurable type is a real, placeable catalog type — the
+        // capability schema and the catalog cannot drift apart.
+        const QJsonObject caps = SettingsNetwork::readoutCapabilitiesJson();
+        for (const QString& t : caps.keys())
+            QVERIFY2(seen.contains(t), qPrintable("configurable type missing from catalog: " + t));
+
+        // Web JSON parity: types/chipNames/catNames mirror the same table.
+        const QJsonObject webCatalog = SettingsNetwork::widgetCatalogJson();
+        QCOMPARE(webCatalog.value("types").toArray().size(), catalog.size());
+        QCOMPARE(webCatalog.value("chipNames").toObject().size(), chips.size());
+        QCOMPARE(webCatalog.value("catNames").toArray().size(), cats.size());
+    }
+
+    // An absent stored displayMode always means "today's rendering" — icon for
+    // the battery readouts, text everywhere else. Declared once; pin it.
+    void displayModeDefaultsPinned() {
+        QCOMPARE(SettingsNetwork::defaultDisplayModeForType("batteryLevel"), QStringLiteral("icon"));
+        QCOMPARE(SettingsNetwork::defaultDisplayModeForType("scaleBattery"), QStringLiteral("icon"));
+        QCOMPARE(SettingsNetwork::defaultDisplayModeForType("temperature"), QStringLiteral("text"));
+        QCOMPARE(SettingsNetwork::defaultDisplayModeForType("scaleWeight"), QStringLiteral("text"));
+        QCOMPARE(SettingsNetwork::defaultDisplayModeForType(""), QStringLiteral("text"));
+        // Web parity: only non-text defaults are injected.
+        const QJsonObject d = SettingsNetwork::displayModeDefaultsJson();
+        QCOMPARE(d.size(), 2);
+        QCOMPARE(d.value("batteryLevel").toString(), QStringLiteral("icon"));
+        QCOMPARE(d.value("scaleBattery").toString(), QStringLiteral("icon"));
+        // Every defaulted type must support displayMode in the schema.
+        for (const QString& t : d.keys())
+            QVERIFY(SettingsNetwork::optionKeysForType(t).contains("displayMode"));
     }
 
     // itemIsConfigured gates the remove-confirmation that protects a set-up
@@ -696,6 +844,62 @@ private slots:
         QVERIFY(net->itemIsConfigured("sp1"));
         // Unknown id → empty props → not configured.
         QVERIFY(!net->itemIsConfigured("does_not_exist"));
+
+        net->setLayoutConfiguration(orig);
+    }
+
+    // Array-valued item properties: setItemPropertyList is the typed path QML
+    // must use (a JS array through the generic QVariant setter arrives as a
+    // wrapped QJSValue and would be stored as null). Regression for the Shot
+    // Plan chip editor saving "shotPlanItems": null, which read back as absent
+    // and silently reverted the user's edits (#1426).
+    void itemPropertyListPersistsArrays() {
+        SettingsNetwork* net = m_settings.network();
+        const QString orig = net->layoutConfiguration();
+
+        net->setLayoutConfiguration(QStringLiteral(
+            "{\"version\":1,\"zones\":{\"centerMiddle\":["
+            "{\"type\":\"shotPlan\",\"id\":\"plan1\"}"
+            "]}}"));
+
+        // Deliberately NON-canonical order (canonical is doseYield, ..., roaster):
+        // a regression that sorts/normalizes the list on write or read would
+        // still pass with an in-order payload, and order IS the feature.
+        QVERIFY(net->setItemPropertyList("plan1", "shotPlanItems",
+                QVariantList{QStringLiteral("roaster"), QStringLiteral("doseYield"), QStringLiteral("coffee")}));
+        QVariantMap props = net->getItemProperties("plan1");
+        QCOMPARE(props.value("shotPlanItems").toStringList(),
+                 QStringList({QStringLiteral("roaster"), QStringLiteral("doseYield"), QStringLiteral("coffee")}));
+
+        // An empty array is a valid "show nothing" config: it must survive as a
+        // present, empty list — not collapse to null (which reads as absent and
+        // re-triggers legacy derivation).
+        net->setItemPropertyList("plan1", "shotPlanItems", QVariantList{});
+        props = net->getItemProperties("plan1");
+        QVERIFY(props.contains("shotPlanItems"));
+        QVERIFY(!props.value("shotPlanItems").isNull());
+        QVERIFY(props.value("shotPlanItems").toList().isEmpty());
+
+        // The generic setter still takes a plain QVariantList (the web editor's
+        // path — JSON arrays arrive as QVariantList, not QJSValue).
+        net->setItemProperty("plan1", "shotPlanItems",
+                             QVariantList{QStringLiteral("grind")});
+        props = net->getItemProperties("plan1");
+        QCOMPARE(props.value("shotPlanItems").toStringList(),
+                 QStringList{QStringLiteral("grind")});
+
+        // A write to a stale/unknown itemId must report failure (and warn), not
+        // silently no-op with the stored state unchanged.
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression("no layout item with id"));
+        QVERIFY(!net->setItemProperty("gone", "shotPlanSentence", true));
+
+        // An invalid QVariant (JS undefined / missing web value) must be
+        // refused, not stored as JSON null; the previous value survives.
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression("refusing invalid value"));
+        QVERIFY(!net->setItemProperty("plan1", "shotPlanItems", QVariant()));
+        props = net->getItemProperties("plan1");
+        QCOMPARE(props.value("shotPlanItems").toStringList(),
+                 QStringList{QStringLiteral("grind")});
 
         net->setLayoutConfiguration(orig);
     }

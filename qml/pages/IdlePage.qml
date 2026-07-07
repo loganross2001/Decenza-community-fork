@@ -204,6 +204,27 @@ Page {
         }
     }
 
+    // Publish the live dose-weighing state on the window root for the Beans layout
+    // widget (DoseWeightItem) — the widget can live outside IdlePage (persistent
+    // status bar), so it can't reach beanCapture directly. Live only while this
+    // page is showing and an uncaptured dose sits on the scale with a saved cup
+    // tare — stricter than the panel readout below, which keeps ticking for an
+    // already-captured load; -1 = not weighing. The engine's re-arm (net change
+    // > rearmDelta after capture) drops isCaptured, so adding more beans after
+    // capture goes live again automatically.
+    Binding {
+        target: idlePage.Window.window
+        property: "doseLiveNetG"
+        value: (idlePage.visible && beanCapture.loadPresent && !beanCapture.isCaptured
+                && Settings.brew.doseCupTareWeight > 0)
+               ? Math.max(0, beanCapture.netWeight) : -1
+    }
+    Binding {
+        target: idlePage.Window.window
+        property: "doseCaptureFlash"
+        value: idlePage.visible && idlePage.beanCaptureShown
+    }
+
     // When the scale is zeroed/tared, the old virtual zero is stale (it would
     // double-count the offset that was just removed) — re-establish the baseline.
     Connections {
@@ -571,6 +592,16 @@ Page {
                 active: activePresetFunction === "steam"
                 visible: active
 
+                // Track scale weight changes and bump version to refresh the live
+                // net-milk pill suffix (see pillSuffixFn below)
+                property int steamPillSuffixVersion: 0
+                Connections {
+                    target: MachineState
+                    function onScaleWeightChanged() {
+                        if (steamPresetLoader.active) steamPresetLoader.steamPillSuffixVersion++
+                    }
+                }
+
                 sourceComponent: Column {
                     width: parent ? parent.width : 0
                     spacing: Theme.scaled(8)
@@ -581,6 +612,26 @@ Page {
                         presets: Settings.brew.steamPitcherPresets
                         selectedIndex: Settings.brew.selectedSteamPitcher
                         supportLongPress: true
+                        pillSuffixMaxWidth: Theme.scaled(60)  // Reserve ~"(1234g)" worth of width
+                        pillSuffixVersion: steamPresetLoader.steamPillSuffixVersion
+
+                        // Live milk weigh: scale reading minus the saved empty-pitcher
+                        // weight, updating as milk is poured. Assumes an un-tared gross
+                        // reading — a pitcher zeroed by the steam auto-tare reads (0g)
+                        // until lifted and replaced (see steamPlacePrompt). Display only —
+                        // the capture path (idleMilkCapture) and steam-time scaling never
+                        // read this. Deliberately NOT netMilkForPitcher(): its 50–1500 g
+                        // window is sized for time scaling and would zero small amounts
+                        // here. Twin of the SteamItem popup's pillSuffixFn — keep in sync.
+                        pillSuffixFn: function(index) {
+                            if (!ScaleDevice.connected || ScaleDevice.isFlowScale) return ""
+                            var preset = Settings.brew.steamPitcherPresets[index]
+                            if (!preset || preset.disabled) return ""
+                            var pitcherWeight = preset.pitcherWeightG ?? 0
+                            if (pitcherWeight <= 0) return ""
+                            var milkWeight = Math.max(0, MachineState.scaleWeight - pitcherWeight)
+                            return " (" + Math.round(milkWeight) + "g)"
+                        }
 
                         // Show pitcher presets as "<name> Pitcher" (e.g. "Small Pitcher"),
                         // skipping the disabled "Off" preset and any name that already

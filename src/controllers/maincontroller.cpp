@@ -291,8 +291,9 @@ MainController::MainController(QNetworkAccessManager* networkManager,
     // Migration 16 ran inside initialize() above. If it found inferred
     // shots that were uploaded to Visualizer, it queued them in
     // QSettings under migration16/pendingVisualizerSync. Drain that
-    // list now — guarded internally on credentials being available;
-    // failed entries persist for the next boot.
+    // list now — guarded internally on credentials being available.
+    // Transiently-failed entries persist for the next boot; permanently
+    // failed ones (404) are evicted (see updateFailed connect below).
     processPendingVisualizerRatingSync();
 
     // One-time reconciliation: relink shots that were uploaded before
@@ -334,16 +335,54 @@ MainController::MainController(QNetworkAccessManager* networkManager,
         m_migration16InFlightVisualizerId.clear();
         dispatchNextPendingVisualizerSync();
     });
-    connect(m_visualizer, &VisualizerUploader::uploadFailed, this,
-            [this](const QString& /*error*/) {
-        // VisualizerUploader::uploadFailed carries no shot-id correlation, so
-        // we can't tell whether the failure was ours or someone else's. The
-        // safe rule: if a migration16 PATCH is in flight, assume it failed
-        // (the same upload session can't error AND succeed on the network
-        // layer), leave the entry in the pending list, and abort the drain.
-        // A spurious abort just means the queue picks up on next boot.
-        if (m_migration16InFlightVisualizerId.isEmpty()) return;
+    connect(m_visualizer, &VisualizerUploader::updateFailed, this,
+            [this](const QString& visualizerId, bool permanent, const QString& error) {
+        // Same in-flight filter as updateSuccess above: ignore failures
+        // from PATCHes we didn't issue (user edits from the review pages).
+        if (m_migration16InFlightVisualizerId.isEmpty()
+            || visualizerId != m_migration16InFlightVisualizerId)
+            return;
         m_migration16InFlightVisualizerId.clear();
+
+        if (!permanent) {
+            // Transient (anything but 404 — see the classification in
+            // VisualizerUploader::onUpdateFinished): leave the entry in
+            // the pending list and abort the drain — the queue picks up
+            // on the next boot.
+            qDebug() << "MainController: migration16 sync — transient failure ("
+                     << error << "); drain paused until next boot";
+            return;
+        }
+
+        // Permanent (HTTP 404): the shot does not exist on Visualizer and
+        // never will — e.g. a bogus placeholder visualizer_id that
+        // migration 16 queued in good faith. Retrying forever wastes a
+        // network round-trip and logs an error on every launch (#1431):
+        // evict the entry, clear the dead link on the local shot row so
+        // nothing else trusts it, and continue draining. The clear is
+        // guarded on the row still holding this exact id, so a link the
+        // user replaced meanwhile (re-upload) is never wiped.
+        QSettings s(QStringLiteral("DecentEspresso"), QStringLiteral("DE1Qt"));
+        QJsonArray pending = QJsonDocument::fromJson(
+            s.value(QStringLiteral("migration16/pendingVisualizerSync")).toByteArray()).array();
+        for (qsizetype i = 0; i < pending.size(); ++i) {
+            const QJsonObject entry = pending[i].toObject();
+            if (entry.value("visualizerId").toString() != visualizerId)
+                continue;
+            const qint64 shotId = entry.value("shotId").toVariant().toLongLong();
+            if (m_shotHistory)
+                m_shotHistory->requestClearStaleVisualizerLink(shotId, visualizerId);
+            pending.removeAt(i);
+            break;
+        }
+        if (pending.isEmpty())
+            s.remove(QStringLiteral("migration16/pendingVisualizerSync"));
+        else
+            s.setValue(QStringLiteral("migration16/pendingVisualizerSync"),
+                       QJsonDocument(pending).toJson(QJsonDocument::Compact));
+        qWarning() << "MainController: migration16 sync — dropping visualizerId"
+                   << visualizerId << "after permanent failure:" << error;
+        dispatchNextPendingVisualizerSync();
     });
 
     // Create shot importer for importing .shot files from DE1 app
@@ -2713,16 +2752,20 @@ void MainController::onShotSampleReceived(const ShotSample& sample) {
                     transitionReason = QStringLiteral("time");
                 } else {
                     // Exit condition was configured, but the sensor threshold was NOT
-                    // confirmed above and time did not expire — so we cannot attribute the
-                    // exit to a real pressure/flow trigger. Record "time" (the frame advanced
-                    // without a confirmed sensor reason) rather than GUESS a sensor exit that
-                    // consumers trust as ground truth (the skip-first-frame guard and the
-                    // grind detector both suppress/trim on a confirmed pressure/flow reason).
-                    transitionReason = QStringLiteral("time");
+                    // confirmed above and time did not expire — usually a real sensor
+                    // exit whose crossing fell between BLE samples. Record it as an
+                    // UNCONFIRMED sensor exit (hint from exitType): displays render it
+                    // like the sensor exit it probably was, the grind detector's
+                    // limiter-tail trim treats pressure_unconfirmed as limiter
+                    // engagement, but the skip-first-frame guard only trusts confirmed
+                    // "pressure"/"flow"/"weight" — so a genuinely skipped frame (which
+                    // lands in this branch) still flags.
+                    transitionReason = prevFrame.exitType.contains(QStringLiteral("pressure"))
+                        ? QStringLiteral("pressure_unconfirmed") : QStringLiteral("flow_unconfirmed");
                     qDebug() << "MainController: Frame" << prevFrameIndex
                              << "exit reason unconfirmed - exitType:" << prevFrame.exitType
                              << "pressure:" << m_lastPressure << "flow:" << m_lastFlow
-                             << "recorded as time";
+                             << "recorded as" << transitionReason;
                 }
             } else {
                 // No exit condition configured - frame ended by time

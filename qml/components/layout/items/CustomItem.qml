@@ -40,9 +40,9 @@ Item {
 
     readonly property color _parsedBgColor: bgColor !== "" ? bgColor : (hasAction ? Theme.primaryColor : Theme.surfaceColor)
 
-    // A brew-settings widget highlights (yellow, like the espresso button
-    // when no favorite is selected) whenever a brew override is in effect —
-    // i.e. temperature or yield differs from the active profile's default.
+    // A brew-settings widget highlights (Theme.highlightColor) whenever a brew
+    // override is in effect — i.e. temperature or target yield differs from the
+    // active profile's default.
     readonly property bool _isBrewSettingsWidget: action === "brewSettings"
         || longPressAction === "brewSettings" || doubleclickAction === "brewSettings"
     readonly property bool _brewOverrideActive: {
@@ -55,14 +55,12 @@ Item {
     // Content color for text and icon tinting on the button background
     readonly property color _contentColor: Theme.primaryContrastColor
 
-    // Active-mode highlight: a togglePreset button (Espresso/Steam/Flush/Hot Water
-    // in the centre zone) shows an accent ring while its preset row is expanded,
-    // so you can see which mode is selected. CustomItem is the full/centre-mode
-    // renderer for these buttons; it writes activePresetFunction on tap but, unlike
-    // the compact-mode EspressoItem, did not read it back — so the button never lit
-    // up. Mirror it into a local reactive property (reading a sub-property through a
-    // `var` doesn't register a binding dependency, hence the Connections), then
-    // compare against the mode this button toggles.
+    // Active-mode highlight: a togglePreset:<mode> button shows a contrasting ring
+    // while its preset row is expanded, so you can see which mode is selected. In
+    // practice these are the compiled action buttons (Espresso/Steam/Hot Water/
+    // Flush/Beans/Equipment) — neither the in-app nor the web widget editor exposes
+    // togglePreset for hand-made custom widgets, though a raw action string in a
+    // layout config is honored the same way.
     readonly property string _toggleMode:
         action.indexOf("togglePreset:") === 0 ? action.substring("togglePreset:".length) : ""
     property var idlePage: {
@@ -71,17 +69,21 @@ Item {
             if (p.objectName === "idlePage") return p
             p = p.parent
         }
+        // Hosts outside IdlePage (the persistent status bar lives beside the page
+        // stack in main.qml): fall back to the stack's current page. togglePreset
+        // and the active ring then work exactly while the home screen is showing —
+        // the only time the preset row exists — and stay inert elsewhere.
+        if (typeof pageStack !== "undefined" && pageStack.currentItem
+                && pageStack.currentItem.objectName === "idlePage")
+            return pageStack.currentItem
         return null
     }
-    property string _activeFn: idlePage ? idlePage.activePresetFunction : ""
-    Connections {
-        target: root.idlePage
-        ignoreUnknownSignals: true
-        function onActivePresetFunctionChanged() {
-            root._activeFn = root.idlePage ? root.idlePage.activePresetFunction : ""
-        }
-    }
-    readonly property bool isActive: _toggleMode !== "" && _activeFn === _toggleMode
+    readonly property bool isActive: _toggleMode !== ""
+        && idlePage !== null && idlePage.activePresetFunction === _toggleMode
+    // Ring must contrast with both the button fill and the page background: a darker
+    // shade vanishes against a dark background, a lighter one against a light background.
+    readonly property color _activeRingColor: Settings.theme.isDarkMode
+        ? Qt.lighter(_effectiveBackground, 1.6) : Qt.darker(_effectiveBackground, 1.5)
 
     readonly property int qtAlignment: {
         switch (textAlign) {
@@ -122,8 +124,6 @@ Item {
         || content.indexOf("%TARGET_TEMP%") >= 0
         || content.indexOf("%RATIO%") >= 0
         || content.indexOf("%DOSE%") >= 0
-        || content.indexOf("%BREW_TEMP%") >= 0
-        || content.indexOf("%YIELD%") >= 0
 
     readonly property bool _needsScaleDevice: content.indexOf("%SCALE%") >= 0
         || content.indexOf("%SCALE_CONNECTED%") >= 0
@@ -131,9 +131,6 @@ Item {
 
     readonly property bool _needsSettingsData: content.indexOf("%GRIND%") >= 0
         || content.indexOf("%GRINDER%") >= 0
-        || content.indexOf("%ROASTER%") >= 0
-        || content.indexOf("%COFFEE%") >= 0
-        || content.indexOf("%ROAST_DATE%") >= 0
 
     // Variable substitution - only tracks the live properties this item actually uses.
     // Items showing static values (e.g. %PROFILE%) no longer re-evaluate at 5 Hz.
@@ -156,22 +153,14 @@ Item {
         }
         if (_needsControllerData && typeof ProfileManager !== "undefined") {
             void(ProfileManager.targetWeight); void(ProfileManager.currentProfileName)
-            void(ProfileManager.profileTargetTemperature); void(ProfileManager.profileTargetWeight)
+            void(ProfileManager.profileTargetTemperature)
             void(ProfileManager.brewByRatio); void(ProfileManager.brewByRatioDose)
-            // Override-aware %BREW_TEMP%/%YIELD%: the override flags live on Settings.brew, and the
-            // C/F unit read inside temperatureDisplay() is C++-side (invisible to bindings).
-            if (typeof Settings !== "undefined") {
-                void(Settings.app.temperatureUnit)
-                void(Settings.brew.hasTemperatureOverride); void(Settings.brew.temperatureOverride)
-                void(Settings.brew.hasBrewYieldOverride)
-            }
         }
         if (_needsScaleDevice && typeof ScaleDevice !== "undefined" && ScaleDevice) {
             void(ScaleDevice.name); void(ScaleDevice.connected)
         }
         if (_needsSettingsData && typeof Settings !== "undefined") {
             void(Settings.dye.dyeGrinderSetting); void(Settings.dye.dyeGrinderModel)
-            void(Settings.dye.dyeBeanBrand); void(Settings.dye.dyeBeanType); void(Settings.dye.dyeRoastDate)
         }
         return substituteVariables(_c)
     }
@@ -237,28 +226,6 @@ Item {
         // Grinder
         result = result.replace(/%GRIND%/g, typeof Settings !== "undefined" && Settings.dye.dyeGrinderSetting ? Settings.dye.dyeGrinderSetting : "—")
         result = result.replace(/%GRINDER%/g, typeof Settings !== "undefined" && Settings.dye.dyeGrinderModel ? Settings.dye.dyeGrinderModel : "—")
-        // Beans (DYE metadata)
-        result = result.replace(/%ROASTER%/g, typeof Settings !== "undefined" && Settings.dye.dyeBeanBrand ? Settings.dye.dyeBeanBrand : "—")
-        result = result.replace(/%COFFEE%/g, typeof Settings !== "undefined" && Settings.dye.dyeBeanType ? Settings.dye.dyeBeanType : "—")
-        result = result.replace(/%ROAST_DATE%/g, typeof Settings !== "undefined" && Settings.dye.dyeRoastDate ? Settings.dye.dyeRoastDate : "—")
-        // Override-aware brew temp + yield (mirror the Shot Plan: temperatureDisplay follows C/F and the
-        // override; yield shows "profile → override" with an arrow when a deliberate yield override is set).
-        if (result.indexOf("%BREW_TEMP%") >= 0) {
-            var _pTemp = typeof ProfileManager !== "undefined" ? ProfileManager.profileTargetTemperature : 0
-            var _hasTO = typeof Settings !== "undefined" && Settings.brew.hasTemperatureOverride
-            var _oTemp = _hasTO ? Settings.brew.temperatureOverride : _pTemp
-            result = result.replace(/%BREW_TEMP%/g, (typeof ProfileManager !== "undefined" && _pTemp > 0)
-                ? ProfileManager.temperatureDisplay(_pTemp, _hasTO, _oTemp) : "—")
-        }
-        if (result.indexOf("%YIELD%") >= 0) {
-            var _pYield = typeof ProfileManager !== "undefined" ? ProfileManager.profileTargetWeight : 0
-            var _tWeight = typeof ProfileManager !== "undefined" ? ProfileManager.targetWeight : 0
-            var _hasYO = typeof Settings !== "undefined" && Settings.brew.hasBrewYieldOverride
-            var _yieldStr = (_hasYO && _pYield > 0 && Math.abs(_tWeight - _pYield) > 0.1)
-                ? (_pYield.toFixed(1) + " → " + _tWeight.toFixed(1) + "g")
-                : (_tWeight > 0 ? (_tWeight.toFixed(1) + "g") : "—")
-            result = result.replace(/%YIELD%/g, _yieldStr)
-        }
         // Machine ready status
         var machineReady = typeof MachineState !== "undefined" && MachineState.isReady
         result = result.replace(/%MACHINE_READY%/g, machineReady ? TranslationManager.translate("customitem.status.ready", "Ready") : TranslationManager.translate("customitem.status.notReady", "Not ready"))
@@ -302,19 +269,19 @@ Item {
     function executeActionString(actionStr) {
         if (!actionStr) return
         var parts = actionStr.split(":")
-        if (parts.length < 2) return
+        if (parts.length < 2) {
+            console.warn("CustomItem: malformed action '" + actionStr + "' (expected 'category:target')")
+            return
+        }
         var category = parts[0]
         var target = parts.slice(1).join(":")
 
         if (category === "togglePreset") {
-            // Walk parent chain to find IdlePage (same pattern as EspressoItem)
-            var p = root.parent
-            while (p) {
-                if (p.objectName === "idlePage") break
-                p = p.parent
-            }
+            var p = root.idlePage
             if (p && typeof p.activePresetFunction !== "undefined") {
                 p.activePresetFunction = (p.activePresetFunction === target) ? "" : target
+            } else {
+                console.warn("CustomItem: togglePreset couldn't find IdlePage ancestor; preset '" + target + "' not toggled")
             }
         } else if (category === "navigate") {
             var pageMap = {
@@ -351,6 +318,8 @@ Item {
                     pageStack.replace(null, Qt.resolvedUrl("../../../pages/" + page))
                 else
                     pageStack.push(Qt.resolvedUrl("../../../pages/" + page))
+            } else if (!page) {
+                console.warn("CustomItem: unknown navigate target '" + target + "'")
             }
         } else if (category === "command") {
             // The hardware Group Head Controller (GHC), when present and active, takes
@@ -427,6 +396,8 @@ Item {
                         }
                         MainController.shotHistory.shotReady.connect(handler)
                         MainController.shotHistory.requestShot(lastId)
+                    } else {
+                        console.warn("CustomItem: uploadVisualizer — no saved shot this session, nothing to upload")
                     }
                     break
                 case "disconnectDE1":
@@ -447,9 +418,15 @@ Item {
                         var profileName = target.substring("loadProfile:".length)
                         if (profileName)
                             ProfileManager.loadProfile(profileName)
+                        else
+                            console.warn("CustomItem: loadProfile command with empty profile name")
+                    } else {
+                        console.warn("CustomItem: unknown command '" + target + "'")
                     }
                     break
             }
+        } else {
+            console.warn("CustomItem: unknown action category '" + category + "' in '" + actionStr + "'")
         }
     }
 
@@ -466,14 +443,11 @@ Item {
             anchors.fill: parent
             anchors.topMargin: Theme.spacingSmall
             anchors.bottomMargin: Theme.spacingSmall
-            color: {
-                var base = root.bgColor || "#555555"
-                return compactTap.isPressed ? Qt.darker(base, 1.2) : base
-            }
+            color: compactTap.isPressed ? Qt.darker(root._effectiveBackground, 1.2) : root._effectiveBackground
             radius: Theme.cardRadius
             opacity: root.hasAction && typeof DE1Device !== "undefined" && !DE1Device.guiEnabled ? 0.5 : 1.0
             border.width: root.isActive ? Theme.scaled(3) : 0
-            border.color: Qt.darker(root._effectiveBackground, 1.5)
+            border.color: root._activeRingColor
         }
 
         RowLayout {
@@ -506,7 +480,7 @@ Item {
         AccessibleTapHandler {
             id: compactTap
             anchors.fill: parent
-            accessibleName: Theme.toAccessibleText(root.resolvedText)
+            accessibleName: Theme.toAccessibleText(root.resolvedText) + (root.isActive ? ", " + TranslationManager.translate("accessibility.selected", "selected") : "")
             accessibleDescription: root._accessibleHint
             supportLongPress: root.longPressAction !== ""
             supportDoubleClick: root.doubleclickAction !== ""
@@ -531,7 +505,7 @@ Item {
             radius: Theme.cardRadius
             opacity: root.hasAction && typeof DE1Device !== "undefined" && !DE1Device.guiEnabled ? 0.5 : 1.0
             border.width: root.isActive ? Theme.scaled(3) : 0
-            border.color: Qt.darker(root._effectiveBackground, 1.5)
+            border.color: root._activeRingColor
         }
 
         // Layout with emoji: icon above text (like ActionButton)
@@ -587,7 +561,7 @@ Item {
         AccessibleTapHandler {
             id: fullTap
             anchors.fill: parent
-            accessibleName: Theme.toAccessibleText(root.resolvedText)
+            accessibleName: Theme.toAccessibleText(root.resolvedText) + (root.isActive ? ", " + TranslationManager.translate("accessibility.selected", "selected") : "")
             accessibleDescription: root._accessibleHint
             supportLongPress: root.longPressAction !== ""
             supportDoubleClick: root.doubleclickAction !== ""

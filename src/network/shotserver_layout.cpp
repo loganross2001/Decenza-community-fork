@@ -67,6 +67,12 @@ void ShotServer::handleLayoutApi(QTcpSocket* socket, const QString& method, cons
             return;
         }
         QVariantMap props = m_settings->network()->getItemProperties(itemId);
+        if (props.isEmpty()) {
+            // Unknown/stale id: an empty 200 would let the editor open seeded
+            // with defaults and autosave into the void.
+            sendResponse(socket, 404, "application/json", R"({"error":"No such item"})");
+            return;
+        }
         sendJson(socket, QJsonDocument(QJsonObject::fromVariantMap(props)).toJson(QJsonDocument::Compact));
         return;
     }
@@ -297,8 +303,19 @@ void ShotServer::handleLayoutApi(QTcpSocket* socket, const QString& method, cons
             sendResponse(socket, 400, "application/json", R"({"error":"Missing itemId or key"})");
             return;
         }
+        if (!obj.contains("value")) {
+            // An absent value would arrive as an invalid QVariant and be
+            // stored as JSON null (read back as "property missing").
+            sendResponse(socket, 400, "application/json", R"({"error":"Missing value"})");
+            return;
+        }
         QVariant value = obj["value"].toVariant();
-        m_settings->network()->setItemProperty(itemId, key, value);
+        if (!m_settings->network()->setItemProperty(itemId, key, value)) {
+            // Stale/unknown itemId (deleted since the editor loaded) or an
+            // unstorable value — a 200 here would let the edit vanish silently.
+            sendResponse(socket, 404, "application/json", R"({"error":"No such item or unstorable value"})");
+            return;
+        }
         sendJson(socket, R"({"success":true})");
     }
     else if (path == "/api/layout/zone-offset") {
@@ -948,6 +965,45 @@ QString ShotServer::generateLayoutPage() const
             text-align: center;
             padding: 1rem 0;
         }
+        .sp-item-row {
+            display: flex;
+            align-items: center;
+            gap: 0.375rem;
+            padding: 0.25rem 0.5rem;
+            margin-bottom: 0.25rem;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+        }
+        .sp-item-label {
+            flex: 1;
+            color: var(--text);
+            font-size: 0.875rem;
+        }
+        .sp-item-btn {
+            width: 28px;
+            height: 28px;
+            border-radius: 6px;
+            border: 1px solid var(--border);
+            background: none;
+            color: var(--text);
+            font-size: 0.75rem;
+            cursor: pointer;
+        }
+        .sp-item-btn:hover:not(:disabled) { border-color: var(--accent); }
+        .sp-item-btn:disabled { opacity: 0.3; cursor: default; }
+        .sp-item-remove { color: #e57373; }
+        .sp-avail-chip {
+            display: inline-block;
+            padding: 0.25rem 0.625rem;
+            margin: 0 0.25rem 0.375rem 0;
+            border-radius: 6px;
+            border: 1px solid var(--border);
+            background: none;
+            color: var(--text-secondary);
+            font-size: 0.875rem;
+            cursor: pointer;
+        }
+        .sp-avail-chip:hover { border-color: var(--accent); color: var(--text); }
         .toolbar {
             display: flex;
             flex-wrap: wrap;
@@ -1861,11 +1917,6 @@ QString ShotServer::generateLayoutPage() const
                             <div class="var-item" onclick="insertVar('%DATE%')">Date</div>
                             <div class="var-item" onclick="insertVar('%RATIO%')">Ratio</div>
                             <div class="var-item" onclick="insertVar('%DOSE%')">Dose</div>
-                            <div class="var-item" onclick="insertVar('%ROASTER%')">Roaster</div>
-                            <div class="var-item" onclick="insertVar('%COFFEE%')">Coffee</div>
-                            <div class="var-item" onclick="insertVar('%ROAST_DATE%')">Roast Date</div>
-                            <div class="var-item" onclick="insertVar('%BREW_TEMP%')">Brew Temp</div>
-                            <div class="var-item" onclick="insertVar('%YIELD%')">Yield</div>
                             <div class="var-item" onclick="insertVar('%MACHINE_READY%')">Ready</div>
                             <div class="var-item" onclick="insertVar('%MACHINE_READY_COLOR%')">Ready Clr</div>
                             <div class="var-item" onclick="insertVar('%CONNECTED%')">Online</div>
@@ -1957,56 +2008,29 @@ QString ShotServer::generateLayoutPage() const
                 </div>
             </div>
 
+            <!-- Shot Plan: ordered display-item list + format toggles.
+                 Order = display order; up/down reorders, ✕ hides (moves the item
+                 to Available), + shows it again. Mirrors the in-app chip editor. -->
             <div id="ssShotPlanSettings" style="display:none">
-                <div class="section-label">Layout</div>
-                <div class="ss-slider-row">
-                    <select id="spFormat" onchange="spToggleChanged()" style="width:100%;padding:0.4rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px">
-                        <option value="sentence">Sentence</option>
-                        <option value="compact">Compact</option>
-                        <option value="stacked">Stacked</option>
-                        <option value="plain">Plain</option>
-                    </select>
-                </div>
-                <div class="section-label">Visible elements</div>
+                <div class="section-label">Shown (order = display order)</div>
+                <div id="spShownList"></div>
+                <div class="section-label" id="spAvailableLabel">Available</div>
+                <div id="spAvailableList"></div>
                 <div class="ss-slider-row">
                     <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer">
-                        <input type="checkbox" id="spShowProfile" checked onchange="spToggleChanged()">
-                        <span style="color:var(--text-secondary)">Profile &amp; temperature</span>
+                        <input type="checkbox" id="spSentence" checked onchange="spSentenceChanged()">
+                        <span style="color:var(--text-secondary)">Sentence style ("Brew 36g of Espresso, using …")</span>
+                    </label>
+                </div>
+                <div class="ss-slider-row">
+                    <label id="spStackedLabel" style="display:flex;align-items:center;gap:0.5rem;cursor:pointer">
+                        <input type="checkbox" id="spStacked" onchange="spConfigChanged()">
+                        <span style="color:var(--text-secondary)">Stacked details (tail on its own line)</span>
                     </label>
                 </div>
                 <div class="ss-slider-row">
                     <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer">
-                        <input type="checkbox" id="spShowRoaster" checked onchange="spToggleChanged()">
-                        <span style="color:var(--text-secondary)">Roaster</span>
-                    </label>
-                </div>
-                <div class="ss-slider-row">
-                    <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer">
-                        <input type="checkbox" id="spShowCoffee" checked onchange="spToggleChanged()">
-                        <span style="color:var(--text-secondary)">Coffee</span>
-                    </label>
-                </div>
-                <div class="ss-slider-row">
-                    <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer">
-                        <input type="checkbox" id="spShowGrind" checked onchange="spToggleChanged()">
-                        <span style="color:var(--text-secondary)">Grind</span>
-                    </label>
-                </div>
-                <div class="ss-slider-row">
-                    <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer">
-                        <input type="checkbox" id="spShowRoastDate" onchange="spToggleChanged()">
-                        <span style="color:var(--text-secondary)">Roast date</span>
-                    </label>
-                </div>
-                <div class="ss-slider-row">
-                    <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer">
-                        <input type="checkbox" id="spShowDoseYield" checked onchange="spToggleChanged()">
-                        <span style="color:var(--text-secondary)">Dose &amp; yield</span>
-                    </label>
-                </div>
-                <div class="ss-slider-row">
-                    <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer">
-                        <input type="checkbox" id="spShowSteamPlan" checked onchange="spToggleChanged()">
+                        <input type="checkbox" id="spShowSteamPlan" checked onchange="spConfigChanged()">
                         <span style="color:var(--text-secondary)">Steam plan (while steaming)</span>
                     </label>
                 </div>
@@ -2412,71 +2436,9 @@ QString ShotServer::generateLayoutPage() const
         {key: "bottomRight", label: "Bottom Bar (Right)", hasOffset: false}
     ];
 
-    // Widget catalog. `cat` indexes CAT_NAMES (0 Actions, 1 Readouts, 2 Utility,
-    // 3 Screensavers); the picker groups by cat and sorts by label within each.
-    // `special`/`screensaver` drive chip/menu-item colour. Mirrors the in-app
-    // catalog in LayoutEditorZone.qml — keep the two in sync.
-    var WIDGET_TYPES = [
-        // Actions (0)
-        {type:"espresso",cat:0,label:"Espresso"},
-        {type:"steam",cat:0,label:"Steam"},
-        {type:"hotwater",cat:0,label:"Hot Water"},
-        {type:"flush",cat:0,label:"Flush"},
-        {type:"sleep",cat:0,label:"Sleep"},
-        {type:"settings",cat:0,label:"Settings"},
-        {type:"quit",cat:0,label:"Quit",special:true},
-        {type:"history",cat:0,label:"History"},
-        {type:"beans",cat:0,label:"Beans"},
-        {type:"equipment",cat:0,label:"Equipment"},
-        {type:"autofavorites",cat:0,label:"Favorites"},
-        {type:"discuss",cat:0,label:"Discuss"},
-        {type:"barista",cat:0,label:"Barista"},
-        {type:"ghcSimulator",cat:0,label:"Mini GHC"},
-        // Readouts (1)
-        {type:"machineStatus",cat:1,label:"Machine Status"},
-        {type:"scaleWeight",cat:1,label:"Scale Weight"},
-        {type:"temperature",cat:1,label:"Temperature"},
-        {type:"steamTemperature",cat:1,label:"Steam Temp"},
-        {type:"batteryLevel",cat:1,label:"Battery Level"},
-        {type:"scaleBattery",cat:1,label:"Scale Battery"},
-        {type:"waterLevel",cat:1,label:"Water Level"},
-        {type:"profileName",cat:1,label:"Profile Name"},
-        {type:"doseWeight",cat:1,label:"Dose Weight"},
-        {type:"milkWeight",cat:1,label:"Milk Weight"},
-        {type:"ratioQuickSelect",cat:1,label:"Ratio Quick-Select"},
-        {type:"shotPlan",cat:1,label:"Shot Plan"},
-        {type:"clock",cat:1,label:"Time"},
-        // Utility (2)
-        {type:"custom",cat:2,label:"Custom",special:true},
-        {type:"pageTitle",cat:2,label:"Page Title",special:true},
-        {type:"separator",cat:2,label:"Separator",special:true},
-        {type:"spacer",cat:2,label:"Spacer",special:true},
-        {type:"weather",cat:2,label:"Weather",special:true},
-        // Screensavers (3)
-        {type:"screensaverPipes",cat:3,label:"3D Pipes",screensaver:true},
-        {type:"screensaverAttractor",cat:3,label:"Attractors",screensaver:true},
-        {type:"screensaverFlipClock",cat:3,label:"Flip Clock",screensaver:true},
-        {type:"lastShot",cat:3,label:"Last Shot",screensaver:true},
-        {type:"screensaverShotMap",cat:3,label:"Shot Map",screensaver:true}
-    ];
-
-    var DISPLAY_NAMES = {
-        espresso:"Espresso",steam:"Steam",hotwater:"Hot Water",flush:"Flush",
-        beans:"Beans",equipment:"Equipment",history:"History",autofavorites:"Favorites",sleep:"Sleep",
-        settings:"Settings",temperature:"Temp",steamTemperature:"Steam",
-        batteryLevel:"Battery",scaleBattery:"Scale Bat",waterLevel:"Water",connectionStatus:"Machine",scaleWeight:"Scale",
-        profileName:"Profile",doseWeight:"Dose",milkWeight:"Milk",ratioQuickSelect:"Ratio",
-        shotPlan:"Shot Plan",pageTitle:"Title",spacer:"Spacer",separator:"Sep",
-        custom:"Custom",weather:"Weather",quit:"Quit",
-        screensaverFlipClock:"Flip Clock",screensaverPipes:"3D Pipes",
-        screensaverAttractor:"Attractor",screensaverShotMap:"Shot Map",
-        lastShot:"Last Shot",
-        discuss:"Discuss",
-        barista:"Barista",
-        ghcSimulator:"Mini GHC",
-        machineStatus:"Machine",
-        clock:"Time"
-    };
+    // The widget catalog (WIDGET_TYPES / DISPLAY_NAMES / CAT_NAMES) is injected
+    // below from the single C++ table (SettingsNetwork::widgetCatalogJson) —
+    // no hand-maintained copy here.
 
     // Readout-widget color overrides — mirrors the theme defaults used by
     // WidgetColor.resolve (see qml/Theme.qml: text/pressure/temperature/flow/warning).
@@ -2485,8 +2447,36 @@ QString ShotServer::generateLayoutPage() const
     var WIDGET_COLORS = {
         white:"#ffffff", green:"#18c37e", red:"#e73249", blue:"#4e85f4", orange:"#ffaa00"
     };
-    // Readout widgets that support the per-instance color + display options.
-    var READOUT_TYPES = ["machineStatus","temperature","steamTemperature","scaleWeight","waterLevel","clock"];
+)HTML";
+    // Readout capability schema (type → option keys), serialized from the same
+    // C++ table that drives the QML editor (SettingsNetwork), so the web editor
+    // has no hand-maintained mirror of the capability table. (The per-key choice
+    // lists below still mirror ReadoutOptionsPopup.qml / WidgetColor.qml.)
+    // Bespoke-editor types map to an empty array.
+    html += QStringLiteral("    var WIDGET_CAPABILITIES = %1;\n")
+        .arg(QString::fromUtf8(QJsonDocument(SettingsNetwork::readoutCapabilitiesJson())
+            .toJson(QJsonDocument::Compact)));
+    // Widget catalog (palette types with categories/labels/flags, chip display
+    // names incl. legacy aliases, category names) and per-type display-mode
+    // defaults, both from the same C++ tables as the QML editor.
+    html += QStringLiteral("    var WIDGET_CATALOG = %1;\n")
+        .arg(QString::fromUtf8(QJsonDocument(SettingsNetwork::widgetCatalogJson())
+            .toJson(QJsonDocument::Compact)));
+    html += QStringLiteral("    var WIDGET_DISPLAY_DEFAULTS = %1;\n")
+        .arg(QString::fromUtf8(QJsonDocument(SettingsNetwork::displayModeDefaultsJson())
+            .toJson(QJsonDocument::Compact)));
+    html += R"HTML(
+    var WIDGET_TYPES = WIDGET_CATALOG.types;
+    var DISPLAY_NAMES = WIDGET_CATALOG.chipNames;
+    var CAT_NAMES = WIDGET_CATALOG.catNames;
+
+    // Option keys a widget type supports (see WIDGET_CAPABILITIES above).
+    function typeOptionKeys(type) {
+        return WIDGET_CAPABILITIES[type] || [];
+    }
+    function typeHasOptionKey(type, key) {
+        return typeOptionKeys(type).indexOf(key) >= 0;
+    }
 
     var ACTIONS = [
         {id:"",label:"None",contexts:["idle","espresso","steam","hotwater","flush","all"]},
@@ -2571,12 +2561,11 @@ QString ShotServer::generateLayoutPage() const
         return tmp.textContent || tmp.innerText || "";
     }
 
-    // Mirror of SettingsNetwork::typeHasOptions — keep in sync with the C++/QML
-    // single source of truth so the indicator and the open behaviour agree.
+    // Driven by the injected WIDGET_CAPABILITIES schema (same C++ table as the
+    // in-app editor); screensavers stay a prefix rule on both sides.
     function typeHasOptions(type) {
         if (type.indexOf("screensaver") === 0) return true;
-        return ["custom","scaleWeight","shotPlan","sleep","machineStatus",
-                "temperature","steamTemperature","waterLevel","clock","lastShot"].indexOf(type) >= 0;
+        return WIDGET_CAPABILITIES.hasOwnProperty(type);
     }
 
     // Persistent "has options" indicator drawn on configurable chips.
@@ -2624,8 +2613,6 @@ QString ShotServer::generateLayoutPage() const
             h.style.display = anyInCat[h.getAttribute("data-cat")] ? "" : "none";
         });
     }
-
-    var CAT_NAMES = ["Actions", "Readouts", "Utility", "Screensavers"];
 )HTML";
     html += R"HTML(
     function renderZones() {
@@ -2734,16 +2721,19 @@ QString ShotServer::generateLayoutPage() const
                 if (typeHasOptions(item.type)) {
                     html += '<span class="chip-opts" title="Has options">' + GEAR_SVG + '</span>';
                 }
-                // Inline data-mode selector for a selected Scale Weight chip.
-                if (isSel && item.type === "scaleWeight") {
+                // Inline option selectors for selected readout chips: each is
+                // gated by the type's capability keys (WIDGET_CAPABILITIES).
+                if (isSel && typeHasOptionKey(item.type, "dataMode")) {
                     var dm = item.dataMode || "gross";
-                    var modes = [["gross","Gross"],["netBeans","Net beans"],["netMilk","Net milk"],["contextAware","Context"],["beansHold","Beans (hold)"],["expectedYield","Expected output"]];
+                    var modes = [["gross","Gross"],["netBeans","Net beans"],["netMilk","Net milk"],["contextAware","Context"],["expectedYield","Expected output"]];
                     html += '<select class="chip-mode" onchange="setScaleMode(\'' + item.id + '\',this.value)" onclick="event.stopPropagation()">';
                     for (var mm = 0; mm < modes.length; mm++) {
                         var msel = (dm === modes[mm][0]) ? ' selected' : '';
                         html += '<option value="' + modes[mm][0] + '"' + msel + '>' + modes[mm][1] + '</option>';
                     }
                     html += '</select>';
+                }
+                if (isSel && typeHasOptionKey(item.type, "showRatio")) {
                     // Show-ratio toggle: suppress the redundant 1:X.X suffix.
                     var sr = (item.showRatio === undefined) ? true : item.showRatio;
                     html += '<select class="chip-mode" onchange="setShowRatio(\'' + item.id + '\',this.value===\'1\')" onclick="event.stopPropagation()">';
@@ -2751,10 +2741,11 @@ QString ShotServer::generateLayoutPage() const
                     html += '<option value="0"' + (!sr ? ' selected' : '') + '>Ratio off</option>';
                     html += '</select>';
                 }
-                // Inline display-mode selector for selected readout chips.
-                if (isSel && READOUT_TYPES.indexOf(item.type) !== -1) {
-                    var disp = item.displayMode || "text";
-                    var dispModes = [["text","Text"],["icon","Icon"]];
+                if (isSel && typeHasOptionKey(item.type, "displayMode")) {
+                    // An absent stored mode always means "today's rendering";
+                    // the per-type default is injected from the schema.
+                    var disp = item.displayMode || WIDGET_DISPLAY_DEFAULTS[item.type] || "text";
+                    var dispModes = [["text","Value only"],["icon","Icon + value"]];
                     html += '<select class="chip-mode" onchange="setDisplayMode(\'' + item.id + '\',this.value)" onclick="event.stopPropagation()">';
                     for (var dd = 0; dd < dispModes.length; dd++) {
                         var dsel = (disp === dispModes[dd][0]) ? ' selected' : '';
@@ -2762,8 +2753,7 @@ QString ShotServer::generateLayoutPage() const
                     }
                     html += '</select>';
                 }
-                // Inline color selector for a selected readout chip.
-                if (isSel && READOUT_TYPES.indexOf(item.type) !== -1) {
+                if (isSel && typeHasOptionKey(item.type, "color")) {
                     var clr = item.color || "default";
                     var clrs = [["default","Default"],["white","White"],["green","Green"],["red","Red"],["blue","Blue"],["orange","Orange"]];
                     html += '<select class="chip-mode" onchange="setColor(\'' + item.id + '\',this.value)" onclick="event.stopPropagation()">';
@@ -3012,7 +3002,8 @@ QString ShotServer::generateLayoutPage() const
         screensaverPipes: "3D Pipes Settings",
         screensaverAttractor: "Attractor Settings",
         screensaverShotMap: "Shot Map Settings",
-        lastShot: "Last Shot Settings"
+        lastShot: "Last Shot Settings",
+        shotPlan: "Shot Plan Settings"
     };
 
     function openScreensaverEditor(itemId, zone, type) {
@@ -3055,15 +3046,12 @@ QString ShotServer::generateLayoutPage() const
                     document.getElementById("ssShotShowPhaseLabels").checked = typeof props.shotShowPhaseLabels === "boolean" ? props.shotShowPhaseLabels : true;
                     document.getElementById("ssLastShotSettings").style.display = "";
                 } else if (type === "shotPlan") {
-                    document.getElementById("spShowProfile").checked = typeof props.shotPlanShowProfile === "boolean" ? props.shotPlanShowProfile : true;
-                    document.getElementById("spShowRoaster").checked = typeof props.shotPlanShowRoaster === "boolean" ? props.shotPlanShowRoaster : true;
-                    document.getElementById("spShowCoffee").checked = typeof props.shotPlanShowCoffee === "boolean" ? props.shotPlanShowCoffee : true;
-                    document.getElementById("spShowGrind").checked = typeof props.shotPlanShowGrind === "boolean" ? props.shotPlanShowGrind : true;
-                    document.getElementById("spShowRoastDate").checked = typeof props.shotPlanShowRoastDate === "boolean" ? props.shotPlanShowRoastDate : false;
-                    document.getElementById("spShowDoseYield").checked = typeof props.shotPlanShowDoseYield === "boolean" ? props.shotPlanShowDoseYield : true;
+                    spItems = spItemsFromProps(props);
+                    spRender();
+                    document.getElementById("spSentence").checked = typeof props.shotPlanSentence === "boolean" ? props.shotPlanSentence : true;
+                    document.getElementById("spStacked").checked = props.shotPlanStacked === true;
                     document.getElementById("spShowSteamPlan").checked = typeof props.shotPlanShowSteamPlan === "boolean" ? props.shotPlanShowSteamPlan : true;
-                    document.getElementById("spFormat").value = (props.shotPlanFormat === "compact" || props.shotPlanFormat === "stacked" || props.shotPlanFormat === "plain") ? props.shotPlanFormat : "sentence";
-                    (function(){ var spPlain = document.getElementById("spFormat").value === "plain"; ["spShowProfile","spShowRoaster","spShowCoffee","spShowGrind","spShowRoastDate","spShowDoseYield"].forEach(function(cid){ document.getElementById(cid).disabled = spPlain; }); })();
+                    spSyncStacked();
                     document.getElementById("ssShotPlanSettings").style.display = "";
                 } else {
                     document.getElementById("ssNoSettings").style.display = "";
@@ -3106,16 +3094,13 @@ QString ShotServer::generateLayoutPage() const
             apiPost("/api/layout/item", {itemId: id, key: "shotShowLabels", value: showLabels}, function() {});
             apiPost("/api/layout/item", {itemId: id, key: "shotShowPhaseLabels", value: showPhaseLabels}, function() {});
         } else if (ssEditingType === "shotPlan") {
-            var spPlain = document.getElementById("spFormat").value === "plain";
-            ["spShowProfile","spShowRoaster","spShowCoffee","spShowGrind","spShowRoastDate","spShowDoseYield"].forEach(function(cid){ document.getElementById(cid).disabled = spPlain; });
-            apiPost("/api/layout/item", {itemId: id, key: "shotPlanShowProfile", value: document.getElementById("spShowProfile").checked}, function() {});
-            apiPost("/api/layout/item", {itemId: id, key: "shotPlanShowRoaster", value: document.getElementById("spShowRoaster").checked}, function() {});
-            apiPost("/api/layout/item", {itemId: id, key: "shotPlanShowCoffee", value: document.getElementById("spShowCoffee").checked}, function() {});
-            apiPost("/api/layout/item", {itemId: id, key: "shotPlanShowGrind", value: document.getElementById("spShowGrind").checked}, function() {});
-            apiPost("/api/layout/item", {itemId: id, key: "shotPlanShowRoastDate", value: document.getElementById("spShowRoastDate").checked}, function() {});
-            apiPost("/api/layout/item", {itemId: id, key: "shotPlanShowDoseYield", value: document.getElementById("spShowDoseYield").checked}, function() {});
+            // New keys only — the six legacy shotPlanShow* item booleans are
+            // read-time migration input and are never written back
+            // (shotPlanShowSteamPlan is a live key, not one of them).
+            apiPost("/api/layout/item", {itemId: id, key: "shotPlanItems", value: spItems}, function() {});
+            apiPost("/api/layout/item", {itemId: id, key: "shotPlanSentence", value: document.getElementById("spSentence").checked}, function() {});
+            apiPost("/api/layout/item", {itemId: id, key: "shotPlanStacked", value: document.getElementById("spStacked").checked}, function() {});
             apiPost("/api/layout/item", {itemId: id, key: "shotPlanShowSteamPlan", value: document.getElementById("spShowSteamPlan").checked}, function() {});
-            apiPost("/api/layout/item", {itemId: id, key: "shotPlanFormat", value: document.getElementById("spFormat").value}, function() {});
         }
     }
 
@@ -3134,8 +3119,101 @@ QString ShotServer::generateLayoutPage() const
         ssAutoSave();
     }
 
-    function spToggleChanged() {
+    // ---- Shot Plan display-item list ----
+    // Mirrors qml/components/layout/ShotPlanConfig.js — keep the key set and
+    // legacy-derivation rule in sync with it.
+
+    var SP_ALL_KEYS = ["doseYield", "profile", "temperature", "roaster", "coffee", "grind", "roastDate"];
+    var SP_ITEM_LABELS = {
+        doseYield: "Dose & yield",
+        profile: "Profile",
+        temperature: "Temperature",
+        roaster: "Roaster",
+        coffee: "Coffee",
+        grind: "Grind",
+        roastDate: "Roast date"
+    };
+    var spItems = [];
+
+    // Prefer the stored shotPlanItems array — presence wins, an empty array is
+    // a valid "show nothing" config and must not fall through to legacy
+    // derivation (which would resurrect the defaults). A null (what the
+    // pre-fix bug stored) or malformed value takes the legacy branch, same as
+    // ShotPlanConfig.itemsFor. Otherwise derive from the legacy shotPlanShow*
+    // booleans in canonical order (the legacy compound Profile & temperature
+    // boolean expands to profile + temperature).
+    function spItemsFromProps(props) {
+        if (Array.isArray(props.shotPlanItems))
+            return props.shotPlanItems.map(String);
+        var order = [];
+        if (props.shotPlanShowDoseYield !== false) order.push("doseYield");
+        if (props.shotPlanShowProfile !== false) { order.push("profile"); order.push("temperature"); }
+        if (props.shotPlanShowRoaster !== false) order.push("roaster");
+        if (props.shotPlanShowCoffee !== false) order.push("coffee");
+        if (props.shotPlanShowGrind !== false) order.push("grind");
+        if (props.shotPlanShowRoastDate === true) order.push("roastDate");
+        return order;
+    }
+
+    function spRender() {
+        var html = "";
+        for (var i = 0; i < spItems.length; i++) {
+            html += '<div class="sp-item-row">'
+                + '<span class="sp-item-label">' + (SP_ITEM_LABELS[spItems[i]] || escapeHtml(spItems[i])) + '</span>'
+                + '<button class="sp-item-btn"' + (i === 0 ? ' disabled' : '') + ' onclick="spMove(' + i + ',-1)" title="Move up" aria-label="Move ' + (SP_ITEM_LABELS[spItems[i]] || escapeHtml(spItems[i])) + ' up">&#9650;</button>'
+                + '<button class="sp-item-btn"' + (i === spItems.length - 1 ? ' disabled' : '') + ' onclick="spMove(' + i + ',1)" title="Move down" aria-label="Move ' + (SP_ITEM_LABELS[spItems[i]] || escapeHtml(spItems[i])) + ' down">&#9660;</button>'
+                + '<button class="sp-item-btn sp-item-remove" onclick="spRemove(' + i + ')" title="Hide" aria-label="Hide ' + (SP_ITEM_LABELS[spItems[i]] || escapeHtml(spItems[i])) + '">&#10005;</button>'
+                + '</div>';
+        }
+        document.getElementById("spShownList").innerHTML = html || '<div class="ss-no-settings">No items shown</div>';
+        var avail = SP_ALL_KEYS.filter(function(k) { return spItems.indexOf(k) === -1; });
+        var availHtml = "";
+        for (var j = 0; j < avail.length; j++) {
+            availHtml += '<button class="sp-avail-chip" onclick="spAdd(\'' + avail[j] + '\')" aria-label="Show ' + (SP_ITEM_LABELS[avail[j]] || escapeHtml(avail[j])) + '">+ ' + (SP_ITEM_LABELS[avail[j]] || escapeHtml(avail[j])) + '</button>';
+        }
+        document.getElementById("spAvailableList").innerHTML = availHtml;
+        document.getElementById("spAvailableLabel").style.display = avail.length ? "" : "none";
+        document.getElementById("spAvailableList").style.display = avail.length ? "" : "none";
+    }
+
+    function spMove(i, delta) {
+        var j = i + delta;
+        if (j < 0 || j >= spItems.length) return;
+        var t = spItems[i]; spItems[i] = spItems[j]; spItems[j] = t;
+        spRender();
+        spConfigChanged();
+    }
+
+    function spRemove(i) {
+        spItems.splice(i, 1);
+        spRender();
+        spConfigChanged();
+    }
+
+    function spAdd(key) {
+        if (spItems.indexOf(key) === -1) spItems.push(key);
+        spRender();
+        spConfigChanged();
+    }
+
+    function spConfigChanged() {
         ssAutoSave();
+    }
+
+    // Stacked only means anything in sentence mode (there is no sentence/tail
+    // split for fragments) — disable and dim it while Sentence style is off,
+    // mirroring the in-app editor.
+    function spSyncStacked() {
+        var on = document.getElementById("spSentence").checked;
+        document.getElementById("spStacked").disabled = !on;
+        var label = document.getElementById("spStackedLabel");
+        label.style.opacity = on ? "" : "0.4";
+        label.style.cursor = on ? "pointer" : "default";
+    }
+
+    function spSentenceChanged() {
+        spSyncStacked();
+        spConfigChanged();
     }
 
     function ssSelectMapTexture(value) {

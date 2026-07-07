@@ -3,6 +3,7 @@ import QtQuick.Layouts
 import QtQuick.Window
 import Decenza
 import "../.."
+import "../ShotPlanConfig.js" as ShotPlanConfig
 
 // The Shot Plan widget — page-aware: shows the brew/shot plan normally and, unless the
 // per-instance "Steam plan" option is off, the steam plan while in steam context (steam
@@ -15,17 +16,18 @@ Item {
     property string itemId: ""
     property var modelData: ({})
 
-    readonly property bool showProfile: modelData.shotPlanShowProfile !== false
-    readonly property bool showRoaster: modelData.shotPlanShowRoaster !== false
-    readonly property bool showCoffee: modelData.shotPlanShowCoffee !== false
-    readonly property bool showGrind: modelData.shotPlanShowGrind !== false
-    readonly property bool showRoastDate: modelData.shotPlanShowRoastDate === true
-    readonly property bool showDoseYield: modelData.shotPlanShowDoseYield !== false
+    // Ordered display items. New configs store `shotPlanItems` (a JSON array of
+    // item keys — order is display order); configs saved before the chip editor
+    // have at most the legacy shotPlanShow* booleans. The resolution rule (incl.
+    // the legacy compound Profile & temperature boolean expanding to the two
+    // independent items) is shared with the editor via ShotPlanConfig.js.
+    readonly property var itemOrder: ShotPlanConfig.itemsFor(modelData)
+    readonly property bool sentence: modelData.shotPlanSentence !== false
+    // Stacked details (sentence mode only): the tail renders on its own
+    // line(s) below the sentence. Compact bar placements ignore it — a bar is
+    // a single-line context.
+    readonly property bool stacked: modelData.shotPlanStacked === true
     readonly property bool showSteamPlan: modelData.shotPlanShowSteamPlan !== false
-    // Display format: "sentence" (default) | "compact" | "stacked" | "plain". Picked in the layout
-    // editor. Only "stacked"/"plain" wrap (up to 3 lines) when the tile is taller; "sentence"/"compact"
-    // stay one line and elide. (Multi-line formats suit center/growable zones — see ShotPlanText.)
-    readonly property string format: modelData.shotPlanFormat || "sentence"
 
     // Steam context = steam selected on the idle screen, OR the full steam page, OR the
     // machine actively steaming. Theme.currentPageObjectName (set by main.qml's
@@ -82,23 +84,19 @@ Item {
         ShotPlanText {
             id: compactShotPlan
             anchors.centerIn: parent
+            // Never wider than the zone grants — the text inside wraps/elides
+            // instead of painting past the widget bounds. Bars are single-line.
+            width: Math.min(implicitWidth, parent.width)
             visible: !root._steamMode && text !== ""
-            format: root.format
-            availableWidth: root.width
-            showProfile: root.showProfile
-            showRoaster: root.showRoaster
-            showCoffee: root.showCoffee
-            showGrind: root.showGrind
-            showRoastDate: root.showRoastDate
-            showDoseYield: root.showDoseYield
+            itemOrder: root.itemOrder
+            sentence: root.sentence
+            maxLines: 1
             onClicked: root.openBrewSettings()
         }
         SteamPlanText {
             id: compactSteamPlan
             anchors.centerIn: parent
             visible: root._steamMode && text !== ""
-            format: root.format
-            availableWidth: root.width
         }
     }
 
@@ -113,23 +111,26 @@ Item {
         ShotPlanText {
             id: fullShotPlan
             anchors.centerIn: parent
+            // Never wider than the zone grants; the full widget has vertical
+            // room in its normal (center-zone) position, so allow a second line
+            // before eliding.
+            width: Math.min(implicitWidth, parent.width)
             visible: !root._steamMode && text !== ""
-            format: root.format
-            availableWidth: root.width
-            showProfile: root.showProfile
-            showRoaster: root.showRoaster
-            showCoffee: root.showCoffee
-            showGrind: root.showGrind
-            showRoastDate: root.showRoastDate
-            showDoseYield: root.showDoseYield
+            itemOrder: root.itemOrder
+            sentence: root.sentence
+            stacked: root.stacked
+            // Stacked spends a line on the detail tail — give the sentence +
+            // wrapped tail room before eliding. Gated on sentence so a stale
+            // stacked flag (saved on, Sentence later turned off) doesn't widen
+            // fragment mode's budget. (The profile-anchor fragment fallback
+            // still gets the extra line — harmless, just a wider wrap budget.)
+            maxLines: root.stacked && root.sentence ? 3 : 2
             onClicked: root.openBrewSettings()
         }
         SteamPlanText {
             id: fullSteamPlan
             anchors.centerIn: parent
             visible: root._steamMode && text !== ""
-            format: root.format
-            availableWidth: root.width
         }
     }
 }

@@ -27,23 +27,17 @@ Item {
         return null
     }
 
-    // Highlight this button while its mode is the one currently selected on the
-    // home screen (its presets are expanded), so you can see which screen you're in.
-    // Mirror idlePage.activePresetFunction into a local reactive property. Reading
-    // it directly through the `var idlePage` does NOT register a QML binding
-    // dependency, so isActive never re-evaluated on tap. Track it explicitly.
-    property string _activeFn: root.idlePage ? root.idlePage.activePresetFunction : ""
-    Connections {
-        target: root.idlePage
-        ignoreUnknownSignals: true
-        function onActivePresetFunctionChanged() {
-            root._activeFn = root.idlePage ? root.idlePage.activePresetFunction : ""
-        }
-    }
-    readonly property bool isActive: _activeFn === "espresso" || presetPopup.visible
+    // Highlight this button while its mode is selected on the home screen (the
+    // centre preset row is expanded), or — in compact mode, where tapping opens
+    // presetPopup instead of setting activePresetFunction — while its popup is open.
+    readonly property bool isActive:
+        (idlePage ? idlePage.activePresetFunction : "") === "espresso" || presetPopup.visible
 
-    implicitWidth: isCompact ? compactContent.implicitWidth : fullContent.implicitWidth
-    implicitHeight: isCompact ? compactContent.implicitHeight : fullContent.implicitHeight
+    // Compact (bar) rendering only: full-size placements of this type compile to
+    // CustomItem in LayoutItemDelegate (isCompiled), so this item never loads
+    // non-compact and carries no full-mode rendering.
+    implicitWidth: compactContent.implicitWidth
+    implicitHeight: compactContent.implicitHeight
 
     function togglePresets() {
         if (root.isCompact) {
@@ -102,36 +96,11 @@ Item {
             supportLongPress: true
             supportDoubleClick: true
             accessibleName: TranslationManager.translate("idle.button.espresso", "Espresso")
+                            + (root.isActive ? ", " + TranslationManager.translate("accessibility.selected", "selected") : "")
             accessibleDescription: TranslationManager.translate("idle.accessible.espresso.hint", "Tap to toggle presets. Double-tap or long-press to select profile.")
             onAccessibleClicked: root.togglePresets()
             onAccessibleDoubleClicked: root.goToProfileSelector()
             onAccessibleLongPressed: root.goToProfileSelector()
-        }
-    }
-
-    // --- FULL MODE ---
-    Item {
-        id: fullContent
-        visible: !root.isCompact
-        anchors.fill: parent
-        implicitWidth: Theme.scaled(150)
-        implicitHeight: Theme.scaled(120)
-
-        ActionButton {
-            anchors.fill: parent
-            translationKey: "idle.button.espresso"
-            translationFallback: "Espresso"
-            iconSource: "qrc:/icons/espresso.svg"
-            enabled: DE1Device.guiEnabled
-            active: root.isActive
-            backgroundColor: root.isActive ? Theme.accentColor
-                             : (Settings.app.selectedFavoriteProfile === -1 ? Theme.highlightColor : Theme.primaryColor)
-            supportDoubleClick: true
-            onClicked: root.togglePresets()
-            onPressAndHold: root.goToProfileSelector()
-            onDoubleClicked: root.goToProfileSelector()
-
-            Accessible.description: TranslationManager.translate("idle.accessible.espresso.description", "Start espresso. Double-tap to select profile. Long-press for settings.")
         }
     }
 

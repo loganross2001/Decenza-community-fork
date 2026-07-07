@@ -23,23 +23,17 @@ Item {
         return null
     }
 
-    // Highlight this button while its mode is the one currently selected on the
-    // home screen (its presets are expanded), so you can see which screen you're in.
-    // Mirror idlePage.activePresetFunction into a local reactive property. Reading
-    // it directly through the `var idlePage` does NOT register a QML binding
-    // dependency, so isActive never re-evaluated on tap. Track it explicitly.
-    property string _activeFn: root.idlePage ? root.idlePage.activePresetFunction : ""
-    Connections {
-        target: root.idlePage
-        ignoreUnknownSignals: true
-        function onActivePresetFunctionChanged() {
-            root._activeFn = root.idlePage ? root.idlePage.activePresetFunction : ""
-        }
-    }
-    readonly property bool isActive: _activeFn === "flush" || presetPopup.visible
+    // Highlight this button while its mode is selected on the home screen (the
+    // centre preset row is expanded), or — in compact mode, where tapping opens
+    // presetPopup instead of setting activePresetFunction — while its popup is open.
+    readonly property bool isActive:
+        (idlePage ? idlePage.activePresetFunction : "") === "flush" || presetPopup.visible
 
-    implicitWidth: isCompact ? compactContent.implicitWidth : fullContent.implicitWidth
-    implicitHeight: isCompact ? compactContent.implicitHeight : fullContent.implicitHeight
+    // Compact (bar) rendering only: full-size placements of this type compile to
+    // CustomItem in LayoutItemDelegate (isCompiled), so this item never loads
+    // non-compact and carries no full-mode rendering.
+    implicitWidth: compactContent.implicitWidth
+    implicitHeight: compactContent.implicitHeight
 
     function togglePresets() {
         if (root.isCompact) {
@@ -98,35 +92,11 @@ Item {
             supportLongPress: true
             supportDoubleClick: true
             accessibleName: TranslationManager.translate("idle.button.flush", "Flush")
+                            + (root.isActive ? ", " + TranslationManager.translate("accessibility.selected", "selected") : "")
             accessibleDescription: TranslationManager.translate("idle.accessible.flush.hint", "Tap to toggle presets. Double-tap or long-press to configure flush.")
             onAccessibleClicked: root.togglePresets()
             onAccessibleDoubleClicked: root.goToFlush()
             onAccessibleLongPressed: root.goToFlush()
-        }
-    }
-
-    // --- FULL MODE ---
-    Item {
-        id: fullContent
-        visible: !root.isCompact
-        anchors.fill: parent
-        implicitWidth: Theme.scaled(150)
-        implicitHeight: Theme.scaled(120)
-
-        ActionButton {
-            anchors.fill: parent
-            translationKey: "idle.button.flush"
-            translationFallback: "Flush"
-            iconSource: "qrc:/icons/flush.svg"
-            enabled: DE1Device.guiEnabled
-            active: root.isActive
-            backgroundColor: root.isActive ? Theme.accentColor : Theme.primaryColor
-            supportDoubleClick: true
-            onClicked: root.togglePresets()
-            onPressAndHold: root.goToFlush()
-            onDoubleClicked: root.goToFlush()
-
-            Accessible.description: TranslationManager.translate("idle.accessible.flush.description", "Flush the group head. Double-tap or long-press to configure.")
         }
     }
 

@@ -1,59 +1,55 @@
 import QtQuick
 import QtQuick.Layouts
+import QtQuick.Window
 import Decenza
+import "../.."
 
 // Layout widget: measured dose weight (composable-brew-bar).
-// Shows Settings.dye.dyeBeanWeight; "—" when no dose recorded.
+// Shows Settings.dye.dyeBeanWeight; "—" when no dose recorded. While the idle
+// page's bean auto-capture is weighing a dose it shows the engine's live
+// virtual-zero net instead (doseLiveNetG on the window root, -1 when not
+// weighing) in the secondary color, and flashes the accent color at capture —
+// driven by the same capture engine and flash timing as the espresso panel's
+// readout (clamped at 0; reverts to the recorded dose once captured, where the
+// panel keeps ticking live).
 Item {
     id: root
     property bool isCompact: false
     property string itemId: ""
+    property var modelData: ({})
     property color zoneTextColor: Theme.textColor
     property bool zoneValueBold: false
 
+    // Per-instance display mode ("text" default | "icon": beans icon in place
+    // of the label) and color override. See WidgetColor for the shared palette.
+    readonly property string displayMode: (modelData && modelData.displayMode) ? modelData.displayMode : "text"
+    readonly property string colorChoice: (modelData && modelData.color) ? modelData.color : "default"
+
     readonly property string labelText: TranslationManager.translate("idle.status.beans", "Beans")
-
-    // Live-then-hold dose: show the live net-bean weight while a dose is being
-    // weighed, freeze the captured dose once the stable-capture "beep" sets
-    // Settings.dye.dyeBeanWeight, and hold it until a fresh dose is placed on the
-    // scale. Falls back to the last recorded dose when idle. Event-based — no timers.
-    property bool scaleConnected: ScaleDevice && ScaleDevice.connected
-    property real _held: 0
-    property bool _wasEmpty: true
-    function _liveNet() { return Math.max(0, MachineState.scaleWeight - Settings.brew.doseCupTareWeight) }
-    // Live only with a saved dose-cup tare AND a plausible dose net — a brew cup's net (>55g) or an
-    // untared cup would otherwise read its gross weight as "beans". Falls through to the recorded dose.
-    readonly property bool _loaded: root.scaleConnected
-        && Settings.brew.doseCupTareWeight > 0
-        && MachineState.scaleWeight > (Settings.brew.doseCupTareWeight + 0.3)
-        && root._liveNet() <= 55
-
-    Connections {
-        target: MachineState
-        function onScaleWeightChanged() {
-            if (MachineState.scaleWeight < 1.0) {
-                root._wasEmpty = true            // cup lifted off
-            } else if (root._wasEmpty && root._liveNet() > 0.3) {
-                root._held = 0                   // a fresh dose is being placed -> go live
-                root._wasEmpty = false
-            }
+    // Live dose state published on the window root by IdlePage (see main.qml).
+    // Guarded so the widget degrades to the recorded dose when the window or
+    // property is unavailable — but a window WITHOUT the property is a one-sided
+    // rename (a wiring bug, not a legitimate state), so warn once to keep that
+    // failure greppable (same pattern as SteamPlanText).
+    property bool _warnedMissingProp: false
+    readonly property real liveNetG: {
+        var win = root.Window.window
+        if (win && win.doseLiveNetG === undefined && !root._warnedMissingProp) {
+            root._warnedMissingProp = true
+            console.warn("DoseWeightItem: window root has no doseLiveNetG — live dose readout disabled")
         }
+        return (win && win.doseLiveNetG !== undefined) ? win.doseLiveNetG : -1
     }
-    Connections {
-        target: Settings.dye
-        function onDyeBeanWeightChanged() {
-            // Stable-capture "beep" landed while a dose is on the scale -> hold it.
-            if (Settings.dye.dyeBeanWeight > 0 && root._loaded)
-                root._held = Settings.dye.dyeBeanWeight
-        }
+    readonly property bool captureFlash: {
+        var win = root.Window.window
+        return win ? (win.doseCaptureFlash === true) : false
     }
-
-    readonly property string valueText: {
-        if (root._held > 0) return root._held.toFixed(1) + " g"          // held captured dose
-        if (root._loaded)   return root._liveNet().toFixed(1) + " g"     // live while weighing
-        return Settings.dye.dyeBeanWeight > 0                            // idle: last recorded
-               ? Settings.dye.dyeBeanWeight.toFixed(1) + " g" : "—"
-    }
+    readonly property bool isLive: liveNetG >= 0
+    readonly property string valueText: root.isLive
+                                        ? root.liveNetG.toFixed(1) + " g"
+                                        : Settings.dye.dyeBeanWeight > 0
+                                          ? Settings.dye.dyeBeanWeight.toFixed(1) + " g"
+                                          : "—"
 
     implicitWidth: col.implicitWidth
     implicitHeight: col.implicitHeight
@@ -68,6 +64,7 @@ Item {
         width: parent.width
         spacing: 0
         Text {
+            visible: root.displayMode !== "icon"
             Layout.fillWidth: true
             horizontalAlignment: Text.AlignHCenter
             elide: Text.ElideRight
@@ -75,12 +72,25 @@ Item {
             color: root.zoneTextColor
             font: Theme.labelFont
         }
+        ThemedIcon {
+            visible: root.displayMode === "icon"
+            Layout.alignment: Qt.AlignHCenter
+            source: "qrc:/icons/coffeebeans.svg"
+            iconSize: Theme.scaled(20)
+            color: WidgetColor.resolve(root.colorChoice, root.zoneTextColor)
+        }
         Text {
             Layout.fillWidth: true
             horizontalAlignment: Text.AlignHCenter
             elide: Text.ElideRight
             text: root.valueText
-            color: root.zoneTextColor
+            // A named color override is static in all states; otherwise secondary
+            // while a live (unsettled) weight is showing, accent flash at capture,
+            // else the zone's configured color.
+            color: WidgetColor.resolve(root.colorChoice,
+                       root.captureFlash ? Theme.primaryColor
+                     : root.isLive ? Theme.textSecondaryColor
+                     : root.zoneTextColor)
             font.pixelSize: Theme.scaled(21)
             font.bold: root.zoneValueBold
         }

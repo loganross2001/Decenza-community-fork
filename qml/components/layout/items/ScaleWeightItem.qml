@@ -12,8 +12,16 @@ Item {
 
     // Per-instance data mode (composable-brew-bar): "" / "gross" (raw weight,
     // default), "netBeans" (minus dose-cup tare), "netMilk" (minus pitcher
-    // weight), "contextAware" (net milk while steaming, else net beans).
+    // weight), "contextAware" (net milk while steaming, else net beans),
+    // "expectedYield" (the active stop-at-weight target, ProfileManager.targetWeight:
+    // the brew-yield override when set — dose × ratio in brew-by-ratio mode — else
+    // the profile's fixed target).
     readonly property string dataMode: (modelData && modelData.dataMode) ? modelData.dataMode : ""
+
+    // A computed mode (currently only expectedYield) shows a derived value, not a
+    // measurement: it renders without a scale, never shows the scale warning, and
+    // never gets the flow-scale "~" suffix.
+    readonly property bool isComputedMode: dataMode === "expectedYield"
 
     // Per-instance display mode (composable-status-bar): "text" (default, a
     // connected-dot + value) or "icon" (a scale icon ahead of the value).
@@ -30,28 +38,6 @@ Item {
         return (p && !p.disabled) ? (p.pitcherWeightG ?? 0) : 0
     }
 
-    // "beansHold": show LIVE net beans while dosing, then freeze the captured
-    // dose once a stable capture has set Settings.dye.dyeBeanWeight, holding it
-    // until the cup is lifted (scale returns to ~0), then go live again for the
-    // next dose. Event-based — no timers.
-    property real _heldDose: 0
-    Connections {
-        target: Settings.dye
-        function onDyeBeanWeightChanged() {
-            if (root.dataMode === "beansHold" && Settings.dye.dyeBeanWeight > 0
-                    && MachineState.scaleWeight > Settings.brew.doseCupTareWeight)
-                root._heldDose = Settings.dye.dyeBeanWeight
-        }
-    }
-    Connections {
-        target: MachineState
-        function onScaleWeightChanged() {
-            // Cup lifted off the scale -> clear the hold so the next dose reads live.
-            if (root.dataMode === "beansHold" && MachineState.scaleWeight < 1.0)
-                root._heldDose = 0
-        }
-    }
-
     // Apply the per-instance data mode to the raw scale reading.
     function displayedWeight() {
         var w = MachineState.scaleWeight
@@ -63,18 +49,8 @@ Item {
             var steaming = MachineState.phase === MachineStateType.Phase.Steaming
             return Math.max(0, w - (steaming ? root._pitcherWeight() : Settings.brew.doseCupTareWeight))
         }
-        if (root.dataMode === "beansHold") {
-            // Held captured dose if we have one this cycle, else live net beans — but only with a saved
-            // tare AND a plausible dose net (a brew cup / untared cup would read gross); else the recorded dose.
-            if (root._heldDose > 0) return root._heldDose
-            var live = (Settings.brew.doseCupTareWeight <= 0) ? 0 : Math.max(0, w - Settings.brew.doseCupTareWeight)
-            return (live > 0.3 && live <= 55) ? live : Settings.dye.dyeBeanWeight
-        }
-        if (root.dataMode === "expectedYield") {
-            // The active stop-at-weight target (ProfileManager.targetWeight): the brew-yield override when set
-            // — which equals dose × ratio in brew-by-ratio mode — else the profile's fixed target. Needs no scale.
+        if (root.dataMode === "expectedYield")
             return ProfileManager.targetWeight
-        }
         return w
     }
 
@@ -92,10 +68,20 @@ Item {
 
     // Scale warning: saved BLE scale not connected or connection failed, or app fell back to simulated scale
     // Don't warn if a USB scale is connected — it satisfies the "have a real scale" requirement (not available on iOS)
-    property bool showScaleWarning: root.dataMode !== "expectedYield"   // computed target needs no scale
+    property bool showScaleWarning: !root.isComputedMode
         && (!root.scaleConnected || root.isFlowScale)
         && (BLEManager.scaleConnectionFailed || Settings.primaryScaleAddress !== "")
         && (Qt.platform.os === "ios" || !UsbScaleManager.scaleConnected)
+
+    // The value renders whenever a scale is connected — or, for a computed mode,
+    // whenever there is a real target: targetWeight == 0 is the profile's
+    // "stop-at-weight off" sentinel (same > 0 convention as ShotGraph /
+    // ShotPlanText), so show the "--" placeholder then, not a fake "0.0 g".
+    // Drives the value rows, the compact tare/settings tap overlay, and the "--"
+    // placeholders (shown when neither the value nor the warning shows; compact
+    // also hides them for flow scales).
+    readonly property bool showValue: !root.showScaleWarning
+        && (root.isComputedMode ? ProfileManager.targetWeight > 0 : root.scaleConnected)
 
     implicitWidth: isCompact ? compactContent.implicitWidth : fullContent.implicitWidth
     implicitHeight: isCompact ? compactContent.implicitHeight : fullContent.implicitHeight
@@ -107,6 +93,9 @@ Item {
             return BLEManager.scaleConnectionFailed
                 ? TranslationManager.translate("statusbar.scale_not_found_tap", "Scale not found. Tap to scan")
                 : TranslationManager.translate("statusbar.scale_connecting", "Scale connecting")
+        if (root.isComputedMode)  // a computed target, not a scale reading ("--" when the profile has none); tap edits it
+            return TranslationManager.translate("idle.label.expectedOutput", "Expected output") + ": "
+                   + (root.showValue ? root.weightText() : "--")
         if (root.scaleConnected)
             return TranslationManager.translate("idle.accessible.scale.weight", "Scale weight:") + " " + root.weightText() + ". " + TranslationManager.translate("idle.accessible.scale.tare", "Tap to tare")
         return TranslationManager.translate("idle.accessible.scale.none", "No scale connected")
@@ -123,6 +112,8 @@ Item {
     Accessible.onPressAction: {
         if (root.showScaleWarning)
             BLEManager.scanForDevices()
+        else if (root.isComputedMode)  // tare is meaningless for a computed target — edit it instead
+            root.openBrewSettings()
         else if (root.scaleConnected)
             MachineState.tareScale()
     }
@@ -144,7 +135,7 @@ Item {
 
     function weightText() {
         var weight = root.displayedWeight().toFixed(1)
-        var suffix = (root.isFlowScale && root.dataMode !== "expectedYield") ? "g~" : "g"
+        var suffix = (root.isFlowScale && !root.isComputedMode) ? "g~" : "g"
         if (root.showRatio && ProfileManager.brewByRatioActive) {
             return weight + suffix + " 1:" + ProfileManager.brewByRatio.toFixed(1)
         }
@@ -208,8 +199,7 @@ Item {
             id: compactScaleRow
             anchors.centerIn: parent
             spacing: Theme.spacingSmall
-            // expectedYield is a computed target — show it even with no scale connected.
-            visible: (root.scaleConnected || root.dataMode === "expectedYield") && !root.showScaleWarning
+            visible: root.showValue
 
             ThemedIcon {
                 anchors.verticalCenter: parent.verticalCenter
@@ -239,8 +229,7 @@ Item {
         // Disconnected (no saved scale)
         Text {
             anchors.centerIn: parent
-            visible: !root.scaleConnected && !root.showScaleWarning && !root.isFlowScale
-                     && root.dataMode !== "expectedYield"
+            visible: !root.showValue && !root.showScaleWarning && !root.isFlowScale
             text: "--"
             color: Theme.textSecondaryColor
             font: Theme.bodyFont
@@ -252,7 +241,7 @@ Item {
             id: scaleMouseArea
             anchors.fill: parent
             anchors.margins: -Theme.spacingSmall
-            visible: root.scaleConnected && !root.showScaleWarning
+            visible: root.showValue
             cursorShape: Qt.PointingHandCursor
 
             property int tapCount: 0
@@ -281,6 +270,13 @@ Item {
 
             onClicked: {
                 if (longPressTriggered) return
+
+                // A computed target has nothing to tare (a tap would silently
+                // no-op or mark a phantom tare complete) — tap edits it instead.
+                if (root.isComputedMode) {
+                    root.openBrewSettings()
+                    return
+                }
 
                 if (MachineState.isFlowing) {
                     MachineState.tareScale()
@@ -351,8 +347,7 @@ Item {
 
             Text {
                 Layout.alignment: Qt.AlignHCenter
-                // expectedYield is a computed target — show it even with no scale connected.
-                visible: (root.scaleConnected || root.dataMode === "expectedYield") && !root.showScaleWarning
+                visible: root.showValue
                 text: root.weightText()
                 color: root.scaleColor(fullTapArea.pressed)
                 font: Theme.valueFont
@@ -361,8 +356,7 @@ Item {
 
             Text {
                 Layout.alignment: Qt.AlignHCenter
-                visible: !root.scaleConnected && !root.showScaleWarning
-                         && root.dataMode !== "expectedYield"
+                visible: !root.showValue && !root.showScaleWarning
                 text: "--"
                 color: Theme.textSecondaryColor
                 font: Theme.valueFont
@@ -389,10 +383,13 @@ Item {
                 Accessible.ignored: true
             }
 
-            Tr {
+            Text {
                 Layout.alignment: Qt.AlignHCenter
-                key: "idle.label.scaleweight"
-                fallback: "Scale Weight"
+                // A computed target labelled "Scale Weight" would misrepresent
+                // what the number is — caption it as what it shows.
+                text: root.isComputedMode
+                      ? TranslationManager.translate("idle.label.expectedOutput", "Expected output")
+                      : TranslationManager.translate("idle.label.scaleweight", "Scale Weight")
                 color: Theme.textSecondaryColor
                 font: Theme.labelFont
                 Accessible.ignored: true
@@ -402,10 +399,12 @@ Item {
         MouseArea {
             id: fullTapArea
             anchors.fill: parent
-            cursorShape: root.showScaleWarning ? Qt.PointingHandCursor : Qt.ArrowCursor
+            cursorShape: (root.showScaleWarning || root.isComputedMode) ? Qt.PointingHandCursor : Qt.ArrowCursor
             onClicked: {
                 if (root.showScaleWarning)
                     BLEManager.scanForDevices()
+                else if (root.isComputedMode)  // computed target: tap edits it, never tares
+                    root.openBrewSettings()
                 else if (root.scaleConnected)
                     MachineState.tareScale()
             }

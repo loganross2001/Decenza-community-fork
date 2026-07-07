@@ -147,10 +147,21 @@ Item {
     function _nextDiffersFromCurrent(nx) {
         if (!nx) return false
         var eps = 0.05
-        // Grinder dial (string): a genuinely different setting than the one on file.
+        // Grinder dial: a genuinely different setting than the one on file. Numeric dials frequently
+        // echo with cosmetic formatting differences ("2.5" vs "2.50", comma vs dot) that are NOT a real
+        // change — when both sides parse as numbers, compare with a format-only tolerance so only a true
+        // dial move (2.5 → 2.6) arms the chip; otherwise fall back to the exact trimmed-string compare.
         var g = String(nx.grinderSetting || "").trim()
-        if (g.length > 0 && g !== String(Settings.dye.dyeGrinderSetting || "").trim())
-            return true
+        var curGrind = String(Settings.dye.dyeGrinderSetting || "").trim()
+        if (g.length > 0 && g !== curGrind) {
+            var gn = parseFloat(g.replace(",", "."))
+            var cn = parseFloat(curGrind.replace(",", "."))
+            if (!isNaN(gn) && !isNaN(cn)) {
+                if (Math.abs(gn - cn) > 0.001) return true   // real dial change, not just formatting
+            } else {
+                return true   // non-numeric / newly-set dial → any text difference is a real change
+            }
+        }
         // Dose in.
         var dose = Number(nx.doseG)
         if (dose > 0 && Math.abs(dose - Number(Settings.dye.dyeBeanWeight)) > eps)
@@ -764,7 +775,12 @@ Item {
                     onClicked: {
                         if (!root._voiceInput) return
                         if (root._voiceInput.listening) root._voiceInput.stop()
-                        else { root._voiceInput.start(); silenceTimer.restart() }
+                        else {
+                            // Barge-in: an explicit tap-to-speak takes priority — silence any greeting/TTS
+                            // still playing so the assistant never talks over the user opening the mic.
+                            if (root._voice) root._voice.stop()
+                            root._voiceInput.start(); silenceTimer.restart()
+                        }
                     }
                 }
 

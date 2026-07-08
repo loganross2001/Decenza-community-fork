@@ -10,6 +10,7 @@
 #include <QRegularExpression>
 #include <QCoreApplication>
 #include <QThread>
+#include <QNetworkAccessManager>
 
 #include "history/shothistorystorage.h"
 #include "history/coffeebagstorage.h"
@@ -686,6 +687,132 @@ private slots:
         });
     }
 
+    void migration24AddsSyncPendingColumn() {
+        // Fresh DB: the column exists (CREATE TABLE path) with default 0.
+        const QString path = freshDb();
+        withRawDb(path, "m24_fresh", [&](QSqlDatabase& db) {
+            QVERIFY(hasColumn(db, "coffee_bags", "visualizer_sync_pending"));
+            CoffeeBag bag;
+            bag.roasterName = "R";
+            bag.coffeeName = "C";
+            const qint64 id = CoffeeBagStorage::insertBagStatic(db, bag);
+            const CoffeeBag loaded = CoffeeBagStorage::loadBagStatic(db, id);
+            QVERIFY(!loaded.visualizerSyncPending);
+            // Round-trips through the kCols update map.
+            QVERIFY(CoffeeBagStorage::updateBagFieldsStatic(
+                db, id, {{"visualizerSyncPending", true}}));
+            QVERIFY(CoffeeBagStorage::loadBagStatic(db, id).visualizerSyncPending);
+        });
+
+        // Upgrade path: fake a v23 database (column stripped), re-run the chain.
+        withRawDb(path, "m24_strip", [&](QSqlDatabase& db) {
+            QSqlQuery q(db);
+            QVERIFY(q.exec("ALTER TABLE coffee_bags DROP COLUMN visualizer_sync_pending"));
+            QVERIFY(q.exec("DELETE FROM schema_version"));
+            QVERIFY(q.exec("INSERT INTO schema_version (version) VALUES (23)"));
+        });
+        {
+            ShotHistoryStorage storage;
+            QVERIFY(initAndClose(path, storage));  // runs migration 24
+        }
+        withRawDb(path, "m24_check", [&](QSqlDatabase& db) {
+            QVERIFY(hasColumn(db, "coffee_bags", "visualizer_sync_pending"));
+            QSqlQuery q(db);
+            QVERIFY(q.exec("SELECT COALESCE(visualizer_sync_pending, -1) FROM coffee_bags LIMIT 1"));
+            QVERIFY(q.next());
+            QCOMPARE(q.value(0).toInt(), 0);  // existing rows default to 0
+            QVERIFY(q.exec("SELECT version FROM schema_version"));
+            QVERIFY(q.next());
+            QCOMPARE(q.value(0).toInt(), 25);  // [barista-fork] visualizer_sync_pending renumbered 24 -> 25 (barista roster holds 24)
+        });
+    }
+
+    void importToleratesSourceWithoutNewerColumns() {
+        // A backup written by an older app version lacks newer coffee_bags
+        // columns; the import SELECT substitutes NULL so the restore still
+        // works (fields land on struct defaults).
+        const QString srcPath = freshDb();
+        const QString destPath = freshDb();
+        withRawDb(srcPath, "old_src", [&](QSqlDatabase& db) {
+            CoffeeBag bag;
+            bag.roasterName = "Old Backup";
+            bag.coffeeName = "Roast";
+            QVERIFY(CoffeeBagStorage::insertBagStatic(db, bag) > 0);
+            insertShot(db, "Old Backup", "Roast", 4000, QString(), 1);
+            QSqlQuery q(db);
+            // Strip columns newer than the pretend source version.
+            QVERIFY(q.exec("ALTER TABLE coffee_bags DROP COLUMN visualizer_sync_pending"));
+            QVERIFY(q.exec("ALTER TABLE coffee_bags DROP COLUMN equipment_id"));
+            QVERIFY(q.exec("ALTER TABLE coffee_bags DROP COLUMN rpm"));
+        });
+
+        QVERIFY(ShotHistoryStorage::importDatabaseStatic(destPath, srcPath, /*merge=*/true));
+
+        withRawDb(destPath, "old_src_check", [&](QSqlDatabase& db) {
+            const QVector<InventoryBag> bags = CoffeeBagStorage::loadInventoryStatic(db);
+            QCOMPARE(bags.size(), 1);
+            QCOMPARE(bags.first().bag.roasterName, QString("Old Backup"));
+            QVERIFY(!bags.first().bag.visualizerSyncPending);
+            QCOMPARE(bags.first().bag.equipmentId, qint64(0));
+        });
+    }
+
+    void migration24RetriesAfterMidStepCrash() {
+        // The state the hasColumn guard exists for: crash between the ALTER
+        // and the version write (column present, version still 23).
+        const QString path = freshDb();
+        withRawDb(path, "m24_crash", [&](QSqlDatabase& db) {
+            QSqlQuery q(db);
+            QVERIFY(hasColumn(db, "coffee_bags", "visualizer_sync_pending"));  // ALTER "already ran"
+            QVERIFY(q.exec("DELETE FROM schema_version"));
+            QVERIFY(q.exec("INSERT INTO schema_version (version) VALUES (23)"));
+        });
+        {
+            ShotHistoryStorage storage;
+            QVERIFY(initAndClose(path, storage));  // re-runs migration 24
+        }
+        withRawDb(path, "m24_crash_check", [&](QSqlDatabase& db) {
+            QVERIFY(hasColumn(db, "coffee_bags", "visualizer_sync_pending"));
+            QSqlQuery q(db);
+            QVERIFY(q.exec("SELECT version FROM schema_version"));
+            QVERIFY(q.next());
+            QCOMPARE(q.value(0).toInt(), 25);  // [barista-fork] visualizer_sync_pending renumbered 24 -> 25 (barista roster holds 24)
+        });
+    }
+
+    // The entry point of the edit-push retry state machine: an edit made
+    // before any upload has probed CM (state Unknown - e.g. offline start)
+    // must be parked as sync-pending, NOT silently dropped. Parks before any
+    // network I/O, so this runs harness-free.
+    void unknownCmParksEditAsSyncPending() {
+        const QString path = freshDb();
+        qint64 bagId = -1;
+        withRawDb(path, "park_seed", [&](QSqlDatabase& db) {
+            CoffeeBag bag;
+            bag.roasterName = "Park";
+            bag.coffeeName = "Me";
+            bagId = CoffeeBagStorage::insertBagStatic(db, bag);
+        });
+        QVERIFY(bagId > 0);
+
+        QNetworkAccessManager nam;
+        VisualizerUploader uploader(&nam, /*settings=*/nullptr);
+        uploader.setLocalDbPath(path);
+        QCOMPARE(uploader.cmState(), VisualizerUploader::CmState::Unknown);
+        uploader.updateBagOnVisualizer(bagId);
+
+        // The park is a background single-row write - poll for it.
+        bool pending = false;
+        QElapsedTimer timer; timer.start();
+        while (!pending && timer.elapsed() < 5000) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 25);
+            withRawDb(path, "park_check", [&](QSqlDatabase& db) {
+                pending = CoffeeBagStorage::loadBagStatic(db, bagId).visualizerSyncPending;
+            });
+        }
+        QVERIFY2(pending, "edit during CM-Unknown must be parked as sync-pending");
+    }
+
     // ==========================================
     // History lane + merge logic
     // ==========================================
@@ -801,6 +928,122 @@ private slots:
         QCOMPARE(merged[2].toMap().value("coffeeName").toString(), QString("Z"));
     }
 
+    // Bean Base's canonical DB holds near-duplicate submissions: same roaster+
+    // name under distinct canonical ids, differing only in descriptive attrs.
+    // Each must stay its own row (distinct id = distinct pick target) and carry
+    // a "detail" line (degree · origin · tastingNotes) so the UI can tell them
+    // apart — the exact bug of identical-looking same-name rows.
+    void mergeLanesCanonicalDuplicatesCarryDetail() {
+        QVariantList canonical;
+        canonical.append(QVariantMap{
+            {"id", "canon-1"}, {"roasterName", "Sweet Bloom"}, {"roastName", "Hometown"},
+            {"degree", "Medium-light"}, {"origin", "Colombia, Ethiopia"},
+            {"tastingNotes", "Blackberries, Praline"}});
+        canonical.append(QVariantMap{
+            {"id", "canon-2"}, {"roasterName", "Sweet Bloom"}, {"roastName", "Hometown"},
+            {"degree", "Light To Medium"}, {"origin", "Colombia, Ethiopia"},
+            {"tastingNotes", "Blackberries, Cocoa"}});
+        canonical.append(QVariantMap{  // no descriptive attrs at all
+            {"id", "canon-3"}, {"roasterName", "Sweet Bloom"}, {"roastName", "Hometown"}});
+
+        const QVariantList merged = UnifiedBeanSearchModel::mergeLanes({}, canonical, {}, "hometown");
+        QCOMPARE(merged.size(), 3);
+
+        QCOMPARE(merged[0].toMap().value("detail").toString(),
+                 QString("Medium-light · Colombia, Ethiopia · Blackberries, Praline"));
+        QCOMPARE(merged[1].toMap().value("detail").toString(),
+                 QString("Light To Medium · Colombia, Ethiopia · Blackberries, Cocoa"));
+        QCOMPARE(merged[2].toMap().value("detail").toString(), QString());
+        for (const QVariant& v : merged)
+            QCOMPARE(tierOf(v), Tier::CanonicalOnly);
+    }
+
+    // A bag created from a canonical row must carry the full descriptive blob,
+    // not just the canonical id: with an empty blob the bag renders an empty
+    // details popup, and BagCard's link backfill then persists `{"link":…}` as
+    // the whole blob (the "broken details after adding Hometown" bug).
+    void mergeLanesCanonicalRowsCarryBlob() {
+        QVariantList canonical;
+        canonical.append(QVariantMap{
+            {"id", "canon-X"}, {"roasterName", "Sweet Bloom"}, {"roastName", "Hometown"},
+            {"degree", "Light"}, {"origin", "Colombia"},
+            {"link", "https://sweetbloomcoffee.com/product/hometown/"}});
+        canonical.append(QVariantMap{
+            {"id", "canon-Y"}, {"roasterName", "Sweet Bloom"}, {"roastName", "Other"},
+            {"degree", "Dark"}});
+
+        QVariantList history;  // canon-Y also in history, with an empty blob
+        history.append(QVariantMap{
+            {"roasterName", "Sweet Bloom"}, {"coffeeName", "Other"}, {"beanBaseId", "canon-Y"},
+            {"beanBaseData", ""}, {"lastUsedEpoch", 100}});
+
+        const QVariantList merged = UnifiedBeanSearchModel::mergeLanes({}, canonical, history, QString());
+        QCOMPARE(merged.size(), 2);
+
+        // Tier 1 (canon-Y merged with history): empty history blob falls back
+        // to the serialized entry. The detail line rides on tier 1 rows too.
+        QCOMPARE(tierOf(merged[0]), Tier::HistoryCanonical);
+        const QVariantMap tier1Blob = QJsonDocument::fromJson(
+            merged[0].toMap().value("beanBaseData").toString().toUtf8()).object().toVariantMap();
+        QCOMPARE(tier1Blob.value("degree").toString(), QString("Dark"));
+        QCOMPARE(merged[0].toMap().value("detail").toString(), QString("Dark"));
+
+        // Tier 2 (canon-X): blob is the entry itself — id, identity, attrs, link.
+        QCOMPARE(tierOf(merged[1]), Tier::CanonicalOnly);
+        const QVariantMap tier2Blob = QJsonDocument::fromJson(
+            merged[1].toMap().value("beanBaseData").toString().toUtf8()).object().toVariantMap();
+        QCOMPARE(tier2Blob.value("id").toString(), QString("canon-X"));
+        QCOMPARE(tier2Blob.value("roastName").toString(), QString("Hometown"));
+        QCOMPARE(tier2Blob.value("roasterName").toString(), QString("Sweet Bloom"));
+        QCOMPARE(tier2Blob.value("degree").toString(), QString("Light"));
+        QCOMPARE(tier2Blob.value("origin").toString(), QString("Colombia"));
+        QCOMPARE(tier2Blob.value("link").toString(),
+                 QString("https://sweetbloomcoffee.com/product/hometown/"));
+    }
+
+    // A history snapshot holding only BagCard's `{"link":…}` backfill artifact
+    // (a bag created while canonical rows carried no blob) must NOT shadow the
+    // fresh entry — otherwise the pre-fix corruption re-persists into every
+    // new bag created from that Tier 1 row.
+    void mergeLanesTier1ReplacesLinkOnlyBlob() {
+        QVariantList canonical;
+        canonical.append(QVariantMap{
+            {"id", "canon-W"}, {"roasterName", "R"}, {"roastName", "W"},
+            {"degree", "Light"}, {"link", "https://roaster.example/w"}});
+        QVariantList history;
+        history.append(QVariantMap{
+            {"roasterName", "R"}, {"coffeeName", "W"}, {"beanBaseId", "canon-W"},
+            {"beanBaseData", "{\"link\":\"https://roaster.example/w\"}"},
+            {"lastUsedEpoch", 100}});
+
+        const QVariantList merged = UnifiedBeanSearchModel::mergeLanes({}, canonical, history, QString());
+        QCOMPARE(merged.size(), 1);
+        QCOMPARE(tierOf(merged[0]), Tier::HistoryCanonical);
+        const QVariantMap blob = QJsonDocument::fromJson(
+            merged[0].toMap().value("beanBaseData").toString().toUtf8()).object().toVariantMap();
+        QCOMPARE(blob.value("degree").toString(), QString("Light"));  // fresh entry won
+        QCOMPARE(blob.value("link").toString(), QString("https://roaster.example/w"));
+    }
+
+    // Tier 1 keeps a non-empty history blob (it may carry legacy-only fields
+    // like a CDN image URL) instead of replacing it with the fresh entry.
+    void mergeLanesTier1PrefersHistoryBlob() {
+        QVariantList canonical;
+        canonical.append(QVariantMap{
+            {"id", "canon-Z"}, {"roasterName", "R"}, {"roastName", "Z"}, {"degree", "Light"}});
+        QVariantList history;
+        history.append(QVariantMap{
+            {"roasterName", "R"}, {"coffeeName", "Z"}, {"beanBaseId", "canon-Z"},
+            {"beanBaseData", "{\"degree\":\"Light\",\"image\":\"https://cdn/legacy.jpg\"}"},
+            {"lastUsedEpoch", 100}});
+
+        const QVariantList merged = UnifiedBeanSearchModel::mergeLanes({}, canonical, history, QString());
+        QCOMPARE(merged.size(), 1);
+        QCOMPARE(tierOf(merged[0]), Tier::HistoryCanonical);
+        QCOMPARE(merged[0].toMap().value("beanBaseData").toString(),
+                 QString("{\"degree\":\"Light\",\"image\":\"https://cdn/legacy.jpg\"}"));
+    }
+
     // Within-tier MRU ordering: two inventory bags out of epoch order must come
     // back most-recently-used first (guards the stable_sort comparator).
     void mergeLanesOrdersByMruWithinTier() {
@@ -889,7 +1132,8 @@ private slots:
         const QStringList localKeys = {
             "grinderBrand", "grinderModel", "grinderBurrs", "grinderSetting",
             "doseWeightG", "yieldOverrideG", "startWeightG", "lastUsedEpoch",
-            "inInventory", "visualizerBagId", "visualizerRoasterId"};
+            "inInventory", "visualizerBagId", "visualizerRoasterId",
+            "visualizerSyncPending"};
         for (const QString& key : localKeys)
             QVERIFY2(!CoffeeBagStorage::touchesVisualizerFields({{key, "x"}}),
                      qPrintable("expected " + key + " to be local-only"));
@@ -1218,6 +1462,74 @@ private slots:
 
         // Nothing to fill -> empty body -> the caller skips the PATCH entirely.
         QVERIFY(VisualizerUploader::buildBagEnrichBody(remote, bag).isEmpty());
+    }
+
+    void enrichBody_fillsEditorOnlyFields() {
+        // The add-bag-detail-editing fields (farm/quality_score/
+        // place_of_purchase/url) ride the same fill-blanks contract.
+        QVariantMap bag;
+        bag.insert("beanBaseData", QStringLiteral(
+            "{\"farm\":\"Gora Kone\",\"qualityScore\":\"88\",\"placeOfPurchase\":\"Local cafe\","
+            "\"link\":\"https://roaster.example/bag\"}"));
+        const QJsonObject body = VisualizerUploader::buildBagEnrichBody(QJsonObject(), bag);
+        QCOMPARE(body.value("farm").toString(), QStringLiteral("Gora Kone"));
+        QCOMPARE(body.value("quality_score").toString(), QStringLiteral("88"));
+        QCOMPARE(body.value("place_of_purchase").toString(), QStringLiteral("Local cafe"));
+        QCOMPARE(body.value("url").toString(), QStringLiteral("https://roaster.example/bag"));
+    }
+
+    // VisualizerUploader::addBagDescriptiveFields — the full-value body the
+    // bag-edit push PATCHes (last-writer-wins for fields we hold; empty locals
+    // omitted, never sent as null). Locks the blob->API mapping incl. the
+    // add-bag-detail-editing fields.
+    void patchBody_mapsAllFieldsAtCurrentValues() {
+        QVariantMap bag;
+        bag.insert("coffeeName", "First Batch");
+        bag.insert("roastDate", "2026-06-01");
+        bag.insert("roastLevel", "Medium");
+        bag.insert("frozenDate", "2026-06-10");
+        bag.insert("defrostDate", "2026-07-01");
+        bag.insert("notes", "my notes");
+        bag.insert("beanBaseId", "canon-123");
+        bag.insert("beanBaseData", QStringLiteral(
+            "{\"origin\":\"Colombia\",\"region\":\"Huila\",\"farm\":\"El Paraiso\",\"producer\":\"Diego\","
+            "\"variety\":\"Caturra\",\"process\":\"Washed\",\"harvest\":\"Late 2025\",\"qualityScore\":\"87\","
+            "\"placeOfPurchase\":\"Roaster site\",\"tastingNotes\":\"cherry\",\"elevation\":\"1900 m\","
+            "\"link\":\"https://roaster.example/bag\",\"canonical\":{\"origin\":\"Colombia\"}}"));
+
+        QJsonObject body;
+        VisualizerUploader::addBagDescriptiveFields(body, bag);
+
+        QCOMPARE(body.value("name").toString(), QStringLiteral("First Batch"));
+        QCOMPARE(body.value("roast_date").toString(), QStringLiteral("2026-06-01"));
+        QCOMPARE(body.value("roast_level").toString(), QStringLiteral("Medium"));
+        QCOMPARE(body.value("frozen_date").toString(), QStringLiteral("2026-06-10"));
+        QCOMPARE(body.value("defrosted_date").toString(), QStringLiteral("2026-07-01"));
+        QCOMPARE(body.value("notes").toString(), QStringLiteral("my notes"));
+        QCOMPARE(body.value("canonical_coffee_bag_id").toString(), QStringLiteral("canon-123"));
+        QCOMPARE(body.value("country").toString(), QStringLiteral("Colombia"));
+        QCOMPARE(body.value("region").toString(), QStringLiteral("Huila"));
+        QCOMPARE(body.value("farm").toString(), QStringLiteral("El Paraiso"));
+        QCOMPARE(body.value("farmer").toString(), QStringLiteral("Diego"));
+        QCOMPARE(body.value("variety").toString(), QStringLiteral("Caturra"));
+        QCOMPARE(body.value("processing").toString(), QStringLiteral("Washed"));
+        QCOMPARE(body.value("harvest_time").toString(), QStringLiteral("Late 2025"));
+        QCOMPARE(body.value("quality_score").toString(), QStringLiteral("87"));
+        QCOMPARE(body.value("place_of_purchase").toString(), QStringLiteral("Roaster site"));
+        QCOMPARE(body.value("tasting_notes").toString(), QStringLiteral("cherry"));
+        QCOMPARE(body.value("elevation").toString(), QStringLiteral("1900 m"));
+        QCOMPARE(body.value("url").toString(), QStringLiteral("https://roaster.example/bag"));
+        QVERIFY(!body.contains("roaster_id"));   // caller-owned
+        QVERIFY(!body.contains("canonical"));    // snapshot never leaves the device
+
+        // Empty local values are OMITTED — a local clear must not null a
+        // server-side value the user set on visualizer.coffee.
+        QVariantMap sparse;
+        sparse.insert("coffeeName", "Bare");
+        QJsonObject sparseBody;
+        VisualizerUploader::addBagDescriptiveFields(sparseBody, sparse);
+        QCOMPARE(sparseBody.value("name").toString(), QStringLiteral("Bare"));
+        QCOMPARE(sparseBody.size(), 1);
     }
 };
 

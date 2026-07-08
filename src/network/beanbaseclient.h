@@ -4,6 +4,7 @@
 #include <QString>
 #include <QHash>
 #include <QPointer>
+#include <QSet>
 #include <QTimer>
 #include <QVariantList>
 
@@ -53,9 +54,66 @@ public:
     // when the entry has no descriptive values — enrichment is best-effort.
     Q_INVOKABLE void fetchCanonicalDetails(const QVariantMap& entry);
 
+    // --- Bag image file cache (pixels never enter the database) ---
+    // The canonical DB has no image column, but entries generally carry the
+    // roaster's product-page URL. ensureBagImage() resolves a bag photo
+    // best-effort: product page → og:image meta tag → download → file in the
+    // app cache directory keyed by canonical id (size-capped, oldest-first
+    // eviction by write time; evictable and re-resolvable, so it is a cache,
+    // not data). When productUrl is empty (a blob linked before `link` was
+    // captured, or an entry the API served without a url), the URL is first
+    // recovered by re-searching the canonical API by roastName and matching
+    // the id — a recovered URL is also announced via bagLinkRecovered so
+    // consumers can backfill the blob. One attempt per canonical id per app
+    // session; silent on every failure path (no og:image, network error, page
+    // gone) — consumers keep their placeholder; only local disk faults warn.
+    // Emits bagImageReady(canonicalId, filePath) on success, and re-emits it
+    // (deferred) when the file already exists.
+    Q_INVOKABLE QString bagImagePath(const QString& canonicalId) const;
+    Q_INVOKABLE void ensureBagImage(const QString& canonicalId,
+                                    const QString& roastName,
+                                    const QString& productUrl);
+    // The user edited the bag's product URL: evict the cached image + the
+    // once-per-session attempt guard for this id and re-resolve from the new
+    // URL (add-bag-detail-editing). ensureBagImage() alone would keep serving
+    // the stale pixels.
+    Q_INVOKABLE void refreshBagImage(const QString& canonicalId,
+                                     const QString& roastName,
+                                     const QString& productUrl);
+    // Recover the product URL for a blob that lacks `link`, independent of the
+    // image state (a bag whose image is already cached still needs its reorder
+    // URL). Re-searches the canonical API by roastName, matches the id, and
+    // emits bagLinkRecovered on success. One attempt per id per session;
+    // silent on failure. ensureBagImage routes its legacy branch through this.
+    Q_INVOKABLE void recoverBagLink(const QString& canonicalId, const QString& roastName);
+
+    // --- Blob edit helpers (add-bag-detail-editing) ---
+    // Thin QML bridges over the header-only BeanBaseBlob helpers so the bag
+    // editor and MCP bag_update share ONE merge/revert implementation. Pure
+    // string→string; no instance state.
+    Q_INVOKABLE static QString mergeBeanDetails(const QString& blob, const QVariantMap& edits);
+    Q_INVOKABLE static QString revertToCanonical(const QString& blob);
+    Q_INVOKABLE static bool blobDiffersFromCanonical(const QString& blob);
+
+    // Fetch a roaster product page and reduce it to plain text for the
+    // "Get info" AI extraction — the same reduction Visualizer's scraper
+    // performs (drop script/style/svg/img, strip tags, squish). Follows
+    // redirects; emits pageTextReady/pageTextFailed.
+    Q_INVOKABLE void fetchPageText(const QString& url);
+    // The HTML -> squished-plain-text reduction. Static + public for tests.
+    static QString extractPageText(const QByteArray& html);
+
+    // og:image URL extraction from product-page HTML (property= or name=,
+    // og:image:secure_url variant, either attribute order; protocol-relative
+    // URLs normalized to https). Empty when absent or not an absolute http(s)
+    // URL. Static + public for tests.
+    static QString extractOgImage(const QByteArray& html);
+
     // Test seam: redirect requests at a local fake server. Production code
     // never calls this; the default is the live service.
     void setVisualizerBaseUrl(const QString& baseUrl) { m_visualizerBaseUrl = baseUrl; }
+    // Test seam: cache directory override (default: CacheLocation/bagimages).
+    void setImageCacheDir(const QString& dir) { m_imageCacheDir = dir; }
 
     // Parses the /api/canonical_coffee_bags JSON ({data:[…]}) into entries:
     // {id, visualizerCanonicalId, source:"visualizer", roasterName (from
@@ -77,8 +135,23 @@ signals:
     // Best-effort attribute enrichment for a previously selected entry.
     void canonicalDetails(const QString& canonicalId, const QVariantMap& attrs);
 
+    // A bag photo landed in (or already existed in) the file cache.
+    void bagImageReady(const QString& canonicalId, const QString& filePath);
+    // "Get info" page fetch (add-bag-detail-editing): the product page's
+    // plain text (tags stripped, whitespace squished, length-capped), ready
+    // for AI extraction. url is echoed back so stale results are discardable.
+    void pageTextReady(const QString& url, const QString& text);
+    void pageTextFailed(const QString& url, const QString& error);
+    // The image re-search recovered a product URL for a blob that lacked
+    // `link` (linked before the url→link capture). BagCard backfills it into
+    // the bag blob so the details popup can offer the reorder link.
+    void bagLinkRecovered(const QString& canonicalId, const QString& link);
+
 private:
     void doSendCanonicalSearch(const QString& query);
+    void fetchProductPage(const QString& canonicalId, const QString& productUrl);
+    void downloadBagImage(const QString& canonicalId, const QString& imageUrl);
+    QString imageCacheDir() const;
 
     QNetworkAccessManager* m_networkManager = nullptr;  // Non-owning
     QString m_visualizerBaseUrl;
@@ -91,4 +164,12 @@ private:
 
     // Session cache: normalized query -> parsed entries.
     QHash<QString, QVariantList> m_canonicalCache;
+
+    // Image cache state: directory override (tests) and the one-attempt-per-
+    // session guards that keep failed resolutions from retrying every view.
+    QString m_imageCacheDir;
+    QSet<QString> m_imageAttempted;
+    QSet<QString> m_linkAttempted;
+    // Ids whose image resolution is waiting on link recovery (legacy blobs).
+    QSet<QString> m_imageAwaitingLink;
 };

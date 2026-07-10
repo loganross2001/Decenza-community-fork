@@ -416,7 +416,7 @@ void SettingsApp::setAutoLoadRevertMinutes(int minutes) {
 
 // Auto-update
 bool SettingsApp::autoCheckUpdates() const {
-    return m_settings.value("updates/autoCheck", true).toBool();
+    return m_settings.value("updates/autoCheck", false).toBool();
 }
 
 void SettingsApp::setAutoCheckUpdates(bool enabled) {

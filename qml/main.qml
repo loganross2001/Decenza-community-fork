@@ -2079,16 +2079,45 @@ ApplicationWindow {
         z: 950  // Above statusBar (600), below touch capture (1000)
     }
 
-    // [barista-fork] hook — proactive barista assistant overlay (own qrc, loaded by URL so the
-    // upstream QML module list is untouched). Confined to the home/idle page so it can never
-    // overlap other screens; guarded so DECENZA_BARISTA=OFF builds simply don't load it.
+    // [barista-fork] hook — the barista is APP CHROME: an always-present collapsed dock (avatar tab) that
+    // the user taps to talk to. Loaded by URL from its own qrc (upstream QML module list untouched) and
+    // gated by DECENZA_BARISTA at build time. It stays ALIVE across pages (active: enabled) so its state /
+    // undiscussed-shot cue survive navigation; a `visible:` gate hides it on full-screen editors/settings
+    // where a floating dock would be in the way (isChromeSuppressed below).
+    function isChromeSuppressed(pageObjectName) {   // [barista-fork]
+        // Full-screen editors + settings where the floating barista dock must not appear.
+        var suppressed = ["settingsPage", "profileEditorPage", "recipeEditorPage",
+                          "pressureEditorPage", "flowEditorPage", "descalingPage"]
+        return suppressed.indexOf(pageObjectName || "") >= 0
+    }
+    // [barista-fork] Hide the dock while the machine is ACTIVELY pulling a shot or steaming — screen space is at
+    // a premium and the live coaches own the moment. Idle on the espresso/steam page still shows the dock; only
+    // the flowing phases hide it (NOT EspressoPreheating, which is the pre-shot "on the espresso page" idle the
+    // owner wants the dock visible for). phase has NOTIFY, so this binding re-evaluates on transitions, and the
+    // Loader's onVisibleChanged→dismiss() tears down any live session when the shot starts.
+    function isActiveOperation(phase) {   // [barista-fork]
+        return phase === MachineStateType.Phase.Preinfusion ||
+               phase === MachineStateType.Phase.Pouring ||
+               phase === MachineStateType.Phase.Ending ||
+               phase === MachineStateType.Phase.Steaming
+    }
     Loader {
         id: baristaOverlay
         anchors.fill: parent
         z: 700  // above statusBar (600), below CRT shader (950) / touch capture (1000)
-        active: typeof Barista !== "undefined" && Barista.enabled
-                && Theme.currentPageObjectName === "idlePage"
+        active: typeof Barista !== "undefined" && Barista.enabled   // [barista-fork] always-present chrome
+        visible: typeof Barista !== "undefined" && Barista.enabled
+                 && !root.isChromeSuppressed(Theme.currentPageObjectName)   // [barista-fork]
+                 && !root.isActiveOperation(MachineState.phase)   // [barista-fork] hide while shooting/steaming
         source: "qrc:/qml/assistant/AssistantOverlay.qml"
+        // [barista-fork] The dock stays LOADED across navigation (Component.onDestruction no longer fires
+        // per-page), so when it's HIDDEN on a suppressed page we must explicitly tear down any live session
+        // — otherwise the mic/TTS would keep running invisibly. dismiss() → Present → the overlay's
+        // onStateChanged closes the mic/TTS; the persisted per-bean thread survives, so returning re-engages
+        // seamlessly. Only fires on suppression (visible→false), NOT on visible non-idle pages — the
+        // conversation is meant to persist across those (cross-page presence).
+        onVisibleChanged: if (!visible && typeof Barista !== "undefined" && Barista.orchestrator)
+                              Barista.orchestrator.dismiss()
     }
 
     // SAW bypassed warning (untared cup detected during extraction)

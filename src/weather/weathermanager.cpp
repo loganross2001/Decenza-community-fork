@@ -112,6 +112,19 @@ void WeatherManager::refresh()
     fetchWeather();
 }
 
+void WeatherManager::ensureLocation()
+{
+    // Only request a fix when nothing usable is available yet. hasLocation() is
+    // true when there is a valid GPS fix OR a manual city is set, so this skips
+    // both the "already located" and "manual city" cases — no GPS spam. When a
+    // location already exists, the existing setLocationProvider()/refresh paths
+    // handle the weather fetch, so skipping here is safe (no regression).
+    // requestUpdate() is async and ungated (consumer-driven), so this is safe to
+    // call during QML incubation.
+    if (m_locationProvider && !m_locationProvider->hasLocation())
+        m_locationProvider->requestUpdate();
+}
+
 // ─── Location handling ───────────────────────────────────────────────────────
 
 void WeatherManager::onLocationChanged()

@@ -24,6 +24,7 @@ class ShotDataModel;
 class Profile;
 class Settings;
 class ShotHistoryStorage;
+class FeedbackStorage;   // [barista-fork]
 class ProfileManager;
 
 class AIManager : public QObject {
@@ -140,6 +141,38 @@ public:
 
     // Shot history access for contextual recommendations
     void setShotHistoryStorage(ShotHistoryStorage* storage);
+    // [barista-fork] Verbal-feedback KB (assistant.db). Read lazily by the barista client-tool executor and
+    // by requestBaristaContext's proactive bean-feedback block — safe to wire after construction.
+    void setFeedbackStorage(FeedbackStorage* storage) { m_feedbackStorage = storage; }
+    FeedbackStorage* feedbackStorage() const { return m_feedbackStorage; }
+    // [barista-fork] Dial-apply handler for the apply_dial_change write tool (approve-then-apply). A std::function
+    // seam (not a BaristaActions* member) so this header/TU never names BaristaActions — keeps the machine-source
+    // chain out of DB-only tests. Wired from BaristaModule to BaristaActions::applyFromNext.
+    void setApplyDialHandler(std::function<QVariantMap(const QVariantMap&, qint64)> handler) {
+        m_applyDialHandler = std::move(handler);
+    }
+    // [barista-fork] end_conversation handler → AssistantOrchestrator::requestDismiss (std::function seam; same
+    // rationale as setApplyDialHandler — this header/TU never names AssistantOrchestrator). Wired from
+    // BaristaModule; it emits a main-thread signal the overlay acts on AFTER the sign-off is spoken.
+    void setEndConversationHandler(std::function<void()> handler) {
+        m_endConversationHandler = std::move(handler);
+    }
+    // [barista-fork] The app-side provenance snapshot the write tool stamps (see m_lastBaristaAnchorSnapshot).
+    QVariantMap lastBaristaAnchorSnapshot() const { return m_lastBaristaAnchorSnapshot; }
+    // [barista-fork] Closed-loop bridge for the apply_dial_change WRITE tool (issue #1053 regression). When the
+    // model APPLIES a dial change by CALLING apply_dial_change instead of emitting a fenced ```json structuredNext
+    // block, the assistant turn would otherwise finalize with structuredNext=nullopt and silently drop out of the
+    // recentAdvice audit. The client-tool lambda in createProviders() captures the tool INPUT (grinderSetting/
+    // doseG/targetWeightG/ratio/temperatureC — same field names the fenced structuredNext audit reads) into
+    // m_pendingToolStructuredNext for the CURRENT turn; AIConversation::onAnalysisComplete take()s it at
+    // finalization and, when NO fenced block was emitted, records it as the turn's structuredNext so a tool-applied
+    // change is audited exactly like a fenced one. Returns the captured object AND clears it in one call so it can
+    // never leak into a later turn — even when a fenced block wins and the taken value is discarded.
+    QJsonObject takePendingToolStructuredNext() {
+        QJsonObject out = m_pendingToolStructuredNext;
+        m_pendingToolStructuredNext = QJsonObject{};
+        return out;
+    }
     // ProfileManager hookup for the SAW prediction block (needs
     // baseProfileName + profile target metadata at user-prompt enrichment
     // time). Wired from MainController::setAiManager. Optional — falls
@@ -313,6 +346,11 @@ private:
     QNetworkAccessManager* m_networkManager = nullptr;
     std::unique_ptr<ShotSummarizer> m_summarizer;
     ShotHistoryStorage* m_shotHistory = nullptr;
+    FeedbackStorage* m_feedbackStorage = nullptr;   // [barista-fork] verbal-feedback KB (assistant.db)
+    // [barista-fork] apply_dial_change handler → BaristaActions::applyFromNext (std::function seam; see setter).
+    std::function<QVariantMap(const QVariantMap&, qint64)> m_applyDialHandler;
+    // [barista-fork] end_conversation handler → AssistantOrchestrator::requestDismiss (std::function seam; see setter).
+    std::function<void()> m_endConversationHandler;
     ProfileManager* m_profileManager = nullptr;
 
     // Providers
@@ -340,6 +378,16 @@ private:
     // [barista-fork] anchor shot id from the last requestBaristaContext, so the overlay can stamp the
     // barista's advice turns (setShotIdForCurrentTurn) into the recentAdvice closed loop.
     qint64 m_lastBaristaAnchorId = 0;
+    // [barista-fork] App-side provenance snapshot for a log_tasting_feedback write, resolved by the last
+    // requestBaristaContext: the CURRENT bean/type/profile + the anchor shot's id and dial (dose/yield/
+    // grind/temp). The write executor merges the model's validated taste fields on top of this — shot_id and
+    // dial are NEVER taken from the model. shotId 0 when the current bean has no matching shot (bean-general).
+    QVariantMap m_lastBaristaAnchorSnapshot;
+    // [barista-fork] Pending tool-applied structuredNext for the CURRENT turn (issue #1053 regression). Set by the
+    // apply_dial_change branch of the client-tool lambda in createProviders(); take()n + cleared at conversation
+    // finalization (AIConversation::onAnalysisComplete) and again unconditionally at the top of analyzeConversation
+    // (the single choke point for every turn) so a failed / superseded tool-turn can't leak into the next turn.
+    QJsonObject m_pendingToolStructuredNext;
     // Dedicated serial for requestBaristaContext — must NOT share m_contextSerial with
     // requestRecentShotContext, or one silently invalidates the other's callback (S1).
     int m_baristaContextSerial = 0;

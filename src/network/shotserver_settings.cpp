@@ -25,6 +25,7 @@
 #include <QFile>
 #include <QBuffer>
 #include <algorithm>
+#include <functional>
 #include <QJsonDocument>
 #include <QJsonArray>
 #include <QJsonObject>
@@ -46,6 +47,40 @@
 #include <QJniObject>
 #endif
 
+// Privacy: raw secret VALUES (API keys, passwords, usernames) are never
+// emitted over the LAN web server. Instead /api/settings returns a masked
+// sentinel when a secret is configured and "" when it is not. The settings
+// page shows these values in <input>s, so a boolean alone is insufficient; the
+// mask keeps the field visibly "filled" without disclosing the real value.
+// The save path (applySecretString below) treats the mask (and empty) as
+// "leave unchanged", so the owner can still set a NEW key but the current key
+// is never sent to, nor round-tripped from, the browser.
+static const QString kSecretMask = QStringLiteral("••••••••"); // "••••••••"
+
+// Redact a secret for outbound JSON: mask if set, empty string if unset. The
+// web JS only truthiness-checks these (e.g. isProviderConfigured's !!value), so
+// a non-empty mask preserves "configured" indication without leaking the value.
+static QString redactedSecret(const QString& value)
+{
+    return value.isEmpty() ? QString() : kSecretMask;
+}
+
+// Apply a posted secret string only when it is a REAL new value: non-empty and
+// not the redaction mask we handed the page. This prevents the mask (or a blank
+// field the user never touched) from overwriting the stored secret. Consequence:
+// a secret cannot be CLEARED via the web UI (empty = "keep current") — this is
+// the intended privacy trade-off; clearing is still possible in the native app.
+static void applySecretString(const QJsonObject& obj, const QString& key,
+                              const std::function<void(const QString&)>& setter)
+{
+    if (!obj.contains(key))
+        return;
+    const QString v = obj[key].toString();
+    if (v.isEmpty() || v == kSecretMask)
+        return;
+    setter(v);
+}
+
 // Apply AI-related fields from a JSON object to Settings. Only keys present
 // in obj are updated; missing keys leave the current setting unchanged.
 static void applyAiSettings(Settings* s, const QJsonObject& obj)
@@ -53,14 +88,11 @@ static void applyAiSettings(Settings* s, const QJsonObject& obj)
     auto* a = s->ai();
     if (obj.contains("aiProvider"))
         a->setAiProvider(obj["aiProvider"].toString());
-    if (obj.contains("openaiApiKey"))
-        a->setOpenaiApiKey(obj["openaiApiKey"].toString());
-    if (obj.contains("anthropicApiKey"))
-        a->setAnthropicApiKey(obj["anthropicApiKey"].toString());
-    if (obj.contains("geminiApiKey"))
-        a->setGeminiApiKey(obj["geminiApiKey"].toString());
-    if (obj.contains("openrouterApiKey"))
-        a->setOpenrouterApiKey(obj["openrouterApiKey"].toString());
+    // Secrets: only overwrite when a real new key is posted (not mask/empty).
+    applySecretString(obj, "openaiApiKey",     [a](const QString& v){ a->setOpenaiApiKey(v); });
+    applySecretString(obj, "anthropicApiKey",  [a](const QString& v){ a->setAnthropicApiKey(v); });
+    applySecretString(obj, "geminiApiKey",     [a](const QString& v){ a->setGeminiApiKey(v); });
+    applySecretString(obj, "openrouterApiKey", [a](const QString& v){ a->setOpenrouterApiKey(v); });
     if (obj.contains("openrouterModel"))
         a->setOpenrouterModel(obj["openrouterModel"].toString());
     if (obj.contains("ollamaEndpoint"))
@@ -80,10 +112,9 @@ static void applyMqttSettings(Settings* s, const QJsonObject& obj)
         m->setMqttBrokerHost(obj["mqttBrokerHost"].toString());
     if (obj.contains("mqttBrokerPort"))
         m->setMqttBrokerPort(obj["mqttBrokerPort"].toInt());
-    if (obj.contains("mqttUsername"))
-        m->setMqttUsername(obj["mqttUsername"].toString());
-    if (obj.contains("mqttPassword"))
-        m->setMqttPassword(obj["mqttPassword"].toString());
+    // Credentials: only overwrite when a real new value is posted (not mask/empty).
+    applySecretString(obj, "mqttUsername", [m](const QString& v){ m->setMqttUsername(v); });
+    applySecretString(obj, "mqttPassword", [m](const QString& v){ m->setMqttPassword(v); });
     if (obj.contains("mqttBaseTopic"))
         m->setMqttBaseTopic(obj["mqttBaseTopic"].toString());
     if (obj.contains("mqttPublishInterval"))
@@ -892,18 +923,18 @@ void ShotServer::handleGetSettings(QTcpSocket* socket)
 
     QJsonObject obj;
 
-    // Visualizer
-    obj["visualizerUsername"] = m_settings->visualizer()->visualizerUsername();
-    obj["visualizerPassword"] = m_settings->visualizer()->visualizerPassword();
+    // Visualizer — credentials redacted (masked if set, "" if unset).
+    obj["visualizerUsername"] = redactedSecret(m_settings->visualizer()->visualizerUsername());
+    obj["visualizerPassword"] = redactedSecret(m_settings->visualizer()->visualizerPassword());
 
-    // AI
+    // AI — API keys redacted; provider/model/endpoint are not secrets.
     {
         auto* a = m_settings->ai();
         obj["aiProvider"] = a->aiProvider();
-        obj["openaiApiKey"] = a->openaiApiKey();
-        obj["anthropicApiKey"] = a->anthropicApiKey();
-        obj["geminiApiKey"] = a->geminiApiKey();
-        obj["openrouterApiKey"] = a->openrouterApiKey();
+        obj["openaiApiKey"] = redactedSecret(a->openaiApiKey());
+        obj["anthropicApiKey"] = redactedSecret(a->anthropicApiKey());
+        obj["geminiApiKey"] = redactedSecret(a->geminiApiKey());
+        obj["openrouterApiKey"] = redactedSecret(a->openrouterApiKey());
         obj["openrouterModel"] = a->openrouterModel();
         obj["ollamaEndpoint"] = a->ollamaEndpoint();
         obj["ollamaModel"] = a->ollamaModel();
@@ -914,8 +945,9 @@ void ShotServer::handleGetSettings(QTcpSocket* socket)
     obj["mqttEnabled"] = mqttSettings->mqttEnabled();
     obj["mqttBrokerHost"] = mqttSettings->mqttBrokerHost();
     obj["mqttBrokerPort"] = mqttSettings->mqttBrokerPort();
-    obj["mqttUsername"] = mqttSettings->mqttUsername();
-    obj["mqttPassword"] = mqttSettings->mqttPassword();
+    // MQTT credentials redacted (masked if set, "" if unset).
+    obj["mqttUsername"] = redactedSecret(mqttSettings->mqttUsername());
+    obj["mqttPassword"] = redactedSecret(mqttSettings->mqttPassword());
     obj["mqttBaseTopic"] = mqttSettings->mqttBaseTopic();
     obj["mqttPublishInterval"] = mqttSettings->mqttPublishInterval();
     obj["mqttClientId"] = mqttSettings->mqttClientId();
@@ -941,11 +973,12 @@ void ShotServer::handleSaveSettings(QTcpSocket* socket, const QByteArray& body)
 
     QJsonObject obj = doc.object();
 
-    // Visualizer
-    if (obj.contains("visualizerUsername"))
-        m_settings->visualizer()->setVisualizerUsername(obj["visualizerUsername"].toString());
-    if (obj.contains("visualizerPassword"))
-        m_settings->visualizer()->setVisualizerPassword(obj["visualizerPassword"].toString());
+    // Visualizer credentials: only overwrite on a real new value (not mask/empty).
+    {
+        auto* v = m_settings->visualizer();
+        applySecretString(obj, "visualizerUsername", [v](const QString& s){ v->setVisualizerUsername(s); });
+        applySecretString(obj, "visualizerPassword", [v](const QString& s){ v->setVisualizerPassword(s); });
+    }
 
     // AI
     applyAiSettings(m_settings, obj);
@@ -973,6 +1006,14 @@ void ShotServer::handleVisualizerTest(QTcpSocket* socket, const QByteArray& body
     QJsonObject obj = doc.object();
     QString username = obj["username"].toString();
     QString password = obj["password"].toString();
+
+    // The web form shows redacted credentials (masked if configured). If the
+    // user tests without re-entering, substitute the stored value so an already-
+    // configured account can still be tested; a real typed value overrides.
+    if ((username.isEmpty() || username == kSecretMask) && m_settings)
+        username = m_settings->visualizer()->visualizerUsername();
+    if ((password.isEmpty() || password == kSecretMask) && m_settings)
+        password = m_settings->visualizer()->visualizerPassword();
 
     if (username.isEmpty() || password.isEmpty()) {
         sendJson(socket, R"({"success": false, "message": "Username and password are required"})");

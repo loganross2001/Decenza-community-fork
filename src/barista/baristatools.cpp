@@ -4,8 +4,11 @@
 #include "../history/shotprojection.h"
 #include "../ai/shotsummarizer.h"
 #include "../core/dbutils.h"
+#include "feedbackstorage.h"
 
 #include <QJsonDocument>
+#include <QJsonArray>
+#include <QStringList>
 #include <QThread>
 #include <QSqlDatabase>
 #include <QSqlQuery>
@@ -126,6 +129,118 @@ QJsonArray BaristaTools::toolDefinitions()
     gd["input_schema"] = gdSchema;
     tools.append(gd);
 
+    // [barista-fork] log_tasting_feedback (WRITE) — the barista's verbal-feedback KB. Claude fills the LIGHT
+    // structured schema INLINE as tool input during the tool-use loop it's already in (no second extraction
+    // call). CRITICAL: shot_id is NOT a field here — the executor stamps it app-side from the current anchor,
+    // so a model-supplied id can't attach feedback to the wrong shot. Everything but raw_text is optional.
+    QJsonObject lf;
+    lf["name"] = QString("log_tasting_feedback");
+    lf["description"] = QString(
+        "Record the user's tasting/texture feedback about a shot to their private feedback knowledge base, so "
+        "you can reason over it across sessions (\"3rd time this bean's been sour\"). Call this WHENEVER the user "
+        "describes how a shot TASTED or FELT — at close-out, mid-conversation, or an unprompted \"that last one "
+        "was sour\". Fill only the fields you can infer from what they actually said; leave the rest out. Do NOT "
+        "invent numbers or descriptors. The shot it attaches to and the dial (dose/yield/grind/temp/bean/profile) "
+        "are recorded automatically — you do NOT supply a shot id.");
+    QJsonObject lfSchema;
+    lfSchema["type"] = QString("object");
+    QJsonObject lfProps;
+    lfProps["raw_text"]              = strProp("What the user actually said about the taste/texture, in their own words (required).");
+    lfProps["overall_rating_0to100"]= intProp("How much they liked it, 0-100, ONLY if they gave a clear sense of it (optional).");
+    lfProps["acidity"]              = strProp("One of: sour, bright, balanced, flat (optional).");
+    lfProps["bitterness"]           = strProp("One of: none, mild, harsh (optional).");
+    lfProps["body"]                 = strProp("One of: thin, medium, syrupy (optional).");
+    lfProps["sweetness"]            = strProp("One of: low, balanced, high (optional).");
+    lfProps["balance"]              = strProp("One of: under, balanced, over (optional).");
+    lfProps["milk"]                 = strProp("For a milk drink, one of: thin, silky, stiff (optional).");
+    QJsonObject lfDesc;
+    lfDesc["type"] = QString("array");
+    lfDesc["description"] = QString("Short freeform descriptor words the user used or implied, e.g. [\"sour\",\"thin milk\"] (optional).");
+    QJsonObject lfDescItems; lfDescItems["type"] = QString("string");
+    lfDesc["items"] = lfDescItems;
+    lfProps["descriptors"] = lfDesc;
+    lfProps["suggested_adjustment"] = strProp("A next-shot change the user or you inferred, e.g. \"grind finer\" (optional).");
+    lfSchema["properties"] = lfProps;
+    lfSchema["required"] = QJsonArray{ QString("raw_text") };
+    lf["input_schema"] = lfSchema;
+    tools.append(lf);
+
+    // [barista-fork] search_tasting_feedback (READ) — ad-hoc/filtered lookup of past feedback for a bean.
+    // Proactive current-bean feedback is ALREADY folded into the context block every turn; this tool is the
+    // secondary path for filtered queries (e.g. "when did I last call this sour") or a DIFFERENT bean.
+    QJsonObject sf;
+    sf["name"] = QString("search_tasting_feedback");
+    sf["description"] = QString(
+        "Look up the user's PAST tasting feedback for a bean from their feedback knowledge base — what they said, "
+        "the dial they used, and any adjustment tried. Use it to build advice on what worked before (\"you called "
+        "this sour twice; last time a half-step finer helped\") or to answer a specific recall question. The "
+        "current bean's recent feedback is already in your context; reach for this for a filtered search or a "
+        "different bean.");
+    QJsonObject sfSchema;
+    sfSchema["type"] = QString("object");
+    QJsonObject sfProps;
+    sfProps["bean_brand"]        = strProp("Roaster / bean brand to look up (matched exactly, case-insensitive).");
+    sfProps["bean_type"]         = strProp("Bean name / type to look up (matched exactly, case-insensitive).");
+    sfProps["descriptor_filter"] = strProp("Optional word to filter feedback by, e.g. \"sour\" or \"thin\" (full-text match).");
+    sfSchema["properties"] = sfProps;
+    sfSchema["required"] = QJsonArray{ QString("bean_brand"), QString("bean_type") };
+    sf["input_schema"] = sfSchema;
+    tools.append(sf);
+
+    // [barista-fork] apply_dial_change (WRITE) — apply an agreed next-shot dial change. This is the
+    // approve-then-apply seam: the barista PROPOSES a change and asks; only once the user clearly approves
+    // ("yes" / "do it" / "go ahead") does it call this. dose/yield/temperature are written to the next-shot
+    // dial immediately; grinderSetting (off-machine) is queued and confirmed at the next shot. The executor
+    // range-checks every value (a hallucinated 200 °C never reaches the machine) and reports back what was
+    // applied/queued/rejected so the barista can confirm accurately.
+    QJsonObject ad;
+    ad["name"] = QString("apply_dial_change");
+    ad["description"] = QString(
+        "Apply an agreed change to the NEXT shot's dial-in. Call this ONLY after you have proposed the change "
+        "and the user has clearly approved it (\"yes\", \"do it\", \"go ahead\") — NEVER unprompted, and never "
+        "just to acknowledge or to restate unchanged settings. Include ONLY the field(s) that actually change. "
+        "dose, yield, and temperature are set on the machine's next-shot dial right away; the grinder setting is "
+        "off-machine, so it is queued and you'll remind the user to set it at the next shot. The result tells you "
+        "exactly what was applied, queued, or rejected (out of range) — confirm to the user from that, naturally "
+        "(\"Done — grind's at 4.4 for the next one\").");
+    QJsonObject adSchema;
+    adSchema["type"] = QString("object");
+    QJsonObject adProps;
+    adProps["grinderSetting"] = strProp("New grinder dial setting (off-machine; queued for the next shot). Optional.");
+    QJsonObject doseP;  doseP["type"] = QString("number"); doseP["description"] = QString("New dose IN, grams (5-30). Optional.");
+    QJsonObject yieldP; yieldP["type"] = QString("number"); yieldP["description"] = QString("New yield OUT, grams (10-120). Optional.");
+    QJsonObject ratioP; ratioP["type"] = QString("number"); ratioP["description"] = QString("Brew ratio, e.g. 2.0 for 1:2.0 (yield is computed from dose x ratio when no explicit yield is given). Optional.");
+    QJsonObject tempP;  tempP["type"] = QString("number"); tempP["description"] = QString("Brew temperature, degrees C (80-100). Optional.");
+    adProps["doseG"]         = doseP;
+    adProps["targetWeightG"] = yieldP;
+    adProps["ratio"]         = ratioP;
+    adProps["temperatureC"]  = tempP;
+    adSchema["properties"] = adProps;
+    ad["input_schema"] = adSchema;
+    tools.append(ad);
+
+    // [barista-fork] end_conversation — the barista ends its OWN session when the user signals they're done
+    // ("that'll be all", "thanks, I'm good", "bye", "see you later"). It speaks a short warm sign-off FIRST
+    // (in the same reply) and calls this; the app collapses the dock only AFTER the sign-off finishes speaking,
+    // so the user never has to hit stop and the sign-off is never cut off. No required args (an optional reason
+    // is fine). The executor merely fires the endConversation seam (a main-thread signal emit) and returns.
+    QJsonObject ec;
+    ec["name"] = QString("end_conversation");
+    ec["description"] = QString(
+        "End this conversation and let the assistant panel collapse, when the user has clearly signalled they're "
+        "DONE — a genuine wrap-up or farewell (\"that'll be all\", \"thanks, I'm good\", \"I'm done\", \"bye\", "
+        "\"see you later\", \"ok got it thanks\"). Give a SHORT warm sign-off in your reply FIRST (\"Anytime — "
+        "enjoy!\"), then call this in the same turn; the app speaks your sign-off and only then closes the panel. "
+        "Judge intent: do NOT call it on a mid-conversation \"thanks\" that's clearly followed by more, only on a "
+        "real close-out. NEVER call it unprompted.");
+    QJsonObject ecSchema;
+    ecSchema["type"] = QString("object");
+    QJsonObject ecProps;
+    ecProps["reason"] = strProp("Optional short note on why the conversation is ending (e.g. \"user said goodbye\").");
+    ecSchema["properties"] = ecProps;
+    ec["input_schema"] = ecSchema;
+    tools.append(ec);
+
     return tools;
 }
 
@@ -153,9 +268,199 @@ static void baristaFreshness(const ShotProjection& s, QJsonObject& out)
 // the JSON result to `done` on the main thread. query_shots is a READ-ONLY lookup across the user's FULL shot
 // history (any roaster/bean, any date range) — the "access to everything" the barista promised. Kept off the
 // main thread because withTempDb opens a fresh connection each call and the target is a slow tablet.
-void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, const QString& name, const QJsonObject& input,
+void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage* feedback,
+                               const std::function<QVariantMap(const QVariantMap&, qint64)>& applyDial,
+                               const std::function<void()>& endConversation,
+                               const QVariantMap& anchorSnapshot,
+                               const QString& name, const QJsonObject& input,
                                std::function<void(QJsonValue)> done)
 {
+    // [barista-fork] end_conversation — the barista dismisses itself on a spoken goodbye. The seam merely
+    // emits a main-thread signal (AssistantOrchestrator::requestDismiss → dismissRequested); the overlay
+    // collapses the dock AFTER the sign-off finishes speaking, so the sign-off is never cut off. We return
+    // immediately so the model's turn (which already carries the sign-off text) completes normally.
+    if (name == QLatin1String("end_conversation")) {
+        if (!endConversation) {
+            done(QJsonObject{{QStringLiteral("error"), QStringLiteral("end-conversation unavailable")}});
+            return;
+        }
+        endConversation();
+        done(QJsonObject{{QStringLiteral("ended"), true}});
+        return;
+    }
+
+    // [barista-fork] apply_dial_change (WRITE) — the approve-then-apply seam. Runs on the main thread (this
+    // executor is invoked there), so the applyDial handler (BaristaActions::applyFromNext) mutates Settings
+    // synchronously and safely. The model has already gotten the user's go-ahead; we range-check and report
+    // what actually landed.
+    if (name == QLatin1String("apply_dial_change")) {
+        if (!applyDial) {
+            done(QJsonObject{{QStringLiteral("error"), QStringLiteral("dial actions unavailable")}});
+            return;
+        }
+        // Map the tool input straight onto the applyFromNext contract (same field names/ranges as the fenced
+        // structuredNext block). anchorShotId comes from the APP-SIDE snapshot (never the model), so the change
+        // enters the same closed loop as a fenced-block apply.
+        QVariantMap next;
+        for (const char* k : {"grinderSetting", "doseG", "targetWeightG", "ratio", "temperatureC"}) {
+            if (input.contains(QLatin1String(k)))
+                next.insert(QLatin1String(k), input.value(QLatin1String(k)).toVariant());
+        }
+        if (next.isEmpty()) {
+            done(QJsonObject{{QStringLiteral("error"),
+                QStringLiteral("apply_dial_change needs at least one field to change "
+                               "(grinderSetting/doseG/targetWeightG/ratio/temperatureC)")}});
+            return;
+        }
+        const qint64 anchorShotId = anchorSnapshot.value(QStringLiteral("shotId")).toLongLong();
+        const QVariantMap res = applyDial(next, anchorShotId);
+        QJsonObject out;
+        if (res.value(QStringLiteral("blocked")).toBool()) {
+            out[QStringLiteral("blocked")] = true;
+            out[QStringLiteral("reason")] = res.value(QStringLiteral("blockedReason")).toString();
+        } else {
+            out[QStringLiteral("applied")] = QJsonArray::fromStringList(res.value(QStringLiteral("applied")).toStringList());
+            out[QStringLiteral("queued")]  = QJsonArray::fromStringList(res.value(QStringLiteral("queued")).toStringList());
+            out[QStringLiteral("rejected")]= QJsonArray::fromStringList(res.value(QStringLiteral("rejected")).toStringList());
+            out[QStringLiteral("ok")] = true;
+        }
+        done(out);
+        return;
+    }
+
+    // [barista-fork] log_tasting_feedback (WRITE) — Claude fills the light structured schema inline; the
+    // executor VALIDATES/WHITELISTS those fields and stamps the shot anchor + dial snapshot APP-SIDE (never
+    // from the model), then persists via FeedbackStorage. shot_id 0 = a bean-general note (allowed).
+    if (name == QLatin1String("log_tasting_feedback")) {
+        if (!feedback) {
+            done(QJsonObject{{QStringLiteral("error"), QStringLiteral("feedback storage unavailable")}});
+            return;
+        }
+        const QString rawText = input.value(QStringLiteral("raw_text")).toString().trimmed();
+        if (rawText.isEmpty()) {
+            done(QJsonObject{{QStringLiteral("error"),
+                QStringLiteral("log_tasting_feedback needs raw_text (what the user said about the taste)")}});
+            return;
+        }
+
+        // Build the structured_json from ONLY the whitelisted axes the model may fill. Unknown keys are dropped.
+        QJsonObject structured;
+        structured[QStringLiteral("raw_text")] = rawText;
+        for (const char* axis : {"acidity", "bitterness", "body", "sweetness", "balance", "milk",
+                                 "suggested_adjustment"}) {
+            const QString v = input.value(QLatin1String(axis)).toString().trimmed();
+            if (!v.isEmpty())
+                structured[QLatin1String(axis)] = v;
+        }
+        // descriptors[]: keep as an array in structured_json AND flatten to a space-joined string for FTS.
+        QStringList descriptorList;
+        for (const QJsonValue& d : input.value(QStringLiteral("descriptors")).toArray()) {
+            const QString s = d.toString().trimmed();
+            if (!s.isEmpty())
+                descriptorList << s;
+        }
+        if (!descriptorList.isEmpty())
+            structured[QStringLiteral("descriptors")] = QJsonArray::fromStringList(descriptorList);
+        bool hasRating = false;
+        int rating = 0;
+        if (input.contains(QStringLiteral("overall_rating_0to100"))) {
+            rating = input.value(QStringLiteral("overall_rating_0to100")).toInt();
+            if (rating > 0 && rating <= 100) {
+                hasRating = true;
+                structured[QStringLiteral("overall_rating_0to100")] = rating;
+            }
+        }
+
+        // Field map for FeedbackStorage: provenance (bean/profile/dial/shotId) from the APP-SIDE snapshot,
+        // taste content from the (validated) model input. anchorSnapshot keys mirror the column keys.
+        QVariantMap fields;
+        for (const char* k : {"shotId", "beanBrand", "beanType", "profile", "doseG", "yieldG",
+                              "grind", "tempC", "source"}) {
+            if (anchorSnapshot.contains(QLatin1String(k)))
+                fields.insert(QLatin1String(k), anchorSnapshot.value(QLatin1String(k)));
+        }
+        fields.insert(QStringLiteral("rawText"), rawText);
+        fields.insert(QStringLiteral("descriptors"), descriptorList.join(QStringLiteral(" ")));
+        fields.insert(QStringLiteral("structuredJson"),
+                      QString::fromUtf8(QJsonDocument(structured).toJson(QJsonDocument::Compact)));
+        if (hasRating)
+            fields.insert(QStringLiteral("rating0to100"), rating);
+        if (!fields.contains(QStringLiteral("source")))
+            fields.insert(QStringLiteral("source"), QStringLiteral("volunteered"));
+
+        // FeedbackStorage::requestLogFeedback is async (its own worker); fire it, and confirm to the model
+        // once the row lands. The connection uses `feedback` as its context object, so it self-disconnects if
+        // storage is destroyed; single-shot so the lambda disconnects itself on the first emission.
+        auto conn = std::make_shared<QMetaObject::Connection>();
+        *conn = QObject::connect(feedback, &FeedbackStorage::feedbackLogged, feedback,
+            [done, conn](qint64 id) {
+                QObject::disconnect(*conn);
+                if (id > 0)
+                    done(QJsonObject{{QStringLiteral("ok"), true}, {QStringLiteral("feedbackId"), id}});
+                else
+                    done(QJsonObject{{QStringLiteral("error"), QStringLiteral("failed to save feedback")}});
+            });
+        feedback->requestLogFeedback(fields);
+        return;
+    }
+
+    // [barista-fork] search_tasting_feedback (READ) — filtered/ad-hoc lookup of past feedback for a bean.
+    if (name == QLatin1String("search_tasting_feedback")) {
+        if (!feedback) {
+            done(QJsonObject{{QStringLiteral("error"), QStringLiteral("feedback storage unavailable")}});
+            return;
+        }
+        const QString beanBrand = input.value(QStringLiteral("bean_brand")).toString().trimmed();
+        const QString beanType  = input.value(QStringLiteral("bean_type")).toString().trimmed();
+        if (beanBrand.isEmpty() && beanType.isEmpty()) {
+            done(QJsonObject{{QStringLiteral("error"),
+                QStringLiteral("search_tasting_feedback needs a bean_brand and/or bean_type")}});
+            return;
+        }
+        const QString descriptorFilter = input.value(QStringLiteral("descriptor_filter")).toString().trimmed();
+
+        auto conn = std::make_shared<QMetaObject::Connection>();
+        *conn = QObject::connect(feedback, &FeedbackStorage::feedbackForBeanReady, feedback,
+            [done, conn](const QVariantList& rows) {
+                QObject::disconnect(*conn);
+                QJsonArray arr;
+                for (const QVariant& r : rows) {
+                    const QVariantMap m = r.toMap();
+                    QJsonObject o;
+                    o[QStringLiteral("shotId")]  = m.value(QStringLiteral("shotId")).toLongLong();
+                    o[QStringLiteral("date")]    = QDateTime::fromSecsSinceEpoch(
+                        m.value(QStringLiteral("createdAt")).toLongLong())
+                        .toString(QStringLiteral("yyyy-MM-dd HH:mm"));
+                    const QString profile = m.value(QStringLiteral("profile")).toString();
+                    if (!profile.isEmpty()) o[QStringLiteral("profile")] = profile;
+                    if (const double dose  = m.value(QStringLiteral("doseG")).toDouble();  dose  > 0)
+                        o[QStringLiteral("doseG")]  = QString::number(dose,  'f', 1).toDouble();
+                    if (const double yield = m.value(QStringLiteral("yieldG")).toDouble(); yield > 0)
+                        o[QStringLiteral("yieldG")] = QString::number(yield, 'f', 1).toDouble();
+                    if (const QString grind = m.value(QStringLiteral("grind")).toString(); !grind.isEmpty())
+                        o[QStringLiteral("grind")] = grind;
+                    if (const double temp = m.value(QStringLiteral("tempC")).toDouble(); temp > 0)
+                        o[QStringLiteral("temperatureC")] = QString::number(temp, 'f', 1).toDouble();
+                    if (const int rating = m.value(QStringLiteral("rating0to100")).toInt(); rating > 0)
+                        o[QStringLiteral("rating0to100")] = rating;
+                    const QString rawText = m.value(QStringLiteral("rawText")).toString();
+                    if (!rawText.isEmpty()) o[QStringLiteral("saidAboutTaste")] = rawText;
+                    const QString descriptors = m.value(QStringLiteral("descriptors")).toString();
+                    if (!descriptors.isEmpty()) o[QStringLiteral("descriptors")] = descriptors;
+                    // structured_json holds the parsed axes + suggested_adjustment.
+                    const QJsonObject sj = QJsonDocument::fromJson(
+                        m.value(QStringLiteral("structuredJson")).toString().toUtf8()).object();
+                    if (sj.contains(QStringLiteral("suggested_adjustment")))
+                        o[QStringLiteral("suggestedAdjustment")] = sj.value(QStringLiteral("suggested_adjustment"));
+                    arr.append(o);
+                }
+                done(QJsonObject{{QStringLiteral("returnedCount"), arr.size()},
+                                 {QStringLiteral("feedback"), arr}});
+            });
+        feedback->requestFeedbackForBean(beanBrand, beanType, descriptorFilter);
+        return;
+    }
+
     if (!shotHistory) {
         done(QJsonObject{{QStringLiteral("error"), QStringLiteral("shot history unavailable")}});
         return;

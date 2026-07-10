@@ -56,17 +56,27 @@ LocationProvider::LocationProvider(QNetworkAccessManager* networkManager, QObjec
                      << "Lat:" << coord.latitude() << "Lon:" << coord.longitude()
                      << "Age:" << ageSecs << "seconds";
 
-            // Use cached position immediately (even if stale) so the UI shows a location
-            // instead of "GPS disabled". A fresh fix will replace it shortly.
-            m_currentLocation.latitude = coord.latitude();
-            m_currentLocation.longitude = coord.longitude();
-            m_currentLocation.valid = true;
-            // Defer geocoding and fresh fix to avoid blocking constructor
-            QTimer::singleShot(0, this, [this, coord]() {
-                reverseGeocode(coord.latitude(), coord.longitude());
-                // Also request a fresh fix to replace the stale cached position
-                requestUpdate();
-            });
+            // Privacy: only seed/expose the cached position (and reverse-geocode +
+            // request a fresh fix) if a location-consuming egress feature is opted
+            // in. Marking m_currentLocation.valid makes hasLocation() true, which
+            // WeatherManager treats as a cue to fetch a forecast (egressing the
+            // coordinates to a weather provider) — so seeding must ALSO be gated,
+            // not just the Nominatim/GPS calls. When Shot Map is later enabled,
+            // ShotReporter::setEnabled() calls requestUpdate() and a fresh fix
+            // repopulates this, so nothing is permanently lost by deferring.
+            if (proactiveLocationAllowed()) {
+                // Use cached position immediately (even if stale) so the UI shows a
+                // location instead of "GPS disabled". A fresh fix replaces it shortly.
+                m_currentLocation.latitude = coord.latitude();
+                m_currentLocation.longitude = coord.longitude();
+                m_currentLocation.valid = true;
+                // Defer geocoding and fresh fix to avoid blocking constructor
+                QTimer::singleShot(0, this, [this, coord]() {
+                    reverseGeocode(coord.latitude(), coord.longitude());
+                    // Also request a fresh fix to replace the stale cached position
+                    requestUpdate();
+                });
+            }
         } else {
             qDebug() << "LocationProvider: No last known position available";
         }
@@ -83,8 +93,11 @@ LocationProvider::LocationProvider(QNetworkAccessManager* networkManager, QObjec
         qDebug() << "LocationProvider: Manual city configured:" << m_manualCity
                  << "at" << m_manualLat << m_manualLon << m_manualCountryCode;
 
-        // Re-geocode if country code is missing (migration from older versions)
-        if (m_manualGeocoded && m_manualCountryCode.isEmpty()) {
+        // Re-geocode if country code is missing (migration from older versions).
+        // Privacy: this is a startup Nominatim query — only issue it proactively
+        // when a location-consuming egress feature is enabled. If the user later
+        // changes the manual city, setManualCity() still geocodes on demand.
+        if (m_manualGeocoded && m_manualCountryCode.isEmpty() && proactiveLocationAllowed()) {
             qDebug() << "LocationProvider: Re-geocoding manual city to obtain country code";
             QTimer::singleShot(0, this, &LocationProvider::geocodeManualCity);
         }
@@ -96,6 +109,21 @@ LocationProvider::~LocationProvider()
     if (m_source) {
         m_source->stopUpdates();
     }
+}
+
+bool LocationProvider::proactiveLocationAllowed() const
+{
+    // Read the same key ShotReporter / MainController use for the Shot Map. That value
+    // is written through the Settings façade, whose backing store is the PRIMARY store
+    // ("DecentEspresso"/"DE1Qt", settings.cpp:47) — NOT the app-default store
+    // ("DecentEspresso"/"Decenza", main.cpp:394-396) that a bare QSettings() resolves to
+    // and that this class uses for its own manual-city persistence. Must read the primary
+    // store explicitly, or the gate never sees the user enabling Shot Map.
+    // Weather (a passive layout widget) has no queryable "active" flag, so it is
+    // intentionally NOT a trigger here: it consumes whatever fix another feature
+    // already obtained but never causes a proactive fetch on its own.
+    QSettings settings("DecentEspresso", "DE1Qt");
+    return settings.value("shotmap/enabled", false).toBool();
 }
 
 double LocationProvider::roundedLatitude() const
@@ -499,6 +527,12 @@ void LocationProvider::onAppStateChanged(Qt::ApplicationState state)
 
     // If we have a fresh GPS fix or manual city, nothing to do
     if (m_hasFreshFix || !m_manualCity.isEmpty())
+        return;
+
+    // Privacy: do not proactively (re-)acquire a fix on every foreground unless
+    // a location-consuming egress feature is enabled. This also suppresses the
+    // macOS/iOS permission prompt on resume when no feature needs location.
+    if (!proactiveLocationAllowed())
         return;
 
     // No source yet (permission may have just been granted) — try creating one

@@ -69,6 +69,15 @@ public:
     // Force a refresh
     Q_INVOKABLE void refresh();
 
+    // Consumer-driven location acquisition: called from QML when the Weather
+    // widget becomes present on screen. Kicks a one-shot location fix ONLY when
+    // no valid location is available yet (no fix and no manual city), so it is
+    // cheap/idempotent to call from both Component.onCompleted and visibility
+    // changes. This is the feature-present trigger that replaces the always-on
+    // proactive acquisition gated behind the Shot Map (privacy hardening); the
+    // proactive gate in LocationProvider is intentionally left untouched.
+    Q_INVOKABLE void ensureLocation();
+
     // WMO weather code helpers
     static QString weatherDescription(int wmoCode);
     static QString weatherIconName(int wmoCode);

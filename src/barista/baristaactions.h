@@ -22,6 +22,10 @@ public:
     // Returns { applied: [str], queued: [str], blocked: bool, blockedReason: str }.
     Q_INVOKABLE QVariantMap applyFromNext(const QVariantMap& next, qint64 anchorShotId = 0);
     Q_INVOKABLE void undoLast();
+    // [barista-fork] Undo the most recent applied change (dose/yield/temp override + the queued grind),
+    // restoring the pre-apply values captured in applyFromNext. Same one-level snapshot as undoLast();
+    // named for the auto-apply/verbal-undo flow. Returns true iff something was actually restored.
+    Q_INVOKABLE bool undoLastAutoApply();
     Q_INVOKABLE bool canUndo() const { return !m_undo.isEmpty(); }
 
     // Conservative yes/no from a spoken reply: 1 = yes, 0 = no, -1 = neither (pass through to the AI).

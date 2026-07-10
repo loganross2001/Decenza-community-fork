@@ -2,11 +2,12 @@ import QtQuick
 import QtQuick.Layouts
 import Decenza
 
-// [barista-fork] The proactive barista assistant — a REAL conversation, not a script. When the
-// orchestrator activates (Espresso selected → "greeting"; a shot finished → "closeOut") this seeds
-// a multi-turn Claude conversation (MainController.aiManager.conversation.ask/followUp) with the
-// user's name, bean and best recipe as context, then shows + speaks Claude's replies and sends the
-// user's typed replies back. What it says is AI-generated and adapts to the user. Idle-page only.
+// [barista-fork] The user-initiated barista assistant — a REAL conversation, not a script. The barista is
+// a quiet persistent presence; it NEVER speaks first. When the user engages (taps/talks → orchestrator
+// state "conversing") this PRIMES a multi-turn Claude conversation (system prompt with the user's name,
+// bean, best recipe, and a sessionContext block carrying recency + any just-pulled shot) and WAITS. The
+// user's first utterance begins the session; any greeting is folded into that first reply per recency.
+// Machine events (Espresso selected, shot saved) are CONTEXT updates, never conversation triggers.
 Item {
     id: root
     anchors.fill: parent
@@ -21,7 +22,18 @@ Item {
         id: silenceTimer
         interval: 20000
         repeat: false
-        onTriggered: if (root._voiceInput) root._voiceInput.stop()
+        onTriggered: {
+            if (root._voiceInput) root._voiceInput.stop()
+            // [barista-fork] Screensaver burn-in safety: a panel left open over the screensaver must not
+            // sit lit if the user walked away. On silence-timeout during the screensaver, collapse back to
+            // the faint drifting avatar (keep the session primed + recoverable via _tapDock — do NOT dismiss,
+            // and do NOT wake the machine). Off-screensaver behavior is unchanged: the mic stops, the panel
+            // stays for reading/typing.
+            if (root._screensaverActive && root._state === "conversing") {
+                root._showSettings = false   // don't leave a stuck settings flag hiding everything when collapsed
+                root._collapsed = true
+            }
+        }
     }
     function _resetSilence() {
         // Only count silence while actually HEARING — a long thinking/searching/speaking turn must not
@@ -52,22 +64,50 @@ Item {
         target: root._voice
         ignoreUnknownSignals: true
         function onSpeakingChanged() {
+            // [barista-fork] The barista signed off and asked to end the session → collapse only NOW that the
+            // sign-off finished speaking (never cut it off). Checked BEFORE the listening guard so a text-only
+            // reply that still spoke a sign-off dismisses too. _endSessionNow clears the flag + ends the session.
+            if (root._voice && !root._voice.speaking && root._endAfterReply) {
+                root._endSessionNow()
+                return
+            }
             if (!root._voiceInput || !root._voiceInput.listening) return
             if (root._voice.speaking) root._voiceInput.pauseMic()
             else { root._voiceInput.resumeMic(); root._resetSilence() }
         }
     }
-    readonly property string _state: _orch ? _orch.state : "dormant"
+    readonly property string _state: _orch ? _orch.state : "present"   // "present" | "conversing"
+    // [barista-fork] A shot the barista knows about but the user hasn't discussed yet — the old close-out,
+    // now pure context (drives the justPulledShot injection + the P3 undiscussed-shot pulse).
+    readonly property bool _hasUndiscussedShot: _orch && _orch.lastShotId > 0 && !_orch.shotDiscussed
     readonly property var _conv: (typeof MainController !== "undefined" && MainController.aiManager)
                                  ? MainController.aiManager.conversation : null
+
+    // [barista-fork] Screensaver-safe presence. When the machine screensaver is up AND the dock is collapsed
+    // (no active conversation), we swap the normal edge tab for a FAINT DRIFTING AVATAR: low opacity so it
+    // barely lights the LCD (and it already rides the hardware backlight dim), repositioned periodically so no
+    // pixel stays lit continuously (burn-in safety). Tapping it engages the barista OVER the screensaver
+    // WITHOUT waking the DE1 (the overlay never calls ScreensaverPage.wake()/DE1Device.wakeUp()).
+    readonly property bool _screensaverActive: (typeof ScreensaverManager !== "undefined")
+                                               && ScreensaverManager.screensaverActive
+    // True exactly when the collapsed dock should render as the drifting avatar (screensaver up + not expanded
+    // + settings closed) — the same "collapsed dock" condition the edge tab uses, gated to the screensaver.
+    readonly property bool _screensaverDock: root._screensaverActive && !root._showSettings
+                                             && !(root._state === "conversing" && !root._collapsed)
 
     property string _message: ""       // the assistant's latest line
     property bool _thinking: false
     property bool _showSettings: false
     property bool _collapsed: false     // panel minimised to a thin edge tab (frees the whole screen)
     property var _pendingNext: null     // structuredNext recommendation awaiting apply/skip
-    property var _pendingBegin: null    // SF-4: a greeting that preempted a still-busy close-out; retry when free
-    property string _sessBrand: ""      // SF-R3-1: this activation's switch args, so a deferred retry re-switches
+    // [barista-fork] User-initiated model: the context is PRIMED (system prompt assembled) but the Claude
+    // session is NOT begun until the user's first real utterance. No synthetic kickoff, no machine-first turn.
+    property string _primedSystemPrompt: ""   // the assembled persona+data block, waiting for the first turn
+    property bool _primed: false              // context ready → the first _send() begins the session
+    property bool _sessionBegun: false        // beginSession() has fired for this activation (else followUp)
+    property string _queuedFirstUtterance: "" // tap-chat-and-talk: words spoken BEFORE context finished
+                                              // building are held here and replayed once primed (never dropped)
+    property string _sessBrand: ""      // this activation's switch args (kept for thread restore on recreate)
     property string _sessType: ""
     property string _sessProf: ""
     property bool _awaitConfirm: false  // a recommendation is armed for a voice "OK"
@@ -75,6 +115,10 @@ Item {
     property bool _awaitingContext: false   // waiting on the shot history before opening the conversation
     property bool _closeOutRated: false      // persist the close-out taste to the shot exactly once
     property bool _fellBack: false           // bean-filtered history was empty → fetched recent overall
+    // [barista-fork] The barista asked to end the conversation (end_conversation tool, or a non-Anthropic
+    // standalone farewell). Don't dismiss instantly — let the sign-off speak first, THEN collapse to the tab.
+    // Cleared on any new user utterance / new engage / teardown so a stuck flag can never dismiss a later turn.
+    property bool _endAfterReply: false
 
     // Strip markdown/code so cloud voices don't read asterisks, hashes, or JSON aloud.
     function _speakSanitised(t) {
@@ -120,6 +164,18 @@ Item {
     function _skipPending() {
         root._pendingNext = null
         root._awaitConfirm = false
+        root._resumeMicAfterLocal()
+    }
+    // [barista-fork] Reverse the last applied dial change (the ask→approve→apply safety net). Restores the
+    // pre-apply dose/yield/temp override + the queued grind captured in applyFromNext, then speaks a short local
+    // confirmation (no model round-trip, like _applyPending).
+    function _undoLast() {
+        if (typeof Barista === "undefined" || !Barista.actions) return
+        var ok = Barista.actions.undoLastAutoApply()
+        var msg = ok ? TranslationManager.translate("barista.act.undone", "Okay — I put it back.")
+                     : TranslationManager.translate("barista.act.nothingUndo", "There's nothing to undo.")
+        root._message = msg
+        root._speakSanitised(msg)
         root._resumeMicAfterLocal()
     }
     // S4: after a locally-spoken line, a MUTED engine won't fire speakingChanged to reopen the mic —
@@ -203,12 +259,48 @@ Item {
         var h = new Date().getHours()
         return h < 12 ? "morning" : (h < 18 ? "afternoon" : "evening")
     }
+    // [barista-fork] Recency of the RELATIONSHIP — the heart of the user-initiated model. Pure timestamp
+    // compare (no timers-as-guards), read at engage/prime time from AssistantSettings.lastExchangeAt.
+    //   ongoing (<60min) → no greeting, continue mid-conversation
+    //   earlierToday (60min–8h, same day) → no hello; at most a light nod ONCE/day
+    //   firstOfDay (new day or >8h) → warm brief hello folded into the first reply
+    //   firstEver (never) → firstOfDay + "don't assume who it is" name caution
+    // (In P2 this moves to orchestrator.recencyBucket(); the injection point below stays.)
+    function _recencyBucket() {
+        if (!root._settings || typeof root._settings.minutesSinceLastExchange !== "function")
+            return "firstEver"
+        var mins = root._settings.minutesSinceLastExchange()
+        if (mins < 0) return "firstEver"
+        if (mins < 60) return "ongoing"
+        // Same calendar day? Compare the stored ISO date to today.
+        var lastIso = root._settings.lastExchangeAt ? root._settings.lastExchangeAt() : ""
+        var sameDay = false
+        if (lastIso && lastIso.length >= 10) {
+            var d = new Date(lastIso)
+            var now = new Date()
+            sameDay = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth()
+                      && d.getDate() === now.getDate()
+        }
+        if (mins < 8 * 60 && sameDay) return "earlierToday"
+        return "firstOfDay"
+    }
     // Stamp the assistant's upcoming turn with the anchor shot id so its advice enters the recentAdvice
     // closed loop (its recommendation gets audited against the shot the user actually pulls next).
     function _stampTurn() {
         if (!root._conv || typeof MainController === "undefined" || !MainController.aiManager) return
         var id = MainController.aiManager.lastBaristaAnchorId()
         if (id > 0) root._conv.setShotIdForCurrentTurn(id)
+    }
+    // [barista-fork] Tap-chat-and-talk: engaging opens the mic in the same gesture. Barge-in — silence any
+    // TTS still playing so the barista never talks over the user opening the mic. No-op if voice unavailable.
+    function _openMic() {
+        if (!root._voiceInput || !root._voiceInput.available)
+            return
+        if (root._voiceInput.listening)
+            return
+        if (root._voice) root._voice.stop()
+        root._voiceInput.start()
+        silenceTimer.restart()
     }
     // B3: fully close the session — stop listening + speaking and clear any pending action, so a
     // dismissed (or destroyed) overlay never keeps transcribing/replying/talking in the background.
@@ -221,32 +313,23 @@ Item {
         root._pendingGrind = null
         root._awaitingContext = false   // BL-1: a late context build must not open a turn while dormant
         root._thinking = false
-        root._pendingBegin = null
+        root._primed = false
+        root._sessionBegun = false
+        root._primedSystemPrompt = ""
+        root._queuedFirstUtterance = ""   // drop any un-replayed tap-and-talk utterance on teardown
+        root._endAfterReply = false       // [barista-fork] stuck-flag guard: a torn-down session can't self-dismiss later
         // SF-1: clear web search so it can't leak onto a later advisor turn on the same conversation key.
         if (root._conv) { root._conv.webSearchEnabled = false; root._conv.toolsEnabled = false; root._conv.verbatimPairs = 2 }
     }
-    // SF-4: the preempted greeting couldn't beginSession because a close-out reply was mid-flight. Its reply
-    // has now landed (conversation is free), so open the greeting — deferred to avoid re-entering the AI stack.
-    function _retryBegin() {
-        var pb = root._pendingBegin
-        root._pendingBegin = null
-        Qt.callLater(function() {
-            if (root._state === "dormant" || !root._conv || !pb) return
-            // SF-R3-1: the earlier switchConversation was refused while busy — re-run it now (free) so the
-            // greeting lands on the RIGHT per-bean thread; that resets webSearchEnabled, so re-apply it.
-            if (typeof MainController !== "undefined" && MainController.aiManager)
-                MainController.aiManager.switchConversation(root._sessBrand, root._sessType, root._sessProf)
-            root._conv.webSearchEnabled = pb.webOn
-            root._conv.toolsEnabled = pb.toolsOn
-            root._conv.verbatimPairs = 8
-            root._thinking = true
-            root._stampTurn()
-            if (!root._conv.beginSession(pb.sys, pb.kick)) {   // N-R3-1: still busy → recover, don't wedge on "…"
-                root._thinking = false
-                root._message = TranslationManager.translate("barista.err",
-                    "Something went wrong — tap Chat or type to try again.")
-            }
-        })
+
+    // [barista-fork] End the session on the barista's own sign-off: clear the flag FIRST (so nothing re-triggers),
+    // then dismiss via the orchestrator — dismiss() flips state to "present", which fires onStateChanged →
+    // _closeSession (stops the mic + TTS) and collapses back to the quiet edge tab. One dismiss path, timed to
+    // land only after the sign-off finished speaking (or right after a muted/text reply renders).
+    function _endSessionNow() {
+        root._endAfterReply = false
+        if (root._orch && typeof root._orch.dismiss === "function")
+            root._orch.dismiss()
     }
 
     // Kick off a conversation. First pull the user's REAL dial-in history for this bean so the
@@ -261,17 +344,21 @@ Item {
                 "Add an AI key in Settings → AI and I'll be able to chat.")
             return
         }
-        if (root._orch) root._orch.markSessionStarted()   // SF-3: don't re-kick on page re-entry
         root._message = ""
         root._thinking = true
         root._awaitingContext = true
         root._closeOutRated = false
         root._fellBack = false
         root._pendingNext = null
-        root._pendingBegin = null   // NICE-1: a new activation supersedes any deferred begin from a prior one
+        root._primed = false            // a new activation re-primes; the first user turn begins the session
+        root._sessionBegun = false
+        root._primedSystemPrompt = ""
+        root._queuedFirstUtterance = ""
         root._awaitConfirm = false
-        // At a greeting (before a shot), surface any off-machine grind the user agreed to but didn't confirm.
-        root._pendingGrind = (root._state === "greeting" && typeof Barista !== "undefined" && Barista.actions)
+        root._endAfterReply = false     // [barista-fork] a fresh engage never inherits a prior session's end-request
+        // Pre-shot (no undiscussed shot to talk about), surface any off-machine grind the user agreed to
+        // but didn't confirm — so the barista can ask early whether it actually got set.
+        root._pendingGrind = (!root._hasUndiscussedShot && typeof Barista !== "undefined" && Barista.actions)
                              ? Barista.actions.outstandingGrind() : null
         // (1) Load THIS bean's persisted conversation so the AI recalls its own prior guidance (pick up
         // where we left off, even after long gaps). (2) Assemble the FULL advisor-grade dialing context
@@ -315,17 +402,47 @@ Item {
         return lines.join("\n")
     }
 
-    // Open (or resume) the conversation with the data in the SYSTEM PROMPT (re-stamped each session,
-    // never trimmed) so the AI ALWAYS has it; the kickoff message carries only intent. beginSession()
-    // keeps the persisted thread (prior discussion) and can't wipe it.
+    // [barista-fork] PRIME the conversation: assemble the data + sessionContext into the SYSTEM PROMPT
+    // (re-stamped each session, never trimmed) so the AI ALWAYS has it — then WAIT. beginSession() is
+    // deferred to the user's first utterance in _send() (user-initiated model); it keeps the persisted
+    // per-bean thread (prior discussion) and can't wipe it.
     function _askWithContext(dataBlock, unused) {
         root._awaitingContext = false
-        if (root._state === "dormant")   // BL-1: dismissed during context build → don't open a turn
+        if (root._state !== "conversing")   // BL-1: dismissed during context build → don't prime a dead session
             return
         if (!root._conv)
             return
         var who = root._settings ? root._settings.assistantName : "Coach"
         var name = root._userName.length > 0 ? root._userName : ""
+
+        // [barista-fork] Ask→approve→apply flow. The barista PROPOSES a dial change and asks; only after the
+        // user approves does it apply. On Anthropic it applies via the apply_dial_change tool; on other providers
+        // there's no tool, so the app watches for the user's affirmative and applies the last proposal itself
+        // (see the fenced-block fallback in _send). The persona differs so the model phrases things correctly.
+        var _canApplyTool = typeof MainController !== "undefined" && MainController.aiManager
+                            && MainController.aiManager.selectedProvider === "anthropic"
+        var applyInstruction = _canApplyTool
+            ? ("HOW CHANGES GET MADE — when you want to change the dial (grind, dose, yield, ratio, or temp), or the "
+               + "user asks for a specific value, FIRST propose it in your reply and ask for the go-ahead ('Want me to "
+               + "take the grind to 4.4?'). Do NOT change anything yet. ONLY once the user clearly approves ('yes', "
+               + "'do it', 'go ahead') do you call the apply_dial_change tool with just the field(s) that change "
+               + "(grinderSetting, doseG, targetWeightG, ratio, temperatureC — grinderSetting is the off-machine dial, "
+               + "doseG grams IN, targetWeightG grams OUT, ratio e.g. 2.0 for 1:2.0). Never call it unprompted, to "
+               + "acknowledge, or to restate unchanged settings. After it runs, confirm naturally from the result — say "
+               + "it's DONE, not as a proposal ('Done — grind's at 4.4 for the next one.'). The grinder is off-machine, "
+               + "so for a grind change tell them to set it on the grinder. If the user says 'undo' or 'put it back', the "
+               + "app reverses the last change itself — you don't need a tool for that.\n")
+            : ("HOW CHANGES GET MADE — when you want to change the dial (grind, dose, yield, ratio, or temp), or the "
+               + "user asks for a specific value, FIRST propose it in your reply and ask for the go-ahead ('Want me to "
+               + "take the grind to 4.4?'), and append EXACTLY ONE fenced block at the very END with ONLY the field(s) "
+               + "that change:\n"
+               + "```json\n{\"grinderSetting\":\"4.75\",\"doseG\":18.0,\"targetWeightG\":36.0,\"ratio\":2.0,\"temperatureC\":92.0,\"expectation\":\"less sour\"}\n```\n"
+               + "grinderSetting = grinder dial (off-machine), doseG = grams IN, targetWeightG = grams OUT, ratio = brew "
+               + "ratio e.g. 2.0 for 1:2.0 (the app computes yield = doseG × ratio, so send doseG + ratio and skip "
+               + "targetWeightG for a ratio change), temperatureC = brew temp. Give REAL numbers. The app applies the "
+               + "proposed block ONLY after the user approves by voice ('yes'/'do it'); until then nothing changes. Do "
+               + "NOT emit the block to acknowledge, to restate CURRENT settings unchanged, or in casual chat — only "
+               + "when you're proposing a real change.\n")
 
         var persona = "You are " + who + ", " + (name.length ? name + "'s" : "the user's")
             + " friend behind the counter of their home espresso bar — a warm, curious person who happens to be a "
@@ -337,10 +454,18 @@ Item {
             + "steer casual talk back to dialing advice. Only coach when the topic is the coffee (they ask, they're about "
             + "to pull or just pulled a shot, or they report taste), or when something social makes coffee help genuinely "
             + "useful (two guests → offer to line up back-to-back shots) — and keep it light.\n"
-            + "GREETING: when a session opens you do NOT yet know who is at the machine — it could be "
-            + (name.length ? name : "the owner") + " or a guest — so open with a simple, name-free hello ('Morning!', "
-            + "'Hey there — what are we making?'). Do NOT greet by name or assume who it is; once they tell you (or it's "
-            + "clearly the regular from what they say), use their name naturally.\n"
+            + "HOW A CONVERSATION STARTS — the USER always speaks first; you were quiet until they talked to you. "
+            + "Your FIRST reply ANSWERS what they said. A greeting, if any, is a short RIDER folded into that reply, "
+            + "never a turn of its own and never 'how can I help?'. Use the sessionContext.recency below to decide:\n"
+            + "  • firstOfDay / firstEver → fold a short, warm hello into the front of your reply ('Morning! …'), "
+            + "then answer. On firstEver you do NOT yet know who's at the machine (owner or guest) — stay name-free "
+            + "until they tell you or it's obvious; then use "
+            + (name.length ? name + "'s name" : "their name") + " naturally.\n"
+            + "  • earlierToday → NO hello; at most a light one-clause nod ('Back for round two — ') IF "
+            + "sessionContext.lightNodOk is true, then answer. Otherwise just answer.\n"
+            + "  • ongoing → NO greeting at all; continue as if mid-conversation.\n"
+            + "NEVER cold-greet, self-introduce, say your own name unprompted, re-introduce yourself, or open with "
+            + "'how can I help'. You are a familiar presence, not a kiosk.\n"
             + "WHEN COACHING: the data block below is the app's LIVE DATABASE of this user's shots, dial-in history, best "
             + "recipes, and your own past advice: you DO have full access to it. NEVER say you lack their history, or "
             + "that this is their first shot, unless the block says 'recordedShots: 0'. The block's 'fullHistory' "
@@ -357,27 +482,40 @@ Item {
             + "grind change, rule out: days off roast or a recent freeze→thaw (a bag under ~5 days runs fast and "
             + "unstable — don't chase it finer), dose consistency vs the last shots, and — if taste won't respond to "
             + "grind or ratio — water. Expect to grind finer as a bag ages. Adapt to their replies.\n"
-            + "AT CLOSE-OUT (after a shot): ask once, lightly, what it TASTED like on those two axes — sour/sharp or "
-            + "bitter/harsh, thin or punchy — because that descriptor is the real dialing signal. Keep it to one natural "
-            + "question, and treat it as SEPARATE from how much they liked it (an optional 0–100 number). If they just "
-            + "give a word or a number, take it and move on — never nag or quiz them.\n"
-            + "WHEN you recommend a concrete change — OR the user asks to set a specific input weight, output weight, "
-            + "ratio, temperature, or grind — append EXACTLY ONE fenced block at the very END, with ONLY the field(s) "
-            + "that actually CHANGE:\n"
-            + "```json\n{\"grinderSetting\":\"4.75\",\"doseG\":18.0,\"targetWeightG\":36.0,\"ratio\":2.0,\"temperatureC\":92.0,\"expectation\":\"less sour\"}\n```\n"
-            + "grinderSetting = grinder dial (off-machine), doseG = grams IN (input dose), targetWeightG = grams OUT "
-            + "(output/yield), ratio = brew ratio e.g. 2.0 for 1:2.0 (the app computes yield = doseG × ratio, so for a "
-            + "ratio change you can send just doseG + ratio and skip targetWeightG), temperatureC = brew temp. Give REAL "
-            + "numbers — the app applies them when the user says OK. If the user names a target ('make it 40 out', "
-            + "'go 1:2.5', '18 in'), you MUST include that value in the block so it gets applied. Do NOT emit the block "
-            + "to acknowledge, to restate the CURRENT settings unchanged, or in casual chat — only when a value truly changes."
+            + "JUST-PULLED SHOT: if sessionContext.justPulledShot is present, a shot finished a few minutes ago and "
+            + "you already know it — do NOT announce it or ask 'how did it taste?' out of nowhere. Wait for the user. "
+            + "When the user describes the taste ('that was sour', 'bit thin', 'perfect') THAT IS the tasting report — "
+            + "you do not need to ask for it. Call log_tasting_feedback SILENTLY (never say 'I've logged that'), then "
+            + "acknowledge in a few words and PROPOSE ONE concrete adjustment for the next shot, asking for the "
+            + "go-ahead — do NOT change anything until they approve (see HOW CHANGES GET MADE below). Read taste on "
+            + "the two axes (sour/sharp ↔ bitter/harsh, thin/watery ↔ strong/punchy) — that descriptor is the real "
+            + "dialing signal — but let them ramble; if they just give a word or a number, take it and move on. Never "
+            + "nag, quiz, checklist, or recap. Enjoyment (an optional 0–100 number) is SEPARATE from the taste and "
+            + "never required.\n"
+            + applyInstruction
+            + "VOICE — you are a person behind the counter, NOT a vending machine. Answer first (adjacency pairs: "
+            + "respond to what they said before anything else). 1–2 short sentences. Minimal acknowledgment — 'got it', "
+            + "not a restatement of what they told you. When you apply a change, confirm it ONCE, in your own natural "
+            + "words ('Done — grind's at 4.4') — don't restate every field or repeat the confirmation. Use their name rarely. At most ONE question per "
+            + "turn, and only if it's load-bearing — no checklists. Silence is fine: no filler, no 'let me know if you "
+            + "need anything', no goodbye. Memory is politeness: follow up on last session's advice before offering new "
+            + "advice. Keep matching their lane (social stays social).\n"
+            + "EXAMPLE PHRASINGS (style anchors, not scripts):\n"
+            + "  • firstOfDay: \"Morning! Two it is — you're at 4.5 on the Kenya, pulled sweet yesterday, I'd stay put. "
+            + "Line them up back-to-back?\"\n"
+            + "  • ongoing (within the hour): \"Same recipe? The last one was running just a hair fast.\" (no greeting, no name)\n"
+            + "  • just-pulled, sour: \"Sour and thin — under-extracted. Want me to take the grind to 4.4? Milk could "
+            + "use a couple more seconds of stretch too.\" (silent log; apply only once they say yes)\n"
+            + "  • user approves: \"Done — grind's at 4.4 for the next one.\" (after apply_dial_change)\n"
+            + "  • earlierToday: \"Back for round two — Ethiopian's a nice afternoon call. You were at 5.0 last time, "
+            + "ran slow — want to go 5.2?\""
 
         // Proactivity level (user setting): what the assistant may VOLUNTEER (it always answers direct asks).
         var level = root._settings ? root._settings.proactivityLevel : "full"
         // Cooldown: on back-to-back shots of the SAME bean (within 6h) don't re-raise a proactive nudge.
-        // Close-out always engages — it's feedback on the shot just pulled, not a repeated greeting nudge.
+        // An undiscussed just-pulled shot always allows a nudge — it's feedback on that shot, not a repeat.
         var mayNudge = (level !== "off") && root._settings
-                       && (root._state === "closeOut" || root._settings.consumeProactiveNudge(root._bean, 6))
+                       && (root._hasUndiscussedShot || root._settings.consumeProactiveNudge(root._bean, 6))
         if (level === "off")
             persona += "\nOnly answer what the user asks; do NOT volunteer suggestions unless asked."
         else if (mayNudge)
@@ -386,8 +524,8 @@ Item {
                 + "stall and propose a strategy change (a different variable, or a different profile) rather than "
                 + "another micro-adjustment. Mention bean freshness/degassing only if clearly relevant."
         else
-            persona += "\nGreet warmly and briefly — you recently made a suggestion for this coffee, so don't "
-                + "re-raise it; only bring something up if the user asks or the data has clearly changed."
+            persona += "\nYou recently made a suggestion for this coffee, so don't re-raise it; only bring "
+                + "something up if the user asks or the data has clearly changed."
 
         // Web search (Anthropic only) — keep the persona truthful about what it can/can't reach.
         var webOn = !!(root._settings && root._settings.webSearchEnabled)
@@ -423,43 +561,143 @@ Item {
                 + "channeling\". Use get_bean_profile to pull ANY bean's freshness (days off roast / days since thaw) and "
                 + "history, or ANY profile's design intent, when it's not the one already in your context. Use "
                 + "detect_grind_drift when they ask why the same grind setting isn't pulling like it used to — it checks "
-                + "whether shots at a fixed setting have drifted faster/slower over time (grinder wear or aging beans)."
+                + "whether shots at a fixed setting have drifted faster/slower over time (grinder wear or aging beans). "
+                + "WHENEVER the user tells you how a shot TASTED or FELT — at close-out, mid-conversation, or an "
+                + "unprompted 'that last one was sour' — call log_tasting_feedback with what you can extract (their words "
+                + "in raw_text, plus any taste axes and a suggested adjustment you can infer). It saves to their private "
+                + "feedback history so you can reason over it across sessions; the shot and dial are recorded "
+                + "automatically, so you never supply a shot id. Don't announce that you're logging it — just do it and "
+                + "keep the conversation natural. The current bean's recent feedback is already in your data block "
+                + "(recentTastingFeedbackOnThisBean); reach for search_tasting_feedback only for a filtered lookup (e.g. "
+                + "'when did I last call this sour') or feedback on a DIFFERENT bean."
+                + "\nENDING THE CHAT — when the user clearly signals the conversation is over (a genuine wrap-up or "
+                + "farewell — 'that'll be all', 'thanks, I'm good', 'I'm done', 'that's it for now', 'bye', 'see "
+                + "you later', 'ok got it thanks'), give a SHORT warm sign-off ('Anytime — enjoy!') and call the "
+                + "end_conversation tool in the SAME reply. The app speaks your sign-off first and only then closes "
+                + "the panel, so the user never has to hit stop. Judge intent: do NOT end on a mid-conversation "
+                + "'thanks' that's clearly followed by more (a question, another request) — only on a real close-out. "
+                + "NEVER call it unprompted or to end a chat the user hasn't wrapped up."
 
         // dataBlock is the pre-formatted, combined context (dial-in + bean profile + profile guidance).
         var block = (dataBlock && dataBlock.length > 0) ? dataBlock : "recordedShots: 0"
 
-        var suggest = (level === "off" || !mayNudge)
-            ? "Someone's just stepped up to the machine this " + root._partOfDay() + ". Greet them with a simple, "
-              + "name-free hello — you don't know who it is yet, and no advice unless they ask."
-            : "Someone's just stepped up to the machine this " + root._partOfDay() + ". Greet them with a simple, "
-              + "name-free hello (you don't know who it is yet), then mention the single most useful thing if there is one."
-        var kickoff = (root._state === "closeOut")
-            ? "I just pulled a shot — how did it go?"
-            : suggest
-        // New-bean opener: no history for this bean → open with a grounded start from the bean profile.
-        if (root._state !== "closeOut" && block.indexOf("recordedShots: 0") >= 0)
-            kickoff += " (This is my first shot on this coffee — use the bean profile to suggest a starting point.)"
-        // Volatile bit goes in the kickoff (not the cached system prompt): the pending grind reminder.
+        // [barista-fork] sessionContext — the runtime facts the persona's greeting/close-out rules read.
+        // recency drives whether a greeting is even warranted; justPulledShot lets "that was sour" land on
+        // a barista who already knows a shot finished. This is CONTEXT, never an instruction to speak first.
+        // Recency is computed in the orchestrator (C++, single source of truth); QML delegates.
+        var bucket = (root._orch && typeof root._orch.recencyBucket === "function")
+                     ? root._orch.recencyBucket() : root._recencyBucket()
+        var minsSince = (root._orch && typeof root._orch.minutesSinceLastExchange === "function")
+                        ? root._orch.minutesSinceLastExchange() : -1
+        // The light "back for round two" nod is at most once per calendar day (earlierToday only).
+        var lightNodOk = (bucket === "earlierToday" && root._settings
+                          && typeof root._settings.consumeLightGreetForToday === "function")
+                         ? root._settings.consumeLightGreetForToday() : false
+        var sessionCtx = "sessionContext:\n"
+            + "  recency: " + bucket + "   (ongoing<60min | earlierToday | firstOfDay | firstEver)\n"
+            + "  minutesSinceLastChat: " + (minsSince < 0 ? "never" : String(minsSince)) + "\n"
+            + "  partOfDay: " + root._partOfDay() + "\n"
+            + "  lightNodOk: " + (lightNodOk ? "true" : "false") + "\n"
+        // A shot the barista already knows about (the old close-out, now pure context). shotDiscussed is
+        // false until the user talks taste; the model must NOT proactively ask about it.
+        if (root._hasUndiscussedShot) {
+            var agoMin = root._orch.lastShotAtMs > 0
+                         ? Math.max(0, Math.round((Date.now() - root._orch.lastShotAtMs) / 60000)) : 0
+            sessionCtx += "  justPulledShot: { minutesAgo: " + agoMin + ", discussed: false }\n"
+        }
+
+        // New-bean note: no history for this bean → the bean profile is the starting point (not "first shot ever").
+        var firstOnBean = (block.indexOf("recordedShots: 0") >= 0)
+        if (firstOnBean)
+            sessionCtx += "  firstShotOnThisBean: true   (use the bean profile to suggest a starting point)\n"
+        // Outstanding off-machine grind the user agreed to but never confirmed — fold into context so the
+        // barista can raise it naturally (no synthetic kickoff exists to carry it anymore).
         if (root._pendingGrind && root._pendingGrind.value)
-            kickoff += " (I earlier agreed to set the grinder to " + root._pendingGrind.value
-                     + " but haven't confirmed doing it — ask me early whether I actually set it.)"
+            sessionCtx += "  unconfirmedGrindSetting: " + root._pendingGrind.value
+                        + "   (user agreed to set this but hasn't confirmed — ask early if it came up)\n"
 
         root._conv.webSearchEnabled = webOn   // barista session only; reset by ask()/resetInMemory()
         root._conv.toolsEnabled = toolsOn     // barista session only; the query_shots opt-in (reset the same way)
         root._conv.verbatimPairs = 8          // keep more of the chat verbatim so casual context survives the session
-        root._stampTurn()
-        var _sys = persona + "\n\n" + block
-        if (!root._conv.beginSession(_sys, kickoff))   // SF-4: busy (a prior turn in flight) → retry when free
-            root._pendingBegin = { "sys": _sys, "kick": kickoff, "webOn": webOn, "toolsOn": toolsOn }
+        // PRIME AND WAIT: assemble the full system prompt but DO NOT begin the Claude session. The user
+        // speaks first — the first _send() calls beginSession(primed, userText). No synthetic kickoff, no
+        // machine-first turn. The barista is present-but-quiet until talked to.
+        root._primedSystemPrompt = persona + "\n\n" + sessionCtx + "\n" + block
+        root._primed = true
+        root._sessionBegun = false
+        root._thinking = false   // nothing is thinking — we're waiting on the user, not the model
+        // [barista-fork] If the user already spoke while we were building context (tap-and-talk), replay that
+        // first utterance now that we're primed — it begins the session with their real words (never dropped).
+        if (root._queuedFirstUtterance.length > 0) {
+            var q = root._queuedFirstUtterance
+            root._queuedFirstUtterance = ""
+            root._send(q)
+        }
     }
 
     function _send(text) {
         var t = (text || "").trim()
-        if (t.length === 0 || !root._conv || root._thinking)
+        if (t.length === 0 || !root._conv)
             return
-        if (root._state === "dormant")   // B3: dismissed → don't keep sending (e.g. late voice finals)
+        if (root._state !== "conversing")   // B3: dismissed → don't keep sending (e.g. late voice finals)
             return
+        // [barista-fork] tap-chat-and-talk: the user may speak DURING the context build (before the session
+        // is primed). Don't drop those words — hold the first utterance and replay it once primed. (Only the
+        // FIRST is queued; a second while still building is ignored, same as any mid-thinking utterance.)
+        if (root._awaitingContext) {
+            if (root._queuedFirstUtterance.length === 0)
+                root._queuedFirstUtterance = t
+            return
+        }
+        if (root._thinking)   // a turn is already in flight → drop (mirrors the prior behavior)
+            return
+        // [barista-fork] Stuck-flag guard: a new user utterance means the conversation is continuing, so any
+        // pending self-dismiss from a prior turn is void — clear it so it can never collapse this later turn.
+        root._endAfterReply = false
         var hasActions = (typeof Barista !== "undefined" && Barista.actions)
+        // [barista-fork] Non-Anthropic standalone farewell — mirror the undo/grind early intercepts. Providers
+        // without the end_conversation tool can't self-dismiss via the model, so the app handles a CLEAR, whole-
+        // string goodbye here: speak a short local sign-off and end the session, no model round-trip. Kept
+        // conservative (exact === match against the normalized utterance, like _isUndo) so a mid-chat "thanks"
+        // that's followed by more never trips it. Gated to non-Anthropic; on Anthropic the model owns the call.
+        var _sendIsAnthropic = typeof MainController !== "undefined" && MainController.aiManager
+                               && MainController.aiManager.selectedProvider === "anthropic"
+        if (!_sendIsAnthropic) {
+            var _f = t.toLowerCase().replace(/[^a-z0-9'\s]/g, " ").replace(/\s+/g, " ").trim()
+            var _isFarewell = _f === "bye" || _f === "bye bye" || _f === "goodbye"
+                              || _f === "see you" || _f === "see ya" || _f === "see you later"
+                              || _f === "that's all" || _f === "thats all"
+                              || _f === "that'll be all" || _f === "thatll be all"
+                              || _f === "that's it" || _f === "thats it"
+                              || _f === "that's it for now" || _f === "thats it for now"
+                              || _f === "i'm done" || _f === "im done" || _f === "all done"
+                              || _f === "ok thanks" || _f === "okay thanks"
+                              || _f === "thanks that's all" || _f === "thanks thats all"
+                              || _f === "got it thanks" || _f === "ok got it thanks" || _f === "okay got it thanks"
+            if (_isFarewell) {
+                var byeMsg = TranslationManager.translate("barista.bye", "Anytime — enjoy!")
+                root._message = byeMsg
+                if (root._orch && typeof root._orch.markExchangeCompleted === "function")
+                    root._orch.markExchangeCompleted()
+                root._speakSanitised(byeMsg)
+                // End after the sign-off: if it will speak, onSpeakingChanged(false) ends it; if muted/off, end now.
+                if (root._voice && root._voice.speaking)
+                    root._endAfterReply = true
+                else
+                    root._endSessionNow()
+                return
+            }
+        }
+        // [barista-fork] Spoken "undo" — the safety net for the ask→approve→apply flow. A SHORT undo phrase
+        // ("undo", "undo that", "put it back") reverses the last applied change locally, gated on canUndo() so
+        // "undo" with nothing to undo passes through to the model. Handled BEFORE the model turn (like the grind
+        // confirm), so it never round-trips. One level (the last change) is enough.
+        if (hasActions && Barista.actions.canUndo()) {
+            var _u = t.toLowerCase().replace(/[^a-z0-9'\s]/g, " ").trim()
+            var _isUndo = _u === "undo" || _u === "undo that" || _u === "undo it"
+                          || _u === "put it back" || _u === "revert" || _u === "never mind that"
+            if (_isUndo) { root._undoLast(); return }
+        }
         // Off-machine grind reminder confirm — ONLY intercept yes/no when the assistant's last line names the
         // pending grind VALUE as a WHOLE number (SF-6/SF-R3-3). A raw substring of a short value like "8" would
         // match "18 grams" and falsely record a grind on a "yes" to a dose question. The chip is the reliable path.
@@ -478,9 +716,14 @@ Item {
             if (c === 0) { root._skipPending(); return }
             root._awaitConfirm = false; root._pendingNext = null   // ambiguous → disarm + drop the stale chip (S11)
         }
-        // PERSISTENCE: capture the close-out taste feedback onto the shot record, so it's available to
-        // the AI on every future call — never starting over or guessing. (Recent-shot context includes it.)
-        if (root._state === "closeOut" && !root._closeOutRated && root._orch && root._orch.lastShotId > 0
+        // PERSISTENCE + CUE-CLEAR: when there's an undiscussed just-pulled shot and the user's reply
+        // DESCRIBES the taste, that's the report. Detect it once here so we can (a) clear the P3
+        // undiscussed-shot cue on BOTH provider paths and (b) on the NON-Anthropic path, write the taste
+        // onto the shot record. On the Anthropic path the model calls log_tasting_feedback itself (the
+        // feedback→KB tool), so we must NOT double-write the shot note — only clear the cue.
+        var _isAnthropic = typeof MainController !== "undefined" && MainController.aiManager
+                           && MainController.aiManager.selectedProvider === "anthropic"
+        if (root._hasUndiscussedShot && !root._closeOutRated && root._orch && root._orch.lastShotId > 0
                 && typeof MainController !== "undefined" && MainController.shotHistory) {
             // Only capture from a SUBSTANTIVE reply (not "ok"/"hang on") and match whole words, so "no good"
             // isn't scored as good and a one-word confirmation doesn't overwrite the notes (S9).
@@ -496,61 +739,101 @@ Item {
             var hasTaste = w.some(function(x) { return TASTE.indexOf(x) >= 0 })
             if (!isConfirmation && w.length >= 2 && hasTaste) {
                 root._closeOutRated = true
-                var neg = w.indexOf("no") >= 0 || w.indexOf("not") >= 0 || w.indexOf("bad") >= 0
-                var enj = (w.indexOf("sour") >= 0) ? 45
-                        : (w.indexOf("bitter") >= 0 || w.indexOf("burnt") >= 0) ? 55
-                        : (!neg && (w.indexOf("balanced") >= 0 || w.indexOf("good") >= 0 || w.indexOf("great") >= 0
-                            || w.indexOf("perfect") >= 0 || w.indexOf("nice") >= 0 || w.indexOf("delicious") >= 0
-                            || w.indexOf("love") >= 0 || w.indexOf("lovely") >= 0)) ? 82
-                        : 0
-                var meta = { "espressoNotes": t }
-                if (enj > 0)
-                    meta["enjoyment0to100"] = enj
-                MainController.shotHistory.requestUpdateShotMetadata(root._orch.lastShotId, meta)
+                // The shot has been discussed → clear the undiscussed-shot cue (both provider paths).
+                if (root._orch && typeof root._orch.markShotDiscussed === "function")
+                    root._orch.markShotDiscussed()
+                if (!_isAnthropic) {   // non-Anthropic has no log_tasting_feedback tool → write the shot note here
+                    var neg = w.indexOf("no") >= 0 || w.indexOf("not") >= 0 || w.indexOf("bad") >= 0
+                    var enj = (w.indexOf("sour") >= 0) ? 45
+                            : (w.indexOf("bitter") >= 0 || w.indexOf("burnt") >= 0) ? 55
+                            : (!neg && (w.indexOf("balanced") >= 0 || w.indexOf("good") >= 0 || w.indexOf("great") >= 0
+                                || w.indexOf("perfect") >= 0 || w.indexOf("nice") >= 0 || w.indexOf("delicious") >= 0
+                                || w.indexOf("love") >= 0 || w.indexOf("lovely") >= 0)) ? 82
+                            : 0
+                    var meta = { "espressoNotes": t }
+                    if (enj > 0)
+                        meta["enjoyment0to100"] = enj
+                    MainController.shotHistory.requestUpdateShotMetadata(root._orch.lastShotId, meta)
+                }
             }
         }
         root._thinking = true
         if (root._voiceInput && root._voiceInput.listening) root._voiceInput.pauseMic()
         root._stampTurn()
-        root._conv.followUp(t)
+        // [barista-fork] User-initiated: the FIRST utterance of a primed session BEGINS the Claude
+        // conversation with the user's real words as the first turn (no synthetic kickoff). Subsequent
+        // turns follow up. The persona's greeting rules fold any hello into this first reply.
+        if (root._primed && !root._sessionBegun) {
+            root._sessionBegun = true
+            root._primed = false
+            if (!root._conv.beginSession(root._primedSystemPrompt, t)) {   // busy (rare) → recover, don't wedge
+                root._sessionBegun = false
+                root._primed = true
+                root._thinking = false
+                root._message = TranslationManager.translate("barista.err",
+                    "Something went wrong — tap Chat or type to try again.")
+            }
+        } else {
+            root._conv.followUp(t)
+        }
     }
 
-    // Activation → start talking (+ bell on the greeting).
+    // [barista-fork] A NEW shot arrived (the orchestrator flips shotDiscussed→false) → re-arm the one-shot
+    // taste capture. The overlay now persists across pages, so _closeOutRated can't rely on _startConversation
+    // to reset it between back-to-back shots in one session (else the 2nd shot's taste is never captured and
+    // the cue never clears).
+    Connections {
+        target: root._orch
+        function onShotDiscussedChanged() {
+            if (root._orch && !root._orch.shotDiscussed)
+                root._closeOutRated = false
+        }
+        // [barista-fork] The barista called end_conversation (Anthropic self-dismiss on a spoken goodbye). Don't
+        // collapse instantly — arm _endAfterReply and let the sign-off (already in this same reply) speak first.
+        // onResponseReceived / onSpeakingChanged then ends the session once the sign-off finishes (never cut off).
+        // If we're not actually in a live conversation, ignore it (a stray late emit must not dismiss nothing).
+        function onDismissRequested() {
+            if (root._state === "conversing")
+                root._endAfterReply = true
+        }
+    }
+
+    // [barista-fork] engage (→ Conversing) → PRIME the context and open the mic (user-initiated: the user
+    // tapped/started talking). dismiss (→ Present) → close the session, back to the quiet tab. The barista
+    // never speaks first — priming assembles the system prompt and waits for the first utterance.
     Connections {
         target: root._orch
         function onStateChanged() {
             if (!root._orch) return
-            root._collapsed = false   // a new greeting/close-out opens expanded
-            if (root._orch.state === "greeting") {
-                // Launch the conversation FIRST — the decorative bell/avatar must never be able to
-                // throw before this runs (a load/anim error there would otherwise swallow the greeting).
-                root._startConversation()
-                if (root._voice) root._voice.playBell()
-                if (typeof avatar !== "undefined" && avatar && avatar.visible) avatar.greet()
-            } else if (root._orch.state === "closeOut") {
-                root._startConversation()
-            } else if (root._orch.state === "dormant") {
+            if (root._orch.state === "conversing") {
+                root._collapsed = false     // expand the panel
+                root._startConversation()   // warms context + primes the system prompt; waits for first utterance
+                root._openMic()             // tap-chat-and-talk: the mic opens with the panel
+            } else {   // "present"
                 root._showSettings = false
                 root._closeSession()
             }
         }
     }
-    // B1: the overlay only exists on the idle page, so a close-out/greeting whose state flipped while the
-    // overlay was destroyed (during the shot) never fired onStateChanged. Catch up on (re)creation.
+    // [barista-fork] On (re)creation, catch up to the orchestrator's state (the overlay may be recreated on
+    // page navigation). If a conversation is live, prime-and-wait is cheap+idempotent (no model call), so we
+    // discriminate on whether the persisted per-bean thread already has a reply: none → re-prime; some →
+    // restore the last line. (No SF-3 latch needed anymore — priming is safe to repeat.)
     Component.onCompleted: {
-        var active = (root._state === "greeting" || root._state === "closeOut")
-        // SF-3: catch up ONLY if this activation hasn't been started yet (the latch survives the overlay
-        // being destroyed/recreated on page navigation), so returning to idle doesn't re-run the greeting.
-        if (active && root._orch && !root._orch.sessionStarted)
+        if (root._state !== "conversing")
+            return
+        // Restore onto THIS bean's thread (an advisor visit on another page may have switched the key).
+        var prof2 = (typeof ProfileManager !== "undefined") ? ProfileManager.currentProfileName : ""
+        prof2 = prof2.replace(/^\*/, "").replace(/ \(modified\)$/, "")
+        if (typeof MainController !== "undefined" && MainController.aiManager && root._conv && !root._conv.busy)
+            MainController.aiManager.switchConversation(Settings.dye.dyeBeanBrand, Settings.dye.dyeBeanType, prof2)
+        var lastLine = root._conv ? root._stripBlock(root._conv.lastResponse || "") : ""
+        if (lastLine.length > 0) {   // thread already has history → restore the last line, keep the session
+            root._message = lastLine
+            root._sessionBegun = true
+            root._thinking = !!(root._conv && root._conv.busy)
+        } else {   // nothing said yet → (re)prime and wait for the first utterance
             root._startConversation()
-        else if (active && root._conv) {   // SF-R3-2 + NICE-2: already started → restore the last line, but on
-            // THIS bean's thread (an advisor visit on another page may have switched the conversation key).
-            var prof2 = (typeof ProfileManager !== "undefined") ? ProfileManager.currentProfileName : ""
-            prof2 = prof2.replace(/^\*/, "").replace(/ \(modified\)$/, "")
-            if (typeof MainController !== "undefined" && MainController.aiManager && !root._conv.busy)
-                MainController.aiManager.switchConversation(Settings.dye.dyeBeanBrand, Settings.dye.dyeBeanType, prof2)
-            root._message = root._stripBlock(root._conv.lastResponse || "")
-            root._thinking = !!root._conv.busy   // a turn still in flight → keep showing thinking until it lands
         }
     }
     // B3: if the user navigates away mid-chat, the Loader destroys us — close the mic/TTS session first.
@@ -560,30 +843,40 @@ Item {
         target: root._conv
         ignoreUnknownSignals: true
         function onResponseReceived(response) {
-            if (root._state === "dormant")   // BL-1: reply landed after dismiss (or it's an advisor turn) → ignore
+            if (root._state !== "conversing")   // BL-1: reply landed after dismiss (or it's an advisor turn) → ignore
                 return
             if (root._awaitingContext)   // N-R3-2: a preempted turn's reply during our context build → not ours
                 return
-            if (root._pendingBegin) { root._retryBegin(); return }   // SF-4: this is the preempted turn's stale reply
             root._message = root._stripBlock(response)   // hide the JSON action block from the display
             root._thinking = false
-            // Pause the mic BEFORE speaking (greeting path has no prior pause). speak() now flips
-            // `speaking` synchronously, so this + the post-speak check below are race-free.
+            // [barista-fork] Recency stamp: this reply completes a real user↔barista EXCHANGE (the session
+            // only ever begins on the user's first utterance now), so mark it — the single source of truth
+            // for greeting cadence next time. Routed through the orchestrator (one write path for lastExchangeAt).
+            if (root._orch && typeof root._orch.markExchangeCompleted === "function")
+                root._orch.markExchangeCompleted()
+            // [barista-fork] Every reply is now a reply TO THE USER (no unprompted machine-first greeting),
+            // so speak it per voiceEnabled — the old greetAloud-suppression of an opener no longer applies.
             if (root._voiceInput && root._voiceInput.listening) root._voiceInput.pauseMic()
             root._speakSanitised(response)               // (also strips fenced blocks before TTS)
             root._resetSilence()   // keep the mic session alive while we're conversing
-            // If this turn carried a concrete recommendation, arm apply-on-confirm + show the chip.
-            // Require an ACTIONABLE field — a bare "expectation" (or an echo the model tacked on) must not
-            // pop an "apply or skip?" with nothing to apply.
-            var nx = root._conv ? root._conv.structuredNextForLastAssistantTurnMap() : null
-            // Arm ONLY for a recommendation that actually CHANGES the recipe (not a bare "expectation"
-            // and not an echo of the current dose/yield/grind the model tacked on).
-            var actionable = root._nextDiffersFromCurrent(nx)
-            if (actionable) {
-                root._pendingNext = nx
-                root._awaitConfirm = true
+            // [barista-fork] Ask→approve→apply. On Anthropic the model applies via the apply_dial_change tool
+            // itself once the user approves — so we must NOT also arm the app-side voice-confirm (that would
+            // double-apply on "yes"). On NON-tool providers there's no tool, so we keep the app-side fallback:
+            // hold the proposed structuredNext as pending; if the user's next utterance is a clear affirmative,
+            // _send applies it. Require an ACTIONABLE field (not a bare "expectation" / an echo of current dial).
+            var _anthropic = typeof MainController !== "undefined" && MainController.aiManager
+                             && MainController.aiManager.selectedProvider === "anthropic"
+            if (!_anthropic) {
+                var nx = root._conv ? root._conv.structuredNextForLastAssistantTurnMap() : null
+                if (root._nextDiffersFromCurrent(nx)) {
+                    root._pendingNext = nx        // a real proposal → arm voice-approve ("yes" → apply)
+                    root._awaitConfirm = true
+                } else {
+                    root._pendingNext = null      // no actionable proposal this turn → disarm
+                    root._awaitConfirm = false
+                }
             } else {
-                root._pendingNext = null   // no actionable recommendation this turn → drop any stale chip (S11)
+                root._pendingNext = null          // tool path: the model owns applying; never arm app-side
                 root._awaitConfirm = false
             }
             // Turn done. If it will speak, `speaking` is already true → skip; onSpeakingChanged(false)
@@ -591,13 +884,18 @@ Item {
             if (root._voiceInput && root._voiceInput.listening
                     && (!root._voice || !root._voice.speaking))
                 root._voiceInput.resumeMic()
+            // [barista-fork] The barista called end_conversation this turn (dismissRequested armed _endAfterReply,
+            // and its sign-off is in THIS reply). If the reply is speaking, onSpeakingChanged(false) will end the
+            // session when playback finishes (never cutting off the sign-off). If voice is muted/off (nothing to
+            // speak), the sign-off is already rendered → end now. Mirrors the muted-resume idiom just above.
+            if (root._endAfterReply && (!root._voice || !root._voice.speaking))
+                root._endSessionNow()
         }
         function onErrorOccurred(error) {   // B2: never hang on "…" — surface it and recover the UI
-            if (root._state === "dormant")
+            if (root._state !== "conversing")
                 return
             if (root._awaitingContext)   // N-R3-2: a preempted turn's error during our context build → not ours
                 return
-            if (root._pendingBegin) { root._retryBegin(); return }   // SF-4: the preempted turn failed → open the greeting
             root._thinking = false
             root._message = (error && error.length > 0)
                 ? error
@@ -634,7 +932,7 @@ Item {
     // ---- Conversation card (centered, idle page only) --------------------------
     Rectangle {
         id: card
-        visible: (root._state === "greeting" || root._state === "closeOut") && !root._showSettings && !root._collapsed
+        visible: root._state === "conversing" && !root._showSettings && !root._collapsed   // P3 makes this the expanded dock
         // Right-docked side panel: leaves the machine controls usable on the left, gives the
         // conversation room to grow, and is out of the way (recommended tablet-assistant UX).
         anchors.right: parent.right
@@ -649,6 +947,20 @@ Item {
 
         Accessible.role: Accessible.StaticText
         Accessible.name: msgText.text
+
+        // [barista-fork] Panel backdrop for the screensaver: when the barista is EXPANDED over the screensaver,
+        // taps on EMPTY areas within the panel must NOT fall through to the screensaver's full-screen wake
+        // MouseArea underneath (which would wake the DE1). This eats taps within the PANEL bounds only. It's the
+        // first child (below cardCol), so buttons/fields/flickable above it still receive their events normally.
+        // Taps OUTSIDE the panel are unaffected → they still hit the screensaver and wake as the owner wants.
+        // Gated to the screensaver so normal (non-screensaver) panel behavior is completely unchanged.
+        MouseArea {
+            anchors.fill: parent
+            visible: root._screensaverActive
+            enabled: root._screensaverActive
+            onClicked: {}   // eat the tap (accepted by default) so it never reaches the screensaver wake below
+            onPressed: {}
+        }
 
         ColumnLayout {
             id: cardCol
@@ -671,11 +983,21 @@ Item {
                     font: Theme.labelFont
                     Accessible.ignored: true
                 }
+                // Gear → open the assistant settings panel (voice provider, ElevenLabs key + saved voices,
+                // names, bell). Uses the settings SVG (no unicode-glyph icons, per CLAUDE.md). Lives inside
+                // `card`, which only shows while conversing && !_showSettings && !_collapsed, so it self-hides
+                // once settings open.
+                AccessibleButton {
+                    subtle: true
+                    icon.source: "qrc:/icons/settings.svg"
+                    accessibleName: TranslationManager.translate("barista.settings.open", "Assistant settings")
+                    onClicked: root._showSettings = true
+                }
                 AccessibleButton {
                     subtle: true
                     text: "→"   // collapse to a thin edge tab, freeing the whole screen
                     accessibleName: TranslationManager.translate("barista.collapse", "Collapse assistant")
-                    onClicked: root._collapsed = true
+                    onClicked: { root._showSettings = false; root._collapsed = true }
                 }
                 AccessibleButton {
                     subtle: true
@@ -730,15 +1052,18 @@ Item {
                 }
             }
 
-            // Apply-on-confirm chip: appears when a recommendation (or a grind reminder) is pending.
+            // [barista-fork] Off-machine grind reminder chip ONLY. The recommendation Apply/Skip modal path was
+            // DELETED — dial changes now go ask→approve→apply (the barista proposes verbally, the user approves
+            // by voice/text, then it applies via the apply_dial_change tool or the app-side affirmative fallback).
+            // The grinder is physical, so its "did you set it?" Yes/No confirm stays a chip.
             ActionConfirmChip {
                 id: actionChip
                 Layout.fillWidth: true
-                grindMode: root._pendingGrind && root._pendingGrind.value ? true : false
+                visible: root._pendingGrind && root._pendingGrind.value ? true : false
+                grindMode: true
                 grindValue: root._pendingGrind ? (root._pendingGrind.value || "") : ""
-                next: root._pendingNext || ({})
-                onApplied: actionChip.grindMode ? root._resolveGrind(true) : root._applyPending()
-                onSkipped: actionChip.grindMode ? root._resolveGrind(false) : root._skipPending()
+                onApplied: root._resolveGrind(true)
+                onSkipped: root._resolveGrind(false)
             }
 
             // Live listening indicator — only when actually HEARING (not while thinking or speaking).
@@ -802,35 +1127,264 @@ Item {
         }
     }
 
-    // Collapsed state: a thin tab on the right edge. The whole screen is usable; tap to reopen.
+    // ---- Assistant settings card (right-docked, mirrors the conversation card) -------------------
+    // [barista-fork] The gear in the conversation-card header opens this. It hosts AssistantSettingsPanel
+    // (voice PROVIDER native/openai/elevenlabs, ElevenLabs key + saved-voices list + add-voice, names,
+    // bell, mute). Same right-dock geometry as `card`; a Back button returns to the conversation.
     Rectangle {
-        id: edgeTab
-        visible: (root._state === "greeting" || root._state === "closeOut") && !root._showSettings && root._collapsed
+        id: settingsCard
+        visible: root._showSettings && !root._collapsed
         anchors.right: parent.right
-        anchors.verticalCenter: parent.verticalCenter
-        width: Theme.scaled(34)
-        height: Theme.scaled(96)
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        anchors.margins: Theme.spacingMedium
+        width: Math.min(Theme.scaled(440), parent.width * 0.42)
         radius: Theme.cardRadius
         color: Theme.surfaceColor
         border.width: 1
         border.color: Theme.borderColor
 
-        Accessible.role: Accessible.Button
-        Accessible.name: TranslationManager.translate("barista.expand", "Open assistant")
-        Accessible.focusable: true
-        Accessible.onPressAction: root._collapsed = false
+        Accessible.role: Accessible.Grouping
+        Accessible.name: TranslationManager.translate("barista.settings.title", "Assistant")
 
-        Text {
+        // [barista-fork] Screensaver tap-eater (mirrors the conversation card's backdrop): while the barista
+        // is expanded over the screensaver, taps on empty settings area must NOT fall through to the
+        // full-screen screensaver wake beneath (which would wake the DE1). First child, below settingsCol.
+        MouseArea {
+            anchors.fill: parent
+            visible: root._screensaverActive
+            enabled: root._screensaverActive
+            onClicked: {}
+            onPressed: {}
+        }
+
+        ColumnLayout {
+            id: settingsCol
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            anchors.margins: Theme.spacingLarge
+            spacing: Theme.spacingMedium
+
+            // Header: back → conversation
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: Theme.scaled(6)
+                AccessibleButton {
+                    subtle: true
+                    icon.source: "qrc:/icons/back.svg"   // no unicode-glyph icons (CLAUDE.md); ← isn't a safe glyph
+                    accessibleName: TranslationManager.translate("common.button.back", "Back")
+                    onClicked: root._showSettings = false
+                }
+                Text {
+                    text: TranslationManager.translate("barista.settings.title", "Assistant")
+                    Layout.fillWidth: true
+                    color: Theme.textSecondaryColor
+                    font: Theme.labelFont
+                    Accessible.ignored: true
+                }
+            }
+
+            // AssistantSettingsPanel is a self-scrolling Rectangle: it draws its own surface/border, owns its
+            // own Flickable, and CAPS ITS OWN HEIGHT to min(content, parent.height − margins) — its
+            // implicitHeight is 0 (it's a Rectangle). So do NOT wrap it in another Flickable (contentHeight
+            // would be 0 → nothing scrolls, and nested vertical Flickables fight the drag), and do NOT bind
+            // its height (Layout.fillHeight/anchors.fill) — that would overwrite its own height binding. Give
+            // it a plain fill-height container as `parent`: the panel then reads that container's height and
+            // self-sizes/scrolls correctly. Its own "×" emits closed() → back to the conversation, like Back.
+            Item {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                AssistantSettingsPanel {
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    onClosed: root._showSettings = false
+                }
+            }
+        }
+    }
+
+    // [barista-fork] ALWAYS-PRESENT collapsed dock — the quiet persistent presence. Shows whenever the panel
+    // isn't expanded (i.e. present, OR conversing-but-collapsed) and settings aren't open. Tap = the whole
+    // "tap chat and talk" gesture: engage the barista (opens the conversation + mic) or, if already
+    // conversing, just re-expand. A subtle pulse bids for attention when a just-pulled shot is undiscussed
+    // (replaces the old spoken close-out) — gated on proactivityLevel so "off" never nags.
+    Rectangle {
+        id: edgeTab
+        // [barista-fork] Hidden during the screensaver-collapse state — the faint drifting avatar takes over
+        // there (burn-in safety). Otherwise the normal collapsed-dock condition (present, or conversing-collapsed).
+        visible: !root._showSettings && !(root._state === "conversing" && !root._collapsed)
+                 && !root._screensaverDock
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        width: Theme.scaled(52)
+        height: Theme.scaled(108)
+        radius: Theme.cardRadius
+        color: Theme.surfaceColor
+        border.width: 1
+        border.color: root._pulseCue ? Theme.primaryColor : Theme.borderColor
+
+        // Non-verbal bid for attention: pulse the tab border/dot when a shot is undiscussed and the user's
+        // proactivity level allows a cue at all ("off" = never). This is the ONLY thing that "speaks" for a
+        // finished shot now — no unprompted TTS.
+        readonly property bool _pulseCue: root._hasUndiscussedShot && root._settings
+                                          && root._settings.proactivityLevel !== "off"
+
+        Accessible.role: Accessible.Button
+        Accessible.name: root._pulseCue
+            ? TranslationManager.translate("barista.expand.shot", "Talk to the assistant about your last shot")
+            : TranslationManager.translate("barista.expand", "Talk to the assistant")
+        Accessible.focusable: true
+        Accessible.onPressAction: root._tapDock()
+
+        // The avatar as the tab face — a familiar presence, not a chevron. Falls back to the app icon glyph.
+        Loader {
+            id: tabAvatar
             anchors.centerIn: parent
-            text: "←"   // pull the panel back out
-            color: Theme.textColor
-            font: Theme.subtitleFont
+            width: Theme.scaled(40); height: Theme.scaled(40)
+            active: root._settings && root._settings.avatarEnabled
+            source: "qrc:/qml/assistant/BaristaAvatar.qml"
+            onLoaded: if (item) item.mode = "idle"
+        }
+        Image {
+            anchors.centerIn: parent
+            visible: !(root._settings && root._settings.avatarEnabled)
+            source: "qrc:/icons/barista.svg"
+            sourceSize.height: Theme.scaled(28)
+            fillMode: Image.PreserveAspectFit
             Accessible.ignored: true
         }
+
+        // The attention pulse — a soft breathing highlight on the tab while a shot is undiscussed.
+        SequentialAnimation on opacity {
+            running: edgeTab._pulseCue
+            loops: Animation.Infinite
+            NumberAnimation { from: 1.0; to: 0.55; duration: 900; easing.type: Easing.InOutSine }
+            NumberAnimation { from: 0.55; to: 1.0; duration: 900; easing.type: Easing.InOutSine }
+            onRunningChanged: if (!running) edgeTab.opacity = 1.0
+        }
+
         MouseArea {
             anchors.fill: parent
             cursorShape: Qt.PointingHandCursor
-            onClicked: root._collapsed = false
+            onClicked: root._tapDock()
         }
+    }
+
+    // [barista-fork] SCREENSAVER PRESENCE — the faint drifting avatar. Replaces the edge tab while the
+    // screensaver is up and the dock is collapsed. Minimal chrome (just the avatar, or a small dot if avatars
+    // are off), low opacity (~0.4) so it barely lights the LCD and rides the hardware backlight dim. It's
+    // repositioned every ~30s (fade out → hop to the next safe position → fade in) so no pixel stays lit
+    // continuously — burn-in safety. It's STATIONARY between hops so it stays easy to tap. Tapping it engages
+    // the barista OVER the screensaver; the tap is consumed by this MouseArea (accepted by default), so it does
+    // NOT reach the screensaver's full-screen wake MouseArea below → the DE1 stays asleep.
+    Item {
+        id: driftingAvatar
+        visible: root._screensaverDock
+        // Sized for a FORGIVING tap target on the screensaver: the item (and its fill MouseArea) is the
+        // touch area, deliberately large (~2.5× the old 44px) so tapping near the icon opens the barista
+        // instead of missing and hitting the screensaver's wake — waking the machine by accident.
+        width: Theme.scaled(112)
+        height: Theme.scaled(112)
+        opacity: 0.4
+
+        // Cycle through a fixed set of scattered positions inside a safe inset (Math.random may be unavailable
+        // in some QML contexts, so we drive position from a rotating index — deterministic and always spread).
+        // Fractions are kept well inside the edges (~15–80%) and avoid the dead center where screensaver content
+        // usually sits. Computed from the LIVE overlay width/height, not hardcoded px.
+        property int _driftIndex: 0
+        readonly property var _driftXFracs: [0.18, 0.72, 0.30, 0.80, 0.22, 0.65]
+        readonly property var _driftYFracs: [0.20, 0.28, 0.75, 0.68, 0.55, 0.18]
+        function _placeAt(i) {
+            if (root.width <= 0 || root.height <= 0) {
+                // Overlay not laid out yet (e.g. created directly into screensaver-dock state):
+                // retry once it has a size so the avatar never sits stuck at 0,0. Converges as
+                // soon as layout gives a non-zero width.
+                Qt.callLater(function() { driftingAvatar._placeAt(i) })
+                return
+            }
+            var n = _driftXFracs.length
+            var k = ((i % n) + n) % n
+            driftingAvatar.x = Math.round(root.width * _driftXFracs[k] - driftingAvatar.width / 2)
+            driftingAvatar.y = Math.round(root.height * _driftYFracs[k] - driftingAvatar.height / 2)
+        }
+
+        // Smooth fade for the drift hop (and for appear/disappear).
+        Behavior on opacity { NumberAnimation { duration: 300; easing.type: Easing.InOutQuad } }
+
+        // When the screensaver-collapse state turns on, drop the avatar at a known-good spot immediately
+        // (so it never sits stuck at 0,0 or mid-fade) and reset opacity to the resting faint level.
+        onVisibleChanged: {
+            if (visible) {
+                driftingAvatar._placeAt(driftingAvatar._driftIndex)
+                driftingAvatar.opacity = 0.4
+            }
+        }
+        Component.onCompleted: if (visible) driftingAvatar._placeAt(driftingAvatar._driftIndex)
+
+        // The avatar face (falls back to a small dot when avatars are disabled).
+        Loader {
+            id: driftAvatarFace
+            anchors.centerIn: parent
+            width: Theme.scaled(100); height: Theme.scaled(100)
+            active: root._settings && root._settings.avatarEnabled
+            source: "qrc:/qml/assistant/BaristaAvatar.qml"
+            onLoaded: if (item) item.mode = "idle"
+        }
+        Rectangle {   // dot fallback (no avatar) — kept tiny and dim
+            anchors.centerIn: parent
+            visible: !(root._settings && root._settings.avatarEnabled)
+            width: Theme.scaled(36); height: Theme.scaled(36)
+            radius: width / 2
+            color: Theme.primaryColor
+        }
+
+        Accessible.role: Accessible.Button
+        Accessible.name: TranslationManager.translate("barista.expand", "Talk to the assistant")
+        Accessible.focusable: true
+        Accessible.onPressAction: root._tapDock()
+
+        MouseArea {
+            anchors.fill: parent
+            cursorShape: Qt.PointingHandCursor
+            onClicked: root._tapDock()   // accepted → does NOT reach the screensaver wake beneath
+        }
+    }
+
+    // [barista-fork] Drift Timer — a legitimate periodic UI timer. Runs ONLY in the screensaver-collapse state
+    // (stopped when a conversation is open or the screensaver is gone). Each tick fades the avatar out, advances
+    // to the next scattered safe position, and fades it back in, so no pixel stays continuously lit.
+    Timer {
+        id: driftTimer
+        interval: 30000
+        repeat: true
+        running: root._screensaverDock
+        onTriggered: {
+            driftingAvatar.opacity = 0.0                 // fade out
+            driftingAvatar._driftIndex = driftingAvatar._driftIndex + 1
+            fadeInDelay.restart()
+        }
+    }
+    // Move + fade back in after the fade-out completes (Behavior duration = 300ms). Keeping the reposition on
+    // this short one-shot (not inside the drift interval) means the avatar never visibly "jumps" while lit.
+    Timer {
+        id: fadeInDelay
+        interval: 320
+        repeat: false
+        onTriggered: {
+            if (!root._screensaverDock) return
+            driftingAvatar._placeAt(driftingAvatar._driftIndex)   // hop to the new safe position while faded out
+            driftingAvatar.opacity = 0.4                          // fade back in
+        }
+    }
+
+    // [barista-fork] The dock tap: if present → engage() (onStateChanged expands + opens the mic); if
+    // already conversing → just re-expand the panel. One gesture, "tap chat and talk".
+    function _tapDock() {
+        root._collapsed = false
+        if (root._state !== "conversing" && root._orch)
+            root._orch.engage()
     }
 }

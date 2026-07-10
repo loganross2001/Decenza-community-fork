@@ -31,6 +31,15 @@ target_sources(Decenza PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristatools.cpp
 )
 
+# FeedbackStorage owns the barista's verbal-feedback KB (separate assistant.db). Registered
+# UNCONDITIONALLY like BaristaTools: baristatools.cpp (unconditional) references FeedbackStorage
+# symbols in the log_tasting_feedback/search_tasting_feedback executors, and aimanager.cpp reads
+# it for the proactive bean-feedback context block, so a DECENZA_BARISTA=OFF build must still link.
+target_sources(Decenza PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/feedbackstorage.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/feedbackstorage.cpp
+)
+
 if(DECENZA_BARISTA)
     target_sources(Decenza PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristamodule.h

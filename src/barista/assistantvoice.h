@@ -23,7 +23,15 @@ class AssistantVoice : public QObject {
     Q_PROPERTY(bool speaking READ speaking NOTIFY speakingChanged)   // for muting the mic while it talks
 
 public:
-    AssistantVoice(AssistantSettings* settings, Settings* appSettings, QObject* parent = nullptr);
+    // [barista-fork] Which voice profile this instance reads from AssistantSettings. Barista = the
+    // conversational assistant voice; Coaching = the SEPARATE voice for the live steam + espresso coaches.
+    // Both share the ElevenLabs API key, saved-voices list, and voiceSpeed — only the provider + the three
+    // per-provider voice ids differ. Crucially, the Coaching role does NOT honor voiceEnabled() (the
+    // barista's mute): the live coaches have their own upstream enable gates.
+    enum class Role { Barista, Coaching };
+
+    AssistantVoice(AssistantSettings* settings, Settings* appSettings,
+                   Role role = Role::Barista, QObject* parent = nullptr);
 
     QStringList availableVoices() const;   // voice names, for the picker
     QString voiceName() const;             // the currently active voice's name
@@ -42,6 +50,13 @@ signals:
     void speakingChanged();
 
 private:
+    // [barista-fork] Role-effective settings reads — resolve to the barista OR the coaching getters
+    // depending on m_role, so all the synth code below stays role-agnostic.
+    QString effectiveProvider() const;
+    QString effectiveVoiceName() const;
+    QString effectiveOpenaiVoice() const;
+    QString effectiveElevenlabsVoiceId() const;
+
     void applyVoiceFromSettings();
     void updateSpeaking();
     void synthOpenAI(const QString& text);       // POST OpenAI TTS → play the returned mp3
@@ -57,6 +72,7 @@ private:
     QNetworkAccessManager* m_net = nullptr;
     AssistantSettings* m_settings = nullptr;
     Settings* m_appSettings = nullptr;
+    Role m_role = Role::Barista;
     bool m_speaking = false;
     // [barista-fork] cloud TTS (QMediaPlayer) only reports Playing once the network POST completes; this
     // holds `speaking` true across that gap so the mic stays paused. m_speakGen discards a stale/late reply.

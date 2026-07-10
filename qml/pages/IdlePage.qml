@@ -407,9 +407,13 @@ Page {
     // Auto-tare scale and announce presets when activePresetFunction changes
     onActivePresetFunctionChanged: {
         _publishOperationMode()
-        // [barista-fork] hook — greet + suggest a plan when Espresso is selected (proactive barista)
-        if (activePresetFunction === "espresso" && typeof Barista !== "undefined" && Barista.orchestrator)
-            Barista.orchestrator.wake()
+        // [barista-fork] hook — Espresso selection is now a CONTEXT update, not a conversation trigger
+        // (user-initiated model): the barista no longer cold-greets on select. It refreshes what the
+        // barista knows (current bean/profile) so a later user-initiated chat is already grounded; it
+        // NEVER speaks here — noteEspressoSelected() is an intentionally silent context hook.
+        if (activePresetFunction === "espresso" && typeof Barista !== "undefined" && Barista.orchestrator
+                && typeof Barista.orchestrator.noteEspressoSelected === "function")
+            Barista.orchestrator.noteEspressoSelected()
         // Auto-tare when steam pills appear so the scale starts at 0
         // before the user places the pitcher
         if (activePresetFunction === "steam" && typeof MachineState !== "undefined") {

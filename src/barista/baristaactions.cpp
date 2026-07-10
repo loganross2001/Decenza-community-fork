@@ -80,8 +80,12 @@ QVariantMap BaristaActions::applyFromNext(const QVariantMap& next, qint64 anchor
     }
     // Grinder is off-machine — queue it, don't write the dial (the shot must not claim a grind the
     // user never physically set). Resolved to Settings.dye.dyeGrinderSetting on confirmation.
+    // Undo snapshots the WHOLE pending queue BEFORE enqueuing (grind lives in the queue, not the dial —
+    // undoLast() restores the pre-enqueue list, cleanly reversing the supersede/append enqueueGrind does).
     const QString grind = next.value("grinderSetting").toString().trimmed();
     if (dye && !grind.isEmpty()) {
+        m_undo["pendingBefore_had"] = true;
+        m_undo["pendingBefore"] = loadPending();
         enqueueGrind(grind, anchorShotId);
         queued << QStringLiteral("grinder %1").arg(grind);
     }
@@ -111,7 +115,16 @@ void BaristaActions::undoLast() {
         else
             brew->setBrewYieldOverride(0);   // S3: clear the override we created (0 = no override)
     }
+    // Restore the off-machine grind queue to its pre-enqueue state (reverses the supersede+append).
+    if (m_undo.value("pendingBefore_had").toBool())
+        savePending(m_undo.value("pendingBefore").toList());
     m_undo.clear();
+}
+
+bool BaristaActions::undoLastAutoApply() {
+    if (m_undo.isEmpty()) return false;
+    undoLast();   // one-level snapshot restore (dose/yield/temp override + the queued grind)
+    return true;
 }
 
 // ── confirmation parsing ─────────────────────────────────────────────────────────

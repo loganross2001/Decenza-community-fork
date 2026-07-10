@@ -19,7 +19,8 @@
 #include <QJsonObject>
 #include <QJsonDocument>
 
-AssistantVoice::AssistantVoice(AssistantSettings* settings, Settings* appSettings, QObject* parent)
+AssistantVoice::AssistantVoice(AssistantSettings* settings, Settings* appSettings,
+                               Role role, QObject* parent)
     : QObject(parent)
     , m_tts(new QTextToSpeech(this))
     , m_bell(new QSoundEffect(this))
@@ -28,11 +29,16 @@ AssistantVoice::AssistantVoice(AssistantSettings* settings, Settings* appSetting
     , m_audioBuffer(new QBuffer(this))
     , m_net(new QNetworkAccessManager(this))
     , m_settings(settings)
-    , m_appSettings(appSettings) {
+    , m_appSettings(appSettings)
+    , m_role(role) {
     m_player->setAudioOutput(m_audioOut);
     applyVoiceFromSettings();
     if (m_settings) {
-        connect(m_settings, &AssistantSettings::voiceNameChanged, this, [this] {
+        // Re-apply the native voice when THIS role's voice-name setting changes.
+        void (AssistantSettings::*nameSignal)() = (m_role == Role::Coaching)
+                               ? &AssistantSettings::coachingVoiceNameChanged
+                               : &AssistantSettings::voiceNameChanged;
+        connect(m_settings, nameSignal, this, [this] {
             applyVoiceFromSettings();
             emit voiceNameChanged();
         });
@@ -80,6 +86,33 @@ QString AssistantVoice::voiceName() const {
     return m_tts ? m_tts->voice().name() : QString();
 }
 
+// [barista-fork] Role-effective settings reads. The barista and coaching voices differ only in provider +
+// the three per-provider voice ids; everything else (keys, saved-voices list, speed) is shared.
+QString AssistantVoice::effectiveProvider() const {
+    if (!m_settings)
+        return QStringLiteral("native");
+    return m_role == Role::Coaching ? m_settings->coachingTtsProvider() : m_settings->ttsProvider();
+}
+
+QString AssistantVoice::effectiveVoiceName() const {
+    if (!m_settings)
+        return QString();
+    return m_role == Role::Coaching ? m_settings->coachingVoiceName() : m_settings->voiceName();
+}
+
+QString AssistantVoice::effectiveOpenaiVoice() const {
+    if (!m_settings)
+        return QStringLiteral("nova");
+    return m_role == Role::Coaching ? m_settings->coachingOpenaiVoice() : m_settings->openaiVoice();
+}
+
+QString AssistantVoice::effectiveElevenlabsVoiceId() const {
+    if (!m_settings)
+        return QString();
+    return m_role == Role::Coaching ? m_settings->coachingElevenlabsVoiceId()
+                                    : m_settings->elevenlabsVoiceId();
+}
+
 QString AssistantVoice::openaiKey() const {
     // Prefer an explicit key from the assistant settings; else reuse the app's configured OpenAI key.
     if (m_settings && !m_settings->openaiApiKey().isEmpty())
@@ -88,14 +121,19 @@ QString AssistantVoice::openaiKey() const {
 }
 
 void AssistantVoice::speak(const QString& text) {
-    if (!m_settings || !m_settings->voiceEnabled() || text.trimmed().isEmpty())
+    if (!m_settings || text.trimmed().isEmpty())
+        return;
+    // The barista voice honors voiceEnabled() (the barista mute). The COACHING voice deliberately does NOT
+    // — the live coaches have their own upstream enable gates (extractionAnnouncements for the shot coach,
+    // steamCoachAudioEnabled for the steam coach), so muting the barista must not silence coaching.
+    if (m_role == Role::Barista && !m_settings->voiceEnabled())
         return;
     // Mark speaking BEFORE dispatch so speakingChanged(true) fires synchronously — the mic pauses now,
     // not after the cloud-TTS POST finally starts playback (which is the "listening while talking" bug).
     ++m_speakGen;
     m_pendingSynth = true;
     updateSpeaking();
-    const QString provider = m_settings->ttsProvider();
+    const QString provider = effectiveProvider();
     if (provider == QLatin1String("openai"))
         synthOpenAI(text);
     else if (provider == QLatin1String("elevenlabs"))
@@ -121,7 +159,7 @@ void AssistantVoice::synthOpenAI(const QString& text) {
     req.setRawHeader("Authorization", "Bearer " + key.toUtf8());
     const QJsonObject body{
         {QStringLiteral("model"), QStringLiteral("tts-1")},
-        {QStringLiteral("voice"), m_settings->openaiVoice()},
+        {QStringLiteral("voice"), effectiveOpenaiVoice()},
         {QStringLiteral("input"), text},
         {QStringLiteral("response_format"), QStringLiteral("mp3")},
         {QStringLiteral("speed"), m_settings->voiceSpeed()},    // user-adjustable pace
@@ -147,7 +185,7 @@ void AssistantVoice::synthElevenLabs(const QString& text) {
         return;
     }
     QNetworkRequest req(QUrl(QStringLiteral("https://api.elevenlabs.io/v1/text-to-speech/%1")
-                             .arg(m_settings->elevenlabsVoiceId())));
+                             .arg(effectiveElevenlabsVoiceId())));
     req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
     req.setRawHeader("xi-api-key", key.toUtf8());
     const QJsonObject body{
@@ -179,8 +217,12 @@ void AssistantVoice::playMp3(const QByteArray& audio) {
     // ALTERNATE the filename each utterance: reusing one path makes the Android backend cache the prior
     // clip's DURATION and stop the new (longer) audio early (the cut-off-mid-sentence bug), and setSource
     // with the same URL is a no-op in Qt. A fresh path forces a clean reload with the correct duration.
+    // Namespace the temp path by ROLE: the barista and coaching instances both cycle through the same
+    // two-file rotation, so an un-namespaced path would let them clobber each other's clips — reviving the
+    // Android "cut off mid-sentence" duration-cache bug across instances. A per-role prefix keeps them apart.
+    const QString rolePrefix = (m_role == Role::Coaching) ? QStringLiteral("c") : QStringLiteral("b");
     const QString path = QDir::tempPath()
-                       + QStringLiteral("/decenza_tts_%1.mp3").arg(m_ttsFileSeq++ % 2);
+                       + QStringLiteral("/decenza_tts_%1%2.mp3").arg(rolePrefix).arg(m_ttsFileSeq++ % 2);
     QFile f(path);
     if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
         m_pendingSynth = false; updateSpeaking();
@@ -204,15 +246,21 @@ void AssistantVoice::stop() {
 }
 
 void AssistantVoice::setVoiceByName(const QString& name) {
-    // Persist; the settings signal drives applyVoiceFromSettings() + voiceNameChanged().
-    if (m_settings)
+    // Persist THIS role's native voice name; the settings signal drives applyVoiceFromSettings() + voiceNameChanged().
+    if (!m_settings)
+        return;
+    if (m_role == Role::Coaching)
+        m_settings->setCoachingVoiceName(name);
+    else
         m_settings->setVoiceName(name);
 }
 
 void AssistantVoice::preview() {
-    const QString who = m_settings ? m_settings->assistantName() : QStringLiteral("Coach");
-    const QString sample = QStringLiteral("Hi, I'm %1. Ready when you are.").arg(who);
-    const QString provider = m_settings ? m_settings->ttsProvider() : QStringLiteral("native");
+    const QString sample = (m_role == Role::Coaching)
+        ? QStringLiteral("On pace — about ten seconds to go.")   // a representative coaching cue
+        : QStringLiteral("Hi, I'm %1. Ready when you are.")
+              .arg(m_settings ? m_settings->assistantName() : QStringLiteral("Coach"));
+    const QString provider = effectiveProvider();
     if (provider == QLatin1String("openai"))
         synthOpenAI(sample);
     else if (provider == QLatin1String("elevenlabs"))
@@ -245,7 +293,7 @@ void AssistantVoice::previewBell(const QString& name) {
 void AssistantVoice::applyVoiceFromSettings() {
     if (!m_tts || !m_settings)
         return;
-    const QString want = m_settings->voiceName();
+    const QString want = effectiveVoiceName();
     if (want.isEmpty())
         return;   // keep the engine default
     for (const QVoice& v : m_tts->availableVoices()) {

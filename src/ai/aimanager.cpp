@@ -12,6 +12,7 @@
 #include "../network/visualizeruploader.h"
 #include "../history/shothistorystorage.h"
 #include "../barista/baristatools.h"
+#include "../barista/feedbackstorage.h"   // [barista-fork] verbal-feedback KB (proactive context + write tool)
 
 #include <QNetworkAccessManager>
 #include <QStandardPaths>
@@ -117,7 +118,29 @@ void AIManager::createProviders()
     // setShotHistoryStorage), so capturing `this` and forwarding at call time preserves the original behavior.
     anthropic->setClientTools(BaristaTools::toolDefinitions(),
         [this](const QString& name, const QJsonObject& input, std::function<void(QJsonValue)> done) {
-            BaristaTools::executeTool(m_shotHistory, name, input, std::move(done));
+            // [barista-fork] Closed-loop bridge (issue #1053 regression): when the model APPLIES a dial change by
+            // CALLING apply_dial_change (instead of emitting a fenced ```json structuredNext block), capture the
+            // applied dial fields as a pending structuredNext for the CURRENT turn so it still enters the
+            // recentAdvice audit. The field names (grinderSetting/doseG/targetWeightG/ratio/temperatureC) already
+            // match what the fenced-block audit reads (computeAdherence keys on grinderSetting/doseG), so the
+            // tool-applied object is auditable the same way. AIConversation::onAnalysisComplete take()s this at
+            // finalization and uses it ONLY when no fenced block was emitted (fenced wins → no double-count).
+            // Captures the raw tool INPUT, not the executor's applied/queued/rejected result — see the
+            // known-limitation note in this fix's report.
+            if (name == QLatin1String("apply_dial_change")) {
+                QJsonObject applied;
+                for (const char* k : {"grinderSetting", "doseG", "targetWeightG", "ratio", "temperatureC"}) {
+                    if (input.contains(QLatin1String(k)))
+                        applied.insert(QLatin1String(k), input.value(QLatin1String(k)));
+                }
+                if (!applied.isEmpty())
+                    m_pendingToolStructuredNext = applied;
+            }
+            // [barista-fork] Thread the feedback KB + the app-side anchor/dial snapshot into the executor so
+            // log_tasting_feedback stamps shot_id + bean/profile/dial itself (never from the model).
+            BaristaTools::executeTool(m_shotHistory, m_feedbackStorage, m_applyDialHandler,
+                                      m_endConversationHandler, m_lastBaristaAnchorSnapshot,
+                                      name, input, std::move(done));
         });
     m_anthropicProvider.reset(anthropic);
 
@@ -1155,14 +1178,17 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
     }
 
     m_lastBaristaAnchorId = 0;   // clear now so a dropped/superseded callback can't leave a stale anchor (S1)
+    m_lastBaristaAnchorSnapshot.clear();   // [barista-fork] same reason for the write-tool provenance snapshot
     const QString dbPath = m_shotHistory->databasePath();
+    // [barista-fork] assistant.db path for the proactive feedback block (a SEPARATE DB from shots.db).
+    const QString feedbackDbPath = m_feedbackStorage ? m_feedbackStorage->databasePath() : QString();
     QPointer<AIManager> self(this);
     ++m_baristaContextSerial;
     int serial = m_baristaContextSerial;
 
     // self is captured by value but ONLY dereferenced inside the main-thread callback (QPointer is
     // not thread-safe). See requestRecentShotContext for the same discipline.
-    QThread* thread = QThread::create([self, dbPath, beanBrand, beanType, profileName, serial]() {
+    QThread* thread = QThread::create([self, dbPath, feedbackDbPath, beanBrand, beanType, profileName, serial]() {
         qint64 anchorId = 0;
         bool beanFilterMissed = false;
         ShotProjection shot;
@@ -1173,6 +1199,7 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
         QJsonObject grinderContext;
         QJsonObject grinderCalibration;
         QJsonObject fullHistory;
+        QJsonArray beanFeedback;   // [barista-fork] recent verbal tasting feedback on the CURRENT bean
 
         withTempDb(dbPath, "barista_ctx", [&](QSqlDatabase& db) {
             // Anchor: latest shot for the current bean; else latest overall (robust to bean-name drift).
@@ -1253,12 +1280,66 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
             }
         });
 
+        // [barista-fork] Proactive retrieval (advisor refinement #3): fold the user's recent VERBAL tasting
+        // feedback on the CURRENT bean into the context block EVERY turn — far more reliable than depending on
+        // the model to call search_tasting_feedback. This reads assistant.db (a DIFFERENT DB from shots.db), so
+        // it opens its OWN withTempDb; the read shares FeedbackStorage::fetchFeedbackForBeanStatic with the
+        // async request path + the search tool so all three read paths use one query.
+        if (!feedbackDbPath.isEmpty() && (!beanBrand.isEmpty() || !beanType.isEmpty())) {
+            withTempDb(feedbackDbPath, "barista_feedback_ctx", [&](QSqlDatabase& db) {
+                const QVariantList rows = FeedbackStorage::fetchFeedbackForBeanStatic(
+                    db, beanBrand, beanType, QString(), 5);
+                for (const QVariant& r : rows) {
+                    const QVariantMap m = r.toMap();
+                    QJsonObject o;
+                    o["date"] = QDateTime::fromSecsSinceEpoch(m.value("createdAt").toLongLong())
+                                    .toString(QStringLiteral("yyyy-MM-dd"));
+                    if (const int rating = m.value("rating0to100").toInt(); rating > 0)
+                        o["rating0to100"] = rating;
+                    if (const QString raw = m.value("rawText").toString(); !raw.isEmpty())
+                        o["saidAboutTaste"] = raw.left(240);
+                    if (const QString desc = m.value("descriptors").toString(); !desc.isEmpty())
+                        o["descriptors"] = desc;
+                    const QJsonObject sj = QJsonDocument::fromJson(
+                        m.value("structuredJson").toString().toUtf8()).object();
+                    if (sj.contains(QStringLiteral("suggested_adjustment")))
+                        o["suggestedAdjustment"] = sj.value(QStringLiteral("suggested_adjustment"));
+                    beanFeedback.append(o);
+                }
+            });
+        }
+
         QMetaObject::invokeMethod(qApp, [self, serial, shot, anchorId, beanFilterMissed,
+                                         beanBrand, beanType, profileName, beanFeedback,
                                          dialInSessions, bestRecentShot, beanBestShot, grinderContext,
                                          grinderCalibration, recentAdvice, fullHistory]() {
             if (!self || serial != self->m_baristaContextSerial)
                 return;   // stale — a newer request superseded this one
             self->m_lastBaristaAnchorId = (anchorId > 0 && shot.isValid()) ? anchorId : 0;
+
+            // [barista-fork] Build the write-tool provenance snapshot (advisor blocker #2). bean/type/profile
+            // come from the CURRENT request args — NOT the anchor shot's bean, because when beanFilterMissed the
+            // anchor is the latest shot OVERALL (a different bean) and stamping its bean would mislabel feedback.
+            // The dial (shot_id + dose/yield/grind/temp) is only trustworthy when the anchor actually matched
+            // this bean; otherwise shot_id=0 (a bean-general note) and the dial is left empty.
+            {
+                QVariantMap snap;
+                snap["beanBrand"] = beanBrand;
+                snap["beanType"]  = beanType;
+                snap["profile"]   = profileName;
+                snap["source"]    = QStringLiteral("volunteered");
+                if (!beanFilterMissed && anchorId > 0 && shot.isValid()) {
+                    snap["shotId"] = anchorId;
+                    if (shot.doseWeightG > 0)          snap["doseG"]  = shot.doseWeightG;
+                    if (shot.finalWeightG > 0)         snap["yieldG"] = shot.finalWeightG;
+                    if (!shot.grinderSetting.isEmpty()) snap["grind"] = shot.grinderSetting;
+                    if (shot.temperatureOverrideC > 0)  snap["tempC"] = shot.temperatureOverrideC;
+                } else {
+                    snap["shotId"] = 0;   // bean-general note (no matching shot for this exact bean)
+                }
+                self->m_lastBaristaAnchorSnapshot = snap;
+            }
+
             if (anchorId <= 0 || !shot.isValid()) {
                 emit self->baristaContextReady(QStringLiteral("recordedShots: 0"));
                 return;
@@ -1272,6 +1353,10 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
                                          recentAdvice, grinderCalibration, beanBestShot);
             if (!fullHistory.isEmpty())
                 obj.insert(QStringLiteral("fullHistory"), fullHistory);
+            // [barista-fork] Proactive verbal-feedback retrieval: the user's own past words about how this
+            // bean tasted, so the barista closes the loop ("you called this sour twice") without a tool call.
+            if (!beanFeedback.isEmpty())
+                obj.insert(QStringLiteral("recentTastingFeedbackOnThisBean"), beanFeedback);
             QString block;
             if (beanFilterMissed)
                 block += QStringLiteral("NOTE: No shots recorded under the exact current bean name — "
@@ -1453,6 +1538,11 @@ void AIManager::analyzeConversation(const QString& systemPrompt, const QJsonArra
     m_analyzing = true;
     m_isConversationRequest = true;
     m_isBagExtractionRequest = false;
+    // [barista-fork] Closed-loop safety net (issue #1053 regression): clear any stale tool-applied structuredNext
+    // at the single choke point every conversation turn passes through, so a prior turn's apply_dial_change capture
+    // (e.g. one whose turn failed, or that was superseded) can NEVER leak into this turn's finalization. Unconditional
+    // — a no-op for the advisor path (no client tools) and for turns that don't call the write tool.
+    m_pendingToolStructuredNext = QJsonObject{};
     emit analyzingChanged();
 
     // Sanitize messages to the API-permitted shape (role + content only). Stored

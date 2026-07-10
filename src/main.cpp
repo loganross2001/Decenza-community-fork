@@ -30,6 +30,7 @@
 #include "version.h"
 #ifdef DECENZA_BARISTA
 #include "barista/baristamodule.h"  // [barista-fork] hook
+#include "barista/assistantvoice.h" // [barista-fork] coaching-voice routing for the live coaches
 #endif
 
 #ifdef Q_OS_ANDROID
@@ -1203,23 +1204,49 @@ int main(int argc, char *argv[])
     AccessibilityManager accessibilityManager;
     accessibilityManager.setTranslationManager(&translationManager);
 
-    // Steam-coach voice: the coach emits speakRequested only when its own audio
-    // setting is on; route it via announceCoaching, which bypasses BOTH
-    // accessibility voice gates — the master switch AND the Voice Announcements
-    // (ttsEnabled) toggle; that second bypass is load-bearing (see
-    // AccessibilityManager::announceCoaching). Do not reroute this through
-    // announce()/routeAnnouncement — either re-gates the voice.
-    QObject::connect(mainController.liveSteamCoach(), &LiveSteamCoach::speakRequested,
-                     &accessibilityManager, &AccessibilityManager::announceCoaching);
+    // [barista-fork] The live coaches speak in the CHOSEN AI "coaching voice" when the barista module
+    // provides one; otherwise they fall back to the on-device AccessibilityManager path (unchanged
+    // behaviour). These are populated below, after BaristaModule::install(). They are assigned before
+    // engine.load(), so before any machine phase (and thus any cue) can fire. In a no-barista build both
+    // stay null and the routing is byte-identical to upstream.
+    AssistantVoice* coachingVoice = nullptr;   // the AI coaching voice (null → native fallback)
+    AssistantVoice* baristaVoice = nullptr;    // the barista voice — stopped so coaching wins during shot/steam
 
-    // Shot-coach voice: unlike steam (which has its own audio opt-in), during-shot
-    // cues have always been gated on the user's extractionAnnouncements preference
-    // and spoken via announce() — preserve that exactly (the old visual+voice
-    // banner did the gate in QML; the banner is visual-only now).
+    // Steam-coach voice: the coach emits speakRequested only when its own audio setting is on. Prefer the
+    // AI coaching voice; else route via announceCoaching, which bypasses BOTH accessibility voice gates —
+    // the master switch AND the Voice Announcements (ttsEnabled) toggle; that second bypass is load-bearing
+    // (see AccessibilityManager::announceCoaching). Do not reroute this through announce()/routeAnnouncement.
+    QObject::connect(mainController.liveSteamCoach(), &LiveSteamCoach::speakRequested,
+                     &accessibilityManager,
+                     [&accessibilityManager, &coachingVoice, &baristaVoice](const QString& text, bool interrupt) {
+#ifdef DECENZA_BARISTA
+                         if (coachingVoice) {
+                             // Arbiter: coaching wins during shot/steam — silence any lingering barista
+                             // utterance so the two AI voices never overlap.
+                             if (baristaVoice) baristaVoice->stop();
+                             coachingVoice->speak(text);
+                             return;
+                         }
+#endif
+                         accessibilityManager.announceCoaching(text, interrupt);
+                     });
+
+    // Shot-coach voice: unlike steam (which has its own audio opt-in), during-shot cues are gated on the
+    // user's extractionAnnouncements preference. Preferred path is the AI coaching voice (gated by that same
+    // preference); else the on-device announce() path — preserving upstream behaviour exactly.
     QObject::connect(mainController.liveShotCoach(), &LiveShotCoach::speakRequested,
-                     &accessibilityManager, [&accessibilityManager](const QString& text, bool interrupt) {
-                         if (accessibilityManager.extractionAnnouncementsEnabled())
-                             accessibilityManager.announce(text, interrupt);
+                     &accessibilityManager,
+                     [&accessibilityManager, &coachingVoice, &baristaVoice](const QString& text, bool interrupt) {
+                         if (!accessibilityManager.extractionAnnouncementsEnabled())
+                             return;   // during-shot voice respects the same toggle it always did
+#ifdef DECENZA_BARISTA
+                         if (coachingVoice) {
+                             if (baristaVoice) baristaVoice->stop();   // coaching wins during the pull
+                             coachingVoice->speak(text);
+                             return;
+                         }
+#endif
+                         accessibilityManager.announce(text, interrupt);
                      });
 
     // Now that all managers exist, finish MCP server setup
@@ -2616,7 +2643,14 @@ int main(int argc, char *argv[])
     checkpoint("Context properties & type registration");
 
 #ifdef DECENZA_BARISTA
-    BaristaModule::install(&engine, &mainController, &machineState, &settings);  // [barista-fork] hook
+    auto* baristaModule = BaristaModule::install(&engine, &mainController, &machineState, &settings);  // [barista-fork] hook
+    // [barista-fork] Point the live-coach speak routes (wired above) at the AI coaching voice, and give the
+    // arbiter a handle to the barista voice so coaching can stop it during shot/steam. Assigned before
+    // engine.load() below, so before any cue can fire.
+    if (baristaModule) {
+        coachingVoice = baristaModule->coachingVoice();
+        baristaVoice = baristaModule->voice();
+    }
 #endif
 
     // Load main QML file (QTP0001 NEW policy uses /qt/qml/ prefix)

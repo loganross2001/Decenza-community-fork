@@ -4,9 +4,9 @@ import QtQuick.Effects
 import Decenza
 import "../.."
 
-// [barista-fork] Home-screen action widget: tap to summon the barista assistant (wakes the greeting/chat
-// card), the same call IdlePage makes on Espresso. Modelled on DiscussItem. Only shown when the barista
-// is enabled. Placeable anywhere in the layout editor (e.g. the bottom-left where Discuss lives).
+// [barista-fork] Home-screen action widget: tap to ENGAGE the barista assistant (opens the conversation
+// panel + mic — user-initiated model). Modelled on DiscussItem. Only shown when the barista is enabled.
+// Placeable anywhere in the layout editor (e.g. the bottom-left where Discuss lives).
 Item {
     id: root
     property bool isCompact: false
@@ -17,8 +17,10 @@ Item {
     implicitHeight: isCompact ? compactContent.implicitHeight : fullContent.implicitHeight
 
     function openBarista() {
+        // [barista-fork] User-initiated: engage() opens the conversation (→ Conversing); the overlay
+        // observes the state change, expands, and opens the mic (tap-chat-and-talk).
         if (typeof Barista !== "undefined" && Barista.orchestrator)
-            Barista.orchestrator.wake()
+            Barista.orchestrator.engage()
     }
 
     // The assistant's own name (e.g. "Coach") for the spoken/accessible label; falls back to "Barista".

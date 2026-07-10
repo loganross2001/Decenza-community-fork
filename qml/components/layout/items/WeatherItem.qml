@@ -26,6 +26,14 @@ Item {
     }
     Accessible.focusable: true
 
+    // Trigger a location fix when the weather widget is present on screen.
+    // This is the feature-present trigger for location acquisition: location is
+    // fetched only when weather is actually displayed. WeatherManager.ensureLocation()
+    // is idempotent (it no-ops when a valid fix or manual city already exists), so
+    // calling it on both instantiation and visibility change is cheap.
+    Component.onCompleted: WeatherManager.ensureLocation()
+    onVisibleChanged: if (visible) WeatherManager.ensureLocation()
+
     // Moon phase emoji based on date (synodic month = 29.53059 days)
     function moonEmoji(timeStr) {
         // Reference new moon: Jan 6, 2000 18:14 UTC

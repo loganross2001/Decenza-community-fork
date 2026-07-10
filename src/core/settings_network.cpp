@@ -616,6 +616,8 @@ const QHash<QString, QStringList>& readoutOptionSchema() {
         { QStringLiteral("doseWeight"),       { QStringLiteral("displayMode"), QStringLiteral("color") } },
         { QStringLiteral("milkWeight"),       { QStringLiteral("displayMode"), QStringLiteral("color") } },
         { QStringLiteral("profileName"),      { QStringLiteral("color") } },
+        // grindQuickSelect has no per-instance options: its step size is a global
+        // preference (Settings.brew.grindQuickSelectStep), not a per-widget option.
     };
     return schema;
 }
@@ -705,6 +707,7 @@ const QVector<WidgetCatalogEntry>& widgetCatalogTable() {
         { "doseWeight",       1, "layoutEditor.widgetDoseWeight",    "Dose Weight",    "layoutEditor.chipDoseWeight", "Dose",       "", true },
         { "milkWeight",       1, "layoutEditor.widgetMilkWeight",    "Milk Weight",    "layoutEditor.chipMilkWeight", "Milk",       "", true },
         { "ratioQuickSelect", 1, "layoutEditor.widgetRatioQuickSelect", "Ratio Quick-Select", "layoutEditor.chipRatioQuick", "Ratio", "", true },
+        { "grindQuickSelect", 1, "layoutEditor.widgetGrindQuickSelect", "Grind Quick-Select", "layoutEditor.chipGrindQuick", "Grind", "", true },
         { "shotPlan",         1, "layoutEditor.widgetShotPlan",      "Shot Plan",      "layoutEditor.chipShotPlan",   "Shot Plan",  "", true },
         // The clock palette label reuses the chip key — pre-existing (the widget
         // was renamed to "Time" and the chip key kept for translations).

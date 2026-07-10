@@ -453,7 +453,17 @@ void AIConversation::onAnalysisComplete(const QString& response)
     // `nextShot` JSON object that we persist alongside the prose so
     // downstream callers (recentAdvice block #1053, future coachmark UI)
     // can read the structured prediction without re-parsing prose.
-    addAssistantMessage(response, AIManager::parseStructuredNext(response));
+    std::optional<QJsonObject> structuredNext = AIManager::parseStructuredNext(response);
+    // [barista-fork] Closed-loop bridge (issue #1053 regression): on the barista's Anthropic path the model may
+    // APPLY a dial change by CALLING apply_dial_change instead of emitting a fenced structuredNext block. That
+    // capture is stashed on AIManager for the current turn. Always take() it (clears regardless, so it can't
+    // leak into a later turn) but use it ONLY when NO fenced block was emitted — a fenced block always wins, so
+    // a tool-applied change is never double-counted. With this, a tool-applied turn (already shotId-stamped via
+    // setShotIdForCurrentTurn) qualifies for recentAssistantTurns() the same as a fenced-block turn.
+    const QJsonObject pendingToolNext = m_aiManager ? m_aiManager->takePendingToolStructuredNext() : QJsonObject{};
+    if (!structuredNext.has_value() && !pendingToolNext.isEmpty())
+        structuredNext = pendingToolNext;
+    addAssistantMessage(response, structuredNext);
 
     // Auto-save so conversation can be continued later
     saveToStorage();

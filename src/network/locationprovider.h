@@ -70,6 +70,16 @@ private slots:
     void onAppStateChanged(Qt::ApplicationState state);
 
 private:
+    // Privacy gate: whether the provider may PROACTIVELY acquire a fix or
+    // reverse-geocode without an explicit consumer request. Returns true only
+    // when a location-consuming feature that egresses is opted in (currently the
+    // decenza.coffee Shot Map, key "shotmap/enabled"). When false, no automatic
+    // GPS fix or Nominatim query is issued on construction or app-foreground.
+    // NOTE: consumer-driven calls (ShotReporter::setEnabled, MainController) and
+    // the manual-city geocode still work regardless — this only gates the
+    // *unrequested* startup/foreground acquisition. See privacy-hardening notes.
+    bool proactiveLocationAllowed() const;
+
     void reverseGeocode(double lat, double lon);
     void forwardGeocode(const QString& city);
     void onForwardGeocodeFinished(QNetworkReply* reply);

@@ -1396,8 +1396,8 @@ Item {
         // Sized for a FORGIVING tap target on the screensaver: the item (and its fill MouseArea) is the
         // touch area, deliberately large (~2.5× the old 44px) so tapping near the icon opens the barista
         // instead of missing and hitting the screensaver's wake — waking the machine by accident.
-        width: Theme.scaled(112)
-        height: Theme.scaled(112)
+        width: Theme.scaled(224)
+        height: Theme.scaled(224)
         opacity: 0.4
 
         // Cycle through a fixed set of scattered positions inside a safe inset (Math.random may be unavailable
@@ -1438,7 +1438,7 @@ Item {
         Loader {
             id: driftAvatarFace
             anchors.centerIn: parent
-            width: Theme.scaled(100); height: Theme.scaled(100)
+            width: Theme.scaled(200); height: Theme.scaled(200)   // 2× (owner request) — bigger screensaver presence
             active: root._settings && root._settings.avatarEnabled
             source: "qrc:/qml/assistant/BaristaAvatar.qml"
             onLoaded: if (item) item.mode = "idle"
@@ -1446,7 +1446,7 @@ Item {
         Rectangle {   // dot fallback (no avatar) — kept tiny and dim
             anchors.centerIn: parent
             visible: !(root._settings && root._settings.avatarEnabled)
-            width: Theme.scaled(36); height: Theme.scaled(36)
+            width: Theme.scaled(72); height: Theme.scaled(72)   // 2× with the avatar
             radius: width / 2
             color: Theme.primaryColor
         }

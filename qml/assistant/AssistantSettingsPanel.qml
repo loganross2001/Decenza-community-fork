@@ -43,23 +43,9 @@ Rectangle {
         anchors.fill: parent
         spacing: Theme.spacingMedium
 
-        // Header — title + dismiss (× emits closed(), mirroring the host Back button).
-        RowLayout {
-            Layout.fillWidth: true
-            Tr {
-                key: "barista.settings.title"; fallback: "Assistant"
-                Layout.fillWidth: true
-                color: Theme.textColor
-                font: Theme.subtitleFont
-                Accessible.ignored: true
-            }
-            AccessibleButton {
-                subtle: true
-                text: "×"
-                accessibleName: TranslationManager.translate("common.accessibility.dismissDialog", "Dismiss")
-                onClicked: root.closed()
-            }
-        }
+        // [barista-fork] No internal title/× header here — the host settingsCard already draws a "Back +
+        // Assistant" header, so a second "Assistant" + × stacked on top was redundant and ate vertical space.
+        // The host Back button closes the panel; the closed() signal is kept for any external caller.
 
         // ── Tab bar ────────────────────────────────────────────────────────
         // Styled like the main Settings tabs (SettingsPage.qml): StyledTabButton (active tab top-rounded,

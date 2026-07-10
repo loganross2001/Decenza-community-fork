@@ -1328,6 +1328,9 @@ Item {
         Loader {
             id: tabAvatar
             anchors.centerIn: parent
+            // Nudge up slightly: the avatar art sits low within its box, so a pure center reads
+            // as "too low" in the tab. A small negative offset visually centers it.
+            anchors.verticalCenterOffset: -Theme.scaled(6)
             width: Theme.scaled(156); height: Theme.scaled(156)   // 20% bigger (130→156); the tab hugs it, no dead space
             active: root._settings && root._settings.avatarEnabled
             source: "qrc:/qml/assistant/BaristaAvatar.qml"
@@ -1335,6 +1338,7 @@ Item {
         }
         Image {
             anchors.centerIn: parent
+            anchors.verticalCenterOffset: -Theme.scaled(6)
             visible: !(root._settings && root._settings.avatarEnabled)
             source: "qrc:/icons/barista.svg"
             sourceSize.height: Theme.scaled(90)   // enlarged with the avatar

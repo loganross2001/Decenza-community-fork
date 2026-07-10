@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Effects
 import Decenza
 
 // Button with required accessibility - enforces accessibleName at compile time
@@ -65,6 +66,15 @@ Button {
                 anchors.verticalCenter: parent.verticalCenter
                 visible: root.icon.source.toString() !== ""
                 opacity: root.enabled ? 1.0 : 0.5
+                // Tint the icon with icon.color so it follows the theme like the text label does
+                // (the line-icon SVGs are hardcoded stroke="white", which is invisible on light
+                // surfaces — this is why an icon-only button could render blank). Scoped to
+                // icon-bearing buttons: text-only buttons have no source, so the layer stays off.
+                layer.enabled: root.icon.source.toString() !== ""
+                layer.effect: MultiEffect {
+                    colorization: 1.0
+                    colorizationColor: root.icon.color
+                }
                 Accessible.ignored: true
             }
 

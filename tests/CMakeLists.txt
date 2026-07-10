@@ -212,6 +212,13 @@ add_decenza_test(tst_roastdate
     tst_roastdate.cpp
 )
 
+# --- tst_speechnormalize: [barista-fork] spoken-text unit/ratio rewrite for TTS
+# (18.8g->grams, 1:2.4->"one to two point four", 93°C->degrees). Header-only,
+# QtCore-only — no AssistantVoice / TextToSpeech deps. ---
+add_decenza_test(tst_speechnormalize
+    tst_speechnormalize.cpp
+)
+
 # --- tst_settings: Settings persistence and defaults ---
 add_decenza_test(tst_settings
     tst_settings.cpp

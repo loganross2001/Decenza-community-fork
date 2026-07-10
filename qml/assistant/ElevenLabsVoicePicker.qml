@@ -38,7 +38,7 @@ Dialog {
     readonly property var _voice: (typeof Barista !== "undefined") ? Barista.voice : null
     readonly property var _settings: (typeof Barista !== "undefined") ? Barista.settings : null
 
-    // Fetched voices (list of maps: name, id, category, accent, gender, age, previewUrl) + error text.
+    // Fetched voices (list of maps: name, id, category, accent, gender, age, useCase, description, previewUrl) + error text.
     property var _voices: []
     property string _errorText: ""
     // Filter state.
@@ -69,7 +69,18 @@ Dialog {
             return false
         if (root._query.length === 0)
             return true
-        return (v["name"] || "").toLowerCase().indexOf(root._query.toLowerCase()) !== -1
+        // Case-insensitive substring match across ALL metadata: a voice matches
+        // if the query hits ANY of name / category / accent / gender / age /
+        // useCase / description. Lets the owner search "narration", "british",
+        // "young", etc. — not just the voice's display name.
+        var q = root._query.toLowerCase()
+        var fields = ["name", "category", "accent", "gender", "age", "useCase", "description"]
+        for (var i = 0; i < fields.length; ++i) {
+            var val = v[fields[i]]
+            if (val && val.toLowerCase().indexOf(q) !== -1)
+                return true
+        }
+        return false
     }
 
     function _visibleVoices() {
@@ -182,7 +193,7 @@ Dialog {
                 id: searchField
                 Layout.fillWidth: true
                 inputMethodHints: Qt.ImhNoPredictiveText | Qt.ImhNoAutoUppercase
-                placeholderText: TranslationManager.translate("barista.voices.searchPlaceholder", "Search voices by name")
+                placeholderText: TranslationManager.translate("barista.voices.searchPlaceholder", "Search by name, accent, use case…")
                 accessibleName: TranslationManager.translate("barista.voices.search", "Search voices")
                 onTextChanged: root._query = text
             }
@@ -369,7 +380,7 @@ Dialog {
                             }
                         }
 
-                        // Subtle chips: category + accent + gender + age.
+                        // Subtle chips: category + accent + gender + age + use case.
                         Flow {
                             Layout.fillWidth: true
                             spacing: Theme.scaled(6)
@@ -378,7 +389,7 @@ Dialog {
                                     var chips = []
                                     if (voiceCard.modelData["category"] && voiceCard.modelData["category"].length > 0)
                                         chips.push({ text: voiceCard.modelData["category"], accent: true })
-                                    var labels = ["accent", "gender", "age"]
+                                    var labels = ["accent", "gender", "age", "useCase"]
                                     for (var i = 0; i < labels.length; ++i) {
                                         var val = voiceCard.modelData[labels[i]]
                                         if (val && val.length > 0)

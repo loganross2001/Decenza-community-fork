@@ -1,6 +1,7 @@
 #include "assistantvoice.h"
 
 #include "assistantsettings.h"
+#include "speechnormalize.h"   // [barista-fork] rewrite grams/ratios/units for reliable TTS pronunciation
 #include "../core/settings.h"
 #include "../core/settings_ai.h"
 
@@ -145,9 +146,16 @@ QString AssistantVoice::openaiKey() const {
     return (m_appSettings && m_appSettings->ai()) ? m_appSettings->ai()->openaiApiKey() : QString();
 }
 
-void AssistantVoice::speak(const QString& text) {
-    if (!m_settings || text.trimmed().isEmpty())
+void AssistantVoice::speak(const QString& rawText) {
+    if (!m_settings || rawText.trimmed().isEmpty())
         return;
+    // Rewrite compact espresso notation ("18.8g", "1:2.4", "93°C") to words the
+    // TTS engines pronounce reliably. Done ONCE here, before dispatch, so it
+    // covers ALL providers (native / OpenAI / ElevenLabs) AND both roles — the
+    // native fallbacks inside synthOpenAI/synthElevenLabs reuse their `text`
+    // arg, so they inherit the normalized string for free. Display text is a
+    // separate string (built in QML) and is untouched.
+    const QString text = speechnormalize::normalizeForSpeech(rawText);
     // The barista voice honors voiceEnabled() (the barista mute). The COACHING voice deliberately does NOT
     // — the live coaches have their own upstream enable gates (extractionAnnouncements for the shot coach,
     // steamCoachAudioEnabled for the steam coach), so muting the barista must not silence coaching.
@@ -291,6 +299,15 @@ void AssistantVoice::fetchElevenlabsVoices() {
             m.insert(QStringLiteral("accent"), labels.value(QStringLiteral("accent")).toString());
             m.insert(QStringLiteral("gender"), labels.value(QStringLiteral("gender")).toString());
             m.insert(QStringLiteral("age"), labels.value(QStringLiteral("age")).toString());
+            // [barista-fork] ElevenLabs labels also carry the intended use case (key "use case" in current
+            // responses, "use_case" in older ones) and an optional free-text description. Capture both so the
+            // picker's search can match on them and show the use case as a chip. Same host/key/response as above
+            // — no new network surface.
+            QString useCase = labels.value(QStringLiteral("use case")).toString();
+            if (useCase.isEmpty())
+                useCase = labels.value(QStringLiteral("use_case")).toString();
+            m.insert(QStringLiteral("useCase"), useCase);
+            m.insert(QStringLiteral("description"), o.value(QStringLiteral("description")).toString());
             m.insert(QStringLiteral("previewUrl"), o.value(QStringLiteral("preview_url")).toString());
             out.append(m);
         }
@@ -353,10 +370,13 @@ void AssistantVoice::setVoiceByName(const QString& name) {
 }
 
 void AssistantVoice::preview() {
-    const QString sample = (m_role == Role::Coaching)
+    // Same units/ratios normalization as speak() so an audition is faithful to
+    // what real utterances sound like. (The fixed sample lines below have no
+    // units/ratios, so this is a no-op today — kept for parity + future samples.)
+    const QString sample = speechnormalize::normalizeForSpeech((m_role == Role::Coaching)
         ? QStringLiteral("On pace — about ten seconds to go.")   // a representative coaching cue
         : QStringLiteral("Hi, I'm %1. Ready when you are.")
-              .arg(m_settings ? m_settings->assistantName() : QStringLiteral("Coach"));
+              .arg(m_settings ? m_settings->assistantName() : QStringLiteral("Coach")));
     const QString provider = effectiveProvider();
     if (provider == QLatin1String("openai"))
         synthOpenAI(sample);

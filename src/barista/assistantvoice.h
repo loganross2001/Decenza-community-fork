@@ -49,7 +49,7 @@ public:
     // result is treated as shared by both the barista and coaching sections.
     Q_INVOKABLE void fetchElevenlabsVoices();
 
-    Q_INVOKABLE void speak(const QString& text);          // no-op when voice is muted
+    Q_INVOKABLE void speak(const QString& rawText);       // no-op when voice is muted; normalizes units/ratios for TTS
     Q_INVOKABLE void stop();
     Q_INVOKABLE void setVoiceByName(const QString& name);  // persists to settings + applies
     Q_INVOKABLE void preview();                            // speak a sample line to audition a voice

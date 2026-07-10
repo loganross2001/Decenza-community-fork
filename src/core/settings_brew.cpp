@@ -200,6 +200,18 @@ void SettingsBrew::setGrindQuickSelectStep(double step) {
     }
 }
 
+double SettingsBrew::temperatureQuickSelectStep() const {
+    return m_settings.value("espresso/temperatureQuickSelectStep", 0.5).toDouble();
+}
+
+void SettingsBrew::setTemperatureQuickSelectStep(double step) {
+    step = qBound(0.1, step, 5.0);  // sane temperature-step range (°C)
+    if (!qFuzzyCompare(temperatureQuickSelectStep(), step)) {
+        m_settings.setValue("espresso/temperatureQuickSelectStep", step);
+        emit temperatureQuickSelectStepChanged();
+    }
+}
+
 bool SettingsBrew::milkAutoCaptureEnabled() const {
     return m_settings.value("steam/milkAutoCaptureEnabled", false).toBool();  // off by default; calibrating turns it on
 }

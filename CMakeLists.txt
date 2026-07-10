@@ -750,6 +750,8 @@ set(QML_FILES
     qml/components/StatusBar.qml
     qml/components/RatioPresetDialog.qml
     qml/components/GrindPickerDialog.qml
+    qml/components/TempPickerDialog.qml
+    qml/components/BrewQuickSelectDialog.qml
     qml/components/StableWeightCapture.qml
     qml/components/ShotPlanText.qml
     qml/components/SteamPlanText.qml
@@ -850,6 +852,8 @@ set(QML_FILES
     qml/components/layout/items/MilkWeightItem.qml
     qml/components/layout/items/RatioQuickSelectItem.qml
     qml/components/layout/items/GrindQuickSelectItem.qml
+    qml/components/layout/items/TempQuickSelectItem.qml
+    qml/components/layout/items/BrewQuickSelectItem.qml
     qml/components/layout/items/ShotPlanItem.qml
     qml/components/layout/items/SpacerItem.qml
     qml/components/layout/items/CustomItem.qml

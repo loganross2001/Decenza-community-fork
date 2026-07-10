@@ -61,6 +61,7 @@ QJsonObject SettingsSerializer::exportToJson(Settings* settings, bool includeSen
     espresso["doseCupTareWeight"] = settings->brew()->doseCupTareWeight();
     espresso["doseCaptureSoundEnabled"] = settings->brew()->doseCaptureSoundEnabled();
     espresso["grindQuickSelectStep"] = settings->brew()->grindQuickSelectStep();
+    espresso["temperatureQuickSelectStep"] = settings->brew()->temperatureQuickSelectStep();
     root["espresso"] = espresso;
 
     // Steam settings
@@ -424,6 +425,7 @@ bool SettingsSerializer::importFromJson(Settings* settings, const QJsonObject& j
         if (espresso.contains("doseCupTareWeight")) settings->brew()->setDoseCupTareWeight(espresso["doseCupTareWeight"].toDouble());
         if (espresso.contains("doseCaptureSoundEnabled")) settings->brew()->setDoseCaptureSoundEnabled(espresso["doseCaptureSoundEnabled"].toBool());
         if (espresso.contains("grindQuickSelectStep")) settings->brew()->setGrindQuickSelectStep(espresso["grindQuickSelectStep"].toDouble());
+        if (espresso.contains("temperatureQuickSelectStep")) settings->brew()->setTemperatureQuickSelectStep(espresso["temperatureQuickSelectStep"].toDouble());
     }
 
     // Steam settings

@@ -267,6 +267,67 @@ void AssistantSettings::addElevenlabsVoice(const QString& name, const QString& i
     emit elevenlabsVoicesChanged();
 }
 
+// Edit a saved voice in place. Renames it and/or changes its id (upsert semantics on the NEW id: if the
+// new id already exists as a different entry, that entry is updated and the old one removed, so we never
+// leave a duplicate). Because the saved-voices list is SHARED between the barista (elevenlabsVoiceId) and
+// the coaching (coachingElevenlabsVoiceId) sections, an id change must re-point BOTH active selections.
+void AssistantSettings::updateElevenlabsVoice(const QString& oldId, const QString& name, const QString& newId) {
+    const QString trimmedOld = oldId.trimmed();
+    const QString trimmedNew = newId.trimmed();
+    const QString trimmedName = name.trimmed();
+    if (trimmedOld.isEmpty() || trimmedNew.isEmpty())
+        return;   // both ids are required — an entry with no id is meaningless
+
+    const QByteArray data = m_settings.value(QStringLiteral("barista/elevenlabsVoices")).toByteArray();
+    QJsonArray arr = QJsonDocument::fromJson(data).array();
+
+    // Find the entry being edited (by its old id).
+    int editIdx = -1;
+    for (int i = 0; i < arr.size(); ++i) {
+        if (arr[i].toObject().value(QStringLiteral("id")).toString() == trimmedOld) {
+            editIdx = i;
+            break;
+        }
+    }
+    if (editIdx < 0)
+        return;   // the row to edit no longer exists (stale UI) — nothing to do
+
+    // If the new id collides with a DIFFERENT existing entry, fold into it (update its name) and drop the
+    // edited row, so the id stays unique. Otherwise update the edited row in place.
+    int collideIdx = -1;
+    if (trimmedNew != trimmedOld) {
+        for (int i = 0; i < arr.size(); ++i) {
+            if (i != editIdx && arr[i].toObject().value(QStringLiteral("id")).toString() == trimmedNew) {
+                collideIdx = i;
+                break;
+            }
+        }
+    }
+    if (collideIdx >= 0) {
+        QJsonObject keep = arr[collideIdx].toObject();
+        keep[QStringLiteral("name")] = trimmedName;
+        arr[collideIdx] = keep;
+        arr.removeAt(editIdx);
+    } else {
+        QJsonObject obj = arr[editIdx].toObject();
+        obj[QStringLiteral("name")] = trimmedName;
+        obj[QStringLiteral("id")] = trimmedNew;
+        arr[editIdx] = obj;
+    }
+
+    m_settings.setValue(QStringLiteral("barista/elevenlabsVoices"), QJsonDocument(arr).toJson());
+
+    // The list is shared: if the edited id was the active barista and/or coaching voice, follow the edit
+    // so the active selection isn't orphaned (active but pointing at the now-renamed/changed id).
+    if (trimmedNew != trimmedOld) {
+        if (elevenlabsVoiceId() == trimmedOld)
+            setElevenlabsVoiceId(trimmedNew);
+        if (coachingElevenlabsVoiceId() == trimmedOld)
+            setCoachingElevenlabsVoiceId(trimmedNew);
+    }
+    emit elevenlabsVoicesChanged();
+}
+
 void AssistantSettings::removeElevenlabsVoice(const QString& id) {
     const QString trimmedId = id.trimmed();
     if (trimmedId.isEmpty())
@@ -285,11 +346,17 @@ void AssistantSettings::removeElevenlabsVoice(const QString& id) {
     }
     if (removed) {
         m_settings.setValue(QStringLiteral("barista/elevenlabsVoices"), QJsonDocument(arr).toJson());
-        // If the removed voice was the active one, fall the selection back to the first
-        // remaining saved voice so it isn't left orphaned (active but absent from the list).
-        // If none remain, leave the active id as-is (TTS still works from the raw id).
-        if (elevenlabsVoiceId() == trimmedId && !arr.isEmpty())
-            setElevenlabsVoiceId(arr.first().toObject().value(QStringLiteral("id")).toString());
+        // If the removed voice was the active one, fall the selection back to the first remaining saved
+        // voice so it isn't left orphaned (active but absent from the list). The list is SHARED between
+        // the barista and coaching sections, so re-point BOTH if either pointed at the removed id. If none
+        // remain, leave the active id(s) as-is (TTS still works from the raw id).
+        if (!arr.isEmpty()) {
+            const QString fallback = arr.first().toObject().value(QStringLiteral("id")).toString();
+            if (elevenlabsVoiceId() == trimmedId)
+                setElevenlabsVoiceId(fallback);
+            if (coachingElevenlabsVoiceId() == trimmedId)
+                setCoachingElevenlabsVoiceId(fallback);
+        }
         emit elevenlabsVoicesChanged();
     }
 }

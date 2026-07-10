@@ -1279,11 +1279,11 @@ Item {
                  && !root._screensaverDock
         anchors.right: parent.right
         anchors.verticalCenter: parent.verticalCenter
-        // [barista-fork] ~2× larger tab (owner request) — easier to see + tap. Still anchored to the right
-        // edge and vertically centered, so it stays on-screen; height (~216) sits comfortably under the
-        // drifting-avatar footprint (112) used on the screensaver.
-        width: Theme.scaled(104)
-        height: Theme.scaled(216)
+        // [barista-fork] Larger tab (owner request) so the avatar face reads clearly and is easy to tap.
+        // Widened to comfortably fit the ~130px avatar below with margin. Still anchored to the right edge
+        // and vertically centered, so it stays on-screen.
+        width: Theme.scaled(148)
+        height: Theme.scaled(264)
         radius: Theme.cardRadius
         color: Theme.surfaceColor
         border.width: 1
@@ -1306,7 +1306,7 @@ Item {
         Loader {
             id: tabAvatar
             anchors.centerIn: parent
-            width: Theme.scaled(80); height: Theme.scaled(80)   // ~2× with the tab
+            width: Theme.scaled(130); height: Theme.scaled(130)   // enlarged to fill the bigger tab face
             active: root._settings && root._settings.avatarEnabled
             source: "qrc:/qml/assistant/BaristaAvatar.qml"
             onLoaded: if (item) item.mode = "idle"
@@ -1315,7 +1315,7 @@ Item {
             anchors.centerIn: parent
             visible: !(root._settings && root._settings.avatarEnabled)
             source: "qrc:/icons/barista.svg"
-            sourceSize.height: Theme.scaled(56)   // ~2× with the tab
+            sourceSize.height: Theme.scaled(90)   // enlarged with the avatar
             fillMode: Image.PreserveAspectFit
             Accessible.ignored: true
         }

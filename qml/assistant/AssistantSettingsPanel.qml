@@ -36,6 +36,9 @@ Rectangle {
             width: parent.width
             spacing: Theme.spacingMedium
 
+            // Reveal state for the (masked) ElevenLabs API key field below.
+            property bool _elKeyShown: false
+
         // Header
         RowLayout {
             Layout.fillWidth: true
@@ -140,129 +143,59 @@ Rectangle {
             onEditingFinished: { Qt.inputMethod.commit(); if (root._settings) root._settings.openaiApiKey = text }
         }
 
-        // ElevenLabs (only when provider = elevenlabs): API key + voice id
-        StyledTextField {
-            Layout.fillWidth: true
-            visible: col._provider === "elevenlabs"
-            Component.onCompleted: text = root._settings ? root._settings.elevenlabsApiKey : ""
-            placeholderText: TranslationManager.translate("barista.settings.elKey", "ElevenLabs API key")
-            onEditingFinished: { Qt.inputMethod.commit(); if (root._settings) root._settings.elevenlabsApiKey = text }
-        }
-        // Saved ElevenLabs voices — pick one by NAME instead of re-typing its cryptic id. Binds to the
-        // elevenlabsVoices PROPERTY (not the method) so the list re-evaluates on elevenlabsVoicesChanged.
+        // ElevenLabs (only when provider = elevenlabs): masked API key + saved-voices manager.
+        // The key is a SECRET — masked by default (password echo) with a Show/Hide toggle, matching the
+        // convention in Settings → AI (SettingsAITab masks provider keys). There's no eye SVG in the icon
+        // set and unicode-glyph icons are disallowed, so the reveal is a plain text toggle button.
+        // The key is SHARED by the barista and coaching sections — show it whenever EITHER is on ElevenLabs
+        // (a coaching-only ElevenLabs user still needs to enter it, and it lives only here).
         Tr {
-            visible: col._provider === "elevenlabs"
-            key: "barista.settings.elSavedVoices"; fallback: "Saved voices"
+            visible: col._provider === "elevenlabs" || col._coachingProvider === "elevenlabs"
+            key: "barista.settings.elKeyLabel"; fallback: "ElevenLabs API key"
             color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true
         }
-        Tr {
-            id: trElNoVoices
-            visible: col._provider === "elevenlabs"
-                     && (!root._settings || root._settings.elevenlabsVoices.length === 0)
-            key: "barista.settings.elNoVoices"; fallback: "No saved voices yet — add one below."
-            Layout.fillWidth: true
-            color: Theme.textSecondaryColor; font: Theme.bodyFont; Accessible.ignored: true
-        }
-        Repeater {
-            model: (col._provider === "elevenlabs" && root._settings) ? root._settings.elevenlabsVoices : []
-            delegate: Rectangle {
-                id: voiceDelegate
-                required property var modelData
-                readonly property string voiceId: modelData["id"] !== undefined ? modelData["id"] : ""
-                readonly property string voiceName: (modelData["name"] !== undefined && modelData["name"].length > 0)
-                                                    ? modelData["name"] : voiceId
-                readonly property bool isActive: root._settings && root._settings.elevenlabsVoiceId === voiceId
-                Layout.fillWidth: true
-                implicitHeight: voiceRow.implicitHeight + Theme.spacingSmall * 2
-                radius: Theme.cardRadius
-                color: Theme.surfaceColor
-                // Active-voice affordance mirrors EquipmentCard/BagCard: a thicker primary-coloured border.
-                border.width: isActive ? 2 : 1
-                border.color: isActive ? Theme.primaryColor : Theme.borderColor
-
-                AccessibleMouseArea {
-                    anchors.fill: parent
-                    accessibleName: TranslationManager.translate("barista.settings.elSelectVoice", "Select voice")
-                        + ": " + voiceDelegate.voiceName
-                    onAccessibleClicked: if (root._settings) root._settings.elevenlabsVoiceId = voiceDelegate.voiceId
-                }
-
-                RowLayout {
-                    id: voiceRow
-                    anchors.fill: parent
-                    anchors.margins: Theme.spacingSmall
-                    spacing: Theme.spacingSmall
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        spacing: 0
-                        Text {
-                            Layout.fillWidth: true
-                            text: voiceDelegate.voiceName
-                            color: Theme.textColor; font: Theme.bodyFont
-                            elide: Text.ElideRight
-                            Accessible.ignored: true
-                        }
-                        Text {
-                            Layout.fillWidth: true
-                            // Truncated id subtitle so the row stays scannable.
-                            text: voiceDelegate.voiceId.length > 14
-                                  ? voiceDelegate.voiceId.substring(0, 14) + "…"
-                                  : voiceDelegate.voiceId
-                            visible: voiceDelegate.voiceId.length > 0
-                                     && voiceDelegate.voiceName !== voiceDelegate.voiceId
-                            color: Theme.textSecondaryColor; font: Theme.labelFont
-                            elide: Text.ElideRight
-                            Accessible.ignored: true
-                        }
-                    }
-                    AccessibleButton {
-                        subtle: true
-                        text: "×"
-                        accessibleName: TranslationManager.translate("barista.settings.elRemoveVoice", "Remove voice")
-                            + ": " + voiceDelegate.voiceName
-                        onClicked: if (root._settings) root._settings.removeElevenlabsVoice(voiceDelegate.voiceId)
-                    }
-                }
-            }
-        }
-
-        // Add a voice: Name + Voice ID + Add button. Commits the IME before reading .text (mobile last-word drop).
-        // Shown whenever EITHER the barista or the coaching voice is on ElevenLabs — the saved-voices list is
-        // shared, so a coaching-only ElevenLabs user still needs this add control (which lives only here).
         RowLayout {
             visible: col._provider === "elevenlabs" || col._coachingProvider === "elevenlabs"
             Layout.fillWidth: true
             spacing: Theme.spacingSmall
             StyledTextField {
-                id: elNameField
+                id: elKeyField
                 Layout.fillWidth: true
-                placeholderText: TranslationManager.translate("barista.settings.elVoiceName", "Name")
-            }
-            StyledTextField {
-                id: elIdField
-                Layout.fillWidth: true
-                placeholderText: TranslationManager.translate("barista.settings.elVoice", "ElevenLabs voice ID")
+                echoMode: col._elKeyShown ? TextInput.Normal : TextInput.Password
+                inputMethodHints: Qt.ImhNoPredictiveText | Qt.ImhNoAutoUppercase
+                Component.onCompleted: text = root._settings ? root._settings.elevenlabsApiKey : ""
+                placeholderText: TranslationManager.translate("barista.settings.elKey", "ElevenLabs API key")
+                accessibleName: TranslationManager.translate("barista.settings.elKeyLabel", "ElevenLabs API key")
+                onEditingFinished: { Qt.inputMethod.commit(); if (root._settings) root._settings.elevenlabsApiKey = text }
             }
             AccessibleButton {
-                text: TranslationManager.translate("common.button.add", "Add")
-                accessibleName: TranslationManager.translate("common.button.add", "Add")
-                onClicked: {
-                    Qt.inputMethod.commit()
-                    if (!root._settings || elIdField.text.trim().length === 0)
-                        return
-                    root._settings.addElevenlabsVoice(elNameField.text, elIdField.text)
-                    // Make the freshly-added voice the active selection for whichever provider(s) are on
-                    // ElevenLabs, so the owner sees an immediate effect without a second tap.
-                    if (col._provider === "elevenlabs")
-                        root._settings.elevenlabsVoiceId = elIdField.text.trim()
-                    if (col._coachingProvider === "elevenlabs")
-                        root._settings.coachingElevenlabsVoiceId = elIdField.text.trim()
-                    elNameField.text = ""
-                    elIdField.text = ""
-                }
+                subtle: true
+                text: col._elKeyShown
+                      ? TranslationManager.translate("common.button.hide", "Hide")
+                      : TranslationManager.translate("common.button.show", "Show")
+                accessibleName: col._elKeyShown
+                      ? TranslationManager.translate("barista.settings.elKeyHide", "Hide API key")
+                      : TranslationManager.translate("barista.settings.elKeyShow", "Show API key")
+                onClicked: col._elKeyShown = !col._elKeyShown
             }
         }
 
+        // Saved ElevenLabs voices — the reusable manager (select / add / edit / delete). The active barista
+        // selection is elevenlabsVoiceId; tapping a row sets it via the voiceSelected signal.
+        Tr {
+            visible: col._provider === "elevenlabs"
+            key: "barista.settings.elSavedVoices"; fallback: "Saved voices"
+            color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true
+        }
+        BaristaSavedVoices {
+            visible: col._provider === "elevenlabs"
+            Layout.fillWidth: true
+            settings: root._settings
+            activeId: root._settings ? root._settings.elevenlabsVoiceId : ""
+            onVoiceSelected: function(id) { if (root._settings) root._settings.elevenlabsVoiceId = id }
+        }
+
+        // Preview the barista's chosen voice (any provider).
         AccessibleButton {
             subtle: true
             text: TranslationManager.translate("barista.settings.preview", "Preview voice")
@@ -339,72 +272,20 @@ Rectangle {
             onActivated: if (root._settings) root._settings.coachingOpenaiVoice = currentText
         }
 
-        // ElevenLabs coaching voice (only when provider = elevenlabs): pick from the SHARED saved-voices
-        // list. The API key + the add/remove controls live in the barista section above (shared).
+        // ElevenLabs coaching voice (only when provider = elevenlabs): the SAME reusable saved-voices manager
+        // as the barista section, bound to the coaching selection. The API key + add/edit/delete are shared
+        // (one underlying list); tapping a row sets coachingElevenlabsVoiceId via voiceSelected.
         Tr {
             visible: col._coachingProvider === "elevenlabs"
             key: "barista.settings.elSavedVoices"; fallback: "Saved voices"
             color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true
         }
-        Tr {
+        BaristaSavedVoices {
             visible: col._coachingProvider === "elevenlabs"
-                     && (!root._settings || root._settings.elevenlabsVoices.length === 0)
-            key: "barista.settings.elNoVoices"; fallback: "No saved voices yet — add one below."
             Layout.fillWidth: true
-            color: Theme.textSecondaryColor; font: Theme.bodyFont; Accessible.ignored: true
-        }
-        Repeater {
-            model: (col._coachingProvider === "elevenlabs" && root._settings) ? root._settings.elevenlabsVoices : []
-            delegate: Rectangle {
-                id: coachingVoiceDelegate
-                required property var modelData
-                readonly property string voiceId: modelData["id"] !== undefined ? modelData["id"] : ""
-                readonly property string voiceName: (modelData["name"] !== undefined && modelData["name"].length > 0)
-                                                    ? modelData["name"] : voiceId
-                readonly property bool isActive: root._settings && root._settings.coachingElevenlabsVoiceId === voiceId
-                Layout.fillWidth: true
-                implicitHeight: coachingVoiceRow.implicitHeight + Theme.spacingSmall * 2
-                radius: Theme.cardRadius
-                color: Theme.surfaceColor
-                border.width: isActive ? 2 : 1
-                border.color: isActive ? Theme.primaryColor : Theme.borderColor
-
-                AccessibleMouseArea {
-                    anchors.fill: parent
-                    accessibleName: TranslationManager.translate("barista.settings.elSelectVoice", "Select voice")
-                        + ": " + coachingVoiceDelegate.voiceName
-                    onAccessibleClicked: if (root._settings) root._settings.coachingElevenlabsVoiceId = coachingVoiceDelegate.voiceId
-                }
-
-                RowLayout {
-                    id: coachingVoiceRow
-                    anchors.fill: parent
-                    anchors.margins: Theme.spacingSmall
-                    spacing: Theme.spacingSmall
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        spacing: 0
-                        Text {
-                            Layout.fillWidth: true
-                            text: coachingVoiceDelegate.voiceName
-                            color: Theme.textColor; font: Theme.bodyFont
-                            elide: Text.ElideRight
-                            Accessible.ignored: true
-                        }
-                        Text {
-                            Layout.fillWidth: true
-                            text: coachingVoiceDelegate.voiceId.length > 14
-                                  ? coachingVoiceDelegate.voiceId.substring(0, 14) + "…"
-                                  : coachingVoiceDelegate.voiceId
-                            visible: coachingVoiceDelegate.voiceId.length > 0
-                                     && coachingVoiceDelegate.voiceName !== coachingVoiceDelegate.voiceId
-                            color: Theme.textSecondaryColor; font: Theme.labelFont
-                            elide: Text.ElideRight
-                            Accessible.ignored: true
-                        }
-                    }
-                }
-            }
+            settings: root._settings
+            activeId: root._settings ? root._settings.coachingElevenlabsVoiceId : ""
+            onVoiceSelected: function(id) { if (root._settings) root._settings.coachingElevenlabsVoiceId = id }
         }
 
         AccessibleButton {

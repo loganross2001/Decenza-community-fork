@@ -95,6 +95,10 @@ public:
     // The active voice remains elevenlabsVoiceId; selecting a saved voice just calls setElevenlabsVoiceId(id).
     Q_INVOKABLE QVariantList elevenlabsVoices() const;              // parsed [{name, id}, ...]
     Q_INVOKABLE void addElevenlabsVoice(const QString& name, const QString& id);  // upsert by id (dedupe), then persist
+    // Edit a saved voice in place: rename it and/or change its id. If the id changed and it was the active
+    // barista and/or coaching selection, the active id follows the edit (both are re-pointed — the list is
+    // shared between the two sections). Then persist + emit elevenlabsVoicesChanged.
+    Q_INVOKABLE void updateElevenlabsVoice(const QString& oldId, const QString& name, const QString& newId);
     Q_INVOKABLE void removeElevenlabsVoice(const QString& id);     // remove by id, then persist
 
     double voiceSpeed() const;                    // speaking rate multiplier (default 1.0)

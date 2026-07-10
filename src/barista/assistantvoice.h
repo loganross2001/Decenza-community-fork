@@ -2,6 +2,7 @@
 
 #include <QObject>
 #include <QStringList>
+#include <QVariantList>
 
 class QTextToSpeech;
 class QSoundEffect;
@@ -21,6 +22,8 @@ class AssistantVoice : public QObject {
     Q_PROPERTY(QStringList availableVoices READ availableVoices NOTIFY availableVoicesChanged)
     Q_PROPERTY(QString voiceName READ voiceName NOTIFY voiceNameChanged)
     Q_PROPERTY(bool speaking READ speaking NOTIFY speakingChanged)   // for muting the mic while it talks
+    // [barista-fork] True while a GET /v1/voices fetch is in flight — drives a spinner in the picker pop-up.
+    Q_PROPERTY(bool fetchingVoices READ fetchingVoices NOTIFY fetchingVoicesChanged)
 
 public:
     // [barista-fork] Which voice profile this instance reads from AssistantSettings. Barista = the
@@ -36,6 +39,15 @@ public:
     QStringList availableVoices() const;   // voice names, for the picker
     QString voiceName() const;             // the currently active voice's name
     bool speaking() const { return m_speaking; }
+    bool fetchingVoices() const { return m_fetchingVoices; }
+
+    // [barista-fork] Fetch the ACCOUNT's ElevenLabs voices (GET /v1/voices with the shared xi-api-key) so the
+    // owner picks from a refined pop-up instead of typing cryptic voice ids. Async, non-blocking, re-entry
+    // guarded. On success emits elevenlabsVoicesFetched(list) where each entry is a QVariantMap
+    // {name, id, category, accent, gender, age, previewUrl}; on any failure emits voicesFetchFailed(reason).
+    // The voices list is ACCOUNT-WIDE, so this is called on the barista instance (Barista.voice) and the
+    // result is treated as shared by both the barista and coaching sections.
+    Q_INVOKABLE void fetchElevenlabsVoices();
 
     Q_INVOKABLE void speak(const QString& text);          // no-op when voice is muted
     Q_INVOKABLE void stop();
@@ -48,6 +60,11 @@ signals:
     void availableVoicesChanged();
     void voiceNameChanged();
     void speakingChanged();
+    void fetchingVoicesChanged();
+    // [barista-fork] Emitted when GET /v1/voices succeeds: a list of QVariantMaps (see fetchElevenlabsVoices).
+    void elevenlabsVoicesFetched(const QVariantList& voices);
+    // [barista-fork] Emitted on any fetch failure (empty key / network error / non-200), with a human reason.
+    void voicesFetchFailed(const QString& reason);
 
 private:
     // [barista-fork] Role-effective settings reads — resolve to the barista OR the coaching getters
@@ -74,6 +91,7 @@ private:
     Settings* m_appSettings = nullptr;
     Role m_role = Role::Barista;
     bool m_speaking = false;
+    bool m_fetchingVoices = false;   // re-entry guard for fetchElevenlabsVoices()
     // [barista-fork] cloud TTS (QMediaPlayer) only reports Playing once the network POST completes; this
     // holds `speaking` true across that gap so the mic stays paused. m_speakGen discards a stale/late reply.
     bool m_pendingSynth = false;

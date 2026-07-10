@@ -213,14 +213,21 @@ Dialog {
 
         // --- Task list ---
         ScrollView {
+            id: taskScroll
             Layout.fillWidth: true
             Layout.fillHeight: true
             Layout.leftMargin: Theme.spacingLarge
             Layout.rightMargin: Theme.spacingLarge
             clip: true
+            // Bind the content to the viewport (not root.width): a content item wider than the
+            // ScrollView enables horizontal scroll and can swallow the vertical flick, which read as
+            // "opens but won't scroll". Pinning contentWidth to availableWidth keeps it vertical-only.
+            contentWidth: availableWidth
+            ScrollBar.vertical.policy: ScrollBar.AsNeeded
+            ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
 
             ColumnLayout {
-                width: root.width - Theme.spacingLarge * 2
+                width: taskScroll.availableWidth
                 spacing: Theme.spacingSmall
 
                 Text {

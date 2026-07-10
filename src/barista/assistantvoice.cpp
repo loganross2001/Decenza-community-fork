@@ -17,7 +17,9 @@
 #include <QNetworkRequest>
 #include <QNetworkReply>
 #include <QJsonObject>
+#include <QJsonArray>
 #include <QJsonDocument>
+#include <QVariantMap>
 
 AssistantVoice::AssistantVoice(AssistantSettings* settings, Settings* appSettings,
                                Role role, QObject* parent)
@@ -203,6 +205,65 @@ void AssistantVoice::synthElevenLabs(const QString& text) {
             else { m_pendingSynth = false; updateSpeaking(); }
         }
         reply->deleteLater();
+    });
+}
+
+void AssistantVoice::fetchElevenlabsVoices() {
+    // [barista-fork] PRIVACY: this GET talks ONLY to api.elevenlabs.io with the user's OWN ElevenLabs key —
+    // the exact same host + xi-api-key header already used for TTS above (synthElevenLabs). It reads the
+    // account's voice list so the owner can pick from a pop-up instead of typing voice ids. No new network
+    // destination, no new credential, no telemetry — no new privacy surface beyond the TTS calls we make.
+    if (m_fetchingVoices)
+        return;   // re-entry guard: a fetch is already in flight
+    const QString key = m_settings ? m_settings->elevenlabsApiKey() : QString();
+    if (key.isEmpty()) {
+        emit voicesFetchFailed(tr("No ElevenLabs API key set."));
+        return;
+    }
+    m_fetchingVoices = true;
+    emit fetchingVoicesChanged();
+
+    QNetworkRequest req(QUrl(QStringLiteral("https://api.elevenlabs.io/v1/voices")));
+    req.setRawHeader("xi-api-key", key.toUtf8());   // same auth idiom as synthElevenLabs()
+    QNetworkReply* reply = m_net->get(req);
+    connect(reply, &QNetworkReply::finished, this, [this, reply] {
+        // Clear the guard on EVERY exit path (success, non-200, network error) so the spinner never wedges.
+        m_fetchingVoices = false;
+        emit fetchingVoicesChanged();
+
+        const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        if (reply->error() != QNetworkReply::NoError || status != 200) {
+            QString reason;
+            if (status == 401 || status == 403)
+                reason = tr("Invalid ElevenLabs API key.");
+            else if (status != 0)
+                reason = tr("ElevenLabs returned an error (%1).").arg(status);
+            else
+                reason = tr("Network error: %1").arg(reply->errorString());
+            emit voicesFetchFailed(reason);
+            reply->deleteLater();
+            return;
+        }
+
+        const QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
+        reply->deleteLater();
+        const QJsonArray arr = doc.object().value(QStringLiteral("voices")).toArray();
+        QVariantList out;
+        out.reserve(arr.size());
+        for (const QJsonValue& v : arr) {
+            const QJsonObject o = v.toObject();
+            const QJsonObject labels = o.value(QStringLiteral("labels")).toObject();
+            QVariantMap m;
+            m.insert(QStringLiteral("name"), o.value(QStringLiteral("name")).toString());
+            m.insert(QStringLiteral("id"), o.value(QStringLiteral("voice_id")).toString());
+            m.insert(QStringLiteral("category"), o.value(QStringLiteral("category")).toString());
+            m.insert(QStringLiteral("accent"), labels.value(QStringLiteral("accent")).toString());
+            m.insert(QStringLiteral("gender"), labels.value(QStringLiteral("gender")).toString());
+            m.insert(QStringLiteral("age"), labels.value(QStringLiteral("age")).toString());
+            m.insert(QStringLiteral("previewUrl"), o.value(QStringLiteral("preview_url")).toString());
+            out.append(m);
+        }
+        emit elevenlabsVoicesFetched(out);
     });
 }
 

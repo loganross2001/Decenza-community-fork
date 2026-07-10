@@ -183,6 +183,44 @@ ColumnLayout {
         }
     }
 
+    // "Browse ElevenLabs voices" — the refined picker pop-up that fetches the account's voices (GET
+    // /v1/voices via Barista.voice) so the owner selects from a list instead of typing ids. Shown only when
+    // the ElevenLabs API key is set (the fetch needs it). It reuses THIS section's select-target: the picker
+    // reports voiceChosen(id) and we re-emit our own voiceSelected(id), so the parent routes it to the right
+    // active setter (barista → elevenlabsVoiceId, coaching → coachingElevenlabsVoiceId). The manual
+    // "+ Add voice" editor below stays as a fallback.
+    AccessibleButton {
+        visible: !root._editorOpen && !!root.settings
+                 && root.settings.elevenlabsApiKey && root.settings.elevenlabsApiKey.length > 0
+        Layout.fillWidth: true
+        icon.source: "qrc:/icons/search.svg"
+        text: TranslationManager.translate("barista.voices.browse", "Browse ElevenLabs voices")
+        accessibleName: TranslationManager.translate("barista.voices.browse", "Browse ElevenLabs voices")
+        // First browse: load the Loader (onLoaded opens it). Subsequent browses: the item is already alive,
+        // so re-open it directly — setting active=true again is a no-op and would NOT re-fire onLoaded.
+        onClicked: {
+            if (pickerLoader.item)
+                pickerLoader.item.open()
+            else
+                pickerLoader.active = true
+        }
+    }
+
+    // The picker is loaded on demand (it pulls in QtMultimedia); opened once created, and stays loaded so a
+    // second browse is instant. voiceChosen re-emits this section's voiceSelected so the correct active id is set.
+    // The voiceChosen.connect lives in onLoaded (fires once) — with item-reuse it must NOT be re-connected, or
+    // the handler would fire multiple times per selection.
+    Loader {
+        id: pickerLoader
+        active: false
+        source: "qrc:/qml/assistant/ElevenLabsVoicePicker.qml"
+        onLoaded: {
+            item.activeId = Qt.binding(function() { return root.activeId })
+            item.voiceChosen.connect(function(id) { root.voiceSelected(id) })
+            item.open()
+        }
+    }
+
     // "+ Add voice" button — reveals the inline editor. Hidden while the editor is already open.
     AccessibleButton {
         visible: !root._editorOpen

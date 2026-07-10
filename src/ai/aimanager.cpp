@@ -1478,9 +1478,10 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
                             "auto-applied. On a yes, call update_maintenance_default per accepted task (it touches "
                             "ONLY still-default tasks; owner-customised ones are left alone). On a no — or once "
                             "you've applied the accepted ones — call dismiss_maintenance_doc_change so it isn't "
-                            "re-offered. This shares the ONE-proactive-thing-per-turn budget and TAKES the slot "
-                            "when present (it is rare and one-time), ahead of a due item or a recipe tweak. For "
-                            "descaling, still defer to the user's water — don't assert a fixed interval.");
+                            "re-offered. This shares the ONE-proactive-thing-per-turn budget but YIELDS to a due "
+                            "reminder/maintenance item (raise it only when nothing is due this turn); it still "
+                            "outranks a mere recipe tweak. For descaling, still defer to the user's water — don't "
+                            "assert a fixed interval.");
                     }
                 }
             });
@@ -1526,9 +1527,12 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
                           + QString::fromUtf8(QJsonDocument(dueItems).toJson(QJsonDocument::Indented));
 
             // [barista-fork] A pending Decent cleaning-guide change to OFFER — shot-independent like dueItems,
-            // so it rides the same first-reply turn including the no-shot paths.
+            // so it rides the same first-reply turn including the no-shot paths. It YIELDS to a due
+            // reminder/maintenance item: only surface the doc offer when nothing is due this turn, so a
+            // rare one-off note can never starve an overdue (possibly safety-relevant) reminder. Enforced
+            // here in code, not just in the persona.
             QString docSuffix;
-            if (!docChange.isEmpty())
+            if (!docChange.isEmpty() && dueItems.isEmpty())
                 docSuffix = QStringLiteral("\n\n## maintenanceDocChanged (Decent's cleaning guide changed — offer an update):\n")
                           + QString::fromUtf8(QJsonDocument(docChange).toJson(QJsonDocument::Indented));
 

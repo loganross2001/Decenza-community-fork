@@ -565,14 +565,16 @@ Item {
                 + "settings — and for descaling, defer to their water (it's TDS-dependent), don't assert a fixed interval."
 
         // [barista-fork] MAINTENANCE-DOC CHANGE (PROACTIVE SURFACING). When the context block carries a
-        // maintenanceDocChanged section, Decent's cleaning guide changed since it was last acknowledged. This is
-        // rare and one-time, so it TAKES the single proactive slot when present — ahead of a due item or a
-        // recipe tweak (both of those recur and persist to the next turn; a doc change is a one-off the owner
-        // should get to weigh in on). Gated on proactivityLevel only (off → never surface it).
+        // maintenanceDocChanged section, Decent's cleaning guide changed since it was last acknowledged. It is
+        // rare and one-time, but it YIELDS to a due reminder/maintenance item — those can be overdue and
+        // safety-relevant, and a one-off doc note must never starve them. It takes the single proactive slot
+        // only when nothing is due this turn. Gated on proactivityLevel only (off → never surface it).
         if (level !== "off")
-            persona += "\nMAINTENANCE-DOC CHANGE (PROACTIVE, takes priority when present): if the context block "
-                + "has a \"maintenanceDocChanged\" section, Decent updated their DE1 cleaning guide. In your FIRST "
-                + "reply, AFTER you answer whatever the user said, briefly mention it and OFFER specific "
+            persona += "\nMAINTENANCE-DOC CHANGE (PROACTIVE, LOWER priority than due items): if the context block "
+                + "has a \"maintenanceDocChanged\" section, Decent updated their DE1 cleaning guide. Only raise it "
+                + "when there is NO \"Due now\" reminder/maintenance item this turn (a due item always wins — defer "
+                + "the doc change to a later turn). When you do raise it, in your FIRST reply, AFTER you answer "
+                + "whatever the user said, briefly mention it and OFFER specific "
                 + "default-interval updates you infer by comparing changedGuideText to currentDefaultSchedule "
                 + "(e.g. 'Decent now suggests backflushing every 5 days instead of 7 — want me to update that?'). "
                 + "Keep it to ONE proactive turn — raise the doc change OR a due item OR a recipe tweak, never a "

@@ -51,6 +51,11 @@ MaintenanceDocSync::MaintenanceDocSync(TasksStorage* tasks, QObject* parent)
 MaintenanceDocSync::~MaintenanceDocSync()
 {
     if (m_reply) {
+        // Disconnect BEFORE abort(): abort() emits finished() synchronously (same-thread
+        // DirectConnection), which would reenter onReplyFinished and null m_reply — then the
+        // deleteLater() below would deref a null pointer. Dropping the connections first makes
+        // the teardown self-contained.
+        m_reply->disconnect(this);
         m_reply->abort();
         m_reply->deleteLater();
         m_reply = nullptr;
@@ -101,13 +106,28 @@ void MaintenanceDocSync::issueGet()
     const QUrl url(kDocUrl);
     QNetworkRequest request(url);
     request.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("Decenza"));
-    // decentespresso.com may redirect (e.g. trailing-slash / https) — follow only no-less-safe hops.
+    // Enforce the owner's "only reach the host I asked for" rule LITERALLY. UserVerifiedRedirectPolicy
+    // makes the reply PAUSE on any redirect and wait for our explicit approval before sending anything
+    // to the new location — so the UA/IP never reaches a host we didn't vet. We allow only same-domain
+    // hops (trailing-slash, http→https, www.) and abort anything else.
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
-                         QNetworkRequest::NoLessSafeRedirectPolicy);
+                         QNetworkRequest::UserVerifiedRedirectPolicy);
     // A stalled connection must not hang the reply forever (inactivity timeout, resets per chunk).
     request.setTransferTimeout(30000);
 
     m_reply = m_network->get(request);
+    connect(m_reply, &QNetworkReply::redirected, this, [this](const QUrl& target) {
+        if (!m_reply)
+            return;
+        const QString host = target.host();
+        if (host == QLatin1String("decentespresso.com")
+            || host.endsWith(QLatin1String(".decentespresso.com"))) {
+            emit m_reply->redirectAllowed();
+        } else {
+            qDebug() << "MaintenanceDocSync: refusing cross-host redirect to" << host;
+            m_reply->abort();
+        }
+    });
     connect(m_reply, &QNetworkReply::finished, this, [this]() {
         QNetworkReply* r = m_reply;
         onReplyFinished(r);

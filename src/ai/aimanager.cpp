@@ -1433,11 +1433,11 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
                     dueItems["reminders"] = reminders;
                 if (!maintenance.isEmpty()) {
                     dueItems["maintenance"] = maintenance;
-                    // No-fabrication guard: tell the model the intervals are editable placeholders, not authoritative.
+                    // Intervals follow Decent's DE1 Quickstart cleaning guide but stay user-adjustable.
                     dueItems["maintenanceNote"] = QStringLiteral(
-                        "These maintenance intervals are the app's EDITABLE DEFAULT placeholders, not Decent's "
-                        "authoritative published schedule. Raise a due item as a gentle suggestion the user can "
-                        "confirm/adjust in settings; do NOT state an interval as an authoritative fact.");
+                        "These maintenance intervals follow Decent's DE1 cleaning guide but are user-adjustable "
+                        "defaults. Raise a due item as a gentle suggestion the user can confirm/adjust in settings. "
+                        "For descaling, defer to the user's water (it is TDS-dependent) rather than asserting a fixed interval.");
                 }
             });
         }

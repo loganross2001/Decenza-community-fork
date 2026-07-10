@@ -9,31 +9,34 @@
 
 namespace {
 
-// [barista-fork] CLEARLY-LABELED EDITABLE DEFAULT maintenance schedule for the Decent DE1.
+// [barista-fork] Default maintenance schedule for the Decent DE1, sourced from Decent's official
+// DE1 Quickstart Guide cleaning section (decentespresso.com/doc/quickstart/).
 //
-// ⚠ NO-FABRICATION GUARD: these intervals are CONSERVATIVE PLACEHOLDERS, NOT Decent's authoritative
-// published schedule. We cannot fetch Decent's live web materials from here, so the app seeds this
-// editable default, marks every seeded row is_default=1, and both the settings UI and the barista's
-// maintenance prompt tell the user these are "editable defaults — confirm against Decent's published
-// schedule." The moment the owner edits a row's interval it becomes their override (is_default=0) and
-// is authoritative over this seed. Never present these numbers to the user as authoritative.
+// These reflect Decent's documented daily/weekly/periodic cleaning tasks. Descaling is deliberately
+// water-dependent: Decent says water under ~30ppm TDS (RO/distilled/deionized) needs NO descaling,
+// 30-120ppm needs roughly ANNUAL descaling with 5% citric acid, and hard water >120ppm needs it every
+// 4-8 weeks — so the owner MUST set the descale interval for their own water. Every seeded row is
+// is_default=1; the moment the owner edits an interval it becomes their override (is_default=0) and is
+// authoritative over this seed. Intervals are Decent's general guidance — adjust for your usage/water.
 struct DefaultTask { const char* key; const char* label; int intervalDays; const char* note; };
 
 const DefaultTask kDefaultMaintenance[] = {
-    { "flush_group",    "Flush / rinse the group head after use", 1,
-      "After each session — a quick hot-water flush to clear the group. Confirm interval against Decent's schedule." },
-    { "backflush",      "Backflush the group",                    7,
-      "Placeholder weekly default — confirm against Decent's published schedule for your usage." },
-    { "clean_screen",   "Clean the shower screen",                14,
-      "Placeholder default — confirm against Decent's published schedule." },
-    { "clean_drip_tray","Empty & clean the drip tray",            3,
-      "Placeholder default — confirm against Decent's published schedule." },
-    { "water_filter",   "Check / replace the water filter",       60,
-      "Depends on your water hardness and volume — confirm against Decent's guidance." },
-    { "descale",        "Descale the machine",                    180,
-      "Strongly water-dependent — confirm the correct interval against Decent's published schedule." },
-    { "lubricate",      "Check / lubricate O-rings & group",      90,
-      "Placeholder default — confirm against Decent's published schedule." },
+    { "flush_group",      "Flush the group head after use",                 1,
+      "Decent: quick hot-water flush after each session to clear the group (Flush / Forward Flush)." },
+    { "clean_steam_wand", "Clean the steam wand after steaming",            1,
+      "Decent daily: purge and wipe the steam wand after each use so milk doesn't dry inside it." },
+    { "clean_water_tank", "Clean & refill the water tank",                  1,
+      "Decent daily: keep the water tank clean and topped up with fresh low-mineral water." },
+    { "clean_drip_tray",  "Empty & rinse the drip tray",                    1,
+      "Decent daily: empty and rinse the drip tray to prevent buildup and odor." },
+    { "steam_wand_weekly","Deep-clean the steam wand",                      7,
+      "Decent weekly: a more thorough steam-wand clean/soak beyond the daily purge." },
+    { "backflush",        "Flush the group head with detergent (backflush)",7,
+      "Decent weekly: backflush the group with espresso-machine detergent to clear oils." },
+    { "soak_group_parts", "Remove & soak the group head parts in detergent",30,
+      "Decent periodic: remove the group head parts (incl. shower screen) and soak them in detergent." },
+    { "descale",          "Descale the machine",                            365,
+      "Decent, WATER-DEPENDENT: none if <30ppm TDS (RO/distilled); ~annual at 30-120ppm (5% citric acid); every 4-8 weeks if >120ppm. Set this for YOUR water." },
 };
 
 // Roll an epoch second forward by one recurrence step from `from`. Unknown/empty → 0 (one-off).

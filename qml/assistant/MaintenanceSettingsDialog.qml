@@ -8,10 +8,10 @@ import Decenza
 // enable/disable, and mark a task done. The owner's edit becomes their OVERRIDE (persisted; the
 // seeded default is only the fallback).
 //
-// ⚠ NO-FABRICATION: the seeded intervals are CONSERVATIVE EDITABLE DEFAULTS, NOT Decent's
-// authoritative published schedule (we can't fetch Decent's live web materials). The banner at the
-// top says so, and each row that is still on its seeded default is tagged "default". Confirm the real
-// intervals against Decent's published maintenance schedule and adjust here.
+// The seeded intervals follow Decent's official DE1 Quickstart cleaning guide
+// (decentespresso.com/doc/quickstart/); each row still on its seed is tagged "default". They are
+// Decent's general guidance — the owner adjusts for their own usage, and MUST set the descale
+// interval for their water (it's TDS-dependent; the banner spells out the thresholds).
 //
 // Reachability: opened from the "Maintenance & reminders" button at the bottom of
 // AssistantSettingsPanel (itself reached via the gear in the conversation-card header). Writes go
@@ -105,9 +105,9 @@ Dialog {
                 anchors.margins: Theme.spacingMedium
                 wrapMode: Text.WordWrap
                 text: TranslationManager.translate("barista.maint.defaultsBanner",
-                    "These are editable DEFAULT intervals, not Decent's official schedule. Confirm each one "
-                    + "against Decent's published DE1 maintenance schedule and adjust below — your edits override "
-                    + "the defaults.")
+                    "These default intervals follow Decent's DE1 Quickstart cleaning guide. Adjust any of them "
+                    + "for your own usage — and especially set DESCALE for your water (none under ~30ppm TDS, "
+                    + "~yearly at 30-120ppm, every 4-8 weeks if harder). Your edits override the defaults.")
                 color: Theme.textSecondaryColor
                 font: Theme.labelFont
             }

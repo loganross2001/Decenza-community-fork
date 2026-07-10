@@ -560,9 +560,9 @@ Item {
                 + "takes PRIORITY over the recipe offer above: raise a due item OR a recipe tweak, never both in "
                 + "one turn, and never a pile — one proactive thing per turn, max. If they want to defer, that's "
                 + "fine — don't nag, and don't re-raise the same item again this session. MAINTENANCE INTERVALS "
-                + "ARE EDITABLE DEFAULTS, not Decent's authoritative schedule (see maintenanceNote): mention a "
-                + "maintenance item as a gentle 'might be about time' the user can confirm or adjust in settings — "
-                + "never assert an interval as an authoritative fact."
+                + "follow Decent's DE1 cleaning guide but are user-adjustable defaults (see maintenanceNote): "
+                + "mention a maintenance item as a gentle 'might be about time' the user can confirm or adjust in "
+                + "settings — and for descaling, defer to their water (it's TDS-dependent), don't assert a fixed interval."
 
         // Web search (Anthropic only) — keep the persona truthful about what it can/can't reach.
         var webOn = !!(root._settings && root._settings.webSearchEnabled)

@@ -1300,11 +1300,12 @@ Item {
                  && !root._screensaverDock
         anchors.right: parent.right
         anchors.verticalCenter: parent.verticalCenter
-        // [barista-fork] Larger tab (owner request) so the avatar face reads clearly and is easy to tap.
-        // Widened to comfortably fit the ~130px avatar below with margin. Still anchored to the right edge
-        // and vertically centered, so it stays on-screen.
-        width: Theme.scaled(148)
-        height: Theme.scaled(264)
+        // [barista-fork] The tab HUGS the avatar (no dead space — owner request). It's sized to the avatar
+        // plus a small even margin all around, not a tall pill: the old 264h left ~67px empty above and
+        // below the centered 130 avatar. Avatar is now 156 (20% bigger), so the tab is ~176 square — much
+        // closer to an action button (Theme.scaled(120)) than before. Right-edge, vertically centered.
+        width: Theme.scaled(172)
+        height: Theme.scaled(176)
         radius: Theme.cardRadius
         color: Theme.surfaceColor
         border.width: 1
@@ -1327,7 +1328,7 @@ Item {
         Loader {
             id: tabAvatar
             anchors.centerIn: parent
-            width: Theme.scaled(130); height: Theme.scaled(130)   // enlarged to fill the bigger tab face
+            width: Theme.scaled(156); height: Theme.scaled(156)   // 20% bigger (130→156); the tab hugs it, no dead space
             active: root._settings && root._settings.avatarEnabled
             source: "qrc:/qml/assistant/BaristaAvatar.qml"
             onLoaded: if (item) item.mode = "idle"

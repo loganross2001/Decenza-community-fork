@@ -490,6 +490,36 @@ Rectangle {
                 Accessible.ignored: true
             }
         }
+
+        // ── Maintenance & reminders ────────────────────────────────────────
+        // [barista-fork] Entry point to the maintenance schedule editor (intervals / enable / mark done).
+        // The dialog is instantiated below and opened here — a provably-reachable path from the gear:
+        // conversation-card gear → AssistantSettingsPanel (this file) → this button → MaintenanceSettingsDialog.
+        Rectangle {   // subtle divider so the section reads as distinct
+            Layout.fillWidth: true
+            Layout.topMargin: Theme.spacingSmall
+            implicitHeight: 1
+            color: Theme.borderColor
         }
+        AccessibleButton {
+            Layout.fillWidth: true
+            text: TranslationManager.translate("barista.settings.maintenance", "Maintenance & reminders…")
+            accessibleName: TranslationManager.translate("barista.settings.maintenance", "Maintenance & reminders")
+            onClicked: maintenanceDialog.open()
+        }
+        Tr {
+            key: "barista.settings.maintenanceHint"
+            fallback: "Editable default schedule for the DE1 — confirm intervals against Decent's published schedule."
+            Layout.fillWidth: true
+            wrapMode: Text.WordWrap
+            color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true
+        }
+        }
+    }
+
+    // The maintenance schedule editor. Modal, parented to the app Overlay (so it centres on screen,
+    // not inside the scrolled panel). Reachable only via the button above.
+    MaintenanceSettingsDialog {
+        id: maintenanceDialog
     }
 }

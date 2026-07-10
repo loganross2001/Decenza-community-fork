@@ -25,6 +25,7 @@ class Profile;
 class Settings;
 class ShotHistoryStorage;
 class FeedbackStorage;   // [barista-fork]
+class TasksStorage;      // [barista-fork] reminders + maintenance (assistant.db)
 class ProfileManager;
 
 class AIManager : public QObject {
@@ -145,6 +146,10 @@ public:
     // by requestBaristaContext's proactive bean-feedback block — safe to wire after construction.
     void setFeedbackStorage(FeedbackStorage* storage) { m_feedbackStorage = storage; }
     FeedbackStorage* feedbackStorage() const { return m_feedbackStorage; }
+    // [barista-fork] Reminders + maintenance store (assistant.db). Read lazily by the barista task tools and
+    // by requestBaristaContext's proactive dueItems block — safe to wire after construction.
+    void setTasksStorage(TasksStorage* storage) { m_tasksStorage = storage; }
+    TasksStorage* tasksStorage() const { return m_tasksStorage; }
     // [barista-fork] Dial-apply handler for the apply_dial_change write tool (approve-then-apply). A std::function
     // seam (not a BaristaActions* member) so this header/TU never names BaristaActions — keeps the machine-source
     // chain out of DB-only tests. Wired from BaristaModule to BaristaActions::applyFromNext.
@@ -347,6 +352,7 @@ private:
     std::unique_ptr<ShotSummarizer> m_summarizer;
     ShotHistoryStorage* m_shotHistory = nullptr;
     FeedbackStorage* m_feedbackStorage = nullptr;   // [barista-fork] verbal-feedback KB (assistant.db)
+    TasksStorage* m_tasksStorage = nullptr;         // [barista-fork] reminders + maintenance (assistant.db)
     // [barista-fork] apply_dial_change handler → BaristaActions::applyFromNext (std::function seam; see setter).
     std::function<QVariantMap(const QVariantMap&, qint64)> m_applyDialHandler;
     // [barista-fork] end_conversation handler → AssistantOrchestrator::requestDismiss (std::function seam; see setter).

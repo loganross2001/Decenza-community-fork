@@ -469,6 +469,22 @@ bool DatabaseBackupManager::createBackup(bool force)
             }
         }
 
+        // [barista-fork] Include the barista's assistant.db (verbal-feedback KB + reminders + maintenance).
+        // It lives beside shots.db but is a SEPARATE file that importDatabaseStatic does not touch, so without
+        // this it would be silently dropped on backup/restore. Staged as a plain file copy; restored by
+        // replacing the live assistant.db (see the restore side). Best-effort: a missing assistant.db (feature
+        // never used) is fine, and a copy failure only forfeits this side DB, never the shots backup.
+        {
+            const QString assistantSrc = QFileInfo(dbPath).absolutePath() + "/assistant.db";
+            if (QFile::exists(assistantSrc)) {
+                const QString assistantDest = stagingDir + "/assistant.db";
+                if (QFile::copy(assistantSrc, assistantDest))
+                    qDebug() << "DatabaseBackupManager: assistant.db (barista KB/reminders/maintenance) backed up";
+                else
+                    qWarning() << "DatabaseBackupManager: Failed to copy assistant.db from" << assistantSrc;
+            }
+        }
+
         // Copy profiles
         if (!userProfilesPath.isEmpty() && QDir(userProfilesPath).exists()) {
             if (copyDirectory(userProfilesPath, stagingDir + "/profiles/user")) {
@@ -867,6 +883,26 @@ bool DatabaseBackupManager::restoreBackup(const QString& filename, bool merge,
 
         // Restore additional data if present (backwards-compatible)
         QString restoreDir = isRawDb ? QFileInfo(zipPath).absolutePath() : tempDir;
+
+        // [barista-fork] Restore the barista's assistant.db (verbal-feedback KB + reminders + maintenance)
+        // when it's present in the backup and shots are being restored (it's the barista's data DB, restored
+        // alongside the shot history). This is a whole-file REPLACE — importDatabaseStatic's row-level merge
+        // covers only shots.db, so a merge-mode restore still replaces assistant.db wholesale (KNOWN
+        // LIMITATION: assistant.db rows are not merged; a merge restore adopts the backup's KB/reminders/
+        // maintenance for that file). Backwards-compatible: an older backup with no assistant.db is a no-op,
+        // leaving the live one intact. Only proceeds when the source file is present.
+        if (restoreShots) {
+            const QString assistantSrc = restoreDir + "/assistant.db";
+            if (QFile::exists(assistantSrc) && !dbPath.isEmpty()) {
+                const QString assistantDest = QFileInfo(dbPath).absolutePath() + "/assistant.db";
+                if (QFile::exists(assistantDest))
+                    QFile::remove(assistantDest);
+                if (QFile::copy(assistantSrc, assistantDest))
+                    qDebug() << "DatabaseBackupManager: assistant.db (barista KB/reminders/maintenance) restored";
+                else
+                    qWarning() << "DatabaseBackupManager: Failed to restore assistant.db to" << assistantDest;
+            }
+        }
 
         // Restore profiles (pure file I/O, safe on background thread)
         bool profilesRestored = false;

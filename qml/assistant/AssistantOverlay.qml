@@ -544,6 +544,26 @@ Item {
             persona += "\nYou recently made a suggestion for this coffee, so don't re-raise it; only bring "
                 + "something up if the user asks or the data has clearly changed."
 
+        // [barista-fork] DUE REMINDERS & MAINTENANCE SURFACING. Deliberately gated ONLY on proactivityLevel
+        // (off → never), NOT on the bean cooldown/consumeProactiveNudge above: a reminder the USER set up
+        // ("remind me to flush the group head Saturday") shouldn't be suppressed just because they pulled the
+        // same bean twice — the cooldown governs the barista's own recipe nudges, not the user's own reminders.
+        // The context block carries a "Due now" section (reminders + maintenance) when anything is due.
+        // ONE-PROACTIVE-THING-PER-TURN: reminders/maintenance and the recipe offer share a single budget — the
+        // barista raises AT MOST ONE proactive thing per turn. Priority: a due reminder/maintenance item wins
+        // over a recipe offer (the user explicitly asked to be reminded; a recipe tweak is the barista's idea).
+        if (level !== "off")
+            persona += "\nDUE REMINDERS & MAINTENANCE (PROACTIVE SURFACING): if the context block has a \"Due "
+                + "now\" section, the user has a reminder or a maintenance task that's due. Raise the SINGLE most "
+                + "pressing due item in your FIRST reply, AFTER you answer whatever they said — naturally, as a "
+                + "friendly nudge, not an alarm ('Oh — you wanted to flush the group head today, by the way'). This "
+                + "takes PRIORITY over the recipe offer above: raise a due item OR a recipe tweak, never both in "
+                + "one turn, and never a pile — one proactive thing per turn, max. If they want to defer, that's "
+                + "fine — don't nag, and don't re-raise the same item again this session. MAINTENANCE INTERVALS "
+                + "ARE EDITABLE DEFAULTS, not Decent's authoritative schedule (see maintenanceNote): mention a "
+                + "maintenance item as a gentle 'might be about time' the user can confirm or adjust in settings — "
+                + "never assert an interval as an authoritative fact."
+
         // Web search (Anthropic only) — keep the persona truthful about what it can/can't reach.
         var webOn = !!(root._settings && root._settings.webSearchEnabled)
                     && typeof MainController !== "undefined" && MainController.aiManager
@@ -594,6 +614,20 @@ Item {
                 + "the panel, so the user never has to hit stop. Judge intent: do NOT end on a mid-conversation "
                 + "'thanks' that's clearly followed by more (a question, another request) — only on a real close-out. "
                 + "NEVER call it unprompted or to end a chat the user hasn't wrapped up."
+                // [barista-fork] Reminder + maintenance TOOL usage — gated on tool availability (Anthropic client
+                // tools), NOT on proactivityLevel: creating/clearing a reminder is a DIRECT ask the barista always
+                // honors even when proactivity is off. (The proactive SURFACING of due items is gated separately
+                // above on proactivityLevel.)
+                + "\nREMINDERS & MAINTENANCE TOOLS — when the user asks you to remind them of something (\"remind "
+                + "me to flush the group head on Saturday\", \"remind me to descale next month\"), call "
+                + "create_reminder: resolve their timing to an ISO 8601 due using sessionContext.today (pick a "
+                + "sensible morning hour if they don't give a time), pass their exact wording in userPhrasing, set "
+                + "recurrence only if they clearly want it to repeat, then confirm briefly. When the user says a "
+                + "reminder or maintenance task is handled (\"done\", \"already flushed it\", \"backflushed this "
+                + "morning\"), clear it: complete_reminder with the reminderId, or log_maintenance with the taskKey "
+                + "(both from the \"Due now\" block or a list_due_reminders result). Use list_due_reminders for an "
+                + "explicit \"what do I need to do\" question. Only log_maintenance for a task that appears in the "
+                + "Due now block — never invent a task or claim an authoritative interval."
 
         // dataBlock is the pre-formatted, combined context (dial-in + bean profile + profile guidance).
         var block = (dataBlock && dataBlock.length > 0) ? dataBlock : "recordedShots: 0"
@@ -610,10 +644,19 @@ Item {
         var lightNodOk = (bucket === "earlierToday" && root._settings
                           && typeof root._settings.consumeLightGreetForToday === "function")
                          ? root._settings.consumeLightGreetForToday() : false
+        // [barista-fork] Absolute "now" so the model can resolve natural-language reminder due dates
+        // ("Saturday", "tomorrow 8am") into an ISO datetime for create_reminder. Local wall-clock.
+        var _now = new Date()
+        var _pad = function(n) { return (n < 10 ? "0" : "") + n }
+        var _todayIso = _now.getFullYear() + "-" + _pad(_now.getMonth() + 1) + "-" + _pad(_now.getDate())
+        var _weekdayNames = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"]
         var sessionCtx = "sessionContext:\n"
             + "  recency: " + bucket + "   (ongoing<60min | earlierToday | firstOfDay | firstEver)\n"
             + "  minutesSinceLastChat: " + (minsSince < 0 ? "never" : String(minsSince)) + "\n"
             + "  partOfDay: " + root._partOfDay() + "\n"
+            + "  today: " + _todayIso + " (" + _weekdayNames[_now.getDay()] + ") "
+            + _pad(_now.getHours()) + ":" + _pad(_now.getMinutes())
+            + "   (use this to resolve reminder timing like \"Saturday\" or \"tomorrow\" into an ISO due)\n"
             + "  lightNodOk: " + (lightNodOk ? "true" : "false") + "\n"
         // A shot the barista already knows about (the old close-out, now pure context). shotDiscussed is
         // false until the user talks taste; the model must NOT proactively ask about it.

@@ -15,6 +15,7 @@
 #include "../history/shothistorystorage.h"
 #include "../barista/baristatools.h"
 #include "../barista/feedbackstorage.h"   // [barista-fork] verbal-feedback KB (proactive context + write tool)
+#include "../barista/tasksstorage.h"      // [barista-fork] reminders + maintenance (proactive dueItems + task tools)
 
 #include <QNetworkAccessManager>
 #include <QStandardPaths>
@@ -221,7 +222,7 @@ void AIManager::createProviders()
             }
             // [barista-fork] Thread the feedback KB + the app-side anchor/dial snapshot into the executor so
             // log_tasting_feedback stamps shot_id + bean/profile/dial itself (never from the model).
-            BaristaTools::executeTool(m_shotHistory, m_feedbackStorage, m_applyDialHandler,
+            BaristaTools::executeTool(m_shotHistory, m_feedbackStorage, m_tasksStorage, m_applyDialHandler,
                                       m_endConversationHandler, m_lastBaristaAnchorSnapshot,
                                       name, input, std::move(done));
         });
@@ -1283,6 +1284,7 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
         QJsonObject grinderCalibration;
         QJsonObject fullHistory;
         QJsonArray beanFeedback;   // [barista-fork] recent verbal tasting feedback on the CURRENT bean
+        QJsonObject dueItems;      // [barista-fork] due reminders + due maintenance (assistant.db, shot-independent)
 
         withTempDb(dbPath, "barista_ctx", [&](QSqlDatabase& db) {
             // Anchor: latest shot for the current bean; else latest overall (robust to bean-name drift).
@@ -1392,8 +1394,56 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
             });
         }
 
+        // [barista-fork] DUE ITEMS — reminders + maintenance that are due NOW. Read UNCONDITIONALLY (these are
+        // shot-independent and bean-independent: a brand-new user with zero shots can still have set a reminder),
+        // and folded into the context even when there are no shots (the no-shot early-return path below also
+        // carries dueItems). Uses TasksStorage static readers so the query is the same as the async/tool path.
+        if (!feedbackDbPath.isEmpty()) {
+            const qint64 now = QDateTime::currentSecsSinceEpoch();
+            withTempDb(feedbackDbPath, "barista_dueitems_ctx", [&](QSqlDatabase& db) {
+                TasksStorage::ensureSchemaStatic(db);   // idempotent; seeds the editable-default maintenance schedule
+                QJsonArray reminders;
+                for (const QVariant& r : TasksStorage::fetchDueRemindersStatic(db, now, 5)) {
+                    const QVariantMap m = r.toMap();
+                    QJsonObject o;
+                    o["reminderId"] = m.value("id").toLongLong();
+                    o["text"]       = m.value("text").toString();
+                    o["due"]        = QDateTime::fromSecsSinceEpoch(m.value("dueAt").toLongLong())
+                                          .toString(QStringLiteral("yyyy-MM-dd HH:mm"));
+                    if (const QString phr = m.value("userPhrasing").toString(); !phr.isEmpty())
+                        o["userPhrasing"] = phr;
+                    if (const QString rec = m.value("recurrence").toString(); !rec.isEmpty())
+                        o["recurrence"] = rec;
+                    reminders.append(o);
+                }
+                QJsonArray maintenance;
+                for (const QVariant& r : TasksStorage::fetchDueMaintenanceStatic(db, now, 5)) {
+                    const QVariantMap m = r.toMap();
+                    QJsonObject o;
+                    o["taskKey"]      = m.value("taskKey").toString();
+                    o["label"]        = m.value("label").toString();
+                    o["intervalDays"] = m.value("intervalDays").toInt();
+                    if (m.contains("overdueDays"))
+                        o["overdueDays"] = m.value("overdueDays").toInt();
+                    else
+                        o["neverDone"] = true;
+                    maintenance.append(o);
+                }
+                if (!reminders.isEmpty())
+                    dueItems["reminders"] = reminders;
+                if (!maintenance.isEmpty()) {
+                    dueItems["maintenance"] = maintenance;
+                    // No-fabrication guard: tell the model the intervals are editable placeholders, not authoritative.
+                    dueItems["maintenanceNote"] = QStringLiteral(
+                        "These maintenance intervals are the app's EDITABLE DEFAULT placeholders, not Decent's "
+                        "authoritative published schedule. Raise a due item as a gentle suggestion the user can "
+                        "confirm/adjust in settings; do NOT state an interval as an authoritative fact.");
+                }
+            });
+        }
+
         QMetaObject::invokeMethod(qApp, [self, serial, shot, anchorId, beanFilterMissed,
-                                         beanBrand, beanType, profileName, beanFeedback,
+                                         beanBrand, beanType, profileName, beanFeedback, dueItems,
                                          dialInSessions, bestRecentShot, beanBestShot, grinderContext,
                                          grinderCalibration, recentAdvice, fullHistory]() {
             if (!self || serial != self->m_baristaContextSerial)
@@ -1423,13 +1473,21 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
                 self->m_lastBaristaAnchorSnapshot = snap;
             }
 
+            // [barista-fork] Due reminders/maintenance are shot-independent, so they must reach the prompt even
+            // when the user has NO shots (a brand-new user who set a reminder). Format once as a suffix appended
+            // to whichever block we emit — including the "recordedShots: 0" early-return paths below.
+            QString dueSuffix;
+            if (!dueItems.isEmpty())
+                dueSuffix = QStringLiteral("\n\n## Due now (reminders & maintenance the user set up):\n")
+                          + QString::fromUtf8(QJsonDocument(dueItems).toJson(QJsonDocument::Indented));
+
             if (anchorId <= 0 || !shot.isValid()) {
-                emit self->baristaContextReady(QStringLiteral("recordedShots: 0"));
+                emit self->baristaContextReady(QStringLiteral("recordedShots: 0") + dueSuffix);
                 return;
             }
             QJsonObject obj = self->buildUserPromptObjectForShot(shot);
             if (obj.isEmpty()) {
-                emit self->baristaContextReady(QStringLiteral("recordedShots: 0"));
+                emit self->baristaContextReady(QStringLiteral("recordedShots: 0") + dueSuffix);
                 return;
             }
             self->enrichUserPromptObject(obj, shot, dialInSessions, bestRecentShot, grinderContext,
@@ -1457,6 +1515,7 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
             block += QStringLiteral("## The app's structured data on this user and their coffee "
                                     "(this is real — you DO have their history):\n");
             block += QString::fromUtf8(QJsonDocument(obj).toJson(QJsonDocument::Indented));
+            block += dueSuffix;   // [barista-fork] due reminders/maintenance ride the same first-reply turn
             emit self->baristaContextReady(block);
         }, Qt::QueuedConnection);
     });

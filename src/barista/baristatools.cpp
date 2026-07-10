@@ -5,6 +5,7 @@
 #include "../ai/shotsummarizer.h"
 #include "../core/dbutils.h"
 #include "feedbackstorage.h"
+#include "tasksstorage.h"
 
 #include <QJsonDocument>
 #include <QJsonArray>
@@ -241,6 +242,82 @@ QJsonArray BaristaTools::toolDefinitions()
     ec["input_schema"] = ecSchema;
     tools.append(ec);
 
+    // [barista-fork] create_reminder (WRITE) — the user asks to be reminded of something ("remind me to
+    // flush the group head on Saturday"). The MODEL resolves the natural-language due to an ISO datetime
+    // (it can see today's date in sessionContext) and passes both the ISO due AND the user's own phrasing
+    // through; the executor stamps epoch app-side. Optional recurrence for repeating chores.
+    QJsonObject cr;
+    cr["name"] = QString("create_reminder");
+    cr["description"] = QString(
+        "Create a reminder for the user when they ask to be reminded of something (\"remind me to flush the "
+        "group head on Saturday\", \"remind me to descale next month\"). Resolve their timing to an ISO 8601 "
+        "datetime using today's date from sessionContext (e.g. the next Saturday at a sensible morning hour if "
+        "they don't give a time), and pass their ORIGINAL phrasing through in userPhrasing. Set recurrence only "
+        "if they clearly want it to repeat. Confirm naturally once it's saved (\"Got it — I'll remind you "
+        "Saturday\"). Do NOT invent reminders they didn't ask for.");
+    QJsonObject crSchema;
+    crSchema["type"] = QString("object");
+    QJsonObject crProps;
+    crProps["text"]         = strProp("What to remind the user to do, in a few words (required), e.g. \"flush the group head\".");
+    crProps["due"]          = strProp("When it's due, as an ISO 8601 datetime you compute from today's date (required), e.g. \"2026-07-11T08:00:00\".");
+    crProps["userPhrasing"] = strProp("The user's own words for the timing, passed through verbatim, e.g. \"Saturday\" or \"tomorrow morning\" (optional).");
+    crProps["recurrence"]   = strProp("One of: daily, weekly, monthly — ONLY if the user wants it to repeat (optional).");
+    crSchema["properties"] = crProps;
+    crSchema["required"] = QJsonArray{ QString("text"), QString("due") };
+    cr["input_schema"] = crSchema;
+    tools.append(cr);
+
+    // [barista-fork] list_due_reminders (READ) — surface reminders that are now due. Due reminders/maintenance
+    // are ALSO folded into the context block (dueItems) each turn, so reach for this for an explicit recall
+    // ("what am I supposed to do today?") or after completing one, to see what's left.
+    QJsonObject lr;
+    lr["name"] = QString("list_due_reminders");
+    lr["description"] = QString(
+        "List the user's reminders that are now due (things they earlier asked to be reminded of). The most "
+        "pressing due item is already summarised in your context block (dueItems); use this tool for an explicit "
+        "\"what do I need to do\" question or to see everything outstanding. Each result has a reminderId you can "
+        "pass to complete_reminder when they say it's done.");
+    QJsonObject lrSchema;
+    lrSchema["type"] = QString("object");
+    lrSchema["properties"] = QJsonObject{};
+    lr["input_schema"] = lrSchema;
+    tools.append(lr);
+
+    // [barista-fork] complete_reminder (WRITE) — clear a reminder the user says they've done. A recurring
+    // reminder rolls forward to its next occurrence instead of closing.
+    QJsonObject cp;
+    cp["name"] = QString("complete_reminder");
+    cp["description"] = QString(
+        "Mark a reminder done when the user says they've handled it (\"done\", \"flushed it\", \"already did "
+        "that\"). Pass the reminderId from a list_due_reminders result or the dueItems block. A recurring "
+        "reminder automatically rolls forward to its next occurrence. Acknowledge briefly (\"Nice — cleared\").");
+    QJsonObject cpSchema;
+    cpSchema["type"] = QString("object");
+    QJsonObject cpProps;
+    cpProps["reminderId"] = intProp("The id of the reminder to complete (from list_due_reminders or the dueItems block).");
+    cpSchema["properties"] = cpProps;
+    cpSchema["required"] = QJsonArray{ QString("reminderId") };
+    cp["input_schema"] = cpSchema;
+    tools.append(cp);
+
+    // [barista-fork] log_maintenance (WRITE) — record that a recurring maintenance task was done, so its
+    // next-due date resets. taskKey comes from the dueItems maintenance block (each due task carries its key).
+    QJsonObject lm;
+    lm["name"] = QString("log_maintenance");
+    lm["description"] = QString(
+        "Record that the user just completed a maintenance task (backflush, descale, cleaned the shower screen, "
+        "etc.) so its next-due date resets. Use the taskKey from the dueItems maintenance block. Only call this "
+        "for a task that actually exists in that block — never invent a task or its schedule; the intervals are "
+        "editable defaults the user confirms in settings, not authoritative facts. Acknowledge briefly.");
+    QJsonObject lmSchema;
+    lmSchema["type"] = QString("object");
+    QJsonObject lmProps;
+    lmProps["taskKey"] = strProp("The maintenance task's key, from the dueItems maintenance block (e.g. \"backflush\").");
+    lmSchema["properties"] = lmProps;
+    lmSchema["required"] = QJsonArray{ QString("taskKey") };
+    lm["input_schema"] = lmSchema;
+    tools.append(lm);
+
     return tools;
 }
 
@@ -269,6 +346,7 @@ static void baristaFreshness(const ShotProjection& s, QJsonObject& out)
 // history (any roaster/bean, any date range) — the "access to everything" the barista promised. Kept off the
 // main thread because withTempDb opens a fresh connection each call and the target is a slow tablet.
 void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage* feedback,
+                               TasksStorage* tasks,
                                const std::function<QVariantMap(const QVariantMap&, qint64)>& applyDial,
                                const std::function<void()>& endConversation,
                                const QVariantMap& anchorSnapshot,
@@ -286,6 +364,141 @@ void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage*
         }
         endConversation();
         done(QJsonObject{{QStringLiteral("ended"), true}});
+        return;
+    }
+
+    // [barista-fork] create_reminder (WRITE) — the model resolved the user's timing to an ISO due; the
+    // executor parses it to epoch app-side (rejecting anything unparseable so a bad due never persists as
+    // "due now"), validates recurrence, and passes the user's phrasing through for provenance.
+    if (name == QLatin1String("create_reminder")) {
+        if (!tasks) {
+            done(QJsonObject{{QStringLiteral("error"), QStringLiteral("reminder storage unavailable")}});
+            return;
+        }
+        const QString text = input.value(QStringLiteral("text")).toString().trimmed();
+        if (text.isEmpty()) {
+            done(QJsonObject{{QStringLiteral("error"),
+                QStringLiteral("create_reminder needs text (what to remind the user to do)")}});
+            return;
+        }
+        const QString dueStr = input.value(QStringLiteral("due")).toString().trimmed();
+        QDateTime due = QDateTime::fromString(dueStr, Qt::ISODate);
+        if (!due.isValid())   // tolerate a date-only ISO (default to 8am local)
+            if (const QDate d = QDate::fromString(dueStr.left(10), Qt::ISODate); d.isValid())
+                due = QDateTime(d, QTime(8, 0));
+        if (!due.isValid()) {
+            done(QJsonObject{{QStringLiteral("error"),
+                QStringLiteral("create_reminder needs a valid ISO 8601 due datetime (e.g. 2026-07-11T08:00:00)")}});
+            return;
+        }
+        QString recurrence = input.value(QStringLiteral("recurrence")).toString().trimmed().toLower();
+        if (recurrence != QLatin1String("daily") && recurrence != QLatin1String("weekly")
+            && recurrence != QLatin1String("monthly"))
+            recurrence.clear();
+
+        QVariantMap fields;
+        fields.insert(QStringLiteral("text"), text);
+        fields.insert(QStringLiteral("dueAt"), due.toSecsSinceEpoch());
+        fields.insert(QStringLiteral("recurrence"), recurrence);
+        fields.insert(QStringLiteral("userPhrasing"), input.value(QStringLiteral("userPhrasing")).toString().trimmed());
+
+        const QString dueEcho = due.toString(QStringLiteral("yyyy-MM-dd HH:mm"));
+        auto conn = std::make_shared<QMetaObject::Connection>();
+        *conn = QObject::connect(tasks, &TasksStorage::reminderCreated, tasks,
+            [done, conn, dueEcho, recurrence](qint64 id) {
+                QObject::disconnect(*conn);
+                if (id > 0) {
+                    QJsonObject o{{QStringLiteral("ok"), true}, {QStringLiteral("reminderId"), id},
+                                  {QStringLiteral("dueAt"), dueEcho}};
+                    if (!recurrence.isEmpty()) o[QStringLiteral("recurrence")] = recurrence;
+                    done(o);
+                } else {
+                    done(QJsonObject{{QStringLiteral("error"), QStringLiteral("failed to save reminder")}});
+                }
+            });
+        tasks->requestCreateReminder(fields);
+        return;
+    }
+
+    // [barista-fork] list_due_reminders (READ) — open reminders due now, newest-due first.
+    if (name == QLatin1String("list_due_reminders")) {
+        if (!tasks) {
+            done(QJsonObject{{QStringLiteral("error"), QStringLiteral("reminder storage unavailable")}});
+            return;
+        }
+        auto conn = std::make_shared<QMetaObject::Connection>();
+        *conn = QObject::connect(tasks, &TasksStorage::dueRemindersReady, tasks,
+            [done, conn](const QVariantList& rows) {
+                QObject::disconnect(*conn);
+                QJsonArray arr;
+                for (const QVariant& r : rows) {
+                    const QVariantMap m = r.toMap();
+                    QJsonObject o;
+                    o[QStringLiteral("reminderId")] = m.value(QStringLiteral("id")).toLongLong();
+                    o[QStringLiteral("text")]       = m.value(QStringLiteral("text")).toString();
+                    o[QStringLiteral("due")]        = QDateTime::fromSecsSinceEpoch(
+                        m.value(QStringLiteral("dueAt")).toLongLong()).toString(QStringLiteral("yyyy-MM-dd HH:mm"));
+                    if (const QString rec = m.value(QStringLiteral("recurrence")).toString(); !rec.isEmpty())
+                        o[QStringLiteral("recurrence")] = rec;
+                    if (const QString phr = m.value(QStringLiteral("userPhrasing")).toString(); !phr.isEmpty())
+                        o[QStringLiteral("userPhrasing")] = phr;
+                    arr.append(o);
+                }
+                done(QJsonObject{{QStringLiteral("dueCount"), arr.size()}, {QStringLiteral("reminders"), arr}});
+            });
+        tasks->requestDueReminders(0);
+        return;
+    }
+
+    // [barista-fork] complete_reminder (WRITE) — clear (or roll forward, if recurring) a reminder.
+    if (name == QLatin1String("complete_reminder")) {
+        if (!tasks) {
+            done(QJsonObject{{QStringLiteral("error"), QStringLiteral("reminder storage unavailable")}});
+            return;
+        }
+        const qint64 reminderId = input.value(QStringLiteral("reminderId")).toVariant().toLongLong();
+        if (reminderId <= 0) {
+            done(QJsonObject{{QStringLiteral("error"),
+                QStringLiteral("complete_reminder needs a positive reminderId (from list_due_reminders)")}});
+            return;
+        }
+        auto conn = std::make_shared<QMetaObject::Connection>();
+        *conn = QObject::connect(tasks, &TasksStorage::reminderCompleted, tasks,
+            [done, conn](qint64 id) {
+                QObject::disconnect(*conn);
+                if (id > 0)
+                    done(QJsonObject{{QStringLiteral("ok"), true}, {QStringLiteral("reminderId"), id}});
+                else
+                    done(QJsonObject{{QStringLiteral("error"),
+                        QStringLiteral("reminder not found or already completed")}});
+            });
+        tasks->requestCompleteReminder(reminderId);
+        return;
+    }
+
+    // [barista-fork] log_maintenance (WRITE) — record a completed maintenance task; resets its next-due.
+    if (name == QLatin1String("log_maintenance")) {
+        if (!tasks) {
+            done(QJsonObject{{QStringLiteral("error"), QStringLiteral("maintenance storage unavailable")}});
+            return;
+        }
+        const QString taskKey = input.value(QStringLiteral("taskKey")).toString().trimmed();
+        if (taskKey.isEmpty()) {
+            done(QJsonObject{{QStringLiteral("error"),
+                QStringLiteral("log_maintenance needs a taskKey (from the dueItems maintenance block)")}});
+            return;
+        }
+        auto conn = std::make_shared<QMetaObject::Connection>();
+        *conn = QObject::connect(tasks, &TasksStorage::maintenanceLogged, tasks,
+            [done, conn, taskKey](const QString& logged) {
+                QObject::disconnect(*conn);
+                if (!logged.isEmpty())
+                    done(QJsonObject{{QStringLiteral("ok"), true}, {QStringLiteral("taskKey"), logged}});
+                else
+                    done(QJsonObject{{QStringLiteral("error"),
+                        QStringLiteral("no maintenance task with key: ") + taskKey}});
+            });
+        tasks->requestLogMaintenance(taskKey, 0);
         return;
     }
 

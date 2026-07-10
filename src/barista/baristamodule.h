@@ -6,6 +6,7 @@
 #include "baristaknowledge.h"      // ditto for Q_PROPERTY(BaristaKnowledge*)
 #include "baristaactions.h"        // ditto for Q_PROPERTY(BaristaActions*)
 #include "baristacontextbuilder.h" // ditto for Q_PROPERTY(BaristaContextBuilder*)
+#include "tasksstorage.h"          // complete type needed for the Q_PROPERTY(TasksStorage*) metatype
 
 class QQmlApplicationEngine;
 class MainController;
@@ -30,6 +31,9 @@ class BaristaModule : public QObject {
     Q_PROPERTY(BaristaKnowledge* knowledge READ knowledge CONSTANT)
     Q_PROPERTY(BaristaActions* actions READ actions CONSTANT)
     Q_PROPERTY(BaristaContextBuilder* contextBuilder READ contextBuilder CONSTANT)
+    // [barista-fork] Reminders + maintenance store, exposed so the maintenance settings dialog can list/edit
+    // tasks and mark them done directly (the barista also reaches it via the AI task tools).
+    Q_PROPERTY(TasksStorage* tasks READ tasks CONSTANT)
 
 public:
     // Single upstream hook: construct the module (settings + orchestrator), register the
@@ -50,6 +54,7 @@ public:
     BaristaKnowledge* knowledge() const { return m_knowledge; }
     BaristaActions* actions() const { return m_actions; }
     BaristaContextBuilder* contextBuilder() const { return m_contextBuilder; }
+    TasksStorage* tasks() const { return m_tasksStorage; }   // [barista-fork] reminders + maintenance
 
 signals:
     void enabledChanged();
@@ -69,4 +74,7 @@ private:
     // [barista-fork] Verbal-feedback KB (assistant.db). Constructed here (the module owns it), initialized with
     // a path derived beside shots.db, and handed to AIManager for the write tool + proactive context block.
     FeedbackStorage* m_feedbackStorage = nullptr;
+    // [barista-fork] Reminders + maintenance store (SAME assistant.db as m_feedbackStorage). Owned here,
+    // initialized with the path derived beside shots.db, handed to AIManager for the task tools + dueItems.
+    TasksStorage* m_tasksStorage = nullptr;
 };

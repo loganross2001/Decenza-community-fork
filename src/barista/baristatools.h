@@ -9,6 +9,7 @@
 
 class ShotHistoryStorage;
 class FeedbackStorage;
+class TasksStorage;   // [barista-fork] reminders + maintenance (assistant.db)
 
 // [barista-fork] The barista's PRIVATE client-side AI tools — query_shots, get_shot_detail, compare_shots,
 // get_bean_profile, detect_grind_drift (READ, shots.db) plus log_tasting_feedback / search_tasting_feedback
@@ -44,7 +45,11 @@ public:
     // AssistantOrchestrator::requestDismiss (see baristamodule.cpp), which merely emits a main-thread signal the
     // overlay acts on AFTER the sign-off is spoken — the tool itself never tears down UI on this thread. An empty
     // std::function yields an error result for that tool only.
+    // [barista-fork] `tasks` supplies the assistant.db reminders + maintenance store for the four
+    // task tools (create_reminder / list_due_reminders / complete_reminder / log_maintenance). Read
+    // lazily like `feedback`; a null pointer yields an error result for those tools only.
     static void executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage* feedback,
+                            TasksStorage* tasks,
                             const std::function<QVariantMap(const QVariantMap&, qint64)>& applyDial,
                             const std::function<void()>& endConversation,
                             const QVariantMap& anchorSnapshot,

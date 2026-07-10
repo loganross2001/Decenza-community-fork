@@ -40,6 +40,15 @@ target_sources(Decenza PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/feedbackstorage.cpp
 )
 
+# TasksStorage owns the barista's reminders + maintenance tracking (SAME assistant.db as FeedbackStorage).
+# Registered UNCONDITIONALLY like FeedbackStorage: baristatools.cpp (unconditional) references TasksStorage
+# in the create_reminder/list_due_reminders/complete_reminder/log_maintenance executors, and aimanager.cpp
+# reads it for the proactive dueItems context block, so a DECENZA_BARISTA=OFF build must still link.
+target_sources(Decenza PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/tasksstorage.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/tasksstorage.cpp
+)
+
 if(DECENZA_BARISTA)
     target_sources(Decenza PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristamodule.h
@@ -68,6 +77,8 @@ if(DECENZA_BARISTA)
             ${CMAKE_CURRENT_SOURCE_DIR}/qml/assistant/AssistantOverlay.qml
             ${CMAKE_CURRENT_SOURCE_DIR}/qml/assistant/AssistantSettingsPanel.qml
             ${CMAKE_CURRENT_SOURCE_DIR}/qml/assistant/AssistantSettingsSection.qml
+            ${CMAKE_CURRENT_SOURCE_DIR}/qml/assistant/MaintenanceSettingsDialog.qml
+
             ${CMAKE_CURRENT_SOURCE_DIR}/qml/assistant/ActionConfirmChip.qml
             ${CMAKE_CURRENT_SOURCE_DIR}/qml/assistant/BaristaAvatar.qml
             ${CMAKE_CURRENT_SOURCE_DIR}/qml/assistant/avatars/AvatarFace.qml

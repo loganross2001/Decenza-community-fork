@@ -8,6 +8,7 @@
 #include "baristaactions.h"
 #include "baristacontextbuilder.h"
 #include "feedbackstorage.h"
+#include "tasksstorage.h"
 #include "../controllers/maincontroller.h"
 #include "../history/shothistorystorage.h"
 #include "../ai/aimanager.h"
@@ -33,7 +34,8 @@ BaristaModule::BaristaModule(MainController* mainController, MachineState* machi
           mainController ? mainController->beanbase() : nullptr,
           mainController ? mainController->profileManager() : nullptr,
           appSettings, this))
-    , m_feedbackStorage(new FeedbackStorage(this)) {
+    , m_feedbackStorage(new FeedbackStorage(this))
+    , m_tasksStorage(new TasksStorage(this)) {
     connect(m_settings, &AssistantSettings::enabledChanged,
             this, &BaristaModule::enabledChanged);
 
@@ -44,10 +46,15 @@ BaristaModule::BaristaModule(MainController* mainController, MachineState* machi
     if (mainController) {
         if (ShotHistoryStorage* sh = mainController->shotHistory(); sh && !sh->databasePath().isEmpty()) {
             const QString dir = QFileInfo(sh->databasePath()).absolutePath();
-            m_feedbackStorage->initialize(dir + QStringLiteral("/assistant.db"));
+            const QString assistantDb = dir + QStringLiteral("/assistant.db");
+            m_feedbackStorage->initialize(assistantDb);
+            // [barista-fork] Reminders + maintenance share the SAME assistant.db file (each store's
+            // ensureSchema is idempotent and touches only its own tables).
+            m_tasksStorage->initialize(assistantDb);
         }
         if (AIManager* ai = mainController->aiManager()) {
             ai->setFeedbackStorage(m_feedbackStorage);
+            ai->setTasksStorage(m_tasksStorage);   // [barista-fork] task tools + dueItems context block
             // [barista-fork] apply_dial_change → applyFromNext, via a std::function seam (keeps BaristaActions
             // out of the AI TUs / DB-only tests). m_actions outlives AIManager (both parented under the module).
             BaristaActions* actions = m_actions;

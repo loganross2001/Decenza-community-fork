@@ -56,6 +56,7 @@ set(CORE_SOURCES
     ${CMAKE_SOURCE_DIR}/src/history/coffeebagstorage.cpp  # SettingsDye write-through dependency
     ${CMAKE_SOURCE_DIR}/src/history/baristastorage.cpp     # shothistorystorage migration 24 dependency
     ${CMAKE_SOURCE_DIR}/src/barista/feedbackstorage.cpp    # [barista-fork] verbal-feedback KB (baristatools.cpp/aimanager.cpp dep)
+    ${CMAKE_SOURCE_DIR}/src/barista/tasksstorage.cpp       # [barista-fork] reminders + maintenance (baristatools.cpp/aimanager.cpp dep)
     ${CMAKE_SOURCE_DIR}/src/history/equipmentstorage.cpp
     ${CMAKE_SOURCE_DIR}/src/core/settings_network.cpp
     ${CMAKE_SOURCE_DIR}/src/core/settings_app.cpp
@@ -462,6 +463,7 @@ set(HISTORY_SOURCES
     ${CMAKE_SOURCE_DIR}/src/history/coffeebagstorage.cpp
     ${CMAKE_SOURCE_DIR}/src/history/baristastorage.cpp
     ${CMAKE_SOURCE_DIR}/src/barista/feedbackstorage.cpp    # [barista-fork] verbal-feedback KB (baristatools.cpp/aimanager.cpp dep)
+    ${CMAKE_SOURCE_DIR}/src/barista/tasksstorage.cpp       # [barista-fork] reminders + maintenance (baristatools.cpp/aimanager.cpp dep)
     ${CMAKE_SOURCE_DIR}/src/history/equipmentstorage.cpp
     ${CMAKE_SOURCE_DIR}/src/history/shotprojection.cpp
     ${CMAKE_SOURCE_DIR}/src/history/shotprojection.h

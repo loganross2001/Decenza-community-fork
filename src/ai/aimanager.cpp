@@ -4,6 +4,8 @@
 #include "shotsummarizer.h"
 #include "../core/settings.h"
 #include "../core/settings_ai.h"
+#include "../core/settings_dye.h"          // [barista-fork] active-bag roast/freeze state for the proactive-rec block
+#include "../network/roastdate.h"          // [barista-fork] locale-robust roast-date → ISO for days-off-roast
 #include "../core/grinderaliases.h"
 #include "../controllers/profilemanager.h"
 #include "dialing_blocks.h"
@@ -19,6 +21,7 @@
 #include <QDir>
 #include <QFile>
 #include <QDateTime>
+#include <QDate>
 #include <QLocale>
 #include <QDebug>
 #include <QCryptographicHash>
@@ -64,6 +67,86 @@ ShotProjection coerceShot(const QVariant& v)
         qWarning() << "AIManager::coerceShot: empty/non-map shot arg (type"
                    << v.typeName() << ") — shot will read as a mistake";
     return ShotProjection::fromVariantMap(m);
+}
+
+// [barista-fork] PROACTIVE-REC INPUTS. A compact, current-state block the barista reads at engage time to
+// DECIDE whether a recipe tweak is worth offering on its first reply — bean age (days off roast + a plain
+// freshness read), and storage state (frozen / days out of the freezer / the user's bag notes). The shot
+// OUTCOME half of a proactive rec (best/most-recent shot on this bean, and the user's own taste words) is
+// already carried by the block's beanBestShot + recentTastingFeedbackOnThisBean fields, so this adds ONLY the
+// bean-condition signals those blocks lack. Everything here is computed FACT (dates, day counts) — no
+// fabricated dial numbers (the persona's no-invention guard still owns those). Reads live SettingsDye, so it
+// must run on the main thread. Returns an empty object when there's nothing worth saying (no roast date, no
+// freeze/notes) so the caller can skip the field entirely.
+//
+// Freshness windows (arabica espresso rule-of-thumb, off roast):
+//   < 5 days  → very fresh / still degassing (runs fast + unstable; do NOT chase it finer yet)
+//   5–10      → opening up
+//   10–21     → peak / dialed-in window
+//   21–35     → mature (expect to grind a touch finer as it fades)
+//   > 35      → fading / stale (grind finer, shorten ratio, or move on)
+QJsonObject buildProactiveRecBlock(SettingsDye* dye)
+{
+    if (!dye)
+        return {};
+    QJsonObject o;
+    const QDate today = QDate::currentDate();
+
+    // --- Bean age off roast ------------------------------------------------
+    const QString rawRoast = dye->dyeRoastDate();
+    if (!rawRoast.isEmpty()) {
+        // RoastDate::toIso is locale-robust (handles US/EU numeric + ISO); fall back to a couple of
+        // explicit formats for anything it passes through unchanged.
+        QDate roast = QDate::fromString(RoastDate::toIso(rawRoast).left(10), Qt::ISODate);
+        if (!roast.isValid()) roast = QDate::fromString(rawRoast, QStringLiteral("yyyy-MM-dd"));
+        if (roast.isValid()) {
+            const qint64 days = roast.daysTo(today);
+            if (days >= 0 && days < 3650) {   // sane range only; a future/typo'd date is left out
+                o.insert(QStringLiteral("daysOffRoast"), static_cast<int>(days));
+                QString read;
+                if (days < 5)       read = QStringLiteral("very fresh / still degassing (runs fast + unstable — do not chase it finer yet)");
+                else if (days < 10) read = QStringLiteral("opening up (approaching its window)");
+                else if (days < 21) read = QStringLiteral("in its peak window");
+                else if (days < 35) read = QStringLiteral("maturing (expect to grind a touch finer as it fades)");
+                else                read = QStringLiteral("fading / past peak (grind finer or shorten the ratio, or consider a fresher bag)");
+                o.insert(QStringLiteral("freshnessRead"), read);
+            }
+        }
+    }
+
+    // --- Storage state (frozen / defrosted) --------------------------------
+    // These describe the ACTIVE bag's thermal history. A just-thawed bag behaves like a young bag for a
+    // day or two (offgassing resumes), which is a legitimate "hold off / re-dial" signal.
+    const QString frozen  = dye->activeBagFrozenDate();
+    const QString defrost = dye->activeBagDefrostDate();
+    if (!frozen.isEmpty() || !defrost.isEmpty()) {
+        QJsonObject storage;
+        const QDate def = QDate::fromString(defrost.left(10), Qt::ISODate);
+        if (def.isValid()) {
+            const qint64 daysOut = def.daysTo(today);
+            if (daysOut >= 0 && daysOut < 3650) {
+                storage.insert(QStringLiteral("daysOutOfFreezer"), static_cast<int>(daysOut));
+                storage.insert(QStringLiteral("note"), daysOut <= 2
+                    ? QStringLiteral("recently defrosted — beans may still be settling; hold a big grind move for a shot or two")
+                    : QStringLiteral("defrosted and settled"));
+            }
+        } else if (!frozen.isEmpty()) {
+            // Frozen with no defrost date recorded → treat as currently frozen (informational only).
+            storage.insert(QStringLiteral("state"), QStringLiteral("frozen (no defrost date recorded)"));
+        }
+        if (!storage.isEmpty())
+            o.insert(QStringLiteral("storage"), storage);
+    }
+
+    // --- The user's own current-shot note ----------------------------------
+    // dyeShotNotes is the CURRENT-SHOT note (dye/shotNotes, per-shot — NOT written through to the bag),
+    // so surface it as recentShotNote, not bag guidance. Still worth honoring when the user jotted
+    // something about this setup ("tastes flat", "trying 1:2.2"); trimmed + capped.
+    const QString notes = dye->dyeShotNotes().trimmed();
+    if (!notes.isEmpty())
+        o.insert(QStringLiteral("recentShotNote"), notes.left(240));
+
+    return o;
 }
 }
 
@@ -1357,6 +1440,16 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
             // bean tasted, so the barista closes the loop ("you called this sour twice") without a tool call.
             if (!beanFeedback.isEmpty())
                 obj.insert(QStringLiteral("recentTastingFeedbackOnThisBean"), beanFeedback);
+            // [barista-fork] PROACTIVE-REC INPUTS: bean age + freshness read + storage state for the ACTIVE
+            // bag (from live SettingsDye — safe here, this callback runs on the main thread). Lets the barista
+            // decide whether to OFFER one recipe tweak on its first reply (grind finer as a bag ages, re-dial
+            // a just-thawed bag) — always as an offer, never auto-applied. Complements beanBestShot +
+            // recentTastingFeedbackOnThisBean (the shot-outcome half); omitted when there's nothing to say.
+            if (self->m_settings && self->m_settings->dye()) {
+                const QJsonObject rec = buildProactiveRecBlock(self->m_settings->dye());
+                if (!rec.isEmpty())
+                    obj.insert(QStringLiteral("proactiveRecInputs"), rec);
+            }
             QString block;
             if (beanFilterMissed)
                 block += QStringLiteral("NOTE: No shots recorded under the exact current bean name — "

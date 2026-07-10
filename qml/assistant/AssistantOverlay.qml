@@ -523,6 +523,23 @@ Item {
                 + "If the recent shots for this bean show 3+ attempts with no rating improvement, name the dialing "
                 + "stall and propose a strategy change (a different variable, or a different profile) rather than "
                 + "another micro-adjustment. Mention bean freshness/degassing only if clearly relevant."
+                // [barista-fork] PROACTIVE RECIPE OFFER — ride the FIRST reply, never a cold greeting. The data
+                // block's proactiveRecInputs (daysOffRoast + freshnessRead, storage/defrost state, recentShotNote),
+                // alongside beanBestShot and recentTastingFeedbackOnThisBean, tell you when a recipe tweak is
+                // genuinely worth raising (e.g. the bag has aged past its window → grind finer; a just-thawed
+                // bag → hold a big move and re-dial gently). If — and ONLY if — one such tweak clearly helps AND
+                // the moment fits (they've engaged you and coffee is fair game), fold ONE concrete offer into
+                // your first reply, in plain coffee language, AFTER you answer whatever they said (answer first).
+                + "\nPROACTIVE RECIPE OFFER: at most ONE tweak, phrased as a genuine offer with an easy, SPOKEN "
+                + "way out — end it so 'no thanks' / 'leave it' is an obvious, no-pressure answer (e.g. \"Your "
+                + "Kenya's out to twelve days now — want to nudge the grind a hair finer, or leave it where it "
+                + "is?\"). It is an OFFER, not a plan: propose and ASK, change NOTHING until they clearly approve, "
+                + "then apply per HOW CHANGES GET MADE. If they pass, drop it gracefully in a few words and do "
+                + "not raise it again this session — silence is fine. Do NOT stack it on top of a just-pulled-shot "
+                + "coaching turn (that turn already carries its own single suggestion), do NOT open with it before "
+                + "answering them, and do NOT force it when they're being social — MATCH THE USER'S LANE wins. "
+                + "Never invent dial numbers without an anchor in the data; if nothing clearly warrants a change, "
+                + "offer nothing."
         else
             persona += "\nYou recently made a suggestion for this coffee, so don't re-raise it; only bring "
                 + "something up if the user asks or the data has clearly changed."
@@ -1219,8 +1236,11 @@ Item {
                  && !root._screensaverDock
         anchors.right: parent.right
         anchors.verticalCenter: parent.verticalCenter
-        width: Theme.scaled(52)
-        height: Theme.scaled(108)
+        // [barista-fork] ~2× larger tab (owner request) — easier to see + tap. Still anchored to the right
+        // edge and vertically centered, so it stays on-screen; height (~216) sits comfortably under the
+        // drifting-avatar footprint (112) used on the screensaver.
+        width: Theme.scaled(104)
+        height: Theme.scaled(216)
         radius: Theme.cardRadius
         color: Theme.surfaceColor
         border.width: 1
@@ -1243,7 +1263,7 @@ Item {
         Loader {
             id: tabAvatar
             anchors.centerIn: parent
-            width: Theme.scaled(40); height: Theme.scaled(40)
+            width: Theme.scaled(80); height: Theme.scaled(80)   // ~2× with the tab
             active: root._settings && root._settings.avatarEnabled
             source: "qrc:/qml/assistant/BaristaAvatar.qml"
             onLoaded: if (item) item.mode = "idle"
@@ -1252,7 +1272,7 @@ Item {
             anchors.centerIn: parent
             visible: !(root._settings && root._settings.avatarEnabled)
             source: "qrc:/icons/barista.svg"
-            sourceSize.height: Theme.scaled(28)
+            sourceSize.height: Theme.scaled(56)   // ~2× with the tab
             fillMode: Image.PreserveAspectFit
             Accessible.ignored: true
         }

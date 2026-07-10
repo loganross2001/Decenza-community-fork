@@ -169,7 +169,7 @@ ColumnLayout {
         onEditingFinished: { Qt.inputMethod.commit(); if (root._settings) root._settings.elevenlabsVoiceId = text }
     }
 
-    // Voice speed slider
+    // Voice speed slider (barista voice — the coaching voice has its own speed in the barista settings panel)
     Tr { key: "barista.settings.speed"; fallback: "Voice speed"
          color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true }
     RowLayout {
@@ -178,8 +178,8 @@ ColumnLayout {
             id: speedSlider
             Layout.fillWidth: true
             from: 0.7; to: 1.3; stepSize: 0.05
-            value: root._settings ? root._settings.voiceSpeed : 1.0
-            onMoved: if (root._settings) root._settings.voiceSpeed = value
+            value: root._settings ? root._settings.baristaVoiceSpeed : 1.0
+            onMoved: if (root._settings) root._settings.baristaVoiceSpeed = value
             Accessible.name: TranslationManager.translate("barista.settings.speed", "Voice speed")
         }
         Text { text: speedSlider.value.toFixed(2) + "×"; color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true }
@@ -189,6 +189,22 @@ ColumnLayout {
             accessibleName: TranslationManager.translate("barista.settings.preview", "Preview voice")
             onClicked: if (root._voice) root._voice.preview()
         }
+    }
+
+    // Voice volume slider (barista voice)
+    Tr { key: "barista.settings.volume"; fallback: "Voice volume"
+         color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true }
+    RowLayout {
+        Layout.fillWidth: true; spacing: Theme.spacingSmall
+        Slider {
+            id: volumeSlider
+            Layout.fillWidth: true
+            from: 0.0; to: 1.0; stepSize: 0.05
+            value: root._settings ? root._settings.baristaVoiceVolume : 1.0
+            onMoved: if (root._settings) root._settings.baristaVoiceVolume = value
+            Accessible.name: TranslationManager.translate("barista.settings.volume", "Voice volume")
+        }
+        Text { text: Math.round(volumeSlider.value * 100) + "%"; color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true }
     }
 
     // Bell — the greeting chime. "poof" is the soft default; "off" silences it; "custom" plays your own file.

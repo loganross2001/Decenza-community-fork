@@ -195,6 +195,50 @@ Rectangle {
             onVoiceSelected: function(id) { if (root._settings) root._settings.elevenlabsVoiceId = id }
         }
 
+        // Barista voice volume — linear 0..1 gain applied at playback (independent of the coaching voice).
+        Tr {
+            key: "barista.settings.volume"; fallback: "Voice volume"
+            color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true
+        }
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: Theme.spacingSmall
+            Slider {
+                id: baristaVolumeSlider
+                Layout.fillWidth: true
+                from: 0.0; to: 1.0; stepSize: 0.05
+                value: root._settings ? root._settings.baristaVoiceVolume : 1.0
+                onMoved: if (root._settings) root._settings.baristaVoiceVolume = value
+                Accessible.name: TranslationManager.translate("barista.settings.volume", "Voice volume")
+            }
+            Text {
+                text: Math.round(baristaVolumeSlider.value * 100) + "%"
+                color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true
+            }
+        }
+
+        // Barista voice speed — rate multiplier (independent of the coaching voice).
+        Tr {
+            key: "barista.settings.speed"; fallback: "Voice speed"
+            color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true
+        }
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: Theme.spacingSmall
+            Slider {
+                id: baristaSpeedSlider
+                Layout.fillWidth: true
+                from: 0.7; to: 1.3; stepSize: 0.05
+                value: root._settings ? root._settings.baristaVoiceSpeed : 1.0
+                onMoved: if (root._settings) root._settings.baristaVoiceSpeed = value
+                Accessible.name: TranslationManager.translate("barista.settings.speed", "Voice speed")
+            }
+            Text {
+                text: baristaSpeedSlider.value.toFixed(2) + "×"
+                color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true
+            }
+        }
+
         // Preview the barista's chosen voice (any provider).
         AccessibleButton {
             subtle: true
@@ -286,6 +330,50 @@ Rectangle {
             settings: root._settings
             activeId: root._settings ? root._settings.coachingElevenlabsVoiceId : ""
             onVoiceSelected: function(id) { if (root._settings) root._settings.coachingElevenlabsVoiceId = id }
+        }
+
+        // Coaching voice volume — independent of the barista voice's volume above.
+        Tr {
+            key: "barista.settings.coachingVolume"; fallback: "Coaching volume"
+            color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true
+        }
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: Theme.spacingSmall
+            Slider {
+                id: coachingVolumeSlider
+                Layout.fillWidth: true
+                from: 0.0; to: 1.0; stepSize: 0.05
+                value: root._settings ? root._settings.coachingVoiceVolume : 1.0
+                onMoved: if (root._settings) root._settings.coachingVoiceVolume = value
+                Accessible.name: TranslationManager.translate("barista.settings.coachingVolume", "Coaching volume")
+            }
+            Text {
+                text: Math.round(coachingVolumeSlider.value * 100) + "%"
+                color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true
+            }
+        }
+
+        // Coaching voice speed — independent of the barista voice's speed above.
+        Tr {
+            key: "barista.settings.coachingSpeed"; fallback: "Coaching speed"
+            color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true
+        }
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: Theme.spacingSmall
+            Slider {
+                id: coachingSpeedSlider
+                Layout.fillWidth: true
+                from: 0.7; to: 1.3; stepSize: 0.05
+                value: root._settings ? root._settings.coachingVoiceSpeed : 1.0
+                onMoved: if (root._settings) root._settings.coachingVoiceSpeed = value
+                Accessible.name: TranslationManager.translate("barista.settings.coachingSpeed", "Coaching speed")
+            }
+            Text {
+                text: coachingSpeedSlider.value.toFixed(2) + "×"
+                color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true
+            }
         }
 
         AccessibleButton {

@@ -25,15 +25,23 @@ class AssistantSettings : public QObject {
     Q_PROPERTY(QString elevenlabsVoiceId READ elevenlabsVoiceId WRITE setElevenlabsVoiceId NOTIFY elevenlabsVoiceIdChanged)
     // [barista-fork] Coaching voice — a SEPARATE voice for the live steam + espresso coaches, chosen
     // independently of the barista's conversational voice. Mirrors the barista provider + per-provider
-    // voice selection above, but deliberately REUSES the shared ElevenLabs API key + saved-voices list
-    // and the shared voiceSpeed (only provider + the three voice ids are split out).
+    // voice selection above, but deliberately REUSES the shared ElevenLabs API key + saved-voices list.
+    // Speed AND volume are now split PER ROLE (baristaVoice*/coachingVoice* below) — only the ElevenLabs
+    // key + saved-voices list stay shared; provider, the three voice ids, speed, and volume all differ.
     Q_PROPERTY(QString coachingTtsProvider READ coachingTtsProvider WRITE setCoachingTtsProvider NOTIFY coachingTtsProviderChanged)
     Q_PROPERTY(QString coachingVoiceName READ coachingVoiceName WRITE setCoachingVoiceName NOTIFY coachingVoiceNameChanged)
     Q_PROPERTY(QString coachingOpenaiVoice READ coachingOpenaiVoice WRITE setCoachingOpenaiVoice NOTIFY coachingOpenaiVoiceChanged)
     Q_PROPERTY(QString coachingElevenlabsVoiceId READ coachingElevenlabsVoiceId WRITE setCoachingElevenlabsVoiceId NOTIFY coachingElevenlabsVoiceIdChanged)
     // Saved ElevenLabs voices: a named list so the owner picks a voice instead of re-typing its cryptic id.
     Q_PROPERTY(QVariantList elevenlabsVoices READ elevenlabsVoices NOTIFY elevenlabsVoicesChanged)
-    Q_PROPERTY(double voiceSpeed READ voiceSpeed WRITE setVoiceSpeed NOTIFY voiceSpeedChanged)
+    // [barista-fork] Per-role speaking rate + playback volume. Previously a single shared voiceSpeed with no
+    // volume control; now the barista's conversational voice and the coaching voice each carry their OWN speed
+    // and volume, set independently in the barista settings. Speed is a rate multiplier (1.0 = normal); volume
+    // is a linear 0..1 gain applied at playback. The old shared barista/voiceSpeed migrates into BOTH speeds.
+    Q_PROPERTY(double baristaVoiceSpeed READ baristaVoiceSpeed WRITE setBaristaVoiceSpeed NOTIFY baristaVoiceSpeedChanged)
+    Q_PROPERTY(double coachingVoiceSpeed READ coachingVoiceSpeed WRITE setCoachingVoiceSpeed NOTIFY coachingVoiceSpeedChanged)
+    Q_PROPERTY(double baristaVoiceVolume READ baristaVoiceVolume WRITE setBaristaVoiceVolume NOTIFY baristaVoiceVolumeChanged)
+    Q_PROPERTY(double coachingVoiceVolume READ coachingVoiceVolume WRITE setCoachingVoiceVolume NOTIFY coachingVoiceVolumeChanged)
     Q_PROPERTY(bool webSearchEnabled READ webSearchEnabled WRITE setWebSearchEnabled NOTIFY webSearchEnabledChanged)
     Q_PROPERTY(bool avatarEnabled READ avatarEnabled WRITE setAvatarEnabled NOTIFY avatarEnabledChanged)
     Q_PROPERTY(QString avatarStyle READ avatarStyle WRITE setAvatarStyle NOTIFY avatarStyleChanged)
@@ -81,7 +89,7 @@ public:
     void setElevenlabsVoiceId(const QString& id);
 
     // [barista-fork] Coaching-voice selection (parallel to the barista voice above). Shares the ElevenLabs
-    // API key + saved-voices list + voiceSpeed; only the provider and the three per-provider voice ids differ.
+    // API key + saved-voices list; the provider, the three per-provider voice ids, speed, and volume are per-role.
     QString coachingTtsProvider() const;          // "native" | "openai" | "elevenlabs" (default "native")
     void setCoachingTtsProvider(const QString& p);
     QString coachingVoiceName() const;            // native TTS voice ("" = engine default)
@@ -101,8 +109,17 @@ public:
     Q_INVOKABLE void updateElevenlabsVoice(const QString& oldId, const QString& name, const QString& newId);
     Q_INVOKABLE void removeElevenlabsVoice(const QString& id);     // remove by id, then persist
 
-    double voiceSpeed() const;                    // speaking rate multiplier (default 1.0)
-    void setVoiceSpeed(double s);
+    // [barista-fork] Per-role speed + volume. Speed is a rate multiplier (default 1.0), clamped to a sane
+    // spoken range; volume is a linear 0..1 gain (default 1.0). The barista* getters also carry the
+    // migration of the legacy shared barista/voiceSpeed value (see the ctor).
+    double baristaVoiceSpeed() const;             // barista voice speaking rate (default 1.0)
+    void setBaristaVoiceSpeed(double s);
+    double coachingVoiceSpeed() const;            // coaching voice speaking rate (default 1.0)
+    void setCoachingVoiceSpeed(double s);
+    double baristaVoiceVolume() const;            // barista voice playback volume 0..1 (default 1.0)
+    void setBaristaVoiceVolume(double v);
+    double coachingVoiceVolume() const;           // coaching voice playback volume 0..1 (default 1.0)
+    void setCoachingVoiceVolume(double v);
 
     bool webSearchEnabled() const;                // let the barista search the web (Anthropic; default on)
     void setWebSearchEnabled(bool e);
@@ -151,7 +168,10 @@ signals:
     void coachingOpenaiVoiceChanged();
     void coachingElevenlabsVoiceIdChanged();
     void elevenlabsVoicesChanged();
-    void voiceSpeedChanged();
+    void baristaVoiceSpeedChanged();
+    void coachingVoiceSpeedChanged();
+    void baristaVoiceVolumeChanged();
+    void coachingVoiceVolumeChanged();
     void webSearchEnabledChanged();
     void avatarEnabledChanged();
     void avatarStyleChanged();

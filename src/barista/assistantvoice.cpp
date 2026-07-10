@@ -115,6 +115,29 @@ QString AssistantVoice::effectiveElevenlabsVoiceId() const {
                                     : m_settings->elevenlabsVoiceId();
 }
 
+// [barista-fork] Per-role speed + volume. Read fresh on every utterance so a moved slider applies to the
+// NEXT thing spoken with no signal wiring.
+double AssistantVoice::effectiveSpeed() const {
+    if (!m_settings)
+        return 1.0;
+    return m_role == Role::Coaching ? m_settings->coachingVoiceSpeed() : m_settings->baristaVoiceSpeed();
+}
+
+double AssistantVoice::effectiveVolume() const {
+    if (!m_settings)
+        return 1.0;
+    return m_role == Role::Coaching ? m_settings->coachingVoiceVolume() : m_settings->baristaVoiceVolume();
+}
+
+// Apply this role's rate + volume to the native engine right before say(). QTextToSpeech::setRate takes
+// [-1, 1]; map the ~0.7–1.3 speed multiplier to that range (1.0 → 0). setVolume takes [0, 1] directly.
+void AssistantVoice::applyNativeParams() {
+    if (!m_tts)
+        return;
+    m_tts->setRate((effectiveSpeed() - 1.0) / 0.5);   // map ~0.7–1.3 → rate -0.6..0.6
+    m_tts->setVolume(effectiveVolume());              // 0..1 linear gain
+}
+
 QString AssistantVoice::openaiKey() const {
     // Prefer an explicit key from the assistant settings; else reuse the app's configured OpenAI key.
     if (m_settings && !m_settings->openaiApiKey().isEmpty())
@@ -141,7 +164,7 @@ void AssistantVoice::speak(const QString& text) {
     else if (provider == QLatin1String("elevenlabs"))
         synthElevenLabs(text);
     else if (m_tts) {
-        m_tts->setRate((m_settings->voiceSpeed() - 1.0) / 0.5);   // map ~0.7–1.3 → rate -0.6..0.6
+        applyNativeParams();   // this role's rate + volume
         m_tts->say(text);   // native engine (stateChanged hands off from m_pendingSynth)
     } else {
         m_pendingSynth = false;   // no engine at all → nothing will speak
@@ -152,27 +175,28 @@ void AssistantVoice::speak(const QString& text) {
 void AssistantVoice::synthOpenAI(const QString& text) {
     const QString key = openaiKey();
     if (key.isEmpty()) {                 // no key → graceful fallback to the native voice
-        if (m_tts) m_tts->say(text);
+        if (m_tts) { applyNativeParams(); m_tts->say(text); }
         else { m_pendingSynth = false; updateSpeaking(); }
         return;
     }
     QNetworkRequest req(QUrl(QStringLiteral("https://api.openai.com/v1/audio/speech")));
     req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
     req.setRawHeader("Authorization", "Bearer " + key.toUtf8());
+    // OpenAI accepts speed in [0.25, 4.0]; our clamp keeps it well inside. Volume is applied at playback
+    // (there's no request-side volume) via m_audioOut in playMp3().
     const QJsonObject body{
         {QStringLiteral("model"), QStringLiteral("tts-1")},
         {QStringLiteral("voice"), effectiveOpenaiVoice()},
         {QStringLiteral("input"), text},
         {QStringLiteral("response_format"), QStringLiteral("mp3")},
-        {QStringLiteral("speed"), m_settings->voiceSpeed()},    // user-adjustable pace
+        {QStringLiteral("speed"), effectiveSpeed()},    // this role's user-adjustable pace
     };
     QNetworkReply* reply = m_net->post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
     connect(reply, &QNetworkReply::finished, this, [this, reply, text, gen = m_speakGen] {
         if (gen == m_speakGen) {   // ignore a superseded / dismissed request's late reply
             if (reply->error() == QNetworkReply::NoError)
                 playMp3(reply->readAll());
-            else if (m_tts)
-                m_tts->say(text);   // cloud call failed → speak natively rather than go silent
+            else if (m_tts) { applyNativeParams(); m_tts->say(text); }   // cloud failed → speak natively, not silent
             else { m_pendingSynth = false; updateSpeaking(); }
         }
         reply->deleteLater();
@@ -182,7 +206,7 @@ void AssistantVoice::synthOpenAI(const QString& text) {
 void AssistantVoice::synthElevenLabs(const QString& text) {
     const QString key = m_settings->elevenlabsApiKey();
     if (key.isEmpty()) {                 // no key → graceful fallback to the native voice
-        if (m_tts) m_tts->say(text);
+        if (m_tts) { applyNativeParams(); m_tts->say(text); }
         else { m_pendingSynth = false; updateSpeaking(); }
         return;
     }
@@ -190,18 +214,25 @@ void AssistantVoice::synthElevenLabs(const QString& text) {
                              .arg(effectiveElevenlabsVoiceId())));
     req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
     req.setRawHeader("xi-api-key", key.toUtf8());
+    // [barista-fork] SPEED: ElevenLabs supports a per-request voice_settings.speed for this model, so we use
+    // the API control (no media-player playbackRate fallback needed — that would also shift pitch). ElevenLabs'
+    // accepted range is 0.7–1.2 ONLY; a value outside it 422s the whole request → a silent native fallback. Our
+    // settings clamp is 0.7–1.3 (shared with native/OpenAI, which tolerate 1.3), so clamp the SENT value down to
+    // 1.2 here independently. VOLUME has no request-side control on ElevenLabs → applied at playback in playMp3().
+    double elSpeed = effectiveSpeed();
+    if (elSpeed > 1.2) elSpeed = 1.2;
+    if (elSpeed < 0.7) elSpeed = 0.7;
     const QJsonObject body{
         {QStringLiteral("text"), text},
         {QStringLiteral("model_id"), QStringLiteral("eleven_turbo_v2_5")},
-        {QStringLiteral("voice_settings"), QJsonObject{{QStringLiteral("speed"), m_settings->voiceSpeed()}}},
+        {QStringLiteral("voice_settings"), QJsonObject{{QStringLiteral("speed"), elSpeed}}},
     };
     QNetworkReply* reply = m_net->post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
     connect(reply, &QNetworkReply::finished, this, [this, reply, text, gen = m_speakGen] {
         if (gen == m_speakGen) {   // ignore a superseded / dismissed request's late reply
             if (reply->error() == QNetworkReply::NoError)
                 playMp3(reply->readAll());
-            else if (m_tts)
-                m_tts->say(text);   // cloud call failed → speak natively rather than go silent
+            else if (m_tts) { applyNativeParams(); m_tts->say(text); }   // cloud failed → speak natively, not silent
             else { m_pendingSynth = false; updateSpeaking(); }
         }
         reply->deleteLater();
@@ -273,6 +304,11 @@ void AssistantVoice::playMp3(const QByteArray& audio) {
         return;
     }
     m_player->stop();
+    // [barista-fork] Apply THIS role's playback volume to the cloud-TTS output. Cloud providers (OpenAI /
+    // ElevenLabs) have no request-side volume, so gain is applied here on the QAudioOutput driving the mp3
+    // player. Read fresh so a moved slider takes effect on the next utterance.
+    if (m_audioOut)
+        m_audioOut->setVolume(effectiveVolume());
     // Android's media backend truncates in-memory (QBuffer) sources after a fraction of a second —
     // write the mp3 to a temp file and play that; files play reliably and to completion.
     // ALTERNATE the filename each utterance: reusing one path makes the Android backend cache the prior
@@ -326,8 +362,10 @@ void AssistantVoice::preview() {
         synthOpenAI(sample);
     else if (provider == QLatin1String("elevenlabs"))
         synthElevenLabs(sample);
-    else if (m_tts)
-        m_tts->say(sample);   // audition — speaks even if muted
+    else if (m_tts) {
+        applyNativeParams();     // audition with this role's rate + volume
+        m_tts->say(sample);      // speaks even if muted
+    }
 }
 
 void AssistantVoice::playBell() {

@@ -1,5 +1,7 @@
 import QtQuick
 import QtQuick.Layouts
+import QtQuick.Shapes
+import QtQuick.Effects
 import Decenza
 
 // [barista-fork] The user-initiated barista assistant — a REAL conversation, not a script. The barista is
@@ -1292,7 +1294,7 @@ Item {
     // "tap chat and talk" gesture: engage the barista (opens the conversation + mic) or, if already
     // conversing, just re-expand. A subtle pulse bids for attention when a just-pulled shot is undiscussed
     // (replaces the old spoken close-out) — gated on proactivityLevel so "off" never nags.
-    Rectangle {
+    Item {
         id: edgeTab
         // [barista-fork] Hidden during the screensaver-collapse state — the faint drifting avatar takes over
         // there (burn-in safety). Otherwise the normal collapsed-dock condition (present, or conversing-collapsed).
@@ -1300,16 +1302,40 @@ Item {
                  && !root._screensaverDock
         anchors.right: parent.right
         anchors.verticalCenter: parent.verticalCenter
-        // [barista-fork] The tab HUGS the avatar (no dead space — owner request). It's sized to the avatar
-        // plus a small even margin all around, not a tall pill: the old 264h left ~67px empty above and
-        // below the centered 130 avatar. Avatar is now 156 (20% bigger), so the tab is ~176 square — much
-        // closer to an action button (Theme.scaled(120)) than before. Right-edge, vertically centered.
+        // [barista-fork] A polished PULL-TAB, not a box: hugs the avatar, but its inner (left) side is
+        // rounded while the screen-edge (right) side is flush/square, and it carries a soft drop shadow so
+        // it reads as lifted off the edge rather than rammed against it. Drawn as a Shape (below) since a
+        // Rectangle can't round only two corners. Avatar 156 (20% bigger); tab ~172x176.
         width: Theme.scaled(172)
         height: Theme.scaled(176)
-        radius: Theme.cardRadius
-        color: Theme.surfaceColor
-        border.width: 1
-        border.color: root._pulseCue ? Theme.primaryColor : Theme.borderColor
+
+        // Tab background: rounded-left / flush-right path + a soft shadow for depth. strokeColor carries the
+        // attention pulse (primary when a shot is undiscussed). Verified shape/winding via a render mock.
+        Shape {
+            id: tabBg
+            anchors.fill: parent
+            layer.enabled: true
+            layer.effect: MultiEffect {
+                shadowEnabled: true
+                shadowColor: Qt.rgba(0, 0, 0, 0.30)
+                shadowBlur: 0.9
+                shadowHorizontalOffset: -Theme.scaled(4)
+                shadowVerticalOffset: Theme.scaled(3)
+                autoPaddingEnabled: true
+            }
+            ShapePath {
+                fillColor: Theme.surfaceColor
+                strokeColor: edgeTab._pulseCue ? Theme.primaryColor : Theme.borderColor
+                strokeWidth: 1
+                startX: tabBg.width; startY: 0
+                PathLine { x: Theme.cardRadius; y: 0 }
+                PathArc  { x: 0; y: Theme.cardRadius; radiusX: Theme.cardRadius; radiusY: Theme.cardRadius; direction: PathArc.Counterclockwise }
+                PathLine { x: 0; y: tabBg.height - Theme.cardRadius }
+                PathArc  { x: Theme.cardRadius; y: tabBg.height; radiusX: Theme.cardRadius; radiusY: Theme.cardRadius; direction: PathArc.Counterclockwise }
+                PathLine { x: tabBg.width; y: tabBg.height }
+                PathLine { x: tabBg.width; y: 0 }
+            }
+        }
 
         // Non-verbal bid for attention: pulse the tab border/dot when a shot is undiscussed and the user's
         // proactivity level allows a cue at all ("off" = never). This is the ONLY thing that "speaks" for a

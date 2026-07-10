@@ -28,8 +28,8 @@ class AssistantVoice : public QObject {
 public:
     // [barista-fork] Which voice profile this instance reads from AssistantSettings. Barista = the
     // conversational assistant voice; Coaching = the SEPARATE voice for the live steam + espresso coaches.
-    // Both share the ElevenLabs API key, saved-voices list, and voiceSpeed — only the provider + the three
-    // per-provider voice ids differ. Crucially, the Coaching role does NOT honor voiceEnabled() (the
+    // Both share the ElevenLabs API key + saved-voices list; the provider, the three per-provider voice ids,
+    // the speaking speed, AND the playback volume are all per-role. Crucially, the Coaching role does NOT honor voiceEnabled() (the
     // barista's mute): the live coaches have their own upstream enable gates.
     enum class Role { Barista, Coaching };
 
@@ -73,6 +73,14 @@ private:
     QString effectiveVoiceName() const;
     QString effectiveOpenaiVoice() const;
     QString effectiveElevenlabsVoiceId() const;
+    // [barista-fork] Per-role speed (rate multiplier) + volume (0..1). Speed + volume are now split per role,
+    // so these resolve to the barista OR coaching getters depending on m_role. Read fresh at speak/playback
+    // time so a moved slider takes effect on the NEXT utterance without any NOTIFY wiring.
+    double effectiveSpeed() const;
+    double effectiveVolume() const;
+    // Apply THIS role's rate + volume to the native QTextToSpeech engine, immediately before every say().
+    // Kept in one place so the native fallbacks (empty key / cloud error) also honor speed + volume.
+    void applyNativeParams();
 
     void applyVoiceFromSettings();
     void updateSpeaking();

@@ -18,6 +18,20 @@ AssistantSettings::AssistantSettings(QObject* parent)
         if (!current.isEmpty() && current != stockRachel)
             addElevenlabsVoice(QStringLiteral("Saved voice"), current);
     }
+
+    // [barista-fork] Migrate the legacy SHARED speed. Speed used to be one setting (barista/voiceSpeed) read
+    // role-agnostically by BOTH the barista and coaching voices. It's now split per role. Seed BOTH new
+    // per-role speeds from the old value so an existing user's chosen pace survives the split on EITHER voice
+    // (seeding only the barista would silently reset the coach to 1.0). One-time, guarded on the legacy key
+    // existing and the new keys being absent, then the legacy key is removed so this never re-fires.
+    if (m_settings.contains(QStringLiteral("barista/voiceSpeed"))) {
+        const double legacy = m_settings.value(QStringLiteral("barista/voiceSpeed"), 1.0).toDouble();
+        if (!m_settings.contains(QStringLiteral("barista/baristaVoiceSpeed")))
+            setBaristaVoiceSpeed(legacy);
+        if (!m_settings.contains(QStringLiteral("barista/coachingVoiceSpeed")))
+            setCoachingVoiceSpeed(legacy);
+        m_settings.remove(QStringLiteral("barista/voiceSpeed"));
+    }
 }
 
 bool AssistantSettings::enabled() const {
@@ -175,7 +189,8 @@ void AssistantSettings::setElevenlabsVoiceId(const QString& id) {
 }
 
 // [barista-fork] Coaching voice — a parallel provider + per-provider voice selection, persisted under
-// barista/coaching*. Shares the ElevenLabs API key + saved-voices list + voiceSpeed with the barista voice.
+// barista/coaching*. Shares the ElevenLabs API key + saved-voices list with the barista voice; speed +
+// volume are split per role (see baristaVoice*/coachingVoice* below).
 QString AssistantSettings::coachingTtsProvider() const {
     return m_settings.value(QStringLiteral("barista/coachingTtsProvider"), QStringLiteral("native")).toString();
 }
@@ -361,18 +376,67 @@ void AssistantSettings::removeElevenlabsVoice(const QString& id) {
     }
 }
 
-double AssistantSettings::voiceSpeed() const {
-    return m_settings.value(QStringLiteral("barista/voiceSpeed"), 1.0).toDouble();
-}
-
-void AssistantSettings::setVoiceSpeed(double s) {
-    // Clamp to a sane spoken range (both OpenAI and ElevenLabs accept ~0.7–1.3 comfortably).
+// [barista-fork] Per-role speed + volume. Speed is clamped to a sane spoken range (native rate mapping and
+// OpenAI accept ~0.7–1.3; ElevenLabs tops out at 1.2 and is clamped again at the request site in
+// AssistantVoice). Volume is a linear 0..1 gain applied at playback (QTextToSpeech::setVolume /
+// QAudioOutput::setVolume). Each is stored under its own barista/ key so the two voices are fully independent.
+static double clampSpeed(double s) {
     if (s < 0.7) s = 0.7;
     if (s > 1.3) s = 1.3;
-    if (qFuzzyCompare(voiceSpeed(), s))
+    return s;
+}
+static double clampVolume(double v) {
+    if (v < 0.0) v = 0.0;
+    if (v > 1.0) v = 1.0;
+    return v;
+}
+
+double AssistantSettings::baristaVoiceSpeed() const {
+    return m_settings.value(QStringLiteral("barista/baristaVoiceSpeed"), 1.0).toDouble();
+}
+
+void AssistantSettings::setBaristaVoiceSpeed(double s) {
+    s = clampSpeed(s);
+    if (qFuzzyCompare(baristaVoiceSpeed(), s))
         return;
-    m_settings.setValue(QStringLiteral("barista/voiceSpeed"), s);
-    emit voiceSpeedChanged();
+    m_settings.setValue(QStringLiteral("barista/baristaVoiceSpeed"), s);
+    emit baristaVoiceSpeedChanged();
+}
+
+double AssistantSettings::coachingVoiceSpeed() const {
+    return m_settings.value(QStringLiteral("barista/coachingVoiceSpeed"), 1.0).toDouble();
+}
+
+void AssistantSettings::setCoachingVoiceSpeed(double s) {
+    s = clampSpeed(s);
+    if (qFuzzyCompare(coachingVoiceSpeed(), s))
+        return;
+    m_settings.setValue(QStringLiteral("barista/coachingVoiceSpeed"), s);
+    emit coachingVoiceSpeedChanged();
+}
+
+double AssistantSettings::baristaVoiceVolume() const {
+    return m_settings.value(QStringLiteral("barista/baristaVoiceVolume"), 1.0).toDouble();
+}
+
+void AssistantSettings::setBaristaVoiceVolume(double v) {
+    v = clampVolume(v);
+    if (qFuzzyCompare(baristaVoiceVolume(), v))
+        return;
+    m_settings.setValue(QStringLiteral("barista/baristaVoiceVolume"), v);
+    emit baristaVoiceVolumeChanged();
+}
+
+double AssistantSettings::coachingVoiceVolume() const {
+    return m_settings.value(QStringLiteral("barista/coachingVoiceVolume"), 1.0).toDouble();
+}
+
+void AssistantSettings::setCoachingVoiceVolume(double v) {
+    v = clampVolume(v);
+    if (qFuzzyCompare(coachingVoiceVolume(), v))
+        return;
+    m_settings.setValue(QStringLiteral("barista/coachingVoiceVolume"), v);
+    emit coachingVoiceVolumeChanged();
 }
 
 QString AssistantSettings::proactivityLevel() const {

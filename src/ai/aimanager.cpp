@@ -70,6 +70,64 @@ ShotProjection coerceShot(const QVariant& v)
     return ShotProjection::fromVariantMap(m);
 }
 
+// [barista-fork] The date of the Nth given weekday of a month (e.g. 4th Thursday of November = Thanksgiving).
+// weekday is Qt's 1=Mon..7=Sun. Walks from the 1st to the first matching weekday, then adds whole weeks.
+QDate nthWeekdayOfMonth(int year, int month, int weekday, int n)
+{
+    QDate d(year, month, 1);
+    if (!d.isValid())
+        return QDate();
+    int delta = (weekday - d.dayOfWeek() + 7) % 7;
+    d = d.addDays(delta + 7 * (n - 1));
+    return (d.month() == month) ? d : QDate();
+}
+
+// [barista-fork] The date of the LAST given weekday of a month (e.g. last Monday of May = Memorial Day).
+QDate lastWeekdayOfMonth(int year, int month, int weekday)
+{
+    QDate d(year, month, 1);
+    if (!d.isValid())
+        return QDate();
+    d = d.addMonths(1).addDays(-1);   // last day of the month
+    int back = (d.dayOfWeek() - weekday + 7) % 7;
+    return d.addDays(-back);
+}
+
+// [barista-fork] Built-in US-holiday lookup for the barista's greeting/goodbye "todaysOccasion". Returns the
+// holiday name for `date` or an empty string. Covers the fixed-date holidays for sure plus the common floating
+// ones computed with QDate (no external table). Easter is deliberately skipped (hard to compute; the task
+// permits skipping it). Purely presentational — a warm "Happy Thanksgiving!" — never a factual claim.
+QString usHolidayForDate(const QDate& date)
+{
+    if (!date.isValid())
+        return QString();
+    const int y = date.year();
+    const int m = date.month();
+    const int d = date.day();
+
+    // Fixed-date holidays.
+    if (m == 1  && d == 1)  return QStringLiteral("New Year's Day");
+    if (m == 2  && d == 14) return QStringLiteral("Valentine's Day");
+    if (m == 3  && d == 17) return QStringLiteral("St. Patrick's Day");
+    if (m == 6  && d == 19) return QStringLiteral("Juneteenth");
+    if (m == 7  && d == 4)  return QStringLiteral("Independence Day");
+    if (m == 10 && d == 31) return QStringLiteral("Halloween");
+    if (m == 11 && d == 11) return QStringLiteral("Veterans Day");
+    if (m == 12 && d == 24) return QStringLiteral("Christmas Eve");
+    if (m == 12 && d == 25) return QStringLiteral("Christmas");
+    if (m == 12 && d == 31) return QStringLiteral("New Year's Eve");
+
+    // Floating holidays (Nth/last weekday; Qt weekday 1=Mon..7=Sun).
+    if (m == 1  && date == nthWeekdayOfMonth(y, 1, 1, 3))  return QStringLiteral("Martin Luther King Jr. Day");
+    if (m == 2  && date == nthWeekdayOfMonth(y, 2, 1, 3))  return QStringLiteral("Presidents' Day");
+    if (m == 5  && date == lastWeekdayOfMonth(y, 5, 1))    return QStringLiteral("Memorial Day");
+    if (m == 9  && date == nthWeekdayOfMonth(y, 9, 1, 1))  return QStringLiteral("Labor Day");
+    if (m == 10 && date == nthWeekdayOfMonth(y, 10, 1, 2)) return QStringLiteral("Indigenous Peoples' Day / Columbus Day");
+    if (m == 11 && date == nthWeekdayOfMonth(y, 11, 4, 4)) return QStringLiteral("Thanksgiving");
+
+    return QString();
+}
+
 // [barista-fork] PROACTIVE-REC INPUTS. A compact, current-state block the barista reads at engage time to
 // DECIDE whether a recipe tweak is worth offering on its first reply — bean age (days off roast + a plain
 // freshness read), and storage state (frozen / days out of the freezer / the user's bag notes). The shot
@@ -1286,6 +1344,7 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
         QJsonArray beanFeedback;   // [barista-fork] recent verbal tasting feedback on the CURRENT bean
         QJsonObject dueItems;      // [barista-fork] due reminders + due maintenance (assistant.db, shot-independent)
         QJsonObject docChange;     // [barista-fork] a pending Decent cleaning-guide change to OFFER (assistant.db)
+        QJsonObject occasion;      // [barista-fork] today's US holiday + personal dates for the greeting/goodbye
 
         withTempDb(dbPath, "barista_ctx", [&](QSqlDatabase& db) {
             // Anchor: latest shot for the current bean; else latest overall (robust to bean-name drift).
@@ -1441,6 +1500,31 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
                         "For descaling, defer to the user's water (it is TDS-dependent) rather than asserting a fixed interval.");
                 }
 
+                // [barista-fork] TODAY'S OCCASION — a built-in US holiday and/or the owner's own personal dates
+                // for TODAY, so the barista can warmly acknowledge it ONCE in its greeting or goodbye (never a
+                // separate proactive item — see the persona rule). Computed on the DB thread beside dueItems so
+                // the personal_dates read (a DIFFERENT table, same assistant.db) stays off the main thread and
+                // rides the same first-reply turn including the no-shot early-return path.
+                const QDate today = QDate::currentDate();
+                if (const QString holiday = usHolidayForDate(today); !holiday.isEmpty())
+                    occasion[QStringLiteral("holiday")] = holiday;
+                QJsonArray personalDates;
+                for (const QVariant& r : TasksStorage::fetchPersonalDatesForTodayStatic(
+                         db, today.month(), today.day(), today.year())) {
+                    const QVariantMap m = r.toMap();
+                    QJsonObject o;
+                    o[QStringLiteral("label")] = m.value(QStringLiteral("label")).toString();
+                    personalDates.append(o);
+                }
+                if (!personalDates.isEmpty())
+                    occasion[QStringLiteral("personalDates")] = personalDates;
+                if (!occasion.isEmpty())
+                    occasion[QStringLiteral("note")] = QStringLiteral(
+                        "Today is a recognized occasion. If — and only if — a warm greeting or goodbye is natural "
+                        "this turn (see the recency/greeting rules), acknowledge it ONCE, briefly and genuinely "
+                        "('Happy Thanksgiving!', 'Happy anniversary!'). It is part of the hello or sign-off, NOT a "
+                        "separate proactive item, and never mid-conversation — do not force it or repeat it.");
+
                 // [barista-fork] MAINTENANCE-DOC CHANGE: the periodic Decent cleaning-guide check
                 // (MaintenanceDocSync) sets reviewed=0 when it detects a change the owner hasn't seen yet.
                 // Fold in the fetched doc text PLUS the CURRENT still-default schedule (is_default=1 rows only —
@@ -1489,7 +1573,7 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
 
         QMetaObject::invokeMethod(qApp, [self, serial, shot, anchorId, beanFilterMissed,
                                          beanBrand, beanType, profileName, beanFeedback, dueItems, docChange,
-                                         dialInSessions, bestRecentShot, beanBestShot, grinderContext,
+                                         occasion, dialInSessions, bestRecentShot, beanBestShot, grinderContext,
                                          grinderCalibration, recentAdvice, fullHistory]() {
             if (!self || serial != self->m_baristaContextSerial)
                 return;   // stale — a newer request superseded this one
@@ -1512,6 +1596,12 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
                     if (shot.finalWeightG > 0)         snap["yieldG"] = shot.finalWeightG;
                     if (!shot.grinderSetting.isEmpty()) snap["grind"] = shot.grinderSetting;
                     if (shot.temperatureOverrideC > 0)  snap["tempC"] = shot.temperatureOverrideC;
+                    // [barista-fork] The anchor shot's CURRENT notes, so a VERBAL rating/taste can land on the
+                    // SHOT record (enjoyment + a "Tasted sour"-style marker) exactly like the post-shot tap
+                    // buttons — WITHOUT clobbering the user's own typed notes. log_tasting_feedback's executor
+                    // strips any prior "Tasted " marker line and appends the new one (mirrors PostShotReviewPage
+                    // notesWithTasteMarker), then writes the merged notes back via requestUpdateShotMetadata.
+                    snap["notes"] = shot.espressoNotes;
                 } else {
                     snap["shotId"] = 0;   // bean-general note (no matching shot for this exact bean)
                 }
@@ -1536,13 +1626,21 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
                 docSuffix = QStringLiteral("\n\n## maintenanceDocChanged (Decent's cleaning guide changed — offer an update):\n")
                           + QString::fromUtf8(QJsonDocument(docChange).toJson(QJsonDocument::Indented));
 
+            // [barista-fork] Today's occasion (holiday + personal dates) — shot-independent like dueItems, so it
+            // rides every first-reply turn including the no-shot paths. It is greeting/goodbye flavor, NOT a
+            // proactive item, so it never competes with (or yields to) dueItems/docChange — always included.
+            QString occasionSuffix;
+            if (!occasion.isEmpty())
+                occasionSuffix = QStringLiteral("\n\n## todaysOccasion (acknowledge once in your greeting or goodbye, only if natural):\n")
+                               + QString::fromUtf8(QJsonDocument(occasion).toJson(QJsonDocument::Indented));
+
             if (anchorId <= 0 || !shot.isValid()) {
-                emit self->baristaContextReady(QStringLiteral("recordedShots: 0") + dueSuffix + docSuffix);
+                emit self->baristaContextReady(QStringLiteral("recordedShots: 0") + dueSuffix + docSuffix + occasionSuffix);
                 return;
             }
             QJsonObject obj = self->buildUserPromptObjectForShot(shot);
             if (obj.isEmpty()) {
-                emit self->baristaContextReady(QStringLiteral("recordedShots: 0") + dueSuffix + docSuffix);
+                emit self->baristaContextReady(QStringLiteral("recordedShots: 0") + dueSuffix + docSuffix + occasionSuffix);
                 return;
             }
             self->enrichUserPromptObject(obj, shot, dialInSessions, bestRecentShot, grinderContext,
@@ -1572,6 +1670,7 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
             block += QString::fromUtf8(QJsonDocument(obj).toJson(QJsonDocument::Indented));
             block += dueSuffix;   // [barista-fork] due reminders/maintenance ride the same first-reply turn
             block += docSuffix;   // [barista-fork] a pending Decent cleaning-guide change to offer (rare, one-time)
+            block += occasionSuffix;   // [barista-fork] today's holiday/personal dates for a warm greeting/goodbye
             emit self->baristaContextReady(block);
         }, Qt::QueuedConnection);
     });

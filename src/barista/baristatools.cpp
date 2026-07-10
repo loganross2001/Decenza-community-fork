@@ -267,6 +267,31 @@ QJsonArray BaristaTools::toolDefinitions()
     cr["input_schema"] = crSchema;
     tools.append(cr);
 
+    // [barista-fork] add_personal_date (WRITE) — the owner tells the barista an important day to remember
+    // ("remember my anniversary is June 3", "my daughter's birthday is on the 12th of March"). The MODEL
+    // resolves the words to a month + day (and an optional year); the executor validates and stores it. It
+    // combines with the built-in US holidays to drive the barista's greeting/goodbye "todaysOccasion".
+    QJsonObject pd;
+    pd["name"] = QString("add_personal_date");
+    pd["description"] = QString(
+        "Remember a personal important date the user asks you to keep (\"remember my anniversary is June 3\", "
+        "\"my birthday is October 12\", \"our wedding was 2019-06-03\"). Resolve their words to a month (1-12) "
+        "and day (1-31); include year ONLY if they gave a specific one-time year, otherwise leave it out so it "
+        "recurs every year (the usual case). Give a short natural label for the occasion (e.g. \"anniversary\", "
+        "\"Mom's birthday\"). Confirm briefly once it's saved (\"Got it — I'll remember your anniversary on "
+        "June 3\"). Do NOT invent dates the user didn't give you.");
+    QJsonObject pdSchema;
+    pdSchema["type"] = QString("object");
+    QJsonObject pdProps;
+    pdProps["label"] = strProp("A short name for the occasion, e.g. \"anniversary\" or \"Mom's birthday\" (required).");
+    pdProps["month"] = intProp("Month of the date, 1-12 (required).");
+    pdProps["day"]   = intProp("Day of the month, 1-31 (required).");
+    pdProps["year"]  = intProp("A specific year, ONLY if the user pinned it to one (optional; omit for a yearly recurring date).");
+    pdSchema["properties"] = pdProps;
+    pdSchema["required"] = QJsonArray{ QString("label"), QString("month"), QString("day") };
+    pd["input_schema"] = pdSchema;
+    tools.append(pd);
+
     // [barista-fork] list_due_reminders (READ) — surface reminders that are now due. Due reminders/maintenance
     // are ALSO folded into the context block (dueItems) each turn, so reach for this for an explicit recall
     // ("what am I supposed to do today?") or after completing one, to see what's left.
@@ -384,6 +409,63 @@ static void baristaFreshness(const ShotProjection& s, QJsonObject& out)
     }
 }
 
+// [barista-fork] Map the model's tasting axes to the canonical one-tap taste choice ("sour" | "balanced" |
+// "bitter") the post-shot review persists — so a SPOKEN rating lands the SAME direction token the tap buttons
+// do. The advisor reads "Tasted sour" as an UNDER-extraction direction signal (enjoyment alone doesn't encode
+// sour-vs-bitter), so the mapping mirrors the two-axis dialing model: acidity=="sour" → "sour"; else
+// bitterness=="harsh" OR balance=="over" → "bitter"; else an explicit balanced read → "balanced". NOTE:
+// acidity=="bright" is deliberately NOT mapped to "sour" — in coffee "bright" is a POSITIVE acidity descriptor,
+// not the under-extraction fault "sour" denotes, so stamping "Tasted sour" on a shot the user liked would send
+// a wrong "grind finer" signal to the advisor. Body/strength-only feedback ("thin") also yields NO marker (the
+// tap buttons don't cover it either) — that nuance stays in the feedback KB. Empty = no clear taste axis.
+static QString baristaTasteChoice(const QJsonObject& input)
+{
+    const QString acidity    = input.value(QStringLiteral("acidity")).toString().trimmed().toLower();
+    const QString bitterness = input.value(QStringLiteral("bitterness")).toString().trimmed().toLower();
+    const QString balance    = input.value(QStringLiteral("balance")).toString().trimmed().toLower();
+    if (acidity == QLatin1String("sour"))
+        return QStringLiteral("sour");
+    if (bitterness == QLatin1String("harsh") || balance == QLatin1String("over"))
+        return QStringLiteral("bitter");
+    if (acidity == QLatin1String("balanced") || acidity == QLatin1String("bright")
+        || balance == QLatin1String("balanced"))
+        return QStringLiteral("balanced");
+    return QString();
+}
+
+// [barista-fork] Enjoyment fallback for a taste choice when the user gave a direction but no explicit number —
+// the SAME mapping the post-shot tap buttons use (PostShotReviewPage enjoymentForTaste). An explicit
+// overall_rating_0to100 always wins over this.
+static int baristaEnjoymentForTaste(const QString& choice)
+{
+    if (choice == QLatin1String("sour"))     return 45;
+    if (choice == QLatin1String("balanced")) return 82;
+    if (choice == QLatin1String("bitter"))   return 55;
+    return 0;
+}
+
+// [barista-fork] Replace any existing "Tasted <choice>" marker line in `notes` with the new one, preserving the
+// user's own typed notes — a C++ port of PostShotReviewPage.notesWithTasteMarker so a spoken taste round-trips
+// with tasteChoiceFromNotes (the review page restores the selection). The marker is CANONICAL ENGLISH
+// (choice id), not a localized word, exactly like the tap-button path. Empty choice → strip the marker only.
+static QString baristaNotesWithTasteMarker(const QString& notes, const QString& choice)
+{
+    static const QString kPrefix = QStringLiteral("Tasted ");
+    QStringList kept;
+    const QStringList lines = notes.split(QLatin1Char('\n'));
+    for (const QString& l : lines) {
+        if (!l.startsWith(kPrefix))
+            kept << l;
+    }
+    QString cleaned = kept.join(QLatin1Char('\n'));
+    while (cleaned.endsWith(QLatin1Char('\n')))
+        cleaned.chop(1);
+    if (choice.isEmpty())
+        return cleaned;
+    const QString marker = kPrefix + choice;
+    return cleaned.isEmpty() ? marker : (cleaned + QLatin1Char('\n') + marker);
+}
+
 // [barista-fork] Run a barista client-tool query against the local shot DB on a background thread and deliver
 // the JSON result to `done` on the main thread. query_shots is a READ-ONLY lookup across the user's FULL shot
 // history (any roaster/bean, any date range) — the "access to everything" the barista promised. Kept off the
@@ -460,6 +542,49 @@ void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage*
                 }
             });
         tasks->requestCreateReminder(fields);
+        return;
+    }
+
+    // [barista-fork] add_personal_date (WRITE) — store the owner's own important day. The model resolves the
+    // words to month/day (+ optional year); the executor validates ranges app-side (a bad value never persists)
+    // and stores via TasksStorage (its own async worker). Combines with built-in US holidays for todaysOccasion.
+    if (name == QLatin1String("add_personal_date")) {
+        if (!tasks) {
+            done(QJsonObject{{QStringLiteral("error"), QStringLiteral("personal-date storage unavailable")}});
+            return;
+        }
+        const QString label = input.value(QStringLiteral("label")).toString().trimmed();
+        const int month = input.value(QStringLiteral("month")).toVariant().toInt();
+        const int day   = input.value(QStringLiteral("day")).toVariant().toInt();
+        if (label.isEmpty()) {
+            done(QJsonObject{{QStringLiteral("error"),
+                QStringLiteral("add_personal_date needs a label (e.g. \"anniversary\")")}});
+            return;
+        }
+        if (month < 1 || month > 12 || day < 1 || day > 31) {
+            done(QJsonObject{{QStringLiteral("error"),
+                QStringLiteral("add_personal_date needs a valid month (1-12) and day (1-31)")}});
+            return;
+        }
+        QVariantMap fields;
+        fields.insert(QStringLiteral("label"), label);
+        fields.insert(QStringLiteral("month"), month);
+        fields.insert(QStringLiteral("day"), day);
+        if (input.contains(QStringLiteral("year")))
+            fields.insert(QStringLiteral("year"), input.value(QStringLiteral("year")).toVariant().toInt());
+
+        auto conn = std::make_shared<QMetaObject::Connection>();
+        *conn = QObject::connect(tasks, &TasksStorage::personalDateAdded, tasks,
+            [done, conn, label, month, day](qint64 id) {
+                QObject::disconnect(*conn);
+                if (id > 0)
+                    done(QJsonObject{{QStringLiteral("ok"), true}, {QStringLiteral("personalDateId"), id},
+                                     {QStringLiteral("label"), label},
+                                     {QStringLiteral("month"), month}, {QStringLiteral("day"), day}});
+                else
+                    done(QJsonObject{{QStringLiteral("error"), QStringLiteral("failed to save personal date")}});
+            });
+        tasks->requestAddPersonalDate(fields);
         return;
     }
 
@@ -726,6 +851,30 @@ void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage*
             fields.insert(QStringLiteral("rating0to100"), rating);
         if (!fields.contains(QStringLiteral("source")))
             fields.insert(QStringLiteral("source"), QStringLiteral("volunteered"));
+
+        // [barista-fork] LAND IT ON THE SHOT RECORD TOO. A spoken rating/taste must fully replace the post-shot
+        // tap buttons, which write enjoyment0to100 + a "Tasted <choice>" marker onto the SHOT (shots.db) — not
+        // just the feedback KB. When we have a REAL anchored shot (shotId > 0, stamped app-side; 0 = a
+        // bean-general note with no shot to attach to) AND the user gave a rating and/or a clear taste axis,
+        // mirror that write via requestUpdateShotMetadata. enjoyment: an explicit overall_rating_0to100 wins;
+        // else the tap-button fallback for the derived taste choice. notes: strip any prior "Tasted " marker and
+        // append the new one, preserving the user's own typed notes (never a full-column clobber). This keeps
+        // the barista's shot write byte-identical to the tap path so PostShotReviewPage round-trips the selection.
+        const qint64 anchorShotId = anchorSnapshot.value(QStringLiteral("shotId")).toLongLong();
+        const QString tasteChoice = baristaTasteChoice(input);
+        if (shotHistory && anchorShotId > 0 && (hasRating || !tasteChoice.isEmpty())) {
+            QVariantMap shotMeta;
+            const int shotEnjoyment = hasRating ? rating : baristaEnjoymentForTaste(tasteChoice);
+            if (shotEnjoyment > 0)
+                shotMeta.insert(QStringLiteral("enjoyment"), shotEnjoyment);
+            if (!tasteChoice.isEmpty()) {
+                const QString mergedNotes = baristaNotesWithTasteMarker(
+                    anchorSnapshot.value(QStringLiteral("notes")).toString(), tasteChoice);
+                shotMeta.insert(QStringLiteral("espressoNotes"), mergedNotes);
+            }
+            if (!shotMeta.isEmpty())
+                shotHistory->requestUpdateShotMetadata(anchorShotId, shotMeta);
+        }
 
         // FeedbackStorage::requestLogFeedback is async (its own worker); fire it, and confirm to the model
         // once the row lands. The connection uses `feedback` as its context object, so it self-disconnects if

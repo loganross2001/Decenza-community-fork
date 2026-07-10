@@ -469,7 +469,8 @@ bool DatabaseBackupManager::createBackup(bool force)
             }
         }
 
-        // [barista-fork] Include the barista's assistant.db (verbal-feedback KB + reminders + maintenance).
+        // [barista-fork] Include the barista's assistant.db (verbal-feedback KB + reminders + maintenance +
+        // personal dates). The whole file is copied, so any assistant.db table (incl. personal_dates) rides along.
         // It lives beside shots.db but is a SEPARATE file that importDatabaseStatic does not touch, so without
         // this it would be silently dropped on backup/restore. Staged as a plain file copy; restored by
         // replacing the live assistant.db (see the restore side). Best-effort: a missing assistant.db (feature

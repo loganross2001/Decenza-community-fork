@@ -318,6 +318,49 @@ QJsonArray BaristaTools::toolDefinitions()
     lm["input_schema"] = lmSchema;
     tools.append(lm);
 
+    // [barista-fork] update_maintenance_default (WRITE) — the approve-then-apply seam for the periodic
+    // "Decent updated their cleaning guide" flow. When the context block's maintenanceDocChanged is present,
+    // the barista OFFERS specific default-interval updates; ONLY after the owner clearly approves a given one
+    // does it call this. It updates ONLY a task that is STILL on its seeded default (is_default=1) — an
+    // owner-overridden interval is never touched (the executor reports it skipped). Marks the doc change
+    // reviewed so it isn't re-offered.
+    QJsonObject um;
+    um["name"] = QString("update_maintenance_default");
+    um["description"] = QString(
+        "Apply an agreed update to a maintenance task's DEFAULT interval, sourced from Decent's updated "
+        "cleaning guide (the context block's maintenanceDocChanged). Call this ONLY after you have OFFERED the "
+        "specific change and the owner has clearly approved it (\"yes\", \"go ahead\") — one call per accepted "
+        "task. It updates the interval only if the task is still on its default; if the owner had already "
+        "customised that task, the change is skipped and you should say so and leave their setting alone. "
+        "Confirm from the result naturally (\"Done — backflush is now every 5 days\"). This is the ONLY way "
+        "Decent-doc changes get applied; nothing changes without the owner's yes.");
+    QJsonObject umSchema;
+    umSchema["type"] = QString("object");
+    QJsonObject umProps;
+    umProps["task_key"]      = strProp("The maintenance task's key from the maintenanceDocChanged block (e.g. \"backflush\").");
+    umProps["interval_days"] = intProp("The new default interval in days from Decent's guide (0-3650).");
+    umProps["label"]         = strProp("An updated task label, ONLY if Decent's guide clearly renamed it (optional).");
+    umSchema["properties"] = umProps;
+    umSchema["required"] = QJsonArray{ QString("task_key"), QString("interval_days") };
+    um["input_schema"] = umSchema;
+    tools.append(um);
+
+    // [barista-fork] dismiss_maintenance_doc_change (WRITE) — the "no thanks" path. When the owner declines
+    // the Decent-doc offer (or after all accepted changes are applied), call this ONCE to mark the change
+    // reviewed so it is never re-offered until Decent changes the guide AGAIN. Takes no fields.
+    QJsonObject dm;
+    dm["name"] = QString("dismiss_maintenance_doc_change");
+    dm["description"] = QString(
+        "Dismiss the current Decent cleaning-guide change (the maintenanceDocChanged block) so it is not "
+        "offered again. Call this when the owner declines the update (\"no thanks\", \"leave it\", \"not now\") "
+        "OR once you have applied every change they accepted — it simply marks the change reviewed. It changes "
+        "no maintenance intervals. No arguments.");
+    QJsonObject dmSchema;
+    dmSchema["type"] = QString("object");
+    dmSchema["properties"] = QJsonObject{};
+    dm["input_schema"] = dmSchema;
+    tools.append(dm);
+
     return tools;
 }
 
@@ -499,6 +542,89 @@ void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage*
                         QStringLiteral("no maintenance task with key: ") + taskKey}});
             });
         tasks->requestLogMaintenance(taskKey, 0);
+        return;
+    }
+
+    // [barista-fork] update_maintenance_default (WRITE) — approve-then-apply for a Decent-doc-sourced default
+    // interval. Guarded to is_default=1 rows (updateMaintenanceDefaultStatic's `AND is_default = 1`); an
+    // owner-overridden task is skipped (reported), never clobbered. On a successful apply we ALSO advance the
+    // doc-change baseline (markDocReviewedStatic) so the offer isn't re-raised. Runs off the main thread via
+    // withTempDb on the assistant.db path (same threading discipline as the shot read tools below).
+    if (name == QLatin1String("update_maintenance_default")) {
+        if (!tasks || tasks->databasePath().isEmpty()) {
+            done(QJsonObject{{QStringLiteral("error"), QStringLiteral("maintenance storage unavailable")}});
+            return;
+        }
+        const QString taskKey = input.value(QStringLiteral("task_key")).toString().trimmed();
+        if (taskKey.isEmpty()) {
+            done(QJsonObject{{QStringLiteral("error"),
+                QStringLiteral("update_maintenance_default needs a task_key (from the maintenanceDocChanged block)")}});
+            return;
+        }
+        if (!input.contains(QStringLiteral("interval_days"))) {
+            done(QJsonObject{{QStringLiteral("error"),
+                QStringLiteral("update_maintenance_default needs interval_days")}});
+            return;
+        }
+        const int intervalDays = input.value(QStringLiteral("interval_days")).toVariant().toInt();
+        if (intervalDays < 0 || intervalDays > 3650) {
+            done(QJsonObject{{QStringLiteral("error"),
+                QStringLiteral("interval_days out of range (0-3650)")}});
+            return;
+        }
+        const QString label = input.value(QStringLiteral("label")).toString().trimmed();
+        const QString dbPath = tasks->databasePath();
+        QThread* thread = QThread::create([=]() {
+            QJsonObject result;
+            const bool dbOk = withTempDb(dbPath, "barista_maint_default", [&](QSqlDatabase& db) {
+                TasksStorage::ensureSchemaStatic(db);
+                const bool applied = TasksStorage::updateMaintenanceDefaultStatic(db, taskKey, intervalDays, label);
+                if (applied) {
+                    TasksStorage::markDocReviewedStatic(db);   // this change acknowledged → don't re-offer
+                    result[QStringLiteral("ok")] = true;
+                    result[QStringLiteral("applied")] = true;
+                    result[QStringLiteral("taskKey")] = taskKey;
+                    result[QStringLiteral("intervalDays")] = intervalDays;
+                } else {
+                    // is_default=0 (owner override) or unknown key — leave the owner's setting alone.
+                    result[QStringLiteral("ok")] = true;
+                    result[QStringLiteral("applied")] = false;
+                    result[QStringLiteral("skipped")] = QStringLiteral(
+                        "task is owner-customised or unknown — left unchanged");
+                    result[QStringLiteral("taskKey")] = taskKey;
+                }
+            });
+            if (!dbOk && !result.contains(QStringLiteral("error")))
+                result[QStringLiteral("error")] = QStringLiteral("maintenance database unavailable");
+            QMetaObject::invokeMethod(qApp, [done, result]() { done(result); }, Qt::QueuedConnection);
+        });
+        QObject::connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+        thread->start();
+        return;
+    }
+
+    // [barista-fork] dismiss_maintenance_doc_change (WRITE) — the "no thanks" path. Advances the doc baseline
+    // so the same Decent-guide change is never re-offered. Changes no intervals. Off the main thread.
+    if (name == QLatin1String("dismiss_maintenance_doc_change")) {
+        if (!tasks || tasks->databasePath().isEmpty()) {
+            done(QJsonObject{{QStringLiteral("error"), QStringLiteral("maintenance storage unavailable")}});
+            return;
+        }
+        const QString dbPath = tasks->databasePath();
+        QThread* thread = QThread::create([=]() {
+            QJsonObject result;
+            const bool dbOk = withTempDb(dbPath, "barista_maint_dismiss", [&](QSqlDatabase& db) {
+                TasksStorage::ensureSchemaStatic(db);
+                TasksStorage::markDocReviewedStatic(db);
+                result[QStringLiteral("ok")] = true;
+                result[QStringLiteral("dismissed")] = true;
+            });
+            if (!dbOk && !result.contains(QStringLiteral("error")))
+                result[QStringLiteral("error")] = QStringLiteral("maintenance database unavailable");
+            QMetaObject::invokeMethod(qApp, [done, result]() { done(result); }, Qt::QueuedConnection);
+        });
+        QObject::connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+        thread->start();
         return;
     }
 

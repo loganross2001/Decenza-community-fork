@@ -39,6 +39,23 @@ class SerialDbWorker;
 //     last_done_at + interval_days*86400 (or never-done → due now). The seeded intervals are
 //     CONSERVATIVE PLACEHOLDERS to be confirmed against Decent's published maintenance schedule —
 //     surfaced to the user + the model as such (no-fabrication guard); never presented as authoritative.
+//
+//   maintenance_doc_state(id INTEGER PRIMARY KEY CHECK(id=1), enabled INTEGER DEFAULT 1,
+//                         last_checked_at INTEGER DEFAULT 0, baseline_hash TEXT DEFAULT '',
+//                         current_hash TEXT DEFAULT '', doc_text TEXT DEFAULT '',
+//                         reviewed INTEGER DEFAULT 1)
+//     [barista-fork] Single-row (id=1) state for the periodic "Decent maintenance-docs check" feature
+//     (MaintenanceDocSync): the owner asked the app to occasionally re-read Decent's DE1 Quickstart
+//     cleaning section and PROPOSE default-interval updates (approve-then-apply, never silent).
+//       enabled         — the owner's toggle for the periodic check (default ON). Only egress is a GET
+//                         to decentespresso.com; nothing is ever sent out.
+//       last_checked_at — epoch secs of the last successful fetch (the ~30-day rate-limit gate).
+//       baseline_hash   — hash of the last-ACKNOWLEDGED normalized doc text (baseline on first fetch;
+//                         advanced to current_hash on accept OR dismiss so a change is offered ONCE).
+//       current_hash    — hash of the most recently fetched normalized doc text.
+//       doc_text        — the fetched normalized text (bounded), so the barista can reason over it.
+//       reviewed        — 1 when current_hash == baseline_hash (nothing to offer); 0 when a NEW change
+//                         is pending the owner's review. The barista offers only while reviewed==0.
 class TasksStorage : public QObject {
     Q_OBJECT
 
@@ -73,6 +90,20 @@ public:
     // Mark a maintenance task done now (last_done_at = now). Emits maintenanceLogged(taskKey).
     Q_INVOKABLE void requestLogMaintenance(const QString& taskKey, qint64 whenEpoch = 0);
 
+    // --- Maintenance-doc sync state (async, for the settings dialog + the periodic check service) ---
+
+    // Read the single-row doc-sync state (enabled, lastCheckedAt, baselineHash, currentHash,
+    // reviewed, docText). Emits maintenanceDocStateReady with a map of those keys. Seeds the row
+    // (enabled=1, reviewed=1) on first read so the dialog always has a value to bind.
+    Q_INVOKABLE void requestMaintenanceDocState();       // maintenanceDocStateReady(state)
+    // Flip the owner's periodic-check toggle. Emits maintenanceDocStateReady with the fresh state.
+    Q_INVOKABLE void setMaintenanceDocSyncEnabled(bool enabled);
+    // Store a freshly-fetched doc: records last_checked_at=now + doc_text, updates current_hash, and
+    // computes `reviewed` (1 if hash unchanged from baseline; on the FIRST fetch baseline is seeded to
+    // the fetched hash so it is silent — reviewed=1). Called by MaintenanceDocSync after a GET. Emits
+    // maintenanceDocStateReady with the resulting state (so the dialog's last-checked date refreshes).
+    Q_INVOKABLE void recordFetchedMaintenanceDoc(const QString& normalizedText, const QString& hash);
+
     // --- Synchronous static helpers (caller provides an OPEN assistant.db connection) ---
 
     // Create reminders + maintenance tables and seed the default maintenance schedule if the table
@@ -96,6 +127,34 @@ public:
     // exists; a non-existent key is a no-op returning false (never fabricates a task).
     static bool logMaintenanceStatic(QSqlDatabase& db, const QString& taskKey, qint64 whenEpoch);
 
+    // [barista-fork] Apply a Decent-doc-sourced DEFAULT update to ONE task. UNLIKE updateMaintenanceTaskStatic
+    // (which flips is_default→0 to record an owner override), this KEEPS is_default=1 (still a default, just a
+    // new value from Decent's guide) and only ever touches a row that is STILL on its default — the
+    // `AND is_default = 1` clause is the guard that makes an owner-overridden row untouchable. Returns true
+    // only if a still-default row was updated; false (0 rows) means the task was owner-overridden or absent,
+    // which the caller reports back as "skipped (owner override)". label is applied only when non-empty.
+    static bool updateMaintenanceDefaultStatic(QSqlDatabase& db, const QString& taskKey,
+                                               int intervalDays, const QString& label);
+
+    // --- Maintenance-doc sync state (single row id=1) ---
+
+    // Create the maintenance_doc_state table + seed the single row (enabled=1, reviewed=1) if absent.
+    // Idempotent; called by ensureSchemaStatic and safe to call directly.
+    static bool ensureDocStateSchemaStatic(QSqlDatabase& db);
+    // Read the single-row state as a map: enabled(bool), lastCheckedAt(qint64), baselineHash(QString),
+    // currentHash(QString), reviewed(bool), docText(QString). Seeds the row if missing.
+    static QVariantMap fetchDocStateStatic(QSqlDatabase& db);
+    // Set the owner's periodic-check toggle. Returns true on success.
+    static bool setDocSyncEnabledStatic(QSqlDatabase& db, bool enabled);
+    // Store a freshly-fetched doc (normalizedText + hash). On the FIRST fetch (empty baseline) this seeds
+    // baseline=current=hash and reviewed=1 (silent baseline — no offer). On a later fetch it sets
+    // current_hash+doc_text+last_checked_at and reviewed = (hash == baseline). Returns true on success.
+    static bool recordFetchedDocStatic(QSqlDatabase& db, const QString& normalizedText,
+                                       const QString& hash, qint64 whenEpoch);
+    // Advance baseline to current (mark the pending change as reviewed) — used on BOTH accept and dismiss,
+    // so the same change is never re-offered. Sets reviewed=1. Returns true on success.
+    static bool markDocReviewedStatic(QSqlDatabase& db);
+
 signals:
     void reminderCreated(qint64 id);                 // id -1 on failure
     void dueRemindersReady(const QVariantList& rows);
@@ -103,6 +162,8 @@ signals:
     void maintenanceTasksReady(const QVariantList& rows);
     void maintenanceTaskUpdated(const QString& taskKey);
     void maintenanceLogged(const QString& taskKey);  // empty on failure
+    // [barista-fork] doc-sync state (enabled, lastCheckedAt, baselineHash, currentHash, reviewed, docText).
+    void maintenanceDocStateReady(const QVariantMap& state);
 
 private:
     void runAsync(const QString& connPrefix,

@@ -177,6 +177,49 @@ void TasksStorage::requestLogMaintenance(const QString& taskKey, qint64 whenEpoc
         [this, taskKey, ok](bool) { emit maintenanceLogged(*ok ? taskKey : QString()); });
 }
 
+// ----------------------------------------------------------------- Maintenance-doc sync (async)
+
+void TasksStorage::requestMaintenanceDocState()
+{
+    auto state = std::make_shared<QVariantMap>();
+    runAsync("docstate_read",
+        [state](QSqlDatabase& db) {
+            if (!TasksStorage::ensureSchemaStatic(db))
+                return;
+            *state = TasksStorage::fetchDocStateStatic(db);
+        },
+        [this, state](bool dbOpened) { if (dbOpened) emit maintenanceDocStateReady(*state); });
+}
+
+void TasksStorage::setMaintenanceDocSyncEnabled(bool enabled)
+{
+    auto state = std::make_shared<QVariantMap>();
+    runAsync("docstate_toggle",
+        [enabled, state](QSqlDatabase& db) {
+            if (!TasksStorage::ensureSchemaStatic(db))
+                return;
+            TasksStorage::setDocSyncEnabledStatic(db, enabled);
+            *state = TasksStorage::fetchDocStateStatic(db);
+        },
+        [this, state](bool dbOpened) { if (dbOpened) emit maintenanceDocStateReady(*state); });
+}
+
+void TasksStorage::recordFetchedMaintenanceDoc(const QString& normalizedText, const QString& hash)
+{
+    if (hash.isEmpty())
+        return;
+    const qint64 now = QDateTime::currentSecsSinceEpoch();
+    auto state = std::make_shared<QVariantMap>();
+    runAsync("docstate_fetch",
+        [normalizedText, hash, now, state](QSqlDatabase& db) {
+            if (!TasksStorage::ensureSchemaStatic(db))
+                return;
+            TasksStorage::recordFetchedDocStatic(db, normalizedText, hash, now);
+            *state = TasksStorage::fetchDocStateStatic(db);
+        },
+        [this, state](bool dbOpened) { if (dbOpened) emit maintenanceDocStateReady(*state); });
+}
+
 // ---------------------------------------------------------------------------- Static helpers
 
 bool TasksStorage::ensureSchemaStatic(QSqlDatabase& db)
@@ -238,6 +281,40 @@ bool TasksStorage::ensureSchemaStatic(QSqlDatabase& db)
                     qWarning() << "TasksStorage: seed failed for" << t.key << ":" << iq.lastError().text();
             }
         }
+    }
+
+    // [barista-fork] Doc-sync state table (single row id=1) rides the same idempotent schema pass.
+    if (!ensureDocStateSchemaStatic(db))
+        return false;
+    return true;
+}
+
+bool TasksStorage::ensureDocStateSchemaStatic(QSqlDatabase& db)
+{
+    QSqlQuery query(db);
+    if (!query.exec(R"(
+        CREATE TABLE IF NOT EXISTS maintenance_doc_state (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            enabled INTEGER DEFAULT 1,
+            last_checked_at INTEGER DEFAULT 0,
+            baseline_hash TEXT DEFAULT '',
+            current_hash TEXT DEFAULT '',
+            doc_text TEXT DEFAULT '',
+            reviewed INTEGER DEFAULT 1
+        )
+    )")) {
+        qWarning() << "TasksStorage: failed to create maintenance_doc_state:" << query.lastError().text();
+        return false;
+    }
+    // Seed the single row (default ON, nothing pending) on first run. INSERT OR IGNORE keeps an
+    // existing owner-toggled row untouched.
+    QSqlQuery iq(db);
+    iq.prepare("INSERT OR IGNORE INTO maintenance_doc_state "
+               "(id, enabled, last_checked_at, baseline_hash, current_hash, doc_text, reviewed) "
+               "VALUES (1, 1, 0, '', '', '', 1)");
+    if (!iq.exec()) {
+        qWarning() << "TasksStorage: seed maintenance_doc_state failed:" << iq.lastError().text();
+        return false;
     }
     return true;
 }
@@ -437,4 +514,124 @@ bool TasksStorage::logMaintenanceStatic(QSqlDatabase& db, const QString& taskKey
         return false;
     }
     return q.numRowsAffected() > 0;   // false = no such task_key (never fabricates a task)
+}
+
+bool TasksStorage::updateMaintenanceDefaultStatic(QSqlDatabase& db, const QString& taskKey,
+                                                  int intervalDays, const QString& label)
+{
+    const QString key = taskKey.trimmed();
+    if (key.isEmpty() || intervalDays < 0)
+        return false;
+
+    QStringList sets;
+    sets << QStringLiteral("interval_days = :interval");
+    // Keep is_default=1 explicitly (a Decent-sourced default value is STILL a default, not an owner
+    // override) — harmless on a row that's already 1, and it re-asserts the class if ever needed.
+    sets << QStringLiteral("is_default = 1");
+    const QString trimmedLabel = label.trimmed();
+    if (!trimmedLabel.isEmpty())
+        sets << QStringLiteral("label = :label");
+
+    QSqlQuery q(db);
+    // The `AND is_default = 1` clause is the GUARD: an owner-overridden row (is_default=0) matches zero
+    // rows and is left completely untouched.
+    q.prepare(QStringLiteral("UPDATE maintenance_tasks SET ") + sets.join(QStringLiteral(", "))
+              + QStringLiteral(" WHERE task_key = :key AND is_default = 1"));
+    q.bindValue(QStringLiteral(":interval"), qMax(0, intervalDays));
+    if (!trimmedLabel.isEmpty())
+        q.bindValue(QStringLiteral(":label"), trimmedLabel);
+    q.bindValue(QStringLiteral(":key"), key);
+    if (!q.exec()) {
+        qWarning() << "TasksStorage: updateMaintenanceDefault failed:" << q.lastError().text();
+        return false;
+    }
+    // 0 rows → the task was owner-overridden (is_default=0) or does not exist; caller reports "skipped".
+    return q.numRowsAffected() > 0;
+}
+
+QVariantMap TasksStorage::fetchDocStateStatic(QSqlDatabase& db)
+{
+    ensureDocStateSchemaStatic(db);
+    QVariantMap out;
+    QSqlQuery q(db);
+    if (!q.exec("SELECT enabled, last_checked_at, baseline_hash, current_hash, doc_text, reviewed "
+                "FROM maintenance_doc_state WHERE id = 1") || !q.next()) {
+        // Never-seeded/failed read → return the safe defaults (enabled ON, nothing pending).
+        out.insert(QStringLiteral("enabled"), true);
+        out.insert(QStringLiteral("lastCheckedAt"), qint64(0));
+        out.insert(QStringLiteral("baselineHash"), QString());
+        out.insert(QStringLiteral("currentHash"), QString());
+        out.insert(QStringLiteral("docText"), QString());
+        out.insert(QStringLiteral("reviewed"), true);
+        return out;
+    }
+    out.insert(QStringLiteral("enabled"),       q.value(0).toInt() != 0);
+    out.insert(QStringLiteral("lastCheckedAt"), q.value(1).toLongLong());
+    out.insert(QStringLiteral("baselineHash"),  q.value(2).toString());
+    out.insert(QStringLiteral("currentHash"),   q.value(3).toString());
+    out.insert(QStringLiteral("docText"),       q.value(4).toString());
+    out.insert(QStringLiteral("reviewed"),      q.value(5).toInt() != 0);
+    return out;
+}
+
+bool TasksStorage::setDocSyncEnabledStatic(QSqlDatabase& db, bool enabled)
+{
+    ensureDocStateSchemaStatic(db);
+    QSqlQuery q(db);
+    q.prepare("UPDATE maintenance_doc_state SET enabled = :en WHERE id = 1");
+    q.bindValue(":en", enabled ? 1 : 0);
+    if (!q.exec()) {
+        qWarning() << "TasksStorage: setDocSyncEnabled failed:" << q.lastError().text();
+        return false;
+    }
+    return true;
+}
+
+bool TasksStorage::recordFetchedDocStatic(QSqlDatabase& db, const QString& normalizedText,
+                                          const QString& hash, qint64 whenEpoch)
+{
+    if (hash.trimmed().isEmpty())
+        return false;
+    ensureDocStateSchemaStatic(db);
+
+    // Read the current baseline to decide whether this is the silent first-fetch or a real change.
+    QString baseline;
+    {
+        QSqlQuery sel(db);
+        if (sel.exec("SELECT baseline_hash FROM maintenance_doc_state WHERE id = 1") && sel.next())
+            baseline = sel.value(0).toString();
+    }
+
+    QSqlQuery q(db);
+    if (baseline.isEmpty()) {
+        // FIRST fetch ever: seed baseline = current = hash and reviewed=1 — a silent baseline, so the
+        // barista never offers a "change" the owner never had a chance to see the original of.
+        q.prepare("UPDATE maintenance_doc_state SET last_checked_at = :when, doc_text = :txt, "
+                  "current_hash = :hash, baseline_hash = :hash, reviewed = 1 WHERE id = 1");
+    } else {
+        // Later fetch: record it and flag reviewed = (unchanged). A NEW hash → reviewed=0 (pending offer).
+        q.prepare("UPDATE maintenance_doc_state SET last_checked_at = :when, doc_text = :txt, "
+                  "current_hash = :hash, reviewed = CASE WHEN :hash = baseline_hash THEN 1 ELSE 0 END "
+                  "WHERE id = 1");
+    }
+    q.bindValue(":when", whenEpoch);
+    q.bindValue(":txt",  normalizedText);
+    q.bindValue(":hash", hash);
+    if (!q.exec()) {
+        qWarning() << "TasksStorage: recordFetchedDoc failed:" << q.lastError().text();
+        return false;
+    }
+    return true;
+}
+
+bool TasksStorage::markDocReviewedStatic(QSqlDatabase& db)
+{
+    ensureDocStateSchemaStatic(db);
+    QSqlQuery q(db);
+    // Advance baseline to whatever's current so THIS change is never re-offered (accept OR dismiss).
+    if (!q.exec("UPDATE maintenance_doc_state SET baseline_hash = current_hash, reviewed = 1 WHERE id = 1")) {
+        qWarning() << "TasksStorage: markDocReviewed failed:" << q.lastError().text();
+        return false;
+    }
+    return true;
 }

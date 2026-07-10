@@ -67,6 +67,12 @@ if(DECENZA_BARISTA)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristaactions.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristacontextbuilder.h
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristacontextbuilder.cpp
+        # [barista-fork] Periodic Decent maintenance-docs check (network + rate-limit + hash). Gated with
+        # the module — nothing unconditional references it (the DB state/apply helpers live in the
+        # unconditional TasksStorage), so it must NOT be built into a DECENZA_BARISTA=OFF binary or the
+        # DB-only tests (it pulls in QtNetwork).
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/maintenancedocsync.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/maintenancedocsync.cpp
     )
 
     # New-assistant QML — its own resource, loaded by URL via a Loader in main.qml.

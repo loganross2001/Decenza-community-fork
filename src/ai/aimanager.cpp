@@ -1285,6 +1285,7 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
         QJsonObject fullHistory;
         QJsonArray beanFeedback;   // [barista-fork] recent verbal tasting feedback on the CURRENT bean
         QJsonObject dueItems;      // [barista-fork] due reminders + due maintenance (assistant.db, shot-independent)
+        QJsonObject docChange;     // [barista-fork] a pending Decent cleaning-guide change to OFFER (assistant.db)
 
         withTempDb(dbPath, "barista_ctx", [&](QSqlDatabase& db) {
             // Anchor: latest shot for the current bean; else latest overall (robust to bean-name drift).
@@ -1439,11 +1440,54 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
                         "defaults. Raise a due item as a gentle suggestion the user can confirm/adjust in settings. "
                         "For descaling, defer to the user's water (it is TDS-dependent) rather than asserting a fixed interval.");
                 }
+
+                // [barista-fork] MAINTENANCE-DOC CHANGE: the periodic Decent cleaning-guide check
+                // (MaintenanceDocSync) sets reviewed=0 when it detects a change the owner hasn't seen yet.
+                // Fold in the fetched doc text PLUS the CURRENT still-default schedule (is_default=1 rows only —
+                // owner-overridden rows are excluded so we never propose to overwrite them), so the model can
+                // OFFER specific default-interval deltas ("backflush 7→5") rather than a vague "they changed
+                // something". This is rare and one-time; it competes for the single proactive slot (see the
+                // persona priority note echoed here). Read only when there is something pending.
+                const QVariantMap docState = TasksStorage::fetchDocStateStatic(db);
+                if (!docState.value(QStringLiteral("reviewed"), true).toBool()) {
+                    const QString docText = docState.value(QStringLiteral("docText")).toString();
+                    if (!docText.isEmpty()) {
+                        docChange[QStringLiteral("changedGuideText")] = docText.left(4000);
+                        // The tasks still on their seeded default — the only rows update_maintenance_default can
+                        // touch. Owner-overridden tasks (is_default=0) are deliberately omitted.
+                        QJsonArray defaults;
+                        QSqlQuery dq(db);
+                        if (dq.exec("SELECT task_key, label, interval_days FROM maintenance_tasks "
+                                    "WHERE is_default = 1 ORDER BY label ASC")) {
+                            while (dq.next()) {
+                                QJsonObject d;
+                                d[QStringLiteral("taskKey")]      = dq.value(0).toString();
+                                d[QStringLiteral("label")]        = dq.value(1).toString();
+                                d[QStringLiteral("intervalDays")] = dq.value(2).toInt();
+                                defaults.append(d);
+                            }
+                        }
+                        if (!defaults.isEmpty())
+                            docChange[QStringLiteral("currentDefaultSchedule")] = defaults;
+                        docChange[QStringLiteral("note")] = QStringLiteral(
+                            "Decent's DE1 cleaning guide has changed since it was last acknowledged. In your "
+                            "FIRST reply (after answering the user), you MAY offer ONE thing: mention the update "
+                            "and OFFER specific default-interval changes you can infer by comparing changedGuideText "
+                            "to currentDefaultSchedule (e.g. 'they now suggest backflushing every 5 days instead of "
+                            "7 — want me to update that?'). It is an OFFER with an easy spoken 'no thanks', never "
+                            "auto-applied. On a yes, call update_maintenance_default per accepted task (it touches "
+                            "ONLY still-default tasks; owner-customised ones are left alone). On a no — or once "
+                            "you've applied the accepted ones — call dismiss_maintenance_doc_change so it isn't "
+                            "re-offered. This shares the ONE-proactive-thing-per-turn budget and TAKES the slot "
+                            "when present (it is rare and one-time), ahead of a due item or a recipe tweak. For "
+                            "descaling, still defer to the user's water — don't assert a fixed interval.");
+                    }
+                }
             });
         }
 
         QMetaObject::invokeMethod(qApp, [self, serial, shot, anchorId, beanFilterMissed,
-                                         beanBrand, beanType, profileName, beanFeedback, dueItems,
+                                         beanBrand, beanType, profileName, beanFeedback, dueItems, docChange,
                                          dialInSessions, bestRecentShot, beanBestShot, grinderContext,
                                          grinderCalibration, recentAdvice, fullHistory]() {
             if (!self || serial != self->m_baristaContextSerial)
@@ -1481,13 +1525,20 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
                 dueSuffix = QStringLiteral("\n\n## Due now (reminders & maintenance the user set up):\n")
                           + QString::fromUtf8(QJsonDocument(dueItems).toJson(QJsonDocument::Indented));
 
+            // [barista-fork] A pending Decent cleaning-guide change to OFFER — shot-independent like dueItems,
+            // so it rides the same first-reply turn including the no-shot paths.
+            QString docSuffix;
+            if (!docChange.isEmpty())
+                docSuffix = QStringLiteral("\n\n## maintenanceDocChanged (Decent's cleaning guide changed — offer an update):\n")
+                          + QString::fromUtf8(QJsonDocument(docChange).toJson(QJsonDocument::Indented));
+
             if (anchorId <= 0 || !shot.isValid()) {
-                emit self->baristaContextReady(QStringLiteral("recordedShots: 0") + dueSuffix);
+                emit self->baristaContextReady(QStringLiteral("recordedShots: 0") + dueSuffix + docSuffix);
                 return;
             }
             QJsonObject obj = self->buildUserPromptObjectForShot(shot);
             if (obj.isEmpty()) {
-                emit self->baristaContextReady(QStringLiteral("recordedShots: 0") + dueSuffix);
+                emit self->baristaContextReady(QStringLiteral("recordedShots: 0") + dueSuffix + docSuffix);
                 return;
             }
             self->enrichUserPromptObject(obj, shot, dialInSessions, bestRecentShot, grinderContext,
@@ -1516,6 +1567,7 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
                                     "(this is real — you DO have their history):\n");
             block += QString::fromUtf8(QJsonDocument(obj).toJson(QJsonDocument::Indented));
             block += dueSuffix;   // [barista-fork] due reminders/maintenance ride the same first-reply turn
+            block += docSuffix;   // [barista-fork] a pending Decent cleaning-guide change to offer (rare, one-time)
             emit self->baristaContextReady(block);
         }, Qt::QueuedConnection);
     });

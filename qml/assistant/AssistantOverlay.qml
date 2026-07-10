@@ -564,6 +564,25 @@ Item {
                 + "mention a maintenance item as a gentle 'might be about time' the user can confirm or adjust in "
                 + "settings — and for descaling, defer to their water (it's TDS-dependent), don't assert a fixed interval."
 
+        // [barista-fork] MAINTENANCE-DOC CHANGE (PROACTIVE SURFACING). When the context block carries a
+        // maintenanceDocChanged section, Decent's cleaning guide changed since it was last acknowledged. This is
+        // rare and one-time, so it TAKES the single proactive slot when present — ahead of a due item or a
+        // recipe tweak (both of those recur and persist to the next turn; a doc change is a one-off the owner
+        // should get to weigh in on). Gated on proactivityLevel only (off → never surface it).
+        if (level !== "off")
+            persona += "\nMAINTENANCE-DOC CHANGE (PROACTIVE, takes priority when present): if the context block "
+                + "has a \"maintenanceDocChanged\" section, Decent updated their DE1 cleaning guide. In your FIRST "
+                + "reply, AFTER you answer whatever the user said, briefly mention it and OFFER specific "
+                + "default-interval updates you infer by comparing changedGuideText to currentDefaultSchedule "
+                + "(e.g. 'Decent now suggests backflushing every 5 days instead of 7 — want me to update that?'). "
+                + "Keep it to ONE proactive turn — raise the doc change OR a due item OR a recipe tweak, never a "
+                + "pile. It is an OFFER with an easy spoken 'no thanks', NEVER auto-applied. On a yes, call "
+                + "update_maintenance_default once per accepted task (it changes ONLY tasks still on their "
+                + "default; anything the user customised is left untouched, and the tool will tell you if it "
+                + "skipped one). On a 'no thanks' — or once you've applied everything they accepted — call "
+                + "dismiss_maintenance_doc_change so it's not brought up again. For descaling, still defer to "
+                + "their water rather than asserting a fixed interval."
+
         // Web search (Anthropic only) — keep the persona truthful about what it can/can't reach.
         var webOn = !!(root._settings && root._settings.webSearchEnabled)
                     && typeof MainController !== "undefined" && MainController.aiManager

@@ -27,6 +27,17 @@ Dialog {
     padding: 0
 
     readonly property var _tasks: (typeof Barista !== "undefined") ? Barista.tasks : null
+    // [barista-fork] Periodic Decent maintenance-docs check service (toggle / last-checked / Check now).
+    readonly property var _docSync: (typeof Barista !== "undefined") ? Barista.docSync : null
+
+    function _lastCheckedText() {
+        if (!root._docSync || root._docSync.lastCheckedAt <= 0)
+            return TranslationManager.translate("barista.docsync.neverChecked", "never checked")
+        var d = new Date(root._docSync.lastCheckedAt * 1000)
+        var pad = function(n) { return (n < 10 ? "0" : "") + n }
+        return TranslationManager.translate("barista.docsync.lastChecked", "last checked")
+               + " " + d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate())
+    }
 
     // The live task list (array of maps: taskKey, label, intervalDays, enabled, lastDoneAt, isDefault, note).
     property var _rows: []
@@ -110,6 +121,93 @@ Dialog {
                     + "~yearly at 30-120ppm, every 4-8 weeks if harder). Your edits override the defaults.")
                 color: Theme.textSecondaryColor
                 font: Theme.labelFont
+            }
+        }
+
+        // --- Periodic Decent maintenance-docs check ---
+        // [barista-fork] Toggle + last-checked + "Check now" for the periodic re-read of Decent's DE1
+        // Quickstart cleaning guide. The only network egress is a single GET to decentespresso.com;
+        // nothing about the user is ever sent. When a change is detected the barista OFFERS specific
+        // default-interval updates on its next reply (approve-then-apply) — nothing changes silently.
+        Rectangle {
+            visible: root._docSync !== null
+            Layout.fillWidth: true
+            Layout.leftMargin: Theme.spacingLarge
+            Layout.rightMargin: Theme.spacingLarge
+            radius: Theme.cardRadius
+            color: Theme.backgroundColor
+            border.width: 1
+            border.color: Theme.borderColor
+            implicitHeight: docSyncCol.implicitHeight + Theme.spacingMedium * 2
+
+            ColumnLayout {
+                id: docSyncCol
+                anchors.fill: parent
+                anchors.margins: Theme.spacingMedium
+                spacing: Theme.spacingSmall
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.spacingSmall
+                    Text {
+                        Layout.fillWidth: true
+                        text: TranslationManager.translate("barista.docsync.title",
+                            "Check Decent's cleaning guide for updates")
+                        color: Theme.textColor
+                        font: Theme.bodyFont
+                        wrapMode: Text.WordWrap
+                        Accessible.ignored: true
+                    }
+                    Switch {
+                        id: docSyncSwitch
+                        checked: root._docSync ? root._docSync.enabled : false
+                        onToggled: if (root._docSync)
+                            root._docSync.setEnabled(checked)
+                        Accessible.role: Accessible.CheckBox
+                        Accessible.name: TranslationManager.translate("barista.docsync.title",
+                            "Check Decent's cleaning guide for updates")
+                        Accessible.checked: checked
+                        Accessible.focusable: true
+                        Accessible.onToggleAction: toggle()
+                    }
+                }
+
+                // Privacy note (matches the code comment): GET only, nothing sent.
+                Text {
+                    Layout.fillWidth: true
+                    text: TranslationManager.translate("barista.docsync.help",
+                        "About once a month the app reads Decent's online cleaning guide and, if it changed, the "
+                        + "barista offers to update the default intervals — you approve each change, nothing changes "
+                        + "on its own. This only downloads that one page from decentespresso.com; nothing about you "
+                        + "is ever sent.")
+                    color: Theme.textSecondaryColor
+                    font: Theme.labelFont
+                    wrapMode: Text.WordWrap
+                    Accessible.ignored: true
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.spacingSmall
+                    Text {
+                        Layout.fillWidth: true
+                        text: root._docSync && root._docSync.checking
+                              ? TranslationManager.translate("barista.docsync.checking", "checking…")
+                              : root._lastCheckedText()
+                        color: Theme.textSecondaryColor
+                        font: Theme.labelFont
+                        Accessible.ignored: true
+                    }
+                    AccessibleButton {
+                        subtle: true
+                        enabled: root._docSync !== null && root._docSync.enabled
+                                 && !(root._docSync && root._docSync.checking)
+                        text: TranslationManager.translate("barista.docsync.checkNow", "Check now")
+                        accessibleName: TranslationManager.translate("barista.docsync.checkNow", "Check now")
+                        onClicked: if (root._docSync)
+                            root._docSync.checkNow()
+                    }
+                }
             }
         }
 

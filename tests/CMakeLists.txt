@@ -913,3 +913,12 @@ target_link_libraries(tst_steamhealth PRIVATE Qt6::Quick Qt6::Graphs)
 add_decenza_test(tst_raceconditionfix
     tst_raceconditionfix.cpp
 )
+
+# --- tst_maintenancedocsync: [barista-fork] "periodic Decent maintenance-docs check" DB layer.
+# Static-helper coverage of TasksStorage's maintenance_doc_state machine + the is_default guard on
+# update_maintenance_default (the one property runtime can't verify — raw-resourced QML + live fetch).
+# Lean deps: tasksstorage.cpp only needs Qt Sql/Core (dbutils.h is header-only). ---
+add_decenza_test(tst_maintenancedocsync
+    tst_maintenancedocsync.cpp
+    ${CMAKE_SOURCE_DIR}/src/barista/tasksstorage.cpp
+)

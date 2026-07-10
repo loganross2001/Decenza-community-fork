@@ -9,6 +9,7 @@
 #include "baristacontextbuilder.h"
 #include "feedbackstorage.h"
 #include "tasksstorage.h"
+#include "maintenancedocsync.h"
 #include "../controllers/maincontroller.h"
 #include "../history/shothistorystorage.h"
 #include "../ai/aimanager.h"
@@ -35,7 +36,9 @@ BaristaModule::BaristaModule(MainController* mainController, MachineState* machi
           mainController ? mainController->profileManager() : nullptr,
           appSettings, this))
     , m_feedbackStorage(new FeedbackStorage(this))
-    , m_tasksStorage(new TasksStorage(this)) {
+    , m_tasksStorage(new TasksStorage(this))
+    // [barista-fork] Periodic Decent maintenance-docs check. Owns its own QNAM; persists via m_tasksStorage.
+    , m_docSync(new MaintenanceDocSync(m_tasksStorage, this)) {
     connect(m_settings, &AssistantSettings::enabledChanged,
             this, &BaristaModule::enabledChanged);
 
@@ -51,6 +54,9 @@ BaristaModule::BaristaModule(MainController* mainController, MachineState* machi
             // [barista-fork] Reminders + maintenance share the SAME assistant.db file (each store's
             // ensureSchema is idempotent and touches only its own tables).
             m_tasksStorage->initialize(assistantDb);
+            // [barista-fork] Now that assistant.db is initialized, kick the once-per-launch, rate-limited
+            // Decent maintenance-docs check (~30-day window, owner-toggle-gated, single GET, nothing sent).
+            m_docSync->maybeCheckOnStartup();
         }
         if (AIManager* ai = mainController->aiManager()) {
             ai->setFeedbackStorage(m_feedbackStorage);

@@ -7,6 +7,7 @@
 #include "baristaactions.h"        // ditto for Q_PROPERTY(BaristaActions*)
 #include "baristacontextbuilder.h" // ditto for Q_PROPERTY(BaristaContextBuilder*)
 #include "tasksstorage.h"          // complete type needed for the Q_PROPERTY(TasksStorage*) metatype
+#include "maintenancedocsync.h"    // ditto for Q_PROPERTY(MaintenanceDocSync*)
 
 class QQmlApplicationEngine;
 class MainController;
@@ -34,6 +35,9 @@ class BaristaModule : public QObject {
     // [barista-fork] Reminders + maintenance store, exposed so the maintenance settings dialog can list/edit
     // tasks and mark them done directly (the barista also reaches it via the AI task tools).
     Q_PROPERTY(TasksStorage* tasks READ tasks CONSTANT)
+    // [barista-fork] Periodic Decent maintenance-docs check, exposed so the maintenance settings dialog can
+    // show last-checked / toggle the periodic check / run "Check now".
+    Q_PROPERTY(MaintenanceDocSync* docSync READ docSync CONSTANT)
 
 public:
     // Single upstream hook: construct the module (settings + orchestrator), register the
@@ -55,6 +59,7 @@ public:
     BaristaActions* actions() const { return m_actions; }
     BaristaContextBuilder* contextBuilder() const { return m_contextBuilder; }
     TasksStorage* tasks() const { return m_tasksStorage; }   // [barista-fork] reminders + maintenance
+    MaintenanceDocSync* docSync() const { return m_docSync; } // [barista-fork] periodic Decent docs check
 
 signals:
     void enabledChanged();
@@ -77,4 +82,7 @@ private:
     // [barista-fork] Reminders + maintenance store (SAME assistant.db as m_feedbackStorage). Owned here,
     // initialized with the path derived beside shots.db, handed to AIManager for the task tools + dueItems.
     TasksStorage* m_tasksStorage = nullptr;
+    // [barista-fork] Periodic Decent maintenance-docs check (network + rate-limit + hash). Owned here;
+    // persists its state through m_tasksStorage (assistant.db maintenance_doc_state row).
+    MaintenanceDocSync* m_docSync = nullptr;
 };

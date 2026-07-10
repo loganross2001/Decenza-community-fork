@@ -812,6 +812,11 @@ bool DatabaseBackupManager::restoreBackup(const QString& filename, bool merge,
             } else {
                 QDir tempDirObj(tempDir);
                 QStringList dbFiles = tempDirObj.entryList({"*.db"}, QDir::Files, QDir::Time);
+                // [barista-fork] The zip now also contains assistant.db (barista KB/reminders/
+                // maintenance) at its root. A bare "*.db" newest-first pick can grab assistant.db
+                // and try to import it AS shot history (no shots table → replace-mode restore
+                // aborts). Exclude the side-DB so only the shots backup is chosen.
+                dbFiles.removeAll(QStringLiteral("assistant.db"));
                 if (!dbFiles.isEmpty()) {
                     tempDbPath = tempDir + "/" + dbFiles.first();
                     qDebug() << "DatabaseBackupManager: Found DB file:" << tempDbPath;
@@ -885,13 +890,14 @@ bool DatabaseBackupManager::restoreBackup(const QString& filename, bool merge,
         QString restoreDir = isRawDb ? QFileInfo(zipPath).absolutePath() : tempDir;
 
         // [barista-fork] Restore the barista's assistant.db (verbal-feedback KB + reminders + maintenance)
-        // when it's present in the backup and shots are being restored (it's the barista's data DB, restored
-        // alongside the shot history). This is a whole-file REPLACE — importDatabaseStatic's row-level merge
-        // covers only shots.db, so a merge-mode restore still replaces assistant.db wholesale (KNOWN
-        // LIMITATION: assistant.db rows are not merged; a merge restore adopts the backup's KB/reminders/
-        // maintenance for that file). Backwards-compatible: an older backup with no assistant.db is a no-op,
-        // leaving the live one intact. Only proceeds when the source file is present.
-        if (restoreShots) {
+        // alongside the shot history. This is a whole-file REPLACE (there is no row-level merge for
+        // assistant.db). To avoid destroying live data it runs ONLY on a REPLACE restore of a real zip:
+        //  - skip when merge==true — a merge restore means "keep my current data, add the old shots", so
+        //    clobbering live reminders/maintenance/feedback-KB with the backup's copy would be data loss;
+        //  - skip when isRawDb — a raw .db pick has no zip; restoreDir is the file's folder, and a stray
+        //    assistant.db sitting next to it must not be adopted.
+        // Backwards-compatible: an older backup with no assistant.db is a no-op, leaving the live one intact.
+        if (restoreShots && !merge && !isRawDb) {
             const QString assistantSrc = restoreDir + "/assistant.db";
             if (QFile::exists(assistantSrc) && !dbPath.isEmpty()) {
                 const QString assistantDest = QFileInfo(dbPath).absolutePath() + "/assistant.db";

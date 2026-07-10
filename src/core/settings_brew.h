@@ -28,6 +28,10 @@ class SettingsBrew : public QObject {
     // +/- grind values in NUMERIC mode. One source of truth (was a per-widget
     // option). Default 1.0, clamped to [0.1, 5.0].
     Q_PROPERTY(double grindQuickSelectStep READ grindQuickSelectStep WRITE setGrindQuickSelectStep NOTIFY grindQuickSelectStepChanged)
+    // Step size (°C) for the temperature quick-select brew-bar pill's +/- values.
+    // Global preference (one source of truth), mirroring grindQuickSelectStep.
+    // Default 0.5, clamped to [0.1, 5.0].
+    Q_PROPERTY(double temperatureQuickSelectStep READ temperatureQuickSelectStep WRITE setTemperatureQuickSelectStep NOTIFY temperatureQuickSelectStepChanged)
     // Master toggle for weight-timed steaming (UI label "Weight-timed steaming").
     // When off, steam time is never scaled from milk weight. Default OFF; setting a
     // pitcher's reference milk (setSteamPitcherCalibration) turns it on automatically.
@@ -112,6 +116,9 @@ public:
 
     double grindQuickSelectStep() const;
     void setGrindQuickSelectStep(double step);
+
+    double temperatureQuickSelectStep() const;
+    void setTemperatureQuickSelectStep(double step);
 
     bool milkAutoCaptureEnabled() const;
     void setMilkAutoCaptureEnabled(bool enabled);
@@ -260,6 +267,7 @@ signals:
     void ratioPreset3Changed();
     void doseCupTareWeightChanged();
     void grindQuickSelectStepChanged();
+    void temperatureQuickSelectStepChanged();
     void milkAutoCaptureEnabledChanged();
     void doseCaptureSoundEnabledChanged();
     void lastSteamMilkGChanged();

@@ -422,6 +422,34 @@ KeyboardAwareContainer {
                                 }
                             }
                         }
+
+                        // Temperature quick-select step (°C) for the brew-bar
+                        // temperature pill's +/- values. Mirrors the grind step above.
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.scaled(4)
+
+                            Text {
+                                text: TranslationManager.translate("settings.preferences.tempStep", "Temperature step (°C)")
+                                color: Theme.textColor
+                                font.pixelSize: Theme.scaled(14)
+                                Accessible.ignored: true
+                            }
+
+                            ValueInput {
+                                Layout.fillWidth: true
+                                from: 0.1
+                                to: 5.0
+                                stepSize: 0.1
+                                decimals: 1
+                                value: Settings.brew.temperatureQuickSelectStep
+                                valueColor: Theme.primaryColor
+                                accessibleName: TranslationManager.translate("settings.preferences.tempStep", "Temperature step (°C)")
+                                onValueModified: function(newValue) {
+                                    Settings.brew.temperatureQuickSelectStep = newValue
+                                }
+                            }
+                        }
                     }
                 }
 

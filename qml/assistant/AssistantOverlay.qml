@@ -1221,7 +1221,9 @@ Item {
         anchors.top: parent.top
         anchors.bottom: parent.bottom
         anchors.margins: Theme.spacingMedium
-        width: Math.min(Theme.scaled(440), parent.width * 0.42)
+        // [barista-fork] Wider than the conversation card: the tabbed settings (Voice · Coaching ·
+        // Maintenance) need room to read as a first-class settings screen, not a cramped popover.
+        width: Math.min(Theme.scaled(520), parent.width * 0.5)
         radius: Theme.cardRadius
         color: Theme.surfaceColor
         border.width: 1
@@ -1269,22 +1271,15 @@ Item {
                 }
             }
 
-            // AssistantSettingsPanel is a self-scrolling Rectangle: it draws its own surface/border, owns its
-            // own Flickable, and CAPS ITS OWN HEIGHT to min(content, parent.height − margins) — its
-            // implicitHeight is 0 (it's a Rectangle). So do NOT wrap it in another Flickable (contentHeight
-            // would be 0 → nothing scrolls, and nested vertical Flickables fight the drag), and do NOT bind
-            // its height (Layout.fillHeight/anchors.fill) — that would overwrite its own height binding. Give
-            // it a plain fill-height container as `parent`: the panel then reads that container's height and
-            // self-sizes/scrolls correctly. Its own "×" emits closed() → back to the conversation, like Back.
-            Item {
+            // [barista-fork] AssistantSettingsPanel is now a TABBED, transparent Rectangle: a tab bar over a
+            // StackLayout of three pages, each its own Flickable. It no longer self-caps its height (the old
+            // single-scroll design did) — its internal ColumnLayout anchors.fill and the active tab's Flickable
+            // fills the remaining space and scrolls. So it MUST be given a bounded, fill-height box: fill this
+            // container. Its own "×" emits closed() → back to the conversation, like Back.
+            AssistantSettingsPanel {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                AssistantSettingsPanel {
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    anchors.top: parent.top
-                    onClosed: root._showSettings = false
-                }
+                onClosed: root._showSettings = false
             }
         }
     }

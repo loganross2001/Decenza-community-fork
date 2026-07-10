@@ -130,6 +130,23 @@ void TasksStorage::requestCompleteReminder(qint64 reminderId)
         [this, outId](bool) { emit reminderCompleted(*outId); });
 }
 
+void TasksStorage::requestAddPersonalDate(const QVariantMap& fields)
+{
+    if (m_dbPath.isEmpty()) {
+        qWarning() << "TasksStorage: requestAddPersonalDate on uninitialized storage";
+        emit personalDateAdded(-1);
+        return;
+    }
+    auto newId = std::make_shared<qint64>(-1);
+    runAsync("personal_date_add",
+        [fields, newId](QSqlDatabase& db) {
+            if (!TasksStorage::ensureSchemaStatic(db))
+                return;
+            *newId = TasksStorage::insertPersonalDateStatic(db, fields);
+        },
+        [this, newId](bool) { emit personalDateAdded(*newId); });
+}
+
 // -------------------------------------------------------------------------- Maintenance (async)
 
 void TasksStorage::requestMaintenanceTasks()
@@ -256,7 +273,24 @@ bool TasksStorage::ensureSchemaStatic(QSqlDatabase& db)
         return false;
     }
 
+    // [barista-fork] Personal dates — the owner's own important days (added by voice). Rides this idempotent
+    // schema pass; the shared assistant.db is backed up wholesale, so no per-table backup registration needed.
+    if (!query.exec(R"(
+        CREATE TABLE IF NOT EXISTS personal_dates (
+            id INTEGER PRIMARY KEY,
+            label TEXT DEFAULT '',
+            month INTEGER DEFAULT 0,
+            day INTEGER DEFAULT 0,
+            year INTEGER DEFAULT 0,
+            created_at INTEGER DEFAULT 0
+        )
+    )")) {
+        qWarning() << "TasksStorage: failed to create personal_dates:" << query.lastError().text();
+        return false;
+    }
+
     query.exec("CREATE INDEX IF NOT EXISTS idx_reminders_open ON reminders(completed_at, due_at)");
+    query.exec("CREATE INDEX IF NOT EXISTS idx_personal_dates_md ON personal_dates(month, day)");
 
     // Seed the editable-default maintenance schedule only when the table is empty (a first run). We
     // INSERT OR IGNORE by task_key so re-seeding never clobbers an owner's edited row. Seeding only
@@ -338,6 +372,60 @@ qint64 TasksStorage::insertReminderStatic(QSqlDatabase& db, const QVariantMap& f
         return -1;
     }
     return q.lastInsertId().toLongLong();
+}
+
+qint64 TasksStorage::insertPersonalDateStatic(QSqlDatabase& db, const QVariantMap& fields)
+{
+    const QString label = fields.value(QStringLiteral("label")).toString().trimmed();
+    const int month = fields.value(QStringLiteral("month")).toInt();
+    const int day   = fields.value(QStringLiteral("day")).toInt();
+    // Validate app-side so a bad value never persists (the barista resolves the words → numbers).
+    if (label.isEmpty() || month < 1 || month > 12 || day < 1 || day > 31)
+        return -1;
+    const int year = qMax(0, fields.value(QStringLiteral("year")).toInt());   // 0 = recurs yearly
+    const qint64 now = QDateTime::currentSecsSinceEpoch();
+    QSqlQuery q(db);
+    q.prepare("INSERT INTO personal_dates (label, month, day, year, created_at) "
+              "VALUES (:label, :month, :day, :year, :created)");
+    q.bindValue(":label", label);
+    q.bindValue(":month", month);
+    q.bindValue(":day", day);
+    q.bindValue(":year", year);
+    q.bindValue(":created", now);
+    if (!q.exec()) {
+        qWarning() << "TasksStorage: personal_date insert failed:" << q.lastError().text();
+        return -1;
+    }
+    return q.lastInsertId().toLongLong();
+}
+
+QVariantList TasksStorage::fetchPersonalDatesForTodayStatic(QSqlDatabase& db, int month, int day, int year)
+{
+    QVariantList rows;
+    if (month < 1 || month > 12 || day < 1 || day > 31)
+        return rows;
+    QSqlQuery q(db);
+    // Match today's month/day; include recurring rows (year 0) AND a row pinned to THIS year.
+    q.prepare("SELECT id, label, month, day, year FROM personal_dates "
+              "WHERE month = :month AND day = :day AND (year = 0 OR year = :year) "
+              "ORDER BY created_at ASC");
+    q.bindValue(":month", month);
+    q.bindValue(":day", day);
+    q.bindValue(":year", year);
+    if (!q.exec()) {
+        qWarning() << "TasksStorage: fetchPersonalDatesForToday failed:" << q.lastError().text();
+        return rows;
+    }
+    while (q.next()) {
+        QVariantMap m;
+        m.insert(QStringLiteral("id"),    q.value(0).toLongLong());
+        m.insert(QStringLiteral("label"), q.value(1).toString());
+        m.insert(QStringLiteral("month"), q.value(2).toInt());
+        m.insert(QStringLiteral("day"),   q.value(3).toInt());
+        m.insert(QStringLiteral("year"),  q.value(4).toInt());
+        rows.append(m);
+    }
+    return rows;
 }
 
 QVariantList TasksStorage::fetchDueRemindersStatic(QSqlDatabase& db, qint64 nowEpoch, int limit)

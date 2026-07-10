@@ -30,6 +30,14 @@ class SerialDbWorker;
 //     recurrence: '' | 'daily' | 'weekly' | 'monthly' (best-effort next-occurrence on complete).
 //     user_phrasing: the user's own words for the due ("Saturday"), passed through for provenance.
 //
+//   personal_dates(id INTEGER PRIMARY KEY, label TEXT, month INTEGER, day INTEGER, year INTEGER DEFAULT 0,
+//                  created_at INTEGER)
+//     [barista-fork] The owner's own important days ("remember my anniversary is June 3"), added by voice
+//     via the add_personal_date client tool. month 1-12, day 1-31. year 0 = recurs every year (the common
+//     case); a non-zero year pins it to one occurrence. Combined with the built-in US-holiday lookup, these
+//     feed the barista's greeting/goodbye "todaysOccasion" block. Rides the shared assistant.db (backed up
+//     wholesale by DatabaseBackupManager — no per-table registration needed).
+//
 //   maintenance_tasks(task_key TEXT PRIMARY KEY, label TEXT, interval_days INTEGER,
 //                     enabled INTEGER DEFAULT 1, last_done_at INTEGER DEFAULT 0,
 //                     is_default INTEGER DEFAULT 1, note TEXT DEFAULT '')
@@ -79,6 +87,13 @@ public:
     // reminderCompleted(id) (id -1 on failure / not found).
     Q_INVOKABLE void requestCompleteReminder(qint64 reminderId);        // reminderCompleted(qint64)
 
+    // --- Personal dates (async) — the owner's own important days ("remember my anniversary is June 3") ---
+
+    // Store one personal date. `fields` keys: label (QString, required), month (int 1-12, required),
+    // day (int 1-31, required), year (int, optional 0 = recurs every year). Emits personalDateAdded(id)
+    // (id -1 on failure). Wired through the add_personal_date barista client tool.
+    Q_INVOKABLE void requestAddPersonalDate(const QVariantMap& fields);   // personalDateAdded(qint64)
+
     // --- Maintenance (async, for the settings dialog) ---
 
     // All maintenance tasks (enabled + disabled), for the settings dialog. Emits maintenanceTasksReady.
@@ -111,6 +126,12 @@ public:
     static bool ensureSchemaStatic(QSqlDatabase& db);
 
     static qint64 insertReminderStatic(QSqlDatabase& db, const QVariantMap& fields);
+
+    // [barista-fork] Personal dates. insert returns the new id (-1 on failure). fetchForToday returns the
+    // personal dates whose (month, day) match the given local date — both year-specific rows (year == the
+    // given year) and recurring rows (year == 0). Each row carries: id, label, month, day, year.
+    static qint64 insertPersonalDateStatic(QSqlDatabase& db, const QVariantMap& fields);
+    static QVariantList fetchPersonalDatesForTodayStatic(QSqlDatabase& db, int month, int day, int year);
     // Open reminders with due_at <= nowEpoch, newest-due first (limit capped). Rows carry:
     // id, text, dueAt, recurrence, userPhrasing, createdAt.
     static QVariantList fetchDueRemindersStatic(QSqlDatabase& db, qint64 nowEpoch, int limit);
@@ -157,6 +178,7 @@ public:
 
 signals:
     void reminderCreated(qint64 id);                 // id -1 on failure
+    void personalDateAdded(qint64 id);               // [barista-fork] id -1 on failure
     void dueRemindersReady(const QVariantList& rows);
     void reminderCompleted(qint64 id);               // id -1 on failure / not found
     void maintenanceTasksReady(const QVariantList& rows);

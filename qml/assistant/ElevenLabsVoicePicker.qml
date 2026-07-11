@@ -43,7 +43,9 @@ Dialog {
     property string _errorText: ""
     // Filter state.
     property string _query: ""
-    property string _categoryFilter: "all"   // all | premade | cloned | professional
+    // [barista-fork] Premade (ElevenLabs stock) voices are filtered OUT at the fetch (assistantvoice.cpp),
+    // so the list only ever holds the user's OWN voices — categories cloned / professional / generated.
+    property string _categoryFilter: "all"   // all | cloned | professional | generated
     // Which preview is currently playing (voice id), so the row shows a "playing" state; "" = none.
     property string _playingId: ""
 
@@ -211,16 +213,17 @@ Dialog {
                 onTextChanged: root._query = text
             }
 
-            // Category filter chips. All / Premade / Cloned / Professional.
+            // Category filter chips. All / Cloned / Professional / Generated — the user's own voice
+            // categories only (premade/stock voices are excluded at the fetch, so no "Premade" chip).
             RowLayout {
                 Layout.fillWidth: true
                 spacing: Theme.spacingSmall
                 Repeater {
                     model: [
                         { key: "all",          labelKey: "barista.voices.catAll",          labelFallback: "All" },
-                        { key: "premade",      labelKey: "barista.voices.catPremade",      labelFallback: "Premade" },
                         { key: "cloned",       labelKey: "barista.voices.catCloned",       labelFallback: "Cloned" },
-                        { key: "professional", labelKey: "barista.voices.catProfessional", labelFallback: "Professional" }
+                        { key: "professional", labelKey: "barista.voices.catProfessional", labelFallback: "Professional" },
+                        { key: "generated",    labelKey: "barista.voices.catGenerated",    labelFallback: "Generated" }
                     ]
                     delegate: Rectangle {
                         required property var modelData

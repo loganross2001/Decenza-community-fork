@@ -78,7 +78,7 @@ Dialog {
     contentItem: ColumnLayout {
         spacing: Theme.spacingMedium
 
-        // --- Title + close ---
+        // --- Title + close (FIXED at top, outside the scroll area) ---
         RowLayout {
             Layout.fillWidth: true
             Layout.topMargin: Theme.spacingLarge
@@ -100,145 +100,154 @@ Dialog {
             }
         }
 
-        // --- No-fabrication banner (hard requirement) ---
-        Rectangle {
-            Layout.fillWidth: true
-            Layout.leftMargin: Theme.spacingLarge
-            Layout.rightMargin: Theme.spacingLarge
-            radius: Theme.cardRadius
-            color: Theme.backgroundColor
-            border.width: 1
-            border.color: Theme.warningColor
-            implicitHeight: bannerText.implicitHeight + Theme.spacingMedium * 2
-            Text {
-                id: bannerText
-                anchors.fill: parent
-                anchors.margins: Theme.spacingMedium
-                wrapMode: Text.WordWrap
-                text: TranslationManager.translate("barista.maint.defaultsBanner",
-                    "These default intervals follow Decent's DE1 Quickstart cleaning guide. Adjust any of them "
-                    + "for your own usage — and especially set DESCALE for your water (none under ~30ppm TDS, "
-                    + "~yearly at 30-120ppm, every 4-8 weeks if harder). Your edits override the defaults.")
-                color: Theme.textSecondaryColor
-                font: Theme.labelFont
-            }
-        }
-
-        // --- Periodic Decent maintenance-docs check ---
-        // [barista-fork] Toggle + last-checked + "Check now" for the periodic re-read of Decent's DE1
-        // Quickstart cleaning guide. The only network egress is a single GET to decentespresso.com;
-        // nothing about the user is ever sent. When a change is detected the barista OFFERS specific
-        // default-interval updates on its next reply (approve-then-apply) — nothing changes silently.
-        Rectangle {
-            visible: root._docSync !== null
-            Layout.fillWidth: true
-            Layout.leftMargin: Theme.spacingLarge
-            Layout.rightMargin: Theme.spacingLarge
-            radius: Theme.cardRadius
-            color: Theme.backgroundColor
-            border.width: 1
-            border.color: Theme.borderColor
-            implicitHeight: docSyncCol.implicitHeight + Theme.spacingMedium * 2
-
-            ColumnLayout {
-                id: docSyncCol
-                anchors.fill: parent
-                anchors.margins: Theme.spacingMedium
-                spacing: Theme.spacingSmall
-
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: Theme.spacingSmall
-                    Text {
-                        Layout.fillWidth: true
-                        text: TranslationManager.translate("barista.docsync.title",
-                            "Check Decent's cleaning guide for updates")
-                        color: Theme.textColor
-                        font: Theme.bodyFont
-                        wrapMode: Text.WordWrap
-                        Accessible.ignored: true
-                    }
-                    Switch {
-                        id: docSyncSwitch
-                        checked: root._docSync ? root._docSync.enabled : false
-                        onToggled: if (root._docSync)
-                            root._docSync.setEnabled(checked)
-                        Accessible.role: Accessible.CheckBox
-                        Accessible.name: TranslationManager.translate("barista.docsync.title",
-                            "Check Decent's cleaning guide for updates")
-                        Accessible.checked: checked
-                        Accessible.focusable: true
-                        Accessible.onToggleAction: toggle()
-                    }
-                }
-
-                // Privacy note (matches the code comment): GET only, nothing sent.
-                Text {
-                    Layout.fillWidth: true
-                    text: TranslationManager.translate("barista.docsync.help",
-                        "About once a month the app reads Decent's online cleaning guide and, if it changed, the "
-                        + "barista offers to update the default intervals — you approve each change, nothing changes "
-                        + "on its own. This only downloads that one page from decentespresso.com; nothing about you "
-                        + "is ever sent.")
-                    color: Theme.textSecondaryColor
-                    font: Theme.labelFont
-                    wrapMode: Text.WordWrap
-                    Accessible.ignored: true
-                }
-
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: Theme.spacingSmall
-                    Text {
-                        Layout.fillWidth: true
-                        text: root._docSync && root._docSync.checking
-                              ? TranslationManager.translate("barista.docsync.checking", "checking…")
-                              : root._lastCheckedText()
-                        color: Theme.textSecondaryColor
-                        font: Theme.labelFont
-                        Accessible.ignored: true
-                    }
-                    AccessibleButton {
-                        subtle: true
-                        enabled: root._docSync !== null && root._docSync.enabled
-                                 && !(root._docSync && root._docSync.checking)
-                        text: TranslationManager.translate("barista.docsync.checkNow", "Check now")
-                        accessibleName: TranslationManager.translate("barista.docsync.checkNow", "Check now")
-                        onClicked: if (root._docSync)
-                            root._docSync.checkNow()
-                    }
-                }
-            }
-        }
-
-        // --- Task list ---
-        ScrollView {
-            id: taskScroll
+        // --- Scrollable body: banner + docSync + task list all scroll together ---
+        // [barista-fork] SCROLL FIX: previously ONLY the task list lived in a Layout.fillHeight ScrollView,
+        // with the banner + docSync section as fixed siblings above it — and a ScrollView auto-sizing itself
+        // around a ColumnLayout child (Layout-vs-implicit-size fight) plus fixed items eating a tablet's
+        // height could leave the list effectively unscrollable / its rows unreachable ("opens but won't
+        // scroll, can't reach or check the tasks"). Now the WHOLE body (banner + docSync + tasks) sits in one
+        // Flickable with an explicit contentHeight, so everything scrolls as a unit and the tasks are always
+        // reachable.
+        // The inner content width is bound to the Flickable's OWN viewport width (bodyFlick.width, NOT the
+        // dialog width): a content item wider than the viewport enables horizontal scroll and swallows the
+        // vertical drag, which is the classic "won't scroll" bug.
+        Flickable {
+            id: bodyFlick
             Layout.fillWidth: true
             Layout.fillHeight: true
-            Layout.leftMargin: Theme.spacingLarge
-            Layout.rightMargin: Theme.spacingLarge
             clip: true
-            // Bind the content to the viewport (not root.width): a content item wider than the
-            // ScrollView enables horizontal scroll and can swallow the vertical flick, which read as
-            // "opens but won't scroll". Pinning contentWidth to availableWidth keeps it vertical-only.
-            contentWidth: availableWidth
-            ScrollBar.vertical.policy: ScrollBar.AsNeeded
-            ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+            contentWidth: width
+            contentHeight: bodyCol.implicitHeight
+            boundsBehavior: Flickable.StopAtBounds
+            flickableDirection: Flickable.VerticalFlick
+            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
-            ColumnLayout {
-                width: taskScroll.availableWidth
-                spacing: Theme.spacingSmall
+            Column {
+                id: bodyCol
+                // Bind to the Flickable's viewport width, not the dialog's — keeps scrolling vertical-only.
+                width: bodyFlick.width
+                spacing: Theme.spacingMedium
+                leftPadding: Theme.spacingLarge
+                rightPadding: Theme.spacingLarge
 
+                // --- No-fabrication banner (hard requirement) ---
+                Rectangle {
+                    width: parent.width - parent.leftPadding - parent.rightPadding
+                    radius: Theme.cardRadius
+                    color: Theme.backgroundColor
+                    border.width: 1
+                    border.color: Theme.warningColor
+                    implicitHeight: bannerText.implicitHeight + Theme.spacingMedium * 2
+                    Text {
+                        id: bannerText
+                        anchors.fill: parent
+                        anchors.margins: Theme.spacingMedium
+                        wrapMode: Text.WordWrap
+                        text: TranslationManager.translate("barista.maint.defaultsBanner",
+                            "These default intervals follow Decent's DE1 Quickstart cleaning guide. Adjust any of them "
+                            + "for your own usage — and especially set DESCALE for your water (none under ~30ppm TDS, "
+                            + "~yearly at 30-120ppm, every 4-8 weeks if harder). Your edits override the defaults.")
+                        color: Theme.textSecondaryColor
+                        font: Theme.labelFont
+                    }
+                }
+
+                // --- Periodic Decent maintenance-docs check ---
+                // [barista-fork] Toggle + last-checked + "Check now" for the periodic re-read of Decent's DE1
+                // Quickstart cleaning guide. The only network egress is a single GET to decentespresso.com;
+                // nothing about the user is ever sent. When a change is detected the barista OFFERS specific
+                // default-interval updates on its next reply (approve-then-apply) — nothing changes silently.
+                Rectangle {
+                    visible: root._docSync !== null
+                    width: parent.width - parent.leftPadding - parent.rightPadding
+                    radius: Theme.cardRadius
+                    color: Theme.backgroundColor
+                    border.width: 1
+                    border.color: Theme.borderColor
+                    implicitHeight: docSyncCol.implicitHeight + Theme.spacingMedium * 2
+
+                    ColumnLayout {
+                        id: docSyncCol
+                        anchors.fill: parent
+                        anchors.margins: Theme.spacingMedium
+                        spacing: Theme.spacingSmall
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.spacingSmall
+                            Text {
+                                Layout.fillWidth: true
+                                text: TranslationManager.translate("barista.docsync.title",
+                                    "Check Decent's cleaning guide for updates")
+                                color: Theme.textColor
+                                font: Theme.bodyFont
+                                wrapMode: Text.WordWrap
+                                Accessible.ignored: true
+                            }
+                            Switch {
+                                id: docSyncSwitch
+                                checked: root._docSync ? root._docSync.enabled : false
+                                onToggled: if (root._docSync)
+                                    root._docSync.setEnabled(checked)
+                                Accessible.role: Accessible.CheckBox
+                                Accessible.name: TranslationManager.translate("barista.docsync.title",
+                                    "Check Decent's cleaning guide for updates")
+                                Accessible.checked: checked
+                                Accessible.focusable: true
+                                Accessible.onToggleAction: toggle()
+                            }
+                        }
+
+                        // Privacy note (matches the code comment): GET only, nothing sent.
+                        Text {
+                            Layout.fillWidth: true
+                            text: TranslationManager.translate("barista.docsync.help",
+                                "About once a month the app reads Decent's online cleaning guide and, if it changed, the "
+                                + "barista offers to update the default intervals — you approve each change, nothing changes "
+                                + "on its own. This only downloads that one page from decentespresso.com; nothing about you "
+                                + "is ever sent.")
+                            color: Theme.textSecondaryColor
+                            font: Theme.labelFont
+                            wrapMode: Text.WordWrap
+                            Accessible.ignored: true
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.spacingSmall
+                            Text {
+                                Layout.fillWidth: true
+                                text: root._docSync && root._docSync.checking
+                                      ? TranslationManager.translate("barista.docsync.checking", "checking…")
+                                      : root._lastCheckedText()
+                                color: Theme.textSecondaryColor
+                                font: Theme.labelFont
+                                Accessible.ignored: true
+                            }
+                            AccessibleButton {
+                                subtle: true
+                                enabled: root._docSync !== null && root._docSync.enabled
+                                         && !(root._docSync && root._docSync.checking)
+                                text: TranslationManager.translate("barista.docsync.checkNow", "Check now")
+                                accessibleName: TranslationManager.translate("barista.docsync.checkNow", "Check now")
+                                onClicked: if (root._docSync)
+                                    root._docSync.checkNow()
+                            }
+                        }
+                    }
+                }
+
+                // --- Empty state ---
                 Text {
                     visible: root._rows.length === 0
-                    Layout.fillWidth: true
+                    width: parent.width - parent.leftPadding - parent.rightPadding
                     text: TranslationManager.translate("barista.maint.empty", "No maintenance tasks yet.")
                     color: Theme.textSecondaryColor
                     font: Theme.bodyFont
                     Accessible.ignored: true
                 }
 
+                // --- Task list ---
                 Repeater {
                     model: root._rows
                     delegate: Rectangle {
@@ -252,7 +261,7 @@ Dialog {
                         readonly property bool isDefault: modelData.isDefault === true
                         readonly property string note: modelData.note || ""
 
-                        Layout.fillWidth: true
+                        width: bodyCol.width - bodyCol.leftPadding - bodyCol.rightPadding
                         implicitHeight: rowCol.implicitHeight + Theme.spacingMedium * 2
                         radius: Theme.cardRadius
                         color: Theme.backgroundColor
@@ -384,7 +393,7 @@ Dialog {
             }
         }
 
-        // --- Close ---
+        // --- Close (FIXED at bottom, outside the scroll area) ---
         RowLayout {
             Layout.fillWidth: true
             Layout.leftMargin: Theme.spacingLarge

@@ -245,10 +245,25 @@ KeyboardAwareContainer {
             color: Theme.surfaceColor
             radius: Theme.cardRadius
 
-            ColumnLayout {
+            // Scrollable: this card holds upload + backup + the Recover-shots
+            // section, which together overflow a tablet's height. Without a
+            // Flickable the bottom (recovery) was clipped and unreachable —
+            // matches the left account card's scroll pattern.
+            Flickable {
+                id: visualizerRightFlick
                 anchors.fill: parent
                 anchors.margins: Theme.scaled(15)
-                spacing: Theme.scaled(12)
+                contentWidth: width
+                contentHeight: visualizerRightColumn.implicitHeight
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                flickableDirection: Flickable.VerticalFlick
+                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+                ColumnLayout {
+                    id: visualizerRightColumn
+                    width: visualizerRightFlick.width
+                    spacing: Theme.scaled(12)
 
                 Tr {
                     key: "settings.visualizer.uploadSettings"
@@ -608,7 +623,8 @@ KeyboardAwareContainer {
                     visible: !visualizerTab.visualizerConnected
                 }
 
-                Item { Layout.fillHeight: true }
+                    Item { Layout.fillHeight: true }
+                }
             }
         }
     }

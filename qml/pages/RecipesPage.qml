@@ -122,7 +122,7 @@ Page {
 
     // The stale card's one-tap re-point: an open-bag picker scoped to one
     // recipe (recipe-bag-lifecycle "manual re-point"). Selecting a bag only
-    // moves the bag link (grind pin/inherit is untouched by construction).
+    // moves the bag link (the recipe's own grind is untouched by construction).
     property var _repointRecipe: null
     Dialog {
         id: repointPicker
@@ -212,7 +212,7 @@ Page {
             repointPicker.open()
         }
         onPlanClicked: {
-            if (!card.archivedCard && card.recipe.id !== Settings.dye.activeRecipeId)
+            if (!card.archivedCard)
                 MainController.activateRecipe(card.recipe.id)
         }
 
@@ -268,8 +268,7 @@ Page {
             accessibleName: TranslationManager.translate("recipes.accessible.activate", "Activate recipe %1").arg(card.recipe.name || "")
             accessibleItem: card
             onAccessibleClicked: {
-                if (card.recipe.id !== Settings.dye.activeRecipeId)
-                    MainController.activateRecipe(card.recipe.id)
+                MainController.activateRecipe(card.recipe.id)
             }
         }
 

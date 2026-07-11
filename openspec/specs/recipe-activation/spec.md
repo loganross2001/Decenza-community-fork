@@ -8,22 +8,27 @@ Recipe activation SHALL be implemented once in the main controller, reusing the 
 
 #### Scenario: Activation applies the full bundle
 - **WHEN** a recipe is activated from any surface
-- **THEN** the profile is loaded, the linked bag becomes active, equipment package is selected, dose/yield/temperature apply, grind resolves per inherit-or-pin against the linked bag, and steam settings are written
+- **THEN** the profile is loaded, the linked bag becomes active, equipment package is selected, dose/yield/temperature apply, grind/rpm apply from the recipe's own owned values (recipe-model), and steam settings are written
 
 #### Scenario: Identical semantics across surfaces
 - **WHEN** the same recipe is activated via QML, MCP, or the web API
 - **THEN** the resulting app and machine state are identical
 
 ### Requirement: Optionality ladder is never violated
-No brewing, steaming, or navigation flow SHALL require a recipe. With no recipe active, all settings (including steam) SHALL behave exactly as before this change. Activating a recipe that lacks optional rungs (no bean, no equipment) SHALL apply what the recipe has and leave the missing rungs untouched. The system SHALL NOT prompt users to create recipes.
+No brewing, steaming, or navigation flow SHALL require a recipe. With no recipe active, all settings (including steam) SHALL behave exactly as before this change. Activating a recipe that lacks optional rungs SHALL apply what the recipe has: a missing equipment rung leaves the current equipment untouched, while a missing bean rung SHALL **clear the active bag** — the session moves to the "no beans selected" state rather than staying attributed to whatever bag happened to be active before. The system SHALL NOT prompt users to create recipes.
 
 #### Scenario: Recipe-less user
 - **WHEN** a user never creates a recipe
 - **THEN** every existing flow (profile selection, bag write-through, global steam settings) is byte-for-byte unchanged
 
-#### Scenario: Bean-less recipe activation
-- **WHEN** a recipe with no linked bean is activated
-- **THEN** profile, dose, steam, and recipe-local grind apply, and the active bag is not changed
+#### Scenario: Bean-less recipe activation clears the bag
+- **WHEN** a recipe with no linked bean is activated while some bag is active
+- **THEN** profile, dose, steam, and the recipe's own grind apply, and the active bag is cleared ("no beans selected")
+- **AND** subsequent grind edits and the shot's bean attribution touch no bag at all
+
+#### Scenario: Clearing the bag does not deactivate the bean-less recipe
+- **WHEN** a bean-less recipe's activation clears the active bag
+- **THEN** the recipe remains the active recipe — the ingredient-swap deactivation watcher treats "no bag" as matching a recipe that has no bag
 
 ### Requirement: Steam settings write on recipe switch with a held heater state
 Activating a recipe SHALL write its steam block into the live brew settings (propagating to the DE1 as today) at activation time, not at shot start. Because the steam heater takes 5–9 minutes to reach temperature, an active milk recipe (`hasMilk: true`) SHALL HOLD the heater on for as long as it is active and the machine is awake: every machine-settings send SHALL treat an active milk recipe like `keepSteamHeaterOn`, so re-sends (wake, reconnect, settings edits) keep the heater warm. Deactivating (or switching to a milk-less recipe) SHALL return the heater to the user's baseline. When `keepSteamHeaterOn` is enabled by the user, a milk-less recipe SHALL NOT override it to off. No new user-facing steam-mode setting SHALL be added.
@@ -45,19 +50,33 @@ Activating a recipe SHALL write its steam block into the live brew settings (pro
 - **THEN** the heater stays warm
 
 ### Requirement: Tweaks write through; ingredient swaps deactivate
-While a recipe is active, changes to dose, yield, temperature override, steam values, milk weight, or the hot-water selection (the chosen water vessel and its values) SHALL write through to the active recipe (no dirty state, matching bag semantics). Grind changes SHALL route to the bag when inherited and to the pin when pinned. Manually changing the profile, the active bag/bean, or the equipment package SHALL deactivate the recipe (event-based, no timers); the recipe itself SHALL be unchanged by deactivation.
+While a recipe is active, changes to dose, steam values, milk weight, or the hot-water selection (the chosen water vessel and its values) SHALL write through to the active recipe (no dirty state, matching bag semantics). Grind/RPM changes SHALL write through to the active bag and stamp the recipe's own `grindPinned`/`rpmPinned` (per `fix-recipe-grind-integrity`: grind lives on the recipe, the bag always mirrors the last dial, and a grind-less `tea*` recipe never adopts a grind).
+
+Yield and temperature are per-brew **overrides**, not tweaks: a Brew Settings change to yield (Stop-at) or temperature (Temp Delta) SHALL apply only as a `Settings.brew` override for the next brew and SHALL NOT write through to the active recipe. The recipe's `yieldG` / `tempOverrideC` SHALL change only via an explicit "Update Recipe" action. Accordingly, the `MainController` auto-stamp watchers on `SettingsBrew::brewOverridesChanged` (→ `yieldG`) and `SettingsBrew::temperatureOverrideChanged` (→ `tempOverrideC`) SHALL be removed.
+
+Manually changing the profile, the active bag/bean, or the equipment package SHALL deactivate the recipe (event-based, no timers); the recipe itself SHALL be unchanged by deactivation.
 
 #### Scenario: Dose tweak while active
 - **WHEN** the user changes dose while a recipe is active
 - **THEN** the recipe's stored dose updates
 
+#### Scenario: Yield override while active does not change the recipe
+- **WHEN** the user changes yield (Stop-at) while a recipe is active and commits the brew
+- **THEN** the change applies as a `Settings.brew` override for the brew
+- **AND** the active recipe's `yieldG` is unchanged
+
+#### Scenario: Temperature override while active does not change the recipe
+- **WHEN** the user changes the temperature (Temp Delta) while a recipe is active and commits the brew
+- **THEN** the change applies as a `Settings.brew` override for the brew
+- **AND** the active recipe's `tempOverrideC` is unchanged
+
 #### Scenario: Hot-water tweak while active
 - **WHEN** the user changes the selected water vessel (or its values) while a recipe is active
 - **THEN** the recipe's stored hot-water block updates to the new vessel snapshot, and re-selecting the same vessel does not deactivate the recipe
 
-#### Scenario: Inherited grind tweak while active
-- **WHEN** the user adjusts grind while a recipe with inherited grind is active
-- **THEN** the bag's grind updates (sibling recipes follow) and the recipe stores no pin
+#### Scenario: Grind tweak while active
+- **WHEN** the user adjusts grind (or RPM) while a non-tea recipe is active
+- **THEN** the recipe's own `grindPinned`/`rpmPinned` updates and the setter mirrors the value onto the linked bag (no inherit/pin routing)
 
 #### Scenario: Profile swap deactivates
 - **WHEN** the user manually selects a different profile while a recipe is active
@@ -95,4 +114,15 @@ Activating a recipe whose linked bag is finished SHALL apply the full bundle: pr
 #### Scenario: Pulling a shot from a stale recipe
 - **WHEN** the user activates a stale recipe and starts espresso
 - **THEN** the shot runs with the recipe's profile, numbers, and the finished bag's grind — identical to activation before the bag was finished
+
+### Requirement: Same-recipe re-activation does not race in-flight edits
+Re-activating a recipe that is already the active recipe SHALL NOT overwrite a field whose edit is still being persisted (a write-through to that same recipe row that has not yet been acknowledged). Re-activation of any *other* recipe, or first activation of the currently-active recipe id from a fresh app session, is unaffected and always applies the full bundle from the current stored state.
+
+#### Scenario: Re-tapping the active recipe pill preserves an unsent edit
+- **WHEN** the user edits the active recipe's grind, and before that edit is acknowledged by storage the user re-taps the same recipe's pill (triggering re-activation)
+- **THEN** the live grind value after re-activation is the user's edit, not a stale pre-edit value
+
+#### Scenario: Re-activation still reflects a settled external edit
+- **WHEN** the active recipe was edited from another client (MCP or web) and no local write to that recipe is in flight
+- **THEN** re-activating the recipe (or any trigger that re-applies it) reflects the externally-made change
 

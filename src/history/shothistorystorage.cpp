@@ -1550,6 +1550,24 @@ bool ShotHistoryStorage::runMigrations()
         }
     }
 
+    // Migration 31: recipe-owned grind (fix-recipe-grind-integrity, upstream #1472).
+    // [barista-fork] Renumbered 30 -> 31: the fork's recipes.bag_id migration already holds 30, so this
+    // advances from a committed migration 30. The "empty grind_pinned = inherit from the bag" mode is
+    // retired — grind always lives on the recipe. Pure data pass, no schema change: each inherit-mode row
+    // adopts its linked bag's current grinder_setting/rpm once. Rows whose bag has no dial (tea bags,
+    // never-dialed) are skipped, bag-less rows untouched. Idempotent, gated ">= 30 && < 31".
+    if (currentVersion >= 30 && currentVersion < 31) {
+        qDebug() << "ShotHistoryStorage: Running migration to version 31 (recipe-owned grind)";
+
+        if (RecipeStorage::migrateGrindOwnershipStatic(m_db)) {
+            query.exec ("DELETE FROM schema_version");
+            query.exec ("INSERT INTO schema_version (version) VALUES (31)");
+            currentVersion = 31;
+        } else {
+            qWarning() << "ShotHistoryStorage: migration 31 incomplete - will retry next launch";
+        }
+    }
+
     // [barista-fork] Version-independent fork-schema repair. A shot DB written by a
     // DIFFERENT Decenza build (e.g. an upstream v2.0.0 database pulled in via
     // device-to-device import) carries a schema_version NUMBER that may sit at or

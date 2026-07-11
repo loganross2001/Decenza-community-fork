@@ -549,7 +549,22 @@ void AnthropicProvider::onAnalysisReply(QNetworkReply* reply)
 
     const QString stopReason = root["stop_reason"].toString();
     const QJsonArray content = root["content"].toArray();
-    if (content.isEmpty() && m_accumulatedText.isEmpty()) {
+    if (content.isEmpty()) {
+        // [barista-fork] An empty terminal response is a GENUINE failure ONLY if this turn produced nothing
+        // yet. On a goodbye turn the model replies with sign-off text + an end_conversation tool_use in the
+        // SAME round; we speak the sign-off (via interimText) and run the tool → re-POST → the model has
+        // already said goodbye and returns EMPTY content with stop_reason "end_turn". That is NOT an error —
+        // the turn already spoke and dismissed. m_toolRounds / m_continuations are per-turn (reset in
+        // analyzeConversation) and are the ONLY paths that emit interimText, so either being >0 means this
+        // turn already emitted spoken text or ran a tool. Complete gracefully with the accumulated text
+        // (usually empty — the sign-off was already spoken and must NOT be re-accumulated → no double-speak).
+        // A first-round empty response (both counters 0) still surfaces the real error.
+        if (m_toolRounds > 0 || m_continuations > 0) {
+            const QString done = m_accumulatedText;
+            m_accumulatedText.clear();
+            emit analysisComplete(done);
+            return;
+        }
         emit analysisFailed("Anthropic returned no response");
         return;
     }

@@ -53,6 +53,11 @@ private:
     bool m_listening = false;   // session open (Chat active)
     bool m_paused = false;      // recogniser temporarily stopped (assistant is speaking)
     bool m_preferOffline = true; // try on-device first; drop to online if the model is unavailable
-    int m_errorStreak = 0;      // consecutive errors — back off to avoid a restart storm
+    int m_errorStreak = 0;      // consecutive transient errors — back off to avoid a restart storm
     QString m_partial;          // live partial transcription
+    // [barista-fork] Post-TTS echo guard. resumeMic() (fired when the barista finishes speaking) stamps this
+    // with "now + a short window"; any finalText arriving before it is dropped as the tail of the barista's
+    // own speech or a stale late result — an event-based flag (a timestamp cleared by the wall clock), not a
+    // timer-as-guard. 0 = no active window. See handleFinal().
+    qint64 m_ignoreFinalUntilMs = 0;
 };

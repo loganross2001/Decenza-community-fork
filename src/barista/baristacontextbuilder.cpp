@@ -17,9 +17,13 @@ BaristaContextBuilder::BaristaContextBuilder(AIManager* aiManager, BeanBaseClien
     , m_profileManager(profileManager)
     , m_settings(settings) {
     m_timeout.setSingleShot(true);
-    // Phase 1 (4s): give up on the NETWORK bean search only — do NOT cut off the DB core, or a slow
+    // Phase 1 (1.5s): give up on the NETWORK bean search only — do NOT cut off the DB core, or a slow
     // first-of-the-day query makes the assistant falsely claim "first shot". Phase 2 (a longer hard
     // backstop): force-emit so the greeting can never hang even if the core never arrives.
+    // [barista-fork] The bean search is a best-effort ENRICHMENT (community bean profile for an UNLINKED
+    // bean); it must never gate the greeting for long. Trimmed from 4s → 1.5s so a new bean can't stall
+    // the first turn: a reasonably fast Bean Base hit still folds in, a slow one is dropped for this
+    // conversation (the DB core — the real dial-in context — is untouched and always waits its full time).
     connect(&m_timeout, &QTimer::timeout, this, [this] {
         if (!m_building)
             return;
@@ -87,7 +91,7 @@ void BaristaContextBuilder::build(const QString& beanBrand, const QString& beanT
     if (!doBean)
         m_beanDone = true;
 
-    m_timeout.start(4000);   // phase-1: network give-up
+    m_timeout.start(1500);   // phase-1: short network give-up so a new-bean lookup can't stall the greeting
     maybeEmit();             // in case everything resolved synchronously
 }
 

@@ -1,6 +1,16 @@
 #include "voiceinput.h"
 
 #include <QCoreApplication>
+#include <QDateTime>
+
+namespace {
+// [barista-fork] After the barista's TTS ends and the mic resumes, drop any finalText for this long so
+// the recogniser doesn't hear the tail of its own speech (or flush a stale buffered result) as a new turn.
+constexpr qint64 kPostTtsIgnoreMs = 400;
+// [barista-fork] Cap consecutive transient-error auto-restarts so a client/timeout/no-match/busy storm
+// can't tight-loop the recogniser. Reset to 0 on any genuine final result (handleFinal).
+constexpr int kMaxTransientRestarts = 3;
+} // namespace
 
 #ifdef Q_OS_ANDROID
 #include <QJniObject>
@@ -135,6 +145,10 @@ void VoiceInput::resumeMic() {
         return;
     m_paused = false;
     m_errorStreak = 0;  // fresh listen after a pause — reset the transient-error run
+    // [barista-fork] Post-TTS echo guard: the barista JUST finished speaking. Ignore any finalText for a
+    // short window so the recogniser can't transcribe the tail of that speech (or deliver a stale result
+    // buffered while paused) as if it were a new user turn — which is what feeds the listen/hear loop.
+    m_ignoreFinalUntilMs = QDateTime::currentMSecsSinceEpoch() + kPostTtsIgnoreMs;
     emit pausedChanged();
     startRecogniser();
 }
@@ -158,6 +172,17 @@ void VoiceInput::stopRecogniser() {
 }
 
 void VoiceInput::handleFinal(const QString& text) {
+    // [barista-fork] Post-TTS echo guard (event-based, cleared by the wall clock): if we're still inside
+    // the window resumeMic() opened when the barista stopped speaking, this "result" is almost certainly
+    // the tail of the barista's own speech or a stale result buffered while the mic was paused — drop it so
+    // it doesn't become a new turn (the listen/hear loop). Clear the partial and let listening continue.
+    if (m_ignoreFinalUntilMs != 0) {
+        if (QDateTime::currentMSecsSinceEpoch() < m_ignoreFinalUntilMs) {
+            setPartial(QString());
+            return;   // NOTE: don't touch m_errorStreak — this isn't a genuine user result
+        }
+        m_ignoreFinalUntilMs = 0;   // window elapsed → back to normal
+    }
     m_errorStreak = 0;   // a real result → the recogniser is healthy
     setPartial(QString());
     const QString t = text.trimmed();
@@ -180,9 +205,12 @@ void VoiceInput::handleError(int code) {
         return;
     }
     // Transient (5=client, 6=timeout, 7=no-match, 8=busy): silence / overlap / benign client hiccup —
-    // keep listening quietly (no pop-up), but back off after a run so a storm can't tight-loop.
+    // keep listening quietly (no pop-up), but back off after a short run so a storm can't tight-loop.
+    // The cap is small (kMaxTransientRestarts): a genuine final result resets m_errorStreak to 0
+    // (handleFinal), so normal listening across utterances is unaffected — only an unbroken run of
+    // errors with no real result in between can exhaust it and end the session.
     if (code == 5 || code == 6 || code == 7 || code == 8) {
-        if (++m_errorStreak <= 6) {
+        if (++m_errorStreak <= kMaxTransientRestarts) {
             startRecogniser();
             return;
         }

@@ -679,6 +679,13 @@ Item {
                 + "ACCURATE about your reach: you can search public websites, but you can NOT log into the user's "
                 + "accounts — Visualizer and Beanconqueror are apps, and their private uploads aren't something you "
                 + "can query. The user's real shot history is the data block above, which IS live."
+                // [barista-fork] Never VOLUNTEER a lookup. "Automatically use web search" above means when the
+                // user's question actually needs it — it must NEVER trigger a lookup they didn't ask for. You are
+                // a barista, not a general morning-briefing assistant: do NOT proactively look up weather, news,
+                // stock prices, or search the web unprompted — ESPECIALLY on the greeting / first turn, where an
+                // unrequested lookup adds a silent startup delay. Only reach for get_weather / get_stock_quote /
+                // get_local_news / web search when the user EXPLICITLY asks for that information. When they do ask,
+                // answer freely (this is about not volunteering lookups, never about refusing them)."
         else
             persona += "\nYou do NOT have web search in this session (it needs the Anthropic provider and the "
                 + "web-search toggle on in settings). If asked about the weather, current events, or anything else "

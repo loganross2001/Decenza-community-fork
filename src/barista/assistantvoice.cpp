@@ -189,18 +189,31 @@ void AssistantVoice::speak(const QString& rawText) {
     m_pendingSynth = true;
     updateSpeaking();
     const QString provider = effectiveProvider();
+    // [barista-fork][audio-diag] Capture the ROUTE so we can see why the barista plays on the tablet while
+    // system audio uses the external speaker: which synth path (cloud mp3 vs native TTS), what Qt thinks the
+    // default output is, what device our QAudioOutput is bound to, and the full list Qt enumerates.
+    QStringList outNames;
+    for (const QAudioDevice& d : QMediaDevices::audioOutputs())
+        outNames << d.description();
     BaristaDiagnostics::record(QStringLiteral("voice"),
         wasSpeaking ? QStringLiteral("speak_INTERRUPTS_previous") : QStringLiteral("speak_start"),
         {{QStringLiteral("role"), m_role == Role::Barista ? QStringLiteral("barista") : QStringLiteral("coaching")},
          {QStringLiteral("provider"), provider},
          {QStringLiteral("chars"), rawText.size()},
          {QStringLiteral("gen"), static_cast<int>(m_speakGen)},
-         {QStringLiteral("say"), rawText.left(80)}});
+         {QStringLiteral("defaultOut"), QMediaDevices::defaultAudioOutput().description()},
+         {QStringLiteral("boundOut"), m_audioOut ? m_audioOut->device().description() : QStringLiteral("none")},
+         {QStringLiteral("outputs"), outNames.join(QStringLiteral(" | "))},
+         {QStringLiteral("say"), rawText.left(60)}});
     if (provider == QLatin1String("openai"))
         synthOpenAI(text);
     else if (provider == QLatin1String("elevenlabs"))
         synthElevenLabs(text);
     else if (m_tts) {
+        // [barista-fork][audio-diag] Native TTS bypasses m_audioOut entirely — Android TextToSpeech does its
+        // own routing, so if THIS is the path, the QAudioOutput device fix can't affect it.
+        BaristaDiagnostics::record(QStringLiteral("audio"), QStringLiteral("native_tts_path"),
+            {{QStringLiteral("role"), m_role == Role::Barista ? QStringLiteral("barista") : QStringLiteral("coaching")}});
         applyNativeParams();   // this role's rate + volume
         m_tts->say(text);   // native engine (stateChanged hands off from m_pendingSynth)
     } else {

@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Dialogs
 import Decenza
 
 // [barista-fork] Tabbed settings for the assistant (Voice · Coaching · Maintenance). Shown inside the
@@ -30,7 +31,7 @@ Rectangle {
     property bool _elKeyShown: false   // reveal state for the (masked) ElevenLabs API key field
 
     // Which tab is showing (persisted in this local property only — a settings panel doesn't warrant a
-    // stored preference). 0 = Voice, 1 = Coaching, 2 = Maintenance.
+    // stored preference). 0 = General, 1 = Voice, 2 = Coaching, 3 = Maintenance.
     property int _tab: 0
 
     // Transparent root: this panel is embedded inside the AssistantOverlay's chromed settingsCard, so it
@@ -84,6 +85,10 @@ Rectangle {
             }
 
             StyledTabButton {
+                text: TranslationManager.translate("barista.settings.tabGeneral", "General")
+                tabLabel: text
+            }
+            StyledTabButton {
                 text: TranslationManager.translate("barista.settings.tabVoice", "Voice")
                 tabLabel: text
             }
@@ -107,19 +112,21 @@ Rectangle {
             Layout.fillHeight: true
             currentIndex: root._tab
 
-            // ═══ VOICE TAB ═══════════════════════════════════════════════════
-            // The barista's conversational voice: both name fields, provider + per-provider pickers, the
-            // shared ElevenLabs key + saved-voices, volume/speed, preview — plus bell + speak toggles.
+            // ═══ GENERAL TAB ═════════════════════════════════════════════════
+            // [barista-fork] Barista identity + behaviour that isn't voice-specific: name + your-name (identity),
+            // proactivity, web search, the character (show + style), and the edge-tab avatar SIZE. These were
+            // previously split between the main-menu Settings → AI section and the Voice tab; the panel now owns
+            // ALL of them so the main menu can shrink to just the on/off toggle. Wiring copied verbatim from the
+            // predecessor controls (same properties, same onCompleted/onActivated one-shot pattern).
             Flickable {
-                id: voiceFlick
-                contentHeight: voiceCol.implicitHeight
+                id: generalFlick
+                contentHeight: generalCol.implicitHeight
                 clip: true
                 boundsBehavior: Flickable.StopAtBounds
 
                 ColumnLayout {
-                    id: voiceCol
-                    // Bind to the Flickable's own width (the viewport), not the panel.
-                    width: voiceFlick.width
+                    id: generalCol
+                    width: generalFlick.width
                     spacing: Theme.spacingMedium
 
                     // Name — how the assistant refers to itself.
@@ -147,6 +154,148 @@ Rectangle {
                         placeholderText: TranslationManager.translate("barista.settings.yourNamePlaceholder", "e.g. Chris")
                         onEditingFinished: { Qt.inputMethod.commit(); if (root._settings) root._settings.userName = text }
                     }
+
+                    // Divider before behaviour controls.
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.topMargin: Theme.spacingSmall
+                        implicitHeight: 1
+                        color: Theme.borderColor
+                    }
+
+                    // Proactivity — "full" suggests freely; "greetings" greets + one item; "off" answers only.
+                    Tr {
+                        key: "barista.settings.proactivity"; fallback: "Proactivity"
+                        color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true
+                    }
+                    ComboBox {
+                        id: proactivityBox
+                        Layout.fillWidth: true
+                        model: ["full", "greetings", "off"]
+                        Accessible.name: TranslationManager.translate("barista.settings.proactivity", "Proactivity")
+                        Component.onCompleted: {
+                            var i = root._settings ? model.indexOf(root._settings.proactivityLevel) : -1
+                            if (i >= 0) currentIndex = i
+                        }
+                        onActivated: if (root._settings) root._settings.proactivityLevel = currentText
+                    }
+
+                    // Web search (Anthropic provider only).
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: Theme.spacingSmall
+                        Switch {
+                            id: webSearchSwitch
+                            checked: root._settings ? root._settings.webSearchEnabled : true
+                            onToggled: if (root._settings) root._settings.webSearchEnabled = checked
+                            Accessible.role: Accessible.CheckBox
+                            Accessible.name: trWebSearch.text
+                            Accessible.checked: checked
+                            Accessible.focusable: true
+                            Accessible.onToggleAction: toggle()
+                        }
+                        Tr {
+                            id: trWebSearch
+                            key: "barista.settings.web"
+                            fallback: "Web search — look up beans, roasters & brewing guides (Anthropic)"
+                            Layout.fillWidth: true
+                            wrapMode: Text.WordWrap
+                            color: Theme.textColor; font: Theme.bodyFont; Accessible.ignored: true
+                        }
+                    }
+
+                    // Show the animated character face.
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: Theme.spacingSmall
+                        Switch {
+                            id: avatarSwitch
+                            checked: root._settings ? root._settings.avatarEnabled : true
+                            onToggled: if (root._settings) root._settings.avatarEnabled = checked
+                            Accessible.role: Accessible.CheckBox
+                            Accessible.name: trAvatarLabel.text
+                            Accessible.checked: checked
+                            Accessible.focusable: true
+                            Accessible.onToggleAction: toggle()
+                        }
+                        Tr {
+                            id: trAvatarLabel
+                            key: "barista.settings.avatar"
+                            fallback: "Show character — a face to watch while it talks"
+                            Layout.fillWidth: true
+                            wrapMode: Text.WordWrap
+                            color: Theme.textColor; font: Theme.bodyFont; Accessible.ignored: true
+                        }
+                    }
+
+                    // Which character face to show (only meaningful when the character is shown).
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: Theme.spacingSmall
+                        visible: root._settings ? root._settings.avatarEnabled : true
+                        Tr {
+                            key: "barista.settings.avatarStyle"; fallback: "Character style"
+                            Layout.fillWidth: true
+                            color: Theme.textColor; font: Theme.bodyFont; Accessible.ignored: true
+                        }
+                        ComboBox {
+                            id: avatarStyleBox
+                            Layout.preferredWidth: Theme.scaled(150)
+                            textRole: "label"; valueRole: "value"
+                            model: [
+                                { value: "face", label: TranslationManager.translate("barista.settings.avatar.face", "Face") },
+                                { value: "cup",  label: TranslationManager.translate("barista.settings.avatar.cup", "Coffee cup") },
+                                { value: "orb",  label: TranslationManager.translate("barista.settings.avatar.orb", "Voice orb") },
+                                { value: "bean", label: TranslationManager.translate("barista.settings.avatar.bean", "Coffee bean") }
+                            ]
+                            Component.onCompleted: {
+                                var i = indexOfValue(root._settings ? root._settings.avatarStyle : "face")
+                                if (i >= 0) currentIndex = i
+                            }
+                            onActivated: if (root._settings) root._settings.avatarStyle = currentValue
+                            Accessible.name: TranslationManager.translate("barista.settings.avatarStyle", "Character style")
+                        }
+                    }
+
+                    // Edge-tab avatar size — how big the collapsed pull-tab avatar on the screen edge is.
+                    Tr {
+                        key: "barista.settings.tabSize"; fallback: "Tab size"
+                        color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true
+                    }
+                    ComboBox {
+                        id: tabSizeBox
+                        Layout.fillWidth: true
+                        textRole: "label"; valueRole: "value"
+                        model: [
+                            { value: "small",  label: TranslationManager.translate("barista.settings.tabSize.small", "Small") },
+                            { value: "medium", label: TranslationManager.translate("barista.settings.tabSize.medium", "Medium") },
+                            { value: "large",  label: TranslationManager.translate("barista.settings.tabSize.large", "Large") }
+                        ]
+                        Accessible.name: TranslationManager.translate("barista.settings.tabSize", "Tab size")
+                        Component.onCompleted: {
+                            var i = indexOfValue(root._settings ? root._settings.avatarTabSize : "medium")
+                            if (i >= 0) currentIndex = i
+                        }
+                        onActivated: if (root._settings) root._settings.avatarTabSize = currentValue
+                    }
+                }
+            }
+
+            // ═══ VOICE TAB ═══════════════════════════════════════════════════
+            // The barista's conversational voice: provider + per-provider pickers, the shared ElevenLabs key +
+            // saved-voices, volume/speed, preview — plus bell + speak toggles. (Name + your-name moved to the
+            // General tab — identity isn't voice-specific.)
+            Flickable {
+                id: voiceFlick
+                contentHeight: voiceCol.implicitHeight
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+
+                ColumnLayout {
+                    id: voiceCol
+                    // Bind to the Flickable's own width (the viewport), not the panel.
+                    width: voiceFlick.width
+                    spacing: Theme.spacingMedium
 
                     // Voice source: native (free/robotic) · OpenAI · ElevenLabs (human, cloud).
                     Tr {
@@ -326,7 +475,7 @@ Rectangle {
                     ComboBox {
                         id: bellBox
                         Layout.fillWidth: true
-                        // "custom" plays a file picked in Settings → AI (bellCustomPath); set it there first.
+                        // "custom" plays your own sound file (chosen just below); "off" silences the chime.
                         model: ["poof", "ding", "off", "custom"]
                         Accessible.name: TranslationManager.translate("barista.settings.bell", "Bell")
                         Component.onCompleted: {
@@ -335,7 +484,36 @@ Rectangle {
                         }
                         onActivated: {
                             if (root._settings) root._settings.bellSound = currentText
-                            if (root._voice) root._voice.previewBell(currentText)   // audition the choice
+                            if (currentText === "custom") {
+                                // First time on "custom" with no file yet → prompt for one; otherwise audition it.
+                                if (root._settings && root._settings.bellCustomPath.length === 0) bellFileDialog.open()
+                                else if (root._voice) root._voice.previewBell("custom")
+                            } else if (root._voice) {
+                                root._voice.previewBell(currentText)   // audition the choice
+                            }
+                        }
+                    }
+
+                    // Custom-sound chooser — only shown for "custom". Plays your own .wav/.mp3 from the tablet.
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: Theme.spacingSmall
+                        visible: root._settings && root._settings.bellSound === "custom"
+                        Button {
+                            text: TranslationManager.translate("barista.settings.bellChoose", "Choose sound file…")
+                            onClicked: bellFileDialog.open()
+                        }
+                        Text {
+                            Layout.fillWidth: true
+                            elide: Text.ElideMiddle
+                            color: Theme.textSecondaryColor
+                            font: Theme.labelFont
+                            Accessible.ignored: true
+                            text: {
+                                var p = (root._settings && root._settings.bellCustomPath) ? String(root._settings.bellCustomPath) : ""
+                                if (p.length === 0) return TranslationManager.translate("barista.settings.bellNoFile", "No file chosen")
+                                return decodeURIComponent(p.substring(p.lastIndexOf("/") + 1))
+                            }
                         }
                     }
 
@@ -584,5 +762,17 @@ Rectangle {
     // inside the scrolled panel). Reachable only via the Maintenance tab's button above.
     MaintenanceSettingsDialog {
         id: maintenanceDialog
+    }
+
+    // Custom-bell file chooser (Voice tab). Writes bellCustomPath + auditions the pick — the only place in
+    // the app that sets a custom bell sound now that the main-menu barista section is reduced to on/off.
+    FileDialog {
+        id: bellFileDialog
+        title: TranslationManager.translate("barista.settings.bellChoose", "Choose sound file…")
+        nameFilters: ["Sound files (*.wav *.mp3)", "All files (*)"]
+        onAccepted: {
+            if (root._settings) root._settings.bellCustomPath = String(selectedFile)
+            if (root._voice) root._voice.previewBell("custom")
+        }
     }
 }

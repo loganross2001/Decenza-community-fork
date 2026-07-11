@@ -483,6 +483,18 @@ void AssistantSettings::setAvatarStyle(const QString& s) {
     emit avatarStyleChanged();
 }
 
+QString AssistantSettings::avatarTabSize() const {
+    // Default "medium" — the owner asked for a SMALLER edge tab than the old hard-coded 156px "large".
+    return m_settings.value(QStringLiteral("barista/avatarTabSize"), QStringLiteral("medium")).toString();
+}
+
+void AssistantSettings::setAvatarTabSize(const QString& s) {
+    if (avatarTabSize() == s)
+        return;
+    m_settings.setValue(QStringLiteral("barista/avatarTabSize"), s);
+    emit avatarTabSizeChanged();
+}
+
 // [barista-fork] Recency of the barista relationship — the heart of the user-initiated model. One ISO
 // timestamp, stamped on every completed exchange; read (never as a timer) at engage-time to decide whether
 // a greeting is even warranted. Mirrors the consumeProactiveNudge persistence pattern.

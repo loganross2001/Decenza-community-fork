@@ -45,6 +45,9 @@ class AssistantSettings : public QObject {
     Q_PROPERTY(bool webSearchEnabled READ webSearchEnabled WRITE setWebSearchEnabled NOTIFY webSearchEnabledChanged)
     Q_PROPERTY(bool avatarEnabled READ avatarEnabled WRITE setAvatarEnabled NOTIFY avatarEnabledChanged)
     Q_PROPERTY(QString avatarStyle READ avatarStyle WRITE setAvatarStyle NOTIFY avatarStyleChanged)
+    // [barista-fork] Size of the avatar on the collapsed EDGE TAB (the pull-tab on the screen edge). Owner-
+    // chosen; the tab hugs the avatar so this drives both. "small" | "medium" | "large" (default "medium").
+    Q_PROPERTY(QString avatarTabSize READ avatarTabSize WRITE setAvatarTabSize NOTIFY avatarTabSizeChanged)
     Q_PROPERTY(QString proactivityLevel READ proactivityLevel WRITE setProactivityLevel NOTIFY proactivityLevelChanged)
 
 public:
@@ -130,6 +133,9 @@ public:
     QString avatarStyle() const;                  // "face" | "cup" | "orb" | "bean" (default "face")
     void setAvatarStyle(const QString& s);
 
+    QString avatarTabSize() const;                // edge-tab avatar size: "small" | "medium" | "large" (default "medium")
+    void setAvatarTabSize(const QString& s);
+
     QString proactivityLevel() const;             // "off" | "greetings" | "full" (default "full")
     void setProactivityLevel(const QString& level);
 
@@ -175,6 +181,7 @@ signals:
     void webSearchEnabledChanged();
     void avatarEnabledChanged();
     void avatarStyleChanged();
+    void avatarTabSizeChanged();
     void proactivityLevelChanged();
 
 private:

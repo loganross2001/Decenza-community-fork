@@ -1324,9 +1324,18 @@ Item {
         // [barista-fork] A polished PULL-TAB, not a box: hugs the avatar, but its inner (left) side is
         // rounded while the screen-edge (right) side is flush/square, and it carries a soft drop shadow so
         // it reads as lifted off the edge rather than rammed against it. Drawn as a Shape (below) since a
-        // Rectangle can't round only two corners. Avatar 156 (20% bigger); tab ~172x176.
-        width: Theme.scaled(172)
-        height: Theme.scaled(176)
+        // Rectangle can't round only two corners. The avatar size is owner-adjustable (avatarTabSize:
+        // small/medium/large → 96/120/156 px); the tab HUGS it (avatar + an even ~16px margin). This is a
+        // LIVE binding so the tab resizes the moment the setting changes. Default "medium" (120) — smaller
+        // than the old hard-coded 156 "large", per the owner.
+        readonly property real _avatarPx: {
+            var s = root._settings ? root._settings.avatarTabSize : "medium"
+            if (s === "small") return Theme.scaled(96)
+            if (s === "large") return Theme.scaled(156)
+            return Theme.scaled(120)   // "medium" (default)
+        }
+        width: edgeTab._avatarPx + Theme.scaled(16)
+        height: edgeTab._avatarPx + Theme.scaled(16)
 
         // Tab background: rounded-left / flush-right path + a soft shadow for depth. strokeColor carries the
         // attention pulse (primary when a shot is undiscussed). Verified shape/winding via a render mock.
@@ -1376,7 +1385,7 @@ Item {
             // Nudge up slightly: the avatar art sits low within its box, so a pure center reads
             // as "too low" in the tab. A small negative offset visually centers it.
             anchors.verticalCenterOffset: -Theme.scaled(6)
-            width: Theme.scaled(156); height: Theme.scaled(156)   // 20% bigger (130→156); the tab hugs it, no dead space
+            width: edgeTab._avatarPx; height: edgeTab._avatarPx   // owner-sized; the tab hugs it, no dead space
             active: root._settings && root._settings.avatarEnabled
             source: "qrc:/qml/assistant/BaristaAvatar.qml"
             onLoaded: if (item) item.mode = "idle"
@@ -1386,7 +1395,7 @@ Item {
             anchors.verticalCenterOffset: -Theme.scaled(6)
             visible: !(root._settings && root._settings.avatarEnabled)
             source: "qrc:/icons/barista.svg"
-            sourceSize.height: Theme.scaled(90)   // enlarged with the avatar
+            sourceSize.height: edgeTab._avatarPx * 0.58   // fallback glyph tracks the avatar size (~90 at 156)
             fillMode: Image.PreserveAspectFit
             Accessible.ignored: true
         }

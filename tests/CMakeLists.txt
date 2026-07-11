@@ -185,6 +185,7 @@ add_decenza_test(tst_machinestate
 add_decenza_test(tst_livesteamcoach
     tst_livesteamcoach.cpp
     ${CMAKE_SOURCE_DIR}/src/ai/livesteamcoach.cpp
+    ${CMAKE_SOURCE_DIR}/src/barista/baristadiagnostics.cpp  # [barista-fork] livesteamcoach.cpp calls BaristaDiagnostics::record
     ${CMAKE_SOURCE_DIR}/src/core/translationmanager.cpp
     ${CMAKE_SOURCE_DIR}/src/ble/de1transport.h
     ${MACHINE_SOURCES}
@@ -337,6 +338,7 @@ add_decenza_test(tst_aimanager
     ${CMAKE_SOURCE_DIR}/src/ai/aiprovider.cpp
     ${CMAKE_SOURCE_DIR}/src/ai/aiconversation.cpp
     ${CMAKE_SOURCE_DIR}/src/barista/baristatools.cpp  # BaristaTools, referenced by aimanager.cpp's client-tool wire-up
+    ${CMAKE_SOURCE_DIR}/src/barista/baristadiagnostics.cpp  # [barista-fork] baristatools.cpp calls BaristaDiagnostics::record
     ${CMAKE_SOURCE_DIR}/src/ai/shotsummarizer.cpp
     ${CMAKE_SOURCE_DIR}/src/ai/shotsummarizer_kb.cpp
     ${CMAKE_SOURCE_DIR}/src/ai/shotanalysis.cpp

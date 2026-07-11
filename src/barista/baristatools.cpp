@@ -7,6 +7,7 @@
 #include "feedbackstorage.h"
 #include "tasksstorage.h"
 #include "baristadiagnostics.h"  // [barista-fork] tool-call timeline recorder
+#include "../history/recipestorage.h"  // [barista-fork] Recipes 2.0 tools (list_recipes / activate / etc.)
 
 #include <QJsonDocument>
 #include <QJsonArray>
@@ -397,6 +398,75 @@ QJsonArray BaristaTools::toolDefinitions()
     dm["input_schema"] = dmSchema;
     tools.append(dm);
 
+    // [barista-fork] Recipes 2.0 — the barista can now know/discuss/use the user's whole-drink recipes.
+    // Descriptions carry policy (read every turn) and mirror Fable's design spec §2.
+    QJsonObject rlst;
+    rlst["name"] = QString("list_recipes");
+    rlst["description"] = QString(
+        "List the user's saved recipes. A recipe is a whole-drink preset (profile + bean + grind + "
+        "dose/yield/temp + optional steam and hot-water blocks) that configures the machine in one step — not a "
+        "dial-in tweak. Returns recipes sorted most-recently-used first with: id, name, drink_type, bean (roaster "
+        "+ coffee display), has_milk, stale (linked bag no longer in inventory — informational, never a blocker), "
+        "shot_count, last_used. Read-only. Use when the user asks what recipes they have, or when you cannot "
+        "confidently resolve a spoken recipe reference against the recipe context you were given.");
+    QJsonObject rlstSchema;
+    rlstSchema["type"] = QString("object");
+    QJsonObject rlstProps;
+    rlstProps["query"] = strProp("Optional case-insensitive substring matched against recipe name, roaster name, "
+                                 "and coffee name. Omit to list all.");
+    QJsonObject rlstLimit; rlstLimit["type"] = QString("integer");
+    rlstLimit["description"] = QString("Max recipes to return (default 20, max 50).");
+    rlstProps["limit"] = rlstLimit;
+    rlstSchema["properties"] = rlstProps;
+    rlst["input_schema"] = rlstSchema;
+    tools.append(rlst);
+
+    QJsonObject rget;
+    rget["name"] = QString("get_active_recipe");
+    rget["description"] = QString(
+        "Return the currently active recipe as a full object (including steam and hot-water blocks), or "
+        "{active: false}. Read-only and instant. The recipe context you were given already includes the active "
+        "recipe's name — call this only when you need detail: e.g., its steam settings before proposing a switch, "
+        "or to answer specific questions about the active drink.");
+    QJsonObject rgetSchema;
+    rgetSchema["type"] = QString("object");
+    rgetSchema["properties"] = QJsonObject{};
+    rget["input_schema"] = rgetSchema;
+    tools.append(rget);
+
+    QJsonObject ract;
+    ract["name"] = QString("activate_recipe");
+    ract["description"] = QString(
+        "Activate a recipe on the machine. HIGH-IMPACT MACHINE CHANGE: this loads the recipe's profile (replacing "
+        "whatever profile is loaded and discarding any unsaved dial-in overrides), rewrites dose, yield, and "
+        "temperature, re-routes grind, and — if the recipe includes milk — turns on the steam heater, which then "
+        "stays hot for several minutes. NEVER call this tool until the user has explicitly approved, in this "
+        "conversation, after you told them which recipe and what will change. Approval for one activation is "
+        "approval for that activation only. The result is the ground truth: success=false means the machine was "
+        "NOT changed — report the reason honestly and never describe an activation as done unless success=true.");
+    QJsonObject ractSchema;
+    ractSchema["type"] = QString("object");
+    QJsonObject ractProps;
+    ractProps["recipe_id"] = intProp("The id of the recipe, taken from the recipe context, list_recipes, or "
+                                     "get_active_recipe. Never invent or guess an id.");
+    ractSchema["properties"] = ractProps;
+    ractSchema["required"] = QJsonArray{ QString("recipe_id") };
+    ract["input_schema"] = ractSchema;
+    tools.append(ract);
+
+    QJsonObject rdeact;
+    rdeact["name"] = QString("deactivate_recipe");
+    rdeact["description"] = QString(
+        "Deactivate the currently active recipe. This unlinks the recipe only — the machine keeps its current "
+        "profile, dose, yield, and temperature; nothing physical changes and the steam heater is not touched. "
+        "Safe to call on a direct user request ('turn off the recipe', 'go freestyle') without a confirmation "
+        "exchange. Returns the name of the recipe that was deactivated, or {was_active: false}.");
+    QJsonObject rdeactSchema;
+    rdeactSchema["type"] = QString("object");
+    rdeactSchema["properties"] = QJsonObject{};
+    rdeact["input_schema"] = rdeactSchema;
+    tools.append(rdeact);
+
     return tools;
 }
 
@@ -534,6 +604,9 @@ void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage*
                                const std::function<void()>& endConversation,
                                const std::function<void(const QString&, const QJsonObject&,
                                                         std::function<void(QJsonValue)>)>& webTools,
+                               const std::function<QVariantMap()>& getActiveRecipe,
+                               const std::function<void(qint64, std::function<void(QJsonObject)>)>& activateRecipe,
+                               const std::function<QVariantMap()>& deactivateRecipe,
                                const QVariantMap& anchorSnapshot,
                                const QString& name, const QJsonObject& input,
                                std::function<void(QJsonValue)> done)
@@ -565,6 +638,104 @@ void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage*
         }
         endConversation();
         done(QJsonObject{{QStringLiteral("ended"), true}});
+        return;
+    }
+
+    // [barista-fork] Recipes 2.0 — list_recipes (READ). Recipes live in the shots.db, so mirror the shot-read
+    // tools: load the inventory off the main thread via withTempDb + RecipeStorage::loadInventoryStatic (already
+    // MRU-ordered), filter by the optional query app-side, cap at limit, and shape each row per the design spec.
+    if (name == QLatin1String("list_recipes")) {
+        if (!shotHistory || shotHistory->databasePath().isEmpty()) {
+            done(QJsonObject{{QStringLiteral("error"), QStringLiteral("recipe database unavailable")}});
+            return;
+        }
+        const QString dbPath = shotHistory->databasePath();
+        const QString query = input.value(QStringLiteral("query")).toString().trimmed().toLower();
+        int limit = input.contains(QStringLiteral("limit")) ? input.value(QStringLiteral("limit")).toInt() : 20;
+        if (limit <= 0) limit = 20;
+        if (limit > 50) limit = 50;
+        QThread* thread = QThread::create([=]() {
+            QJsonObject result;
+            QJsonArray arr;
+            int matched = 0;
+            const bool dbOk = withTempDb(dbPath, "barista_recipes", [&](QSqlDatabase& db) {
+                const QVector<InventoryRecipe> inv = RecipeStorage::loadInventoryStatic(db, /*archived=*/false);
+                for (const InventoryRecipe& ir : inv) {
+                    const Recipe& r = ir.recipe;
+                    if (!query.isEmpty()) {
+                        const QString hay = (r.name + QLatin1Char(' ') + r.roasterName + QLatin1Char(' ')
+                                             + r.coffeeName).toLower();
+                        if (!hay.contains(query))
+                            continue;
+                    }
+                    ++matched;
+                    if (arr.size() >= limit)
+                        continue;   // keep counting the total match set, but only emit `limit` rows
+                    QJsonObject o;
+                    o[QStringLiteral("id")] = static_cast<double>(r.id);
+                    o[QStringLiteral("name")] = r.name;
+                    o[QStringLiteral("drink_type")] = r.drinkType;   // may be empty on legacy rows
+                    o[QStringLiteral("bean")] = QString(r.roasterName + QLatin1Char(' ') + r.coffeeName).trimmed();
+                    bool hasMilk = false;
+                    if (!r.steamJson.isEmpty())
+                        hasMilk = QJsonDocument::fromJson(r.steamJson.toUtf8())
+                                      .object().value(QStringLiteral("hasMilk")).toBool();
+                    o[QStringLiteral("has_milk")] = hasMilk;
+                    o[QStringLiteral("stale")] = ir.stale;
+                    o[QStringLiteral("shot_count")] = static_cast<double>(ir.shotCount);
+                    o[QStringLiteral("last_used")] = static_cast<double>(r.lastUsedEpoch);
+                    arr.append(o);
+                }
+            });
+            if (dbOk) {
+                result[QStringLiteral("recipes")] = arr;
+                result[QStringLiteral("total_matched")] = matched;
+            } else if (!result.contains(QStringLiteral("error"))) {
+                result[QStringLiteral("error")] = QStringLiteral("recipe database unavailable");
+            }
+            QMetaObject::invokeMethod(qApp, [done, result]() { done(result); }, Qt::QueuedConnection);
+        });
+        QObject::connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+        thread->start();
+        return;
+    }
+
+    // [barista-fork] get_active_recipe (READ) — synchronous seam into MainController::activeRecipe().
+    if (name == QLatin1String("get_active_recipe")) {
+        const QVariantMap active = getActiveRecipe ? getActiveRecipe() : QVariantMap{};
+        const bool isActive = !active.isEmpty() && active.value(QStringLiteral("id")).toLongLong() > 0;
+        QJsonObject out;
+        out[QStringLiteral("active")] = isActive;
+        if (isActive)
+            out[QStringLiteral("recipe")] = QJsonObject::fromVariantMap(active);
+        done(out);
+        return;
+    }
+
+    // [barista-fork] activate_recipe (CONTROL, machine-mutating). The approve-then-apply GATE lives in the model
+    // (the tool description forbids calling this before explicit user approval). The executor only forwards to
+    // the async seam, which does the pre-flight + activation + result correlation and replies with the ground
+    // truth — we hand that straight back so the barista reports success/failure honestly.
+    if (name == QLatin1String("activate_recipe")) {
+        if (!activateRecipe) {
+            done(QJsonObject{{QStringLiteral("success"), false},
+                             {QStringLiteral("failure_reason"), QStringLiteral("unavailable")},
+                             {QStringLiteral("detail"), QStringLiteral("Recipe activation is unavailable.")}});
+            return;
+        }
+        if (!input.contains(QStringLiteral("recipe_id"))) {
+            done(QJsonObject{{QStringLiteral("error"), QStringLiteral("activate_recipe needs recipe_id")}});
+            return;
+        }
+        const qint64 recipeId = input.value(QStringLiteral("recipe_id")).toVariant().toLongLong();
+        activateRecipe(recipeId, [done](QJsonObject result) { done(result); });
+        return;
+    }
+
+    // [barista-fork] deactivate_recipe (CONTROL, no machine mutation) — a direct instruction IS the approval.
+    if (name == QLatin1String("deactivate_recipe")) {
+        const QVariantMap res = deactivateRecipe ? deactivateRecipe() : QVariantMap{};
+        done(QJsonObject::fromVariantMap(res));
         return;
     }
 

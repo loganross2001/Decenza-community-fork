@@ -12,7 +12,10 @@
 #include "maintenancedocsync.h"
 #include "baristawebtools.h"      // [barista-fork] fast-path web tools (weather / stock / local news)
 #include "../controllers/maincontroller.h"
+#include "../controllers/profilemanager.h"   // [barista-fork] activate_recipe pre-flight (findProfileByTitle)
 #include "../history/shothistorystorage.h"
+#include "../history/recipestorage.h"         // [barista-fork] Recipes 2.0 activate pre-flight + load
+#include "../core/dbutils.h"                  // [barista-fork] withTempDb for the off-main recipe pre-flight
 #include "../ai/aimanager.h"
 
 #include <QQmlApplicationEngine>
@@ -20,6 +23,11 @@
 #include <QFileInfo>
 #include <QNetworkAccessManager>
 #include <QJsonObject>
+#include <QJsonDocument>
+#include <QThread>
+#include <QTimer>
+#include <QCoreApplication>
+#include <memory>
 
 BaristaModule::BaristaModule(MainController* mainController, MachineState* machineState,
                              Settings* appSettings, QObject* parent)
@@ -123,6 +131,121 @@ BaristaModule::BaristaModule(MainController* mainController, MachineState* machi
                     return;
                 }
                 done(QJsonObject{{QStringLiteral("error"), QStringLiteral("unknown web tool: ") + name}});
+            });
+
+            // [barista-fork] Recipes 2.0 tools → MainController. get/deactivate are sync main-thread reads;
+            // activate is async + MACHINE-MUTATING (pre-flight off-main → profile check + activate + terminal
+            // recipeActivated correlation + 10s timeout, all main-thread). mainController outlives AIManager.
+            MainController* mc = mainController;
+            ai->setGetActiveRecipeHandler([mc]() -> QVariantMap {
+                return mc ? mc->activeRecipe() : QVariantMap{};
+            });
+            ai->setDeactivateRecipeHandler([mc]() -> QVariantMap {
+                QVariantMap out;
+                if (!mc) { out[QStringLiteral("was_active")] = false; return out; }
+                const QVariantMap active = mc->activeRecipe();
+                const bool wasActive = !active.isEmpty() && active.value(QStringLiteral("id")).toLongLong() > 0;
+                out[QStringLiteral("was_active")] = wasActive;
+                if (wasActive)
+                    out[QStringLiteral("name")] = active.value(QStringLiteral("name")).toString();
+                mc->deactivateRecipe();
+                return out;
+            });
+            ai->setActivateRecipeHandler([mc](qint64 recipeId, std::function<void(QJsonObject)> reply) {
+                if (!mc || !mc->shotHistory() || mc->shotHistory()->databasePath().isEmpty()) {
+                    reply(QJsonObject{{QStringLiteral("success"), false},
+                                      {QStringLiteral("failure_reason"), QStringLiteral("unavailable")},
+                                      {QStringLiteral("detail"), QStringLiteral("Recipe activation is unavailable.")}});
+                    return;
+                }
+                const QString dbPath = mc->shotHistory()->databasePath();
+                QThread* thread = QThread::create([mc, recipeId, dbPath, reply]() {
+                    // Pre-flight the recipe row OFF the main thread (DB read).
+                    Recipe rec;
+                    bool found = false;
+                    withTempDb(dbPath, "barista_recipe_preflight", [&](QSqlDatabase& db) {
+                        rec = RecipeStorage::loadRecipeStatic(db, recipeId);
+                        found = rec.isValid();
+                    });
+                    // Everything below mutates the machine → back on the main thread.
+                    QMetaObject::invokeMethod(qApp, [mc, recipeId, rec, found, reply]() {
+                        if (!found) {
+                            reply(QJsonObject{{QStringLiteral("success"), false},
+                                {QStringLiteral("failure_reason"), QStringLiteral("not_found")},
+                                {QStringLiteral("detail"), QStringLiteral("That recipe no longer exists.")}});
+                            return;
+                        }
+                        // Profile must resolve: title installed, OR a stored profile_json fallback, OR the recipe
+                        // is legitimately profile-less (hot-water-only). Else fail without touching the machine.
+                        const bool hotWaterOnly = rec.profileTitle.trimmed().isEmpty()
+                                                  && Recipe::hotWaterActive(rec.hotWaterJson);
+                        bool profileOk = hotWaterOnly;
+                        if (!profileOk && !rec.profileTitle.trimmed().isEmpty()) {
+                            const bool titleResolves = mc->profileManager()
+                                && !mc->profileManager()->findProfileByTitle(rec.profileTitle).isEmpty();
+                            profileOk = titleResolves || !rec.profileJson.trimmed().isEmpty();
+                        }
+                        if (!profileOk) {
+                            reply(QJsonObject{{QStringLiteral("success"), false},
+                                {QStringLiteral("failure_reason"), QStringLiteral("profile_missing")},
+                                {QStringLiteral("detail"),
+                                 QStringLiteral("Profile '%1' referenced by this recipe was not found. Nothing changed.")
+                                     .arg(rec.profileTitle)}});
+                            return;
+                        }
+                        bool hasMilk = false;
+                        if (!rec.steamJson.isEmpty())
+                            hasMilk = QJsonDocument::fromJson(rec.steamJson.toUtf8())
+                                          .object().value(QStringLiteral("hasMilk")).toBool();
+                        // Correlate the terminal recipeActivated(id,success) with a 10s timeout. A shared flag
+                        // guards against a double reply (signal vs timeout); whichever fires first tears both down.
+                        auto replied = std::make_shared<bool>(false);
+                        auto conn = std::make_shared<QMetaObject::Connection>();
+                        QTimer* timer = new QTimer(mc);
+                        timer->setSingleShot(true);
+                        auto finish = [replied, conn, timer, reply](const QJsonObject& r) {
+                            if (*replied) return;
+                            *replied = true;
+                            QObject::disconnect(*conn);
+                            timer->stop();
+                            timer->deleteLater();
+                            reply(r);
+                        };
+                        *conn = QObject::connect(mc, &MainController::recipeActivated, mc,
+                            [recipeId, rec, hasMilk, finish](qint64 id, bool success) {
+                                if (id != recipeId) return;   // not our activation
+                                QJsonObject r;
+                                r[QStringLiteral("success")] = success;
+                                if (success) {
+                                    QJsonObject ro;
+                                    ro[QStringLiteral("id")] = static_cast<double>(rec.id);
+                                    ro[QStringLiteral("name")] = rec.name;
+                                    ro[QStringLiteral("profile")] = rec.profileTitle;
+                                    ro[QStringLiteral("dose_g")] = rec.doseG;
+                                    ro[QStringLiteral("yield_g")] = rec.yieldG;
+                                    ro[QStringLiteral("has_milk")] = hasMilk;
+                                    ro[QStringLiteral("steam_heater_started")] = hasMilk;
+                                    r[QStringLiteral("recipe")] = ro;
+                                } else {
+                                    r[QStringLiteral("failure_reason")] = QStringLiteral("activation_failed");
+                                    r[QStringLiteral("detail")] = QStringLiteral(
+                                        "The machine did not accept the recipe (its profile may be missing). Nothing changed.");
+                                }
+                                finish(r);
+                            });
+                        QObject::connect(timer, &QTimer::timeout, mc, [finish]() {
+                            finish(QJsonObject{{QStringLiteral("success"), false},
+                                {QStringLiteral("failure_reason"), QStringLiteral("timeout")},
+                                {QStringLiteral("detail"),
+                                 QStringLiteral("No confirmation from the machine within 10s; state unknown. "
+                                                "Tell the user to check the screen.")}});
+                        });
+                        timer->start(10000);
+                        mc->activateRecipe(recipeId);
+                    }, Qt::QueuedConnection);
+                });
+                QObject::connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+                thread->start();
             });
         }
     }

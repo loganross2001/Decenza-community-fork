@@ -63,12 +63,22 @@ public:
     // baristamodule.cpp); each resolves `done(result)` on completion. An empty std::function yields an error
     // result for those three tools only. Signature mirrors the generic tool executor:
     // (toolName, input, done).
+    // [barista-fork] `getActiveRecipe` / `activateRecipe` / `deactivateRecipe` are the Recipes 2.0 seams (same
+    // std::function-seam rationale as applyDial — this TU never names MainController). getActiveRecipe returns
+    // the active recipe map (or {} = none), sync on the main thread. deactivateRecipe returns {was_active,name},
+    // sync. activateRecipe is ASYNC + MACHINE-MUTATING: the app handler does the pre-flight (recipe exists +
+    // profile resolvable), the activateRecipe() call, the recipeActivated correlation, and a 10s timeout, then
+    // resolves its reply with a result JSON — the executor forwards that straight to `done`. Empty seams yield
+    // an unavailable/error result for the corresponding tool only.
     static void executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage* feedback,
                             TasksStorage* tasks,
                             const std::function<QVariantMap(const QVariantMap&, qint64)>& applyDial,
                             const std::function<void()>& endConversation,
                             const std::function<void(const QString&, const QJsonObject&,
                                                      std::function<void(QJsonValue)>)>& webTools,
+                            const std::function<QVariantMap()>& getActiveRecipe,
+                            const std::function<void(qint64, std::function<void(QJsonObject)>)>& activateRecipe,
+                            const std::function<QVariantMap()>& deactivateRecipe,
                             const QVariantMap& anchorSnapshot,
                             const QString& name, const QJsonObject& input,
                             std::function<void(QJsonValue)> done);

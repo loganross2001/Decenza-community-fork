@@ -174,6 +174,21 @@ public:
                                                std::function<void(QJsonValue)>)> handler) {
         m_webToolsHandler = std::move(handler);
     }
+    // [barista-fork] Recipes 2.0 barista tools. std::function seams (this header/TU never names MainController)
+    // wired from BaristaModule to MainController. getActiveRecipe → the active recipe map or {} (main-thread,
+    // sync). deactivateRecipe → {was_active, name} (main-thread, sync). activateRecipe is ASYNC and
+    // MACHINE-MUTATING: the handler does the pre-flight (recipe exists + profile resolvable), the
+    // MainController::activateRecipe() call, the recipeActivated(id,success) correlation, and a 10s timeout,
+    // then replies with a result JSON. Unset → the corresponding tool returns an error/unavailable result.
+    void setGetActiveRecipeHandler(std::function<QVariantMap()> handler) {
+        m_getActiveRecipeHandler = std::move(handler);
+    }
+    void setDeactivateRecipeHandler(std::function<QVariantMap()> handler) {
+        m_deactivateRecipeHandler = std::move(handler);
+    }
+    void setActivateRecipeHandler(std::function<void(qint64, std::function<void(QJsonObject)>)> handler) {
+        m_activateRecipeHandler = std::move(handler);
+    }
     // [barista-fork] The app-side provenance snapshot the write tool stamps (see m_lastBaristaAnchorSnapshot).
     QVariantMap lastBaristaAnchorSnapshot() const { return m_lastBaristaAnchorSnapshot; }
     // [barista-fork] Closed-loop bridge for the apply_dial_change WRITE tool (issue #1053 regression). When the
@@ -393,6 +408,10 @@ private:
     std::function<void()> m_endConversationHandler;
     // [barista-fork] fast-path web-tool handler → BaristaWebTools async getters (std::function seam; see setter).
     std::function<void(const QString&, const QJsonObject&, std::function<void(QJsonValue)>)> m_webToolsHandler;
+    // [barista-fork] Recipes 2.0 tool handlers → MainController (std::function seams; see setters).
+    std::function<QVariantMap()> m_getActiveRecipeHandler;
+    std::function<QVariantMap()> m_deactivateRecipeHandler;
+    std::function<void(qint64, std::function<void(QJsonObject)>)> m_activateRecipeHandler;
     ProfileManager* m_profileManager = nullptr;
 
     // Providers

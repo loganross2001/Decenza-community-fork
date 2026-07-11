@@ -13,6 +13,7 @@
 #include "../profile/profile.h"
 #include "../network/visualizeruploader.h"
 #include "../history/shothistorystorage.h"
+#include "../history/recipestorage.h"   // [barista-fork] Recipes 2.0 proactive context block
 #include "../barista/baristatools.h"
 #include "../barista/feedbackstorage.h"   // [barista-fork] verbal-feedback KB (proactive context + write tool)
 #include "../barista/tasksstorage.h"      // [barista-fork] reminders + maintenance (proactive dueItems + task tools)
@@ -286,7 +287,9 @@ void AIManager::createProviders()
             // log_tasting_feedback stamps shot_id + bean/profile/dial itself (never from the model). The
             // m_webToolsHandler seam runs the fast-path web tools (get_weather/get_stock_quote/get_local_news).
             BaristaTools::executeTool(m_shotHistory, m_feedbackStorage, m_tasksStorage, m_applyDialHandler,
-                                      m_endConversationHandler, m_webToolsHandler, m_lastBaristaAnchorSnapshot,
+                                      m_endConversationHandler, m_webToolsHandler,
+                                      m_getActiveRecipeHandler, m_activateRecipeHandler, m_deactivateRecipeHandler,
+                                      m_lastBaristaAnchorSnapshot,
                                       name, input, std::move(done));
         });
     // [barista-fork] Register the fast-path web-tool DEFINITIONS separately. They ship under the webSearch gate
@@ -1329,6 +1332,54 @@ void AIManager::emitRecentShotContext(
 // on the current bean (falling back to the latest shot overall). Mirrors the ai_advisor_invoke recipe in
 // mcptools_ai.cpp: SQL/blocks on a background thread, then buildUserPromptObjectForShot + enrichUserPromptObject
 // on the main thread. Stale results are dropped via the shared m_contextSerial guard.
+// [barista-fork] Format the proactive [Recipes] block (Fable design spec §3): the active recipe line + up to
+// 6 MRU rows, so the model can resolve "use <name>" / "this recipe" without a tool round-trip. Built off the
+// main thread from the shot DB inventory; the active id is captured on the main thread and passed in.
+static QString formatRecipesBlock(const QVector<InventoryRecipe>& inv, qint64 activeRecipeId)
+{
+    const auto milkOf = [](const Recipe& r) {
+        return !r.steamJson.isEmpty()
+            && QJsonDocument::fromJson(r.steamJson.toUtf8()).object().value(QStringLiteral("hasMilk")).toBool();
+    };
+    QString out = QStringLiteral("\n\n[Recipes]\n");
+    const InventoryRecipe* active = nullptr;
+    if (activeRecipeId > 0)
+        for (const InventoryRecipe& ir : inv)
+            if (ir.recipe.id == activeRecipeId) { active = &ir; break; }
+    if (active) {
+        out += QStringLiteral("Active recipe: \"%1\" (%2%3, profile: %4) — id %5\n")
+                   .arg(active->recipe.name,
+                        active->recipe.drinkType.isEmpty() ? QStringLiteral("drink") : active->recipe.drinkType,
+                        milkOf(active->recipe) ? QStringLiteral(", milk drink") : QString(),
+                        active->recipe.profileTitle.isEmpty() ? QStringLiteral("(hot water)") : active->recipe.profileTitle,
+                        QString::number(active->recipe.id));
+    } else {
+        out += QStringLiteral("Active recipe: none\n");
+    }
+    if (inv.isEmpty()) {
+        out += QStringLiteral("Saved recipes: none\n");
+        return out;
+    }
+    out += QStringLiteral("Saved recipes, most recent first (%1 total):\n").arg(inv.size());
+    int shown = 0;
+    for (const InventoryRecipe& ir : inv) {
+        if (shown >= 6) break;
+        ++shown;
+        const Recipe& r = ir.recipe;
+        const QString bean = QString(r.roasterName + QLatin1Char(' ') + r.coffeeName).trimmed();
+        out += QStringLiteral("  %1 · %2 · %3%4%5%6\n")
+                   .arg(QString::number(r.id),
+                        r.name,
+                        r.drinkType.isEmpty() ? QStringLiteral("?") : r.drinkType,
+                        bean.isEmpty() ? QString() : (QStringLiteral(" · ") + bean),
+                        milkOf(r) ? QStringLiteral(" · milk") : QString(),
+                        ir.stale ? QStringLiteral(" · stale:YES (bag out of inventory)") : QString());
+    }
+    out += QStringLiteral("Say \"use <name>\" style requests map to activate_recipe. Recipes are whole drinks; "
+                          "activating one replaces the loaded profile.\n");
+    return out;
+}
+
 void AIManager::requestBaristaContext(const QString& beanBrand, const QString& beanType, const QString& profileName)
 {
     if (!m_shotHistory) {
@@ -1344,10 +1395,13 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
     QPointer<AIManager> self(this);
     ++m_baristaContextSerial;
     int serial = m_baristaContextSerial;
+    // [barista-fork] Recipes 2.0 proactive block: read the active recipe id on the MAIN thread (live dye
+    // setting); the worker loads the recipe inventory from the shot DB and formats the [Recipes] block.
+    const qint64 activeRecipeId = (m_settings && m_settings->dye()) ? m_settings->dye()->activeRecipeId() : -1;
 
     // self is captured by value but ONLY dereferenced inside the main-thread callback (QPointer is
     // not thread-safe). See requestRecentShotContext for the same discipline.
-    QThread* thread = QThread::create([self, dbPath, feedbackDbPath, beanBrand, beanType, profileName, serial]() {
+    QThread* thread = QThread::create([self, dbPath, feedbackDbPath, beanBrand, beanType, profileName, serial, activeRecipeId]() {
         qint64 anchorId = 0;
         bool beanFilterMissed = false;
         ShotProjection shot;
@@ -1588,10 +1642,21 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
             });
         }
 
+        // [barista-fork] Recipes 2.0 proactive block (off-main DB read). Shot-independent like dueItems, so it
+        // rides every first-reply turn including the no-shot paths below.
+        QString recipesBlock;
+        {
+            QVector<InventoryRecipe> inv;
+            withTempDb(dbPath, "barista_ctx_recipes", [&](QSqlDatabase& db) {
+                inv = RecipeStorage::loadInventoryStatic(db, /*archived=*/false);
+            });
+            recipesBlock = formatRecipesBlock(inv, activeRecipeId);
+        }
+
         QMetaObject::invokeMethod(qApp, [self, serial, shot, anchorId, beanFilterMissed,
                                          beanBrand, beanType, profileName, beanFeedback, dueItems, docChange,
                                          occasion, dialInSessions, bestRecentShot, beanBestShot, grinderContext,
-                                         grinderCalibration, recentAdvice, fullHistory]() {
+                                         grinderCalibration, recentAdvice, fullHistory, recipesBlock]() {
             if (!self || serial != self->m_baristaContextSerial)
                 return;   // stale — a newer request superseded this one
             self->m_lastBaristaAnchorId = (anchorId > 0 && shot.isValid()) ? anchorId : 0;
@@ -1650,12 +1715,12 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
                                + QString::fromUtf8(QJsonDocument(occasion).toJson(QJsonDocument::Indented));
 
             if (anchorId <= 0 || !shot.isValid()) {
-                emit self->baristaContextReady(QStringLiteral("recordedShots: 0") + dueSuffix + docSuffix + occasionSuffix);
+                emit self->baristaContextReady(QStringLiteral("recordedShots: 0") + dueSuffix + docSuffix + occasionSuffix + recipesBlock);
                 return;
             }
             QJsonObject obj = self->buildUserPromptObjectForShot(shot);
             if (obj.isEmpty()) {
-                emit self->baristaContextReady(QStringLiteral("recordedShots: 0") + dueSuffix + docSuffix + occasionSuffix);
+                emit self->baristaContextReady(QStringLiteral("recordedShots: 0") + dueSuffix + docSuffix + occasionSuffix + recipesBlock);
                 return;
             }
             self->enrichUserPromptObject(obj, shot, dialInSessions, bestRecentShot, grinderContext,
@@ -1686,6 +1751,7 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
             block += dueSuffix;   // [barista-fork] due reminders/maintenance ride the same first-reply turn
             block += docSuffix;   // [barista-fork] a pending Decent cleaning-guide change to offer (rare, one-time)
             block += occasionSuffix;   // [barista-fork] today's holiday/personal dates for a warm greeting/goodbye
+            block += recipesBlock;     // [barista-fork] Recipes 2.0 proactive block (active recipe + MRU list)
             emit self->baristaContextReady(block);
         }, Qt::QueuedConnection);
     });

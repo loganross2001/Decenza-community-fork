@@ -35,22 +35,67 @@ BaristaDiagnostics::BaristaDiagnostics(QObject* parent)
     QSettings settings;
     m_enabled = settings.value(QStringLiteral("barista/diagnosticsEnabled"), true).toBool();
 
-    // Write to the DOWNLOADS folder — on Android that's the one location the tablet's file UI and a USB pull
-    // both reach without a deep dive. Fall back to Documents, then app data, if Downloads is unavailable.
-    QString base = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+    // Sit our log in the SAME directory as the app's own debug.log (AppDataLocation) — that's the location
+    // the owner has proven they can retrieve. An earlier build wrote to Documents, which the tablet's file UI
+    // can't reach; recoverPriorLogs() below rescues anything left there into here, next to debug.log.
+    QString base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
     if (base.isEmpty())
-        base = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
+        base = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
     if (base.isEmpty())
-        base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-    m_dir = base + QStringLiteral("/DecenzaBaristaDiagnostics");
+        base = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+    m_dir = base;   // directly beside debug.log — no subdir, maximum findability
     QDir().mkpath(m_dir);
     m_filePath = m_dir + QStringLiteral("/barista-diagnostics.log");
+
+    // One-time recovery: an earlier build wrote logs to Documents (which the tablet's file UI can't reach).
+    // Copy any pre-existing barista logs from there (and app data) into the reachable Downloads folder so a
+    // reproduction captured before this fix isn't stranded. Best-effort, only copies what isn't already there.
+    const int recovered = recoverPriorLogs();
 
     s_instance = this;
 
     // A boot marker anchors every session and proves the recorder is live.
     record(QStringLiteral("system"), QStringLiteral("recorder_started"),
-           {{QStringLiteral("enabled"), m_enabled}, {QStringLiteral("path"), m_filePath}});
+           {{QStringLiteral("enabled"), m_enabled}, {QStringLiteral("path"), m_filePath},
+            {QStringLiteral("recoveredPriorLogs"), recovered}});
+}
+
+// Copy pre-existing barista diagnostics logs from the OLD unreachable locations (Documents, app data) into
+// the reachable Downloads folder. Returns how many files were copied. Runs once per launch; skips files that
+// already exist at the destination, so it's idempotent and cheap.
+int BaristaDiagnostics::recoverPriorLogs()
+{
+    int copied = 0;
+    const QList<QStandardPaths::StandardLocation> priorRoots = {
+        QStandardPaths::DocumentsLocation, QStandardPaths::AppDataLocation,
+        QStandardPaths::AppLocalDataLocation };
+    // Also drop a copy at the Downloads ROOT (next to the app's debug.log) so it's trivial to find.
+    QString downloadsRoot = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+    for (const auto loc : priorRoots) {
+        const QString b = QStandardPaths::writableLocation(loc);
+        if (b.isEmpty())
+            continue;
+        const QString priorDir = b + QStringLiteral("/DecenzaBaristaDiagnostics");
+        if (priorDir == m_dir)
+            continue;   // already our target
+        QDir pd(priorDir);
+        if (!pd.exists())
+            continue;
+        const QStringList logs = pd.entryList(QStringList{ QStringLiteral("*.log") }, QDir::Files);
+        for (const QString& name : logs) {
+            const QString src = priorDir + QLatin1Char('/') + name;
+            const QString dst = m_dir + QStringLiteral("/recovered-") + name;
+            if (!QFile::exists(dst) && QFile::copy(src, dst))
+                ++copied;
+            // Belt-and-braces: also put it at the Downloads root beside debug.log.
+            if (!downloadsRoot.isEmpty()) {
+                const QString flat = downloadsRoot + QStringLiteral("/barista-diag-recovered-") + name;
+                if (!QFile::exists(flat))
+                    QFile::copy(src, flat);
+            }
+        }
+    }
+    return copied;
 }
 
 BaristaDiagnostics::~BaristaDiagnostics()

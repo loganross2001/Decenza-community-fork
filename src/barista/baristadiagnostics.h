@@ -63,6 +63,7 @@ signals:
 private:
     void appendLocked(const QString& category, const QString& event, const QVariantMap& detail);
     void openFileLocked();
+    int recoverPriorLogs();   // copy pre-existing logs from old unreachable dirs into Downloads (one-time)
 
     static BaristaDiagnostics* s_instance;
 

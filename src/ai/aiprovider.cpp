@@ -628,6 +628,15 @@ void AnthropicProvider::analyzeUrl(const QString& systemPrompt, const QString& u
     setStatus(Status::Busy);
     m_retryCount = 0;
     ++m_reqGen;
+    // [barista-fork] Reset the fork's continuation/tool state, same as analyze()
+    // and analyzeConversation(). This provider instance is SHARED: the barista
+    // (analyzeConversation) and the recipe-wizard URL extraction (analyzeUrl) run
+    // on the same AnthropicProvider, so a prior barista turn can leave m_accumulatedText
+    // non-empty or m_continuations advanced — which would prepend stale prose to the
+    // extraction or block a legitimate web_fetch pause_turn. Clear it before each URL turn.
+    m_continuations = 0;
+    m_accumulatedText.clear();
+    m_toolRounds = 0;
 
     QJsonObject requestBody;
     requestBody["model"] = m_model;

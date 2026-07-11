@@ -1501,11 +1501,11 @@ bool ShotHistoryStorage::runMigrations()
 
         if (!hasColumn("recipes", "drink_type")
             && !query.exec ("ALTER TABLE recipes ADD COLUMN drink_type TEXT"))
-            qWarning() << "ShotHistoryStorage: migration 28 add recipes.drink_type failed -"
+            qWarning() << "ShotHistoryStorage: migration 29 add recipes.drink_type failed -"
                        << query.lastError().text();
         if (!hasColumn("coffee_bags", "kind")
             && !query.exec ("ALTER TABLE coffee_bags ADD COLUMN kind TEXT NOT NULL DEFAULT 'coffee'"))
-            qWarning() << "ShotHistoryStorage: migration 28 add coffee_bags.kind failed -"
+            qWarning() << "ShotHistoryStorage: migration 29 add coffee_bags.kind failed -"
                        << query.lastError().text();
 
         if (hasColumn("recipes", "drink_type") && hasColumn("coffee_bags", "kind")) {
@@ -1517,7 +1517,7 @@ bool ShotHistoryStorage::runMigrations()
         }
     }
 
-    // Migration 29: recipes.bag_id (recipes-bag-links-ui-polish). Recipes now
+    // Migration 30: recipes.bag_id (recipes-bag-links-ui-polish). Recipes now
     // link a SPECIFIC bag instead of resolving their bean identity to the
     // most-recently-used open bag at every activation (which silently picked
     // the wrong bag for users running two bags of one bean at different
@@ -1534,7 +1534,7 @@ bool ShotHistoryStorage::runMigrations()
 
         if (!hasColumn("recipes", "bag_id")
             && !query.exec ("ALTER TABLE recipes ADD COLUMN bag_id INTEGER"))
-            qWarning() << "ShotHistoryStorage: migration 29 add recipes.bag_id failed -"
+            qWarning() << "ShotHistoryStorage: migration 30 add recipes.bag_id failed -"
                        << query.lastError().text();
 
         // The version bump gates on the DATA pass too: the pass is

@@ -96,6 +96,10 @@ Rectangle {
 
                         Layout.fillWidth: true
                         Layout.fillHeight: true
+                        // A plain Item isn't keyboard-focusable by default, so the FocusIndicator below
+                        // (bound to activeFocus) would never show. Opt into Tab-key focus for parity with the
+                        // shared StyledTabButton the main Settings tabs use.
+                        activeFocusOnTab: true
 
                         Text {
                             anchors.centerIn: parent

@@ -258,7 +258,10 @@ ColumnLayout {
         visible: !root._editorOpen && !!root.settings
                  && root.settings.elevenlabsApiKey && root.settings.elevenlabsApiKey.length > 0
         Layout.fillWidth: true
-        icon.source: "qrc:/icons/search.svg"
+        // The PRIMARY action of this section (filled accent) — matches the approved render's big blue
+        // "+ Browse ElevenLabs voices" button. "+ Add voice" below stays the secondary (outlined) action.
+        primary: true
+        icon.source: "qrc:/icons/plus.svg"
         text: TranslationManager.translate("barista.voices.browse", "Browse ElevenLabs voices")
         accessibleName: TranslationManager.translate("barista.voices.browse", "Browse ElevenLabs voices")
         // First browse: load the Loader (onLoaded opens it). Subsequent browses: the item is already alive,

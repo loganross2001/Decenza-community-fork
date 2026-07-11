@@ -291,6 +291,16 @@ void AssistantVoice::fetchElevenlabsVoices() {
         out.reserve(arr.size());
         for (const QJsonValue& v : arr) {
             const QJsonObject o = v.toObject();
+            // [barista-fork] Show only the user's OWN voices ("My Voices"), matching what they see in the
+            // ElevenLabs app. GET /v1/voices returns the account's WHOLE library — including ElevenLabs'
+            // "premade" (stock) voices — which is the "way more voices than I selected" complaint AND the
+            // source of the "garbled/incomplete" metadata (stock rows often carry sparse labels). The
+            // reliable owner-vs-stock discriminator is the per-voice `category`: `premade` = ElevenLabs
+            // stock; `cloned` / `professional` / `generated` = the user's own. Drop premade at the fetch so
+            // BOTH the picker and the "Save all" import see the filtered set.
+            const QString category = o.value(QStringLiteral("category")).toString();
+            if (category == QLatin1String("premade"))
+                continue;
             const QJsonObject labels = o.value(QStringLiteral("labels")).toObject();
             QVariantMap m;
             m.insert(QStringLiteral("name"), o.value(QStringLiteral("name")).toString());

@@ -1344,7 +1344,11 @@ bool ShotHistoryStorage::runMigrations()
     // constraint dedups), so a retried run after a mid-step crash is a no-op.
     // Whitespace before the open-paren dodges the QSqlQuery permission-hook
     // false-positive, as elsewhere. Do not auto-format.
-    if (currentVersion < 24) {
+    // [barista-fork] Gate sequentially (>= 23 && < 24), matching migrations 22/23/25.
+    // A bare "< 24" let this leap in when an earlier migration was gated for retry
+    // (e.g. migration 21's yield-rename post-condition unmet), skipping the retry
+    // and dragging the chain to the latest — defeating the earlier gate.
+    if (currentVersion >= 23 && currentVersion < 24) {
         qDebug() << "ShotHistoryStorage: Running migration to version 24 (barista roster)";
 
         const bool txn = m_db.transaction();

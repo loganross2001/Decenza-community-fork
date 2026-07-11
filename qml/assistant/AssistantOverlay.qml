@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Shapes
 import QtQuick.Effects
@@ -1155,6 +1156,9 @@ Item {
                 contentWidth: width
                 contentHeight: msgText.implicitHeight
                 boundsBehavior: Flickable.StopAtBounds
+                flickableDirection: Flickable.VerticalFlick
+                // Visible, draggable vertical scrollbar (Job 3 consistent-scrolling pattern).
+                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
                 Text {
                     id: msgText

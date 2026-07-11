@@ -103,10 +103,25 @@ Dialog {
         root._playingId = id
     }
 
-    // Select: import into the shared saved list (persists with the real name) + tell the host to activate it.
+    // Build the persisted saved-voice record from a fetched voice: name + id + the searchable metadata
+    // (accent / gender / age / useCase / description). The raw id is kept for selection but is never shown.
+    function _savedRecord(v) {
+        return {
+            "name": v["name"] || v["id"],
+            "id": v["id"],
+            "accent": v["accent"] || "",
+            "gender": v["gender"] || "",
+            "age": v["age"] || "",
+            "useCase": v["useCase"] || "",
+            "description": v["description"] || ""
+        }
+    }
+
+    // Select: import into the shared saved list (persists with the real name + metadata) + tell the host to
+    // activate it. Metadata rides along so the saved list can display / search it later.
     function _select(v) {
         if (root._settings)
-            root._settings.addElevenlabsVoice(v["name"] || v["id"], v["id"])
+            root._settings.addElevenlabsVoiceWithMeta(root._savedRecord(v))
         root.voiceChosen(v["id"])
         previewPlayer.stop()
         root._playingId = ""
@@ -116,10 +131,8 @@ Dialog {
     function _saveAll() {
         if (!root._settings)
             return
-        for (var i = 0; i < root._voices.length; ++i) {
-            var v = root._voices[i]
-            root._settings.addElevenlabsVoice(v["name"] || v["id"], v["id"])
-        }
+        for (var i = 0; i < root._voices.length; ++i)
+            root._settings.addElevenlabsVoiceWithMeta(root._savedRecord(root._voices[i]))
     }
 
     onOpened: {
@@ -308,8 +321,11 @@ Dialog {
             visible: root._voices.length > 0 && !(root._voice && root._voice.fetchingVoices)
             clip: true
             spacing: Theme.spacingSmall
+            boundsBehavior: Flickable.StopAtBounds
+            flickableDirection: Flickable.VerticalFlick
             model: root._visibleVoices()
-            ScrollBar.vertical: ScrollBar {}
+            // Visible, draggable vertical scrollbar (Job 3 pattern).
+            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
             delegate: Rectangle {
                 id: voiceCard

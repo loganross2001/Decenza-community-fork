@@ -265,32 +265,55 @@ QVariantList AssistantSettings::elevenlabsVoices() const {
     return result;
 }
 
+// The optional voice metadata we persist alongside {name, id} so the saved list can show / search on
+// country-accent, voice type, etc. WITHOUT ever surfacing the raw id. These match the keys emitted by
+// AssistantVoice::fetchElevenlabsVoices (accent/gender/age/useCase/description). The picker passes them
+// through on import; a manual add leaves them empty; a legacy {name,id}-only row loads with them empty.
+static const char* const kVoiceMetaKeys[] = { "accent", "gender", "age", "useCase", "description" };
+
 void AssistantSettings::addElevenlabsVoice(const QString& name, const QString& id) {
-    const QString trimmedId = id.trimmed();
+    // Manual add / seed / picker's older 2-arg path: name + id only, no metadata to merge.
+    addElevenlabsVoiceWithMeta({ { QStringLiteral("name"), name }, { QStringLiteral("id"), id } });
+}
+
+// Upsert a saved voice by id, MERGING any supplied metadata. Mutating the existing JSON object in place is
+// what makes the migration safe both ways: a legacy {name,id}-only row keeps working (missing keys read as
+// empty in QML), and a later name-only edit does NOT wipe metadata a picker import stored earlier — we only
+// overwrite the keys we were actually given. `voice` carries name + id (required) + optional metadata.
+void AssistantSettings::addElevenlabsVoiceWithMeta(const QVariantMap& voice) {
+    const QString trimmedId = voice.value(QStringLiteral("id")).toString().trimmed();
     if (trimmedId.isEmpty())
         return;   // an entry with no id is meaningless — a blank name is fine (falls back to the id)
-    const QString trimmedName = name.trimmed();
+    const QString trimmedName = voice.value(QStringLiteral("name")).toString().trimmed();
 
     const QByteArray data = m_settings.value(QStringLiteral("barista/elevenlabsVoices")).toByteArray();
     QJsonArray arr = QJsonDocument::fromJson(data).array();
 
-    // Dedupe by id: if this id already exists, UPDATE its name in place; otherwise append a new entry.
-    bool found = false;
+    // Dedupe by id: if this id already exists, UPDATE it in place; otherwise append a new entry.
+    int idx = -1;
     for (int i = 0; i < arr.size(); ++i) {
-        QJsonObject obj = arr[i].toObject();
-        if (obj.value(QStringLiteral("id")).toString() == trimmedId) {
-            obj[QStringLiteral("name")] = trimmedName;
-            arr[i] = obj;
-            found = true;
+        if (arr[i].toObject().value(QStringLiteral("id")).toString() == trimmedId) {
+            idx = i;
             break;
         }
     }
-    if (!found) {
-        QJsonObject obj;
-        obj[QStringLiteral("name")] = trimmedName;
-        obj[QStringLiteral("id")] = trimmedId;
-        arr.append(obj);
+    QJsonObject obj = (idx >= 0) ? arr[idx].toObject() : QJsonObject();
+    obj[QStringLiteral("name")] = trimmedName;
+    obj[QStringLiteral("id")] = trimmedId;
+    // Merge only the metadata keys we were actually given (a non-empty value), so a bare {name,id} upsert
+    // leaves any previously-stored metadata intact.
+    for (const char* key : kVoiceMetaKeys) {
+        const QString k = QString::fromLatin1(key);
+        if (voice.contains(k)) {
+            const QString val = voice.value(k).toString().trimmed();
+            if (!val.isEmpty())
+                obj[k] = val;
+        }
     }
+    if (idx >= 0)
+        arr[idx] = obj;
+    else
+        arr.append(obj);
 
     m_settings.setValue(QStringLiteral("barista/elevenlabsVoices"), QJsonDocument(arr).toJson());
     emit elevenlabsVoicesChanged();

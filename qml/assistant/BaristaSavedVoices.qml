@@ -4,7 +4,8 @@ import QtQuick.Layouts
 import Decenza
 
 // [barista-fork] Reusable ElevenLabs saved-voices manager. Renders the saved voices as tidy, tappable
-// rows (name prominent, id subtle/truncated, an active indicator, and inline Edit / Delete icon-buttons),
+// rows (name prominent, a metadata subtitle — accent · gender · use case, NOT the raw id — an active
+// indicator, and inline Edit / Delete icon-buttons), a search field that filters the list on that metadata,
 // plus a "+ Add voice" button that reveals an inline Name + Voice ID editor. The SAME editor is reused for
 // Edit (prefilled). Used in BOTH the barista Voice section and the Coaching voice section — the underlying
 // saved-voices list is a single shared model on AssistantSettings, so this component is section-agnostic:
@@ -31,6 +32,46 @@ ColumnLayout {
     // is the id being edited ("" = adding a new voice, non-empty = editing that saved voice in place).
     property bool _editorOpen: false
     property string _editingId: ""
+
+    // Saved-list search query (name + accent + gender + age + useCase + description, case-insensitive, ANY).
+    property string _query: ""
+
+    // The filtered saved-voices list. Recomputes whenever the query changes OR the underlying list changes
+    // (elevenlabsVoicesChanged) — both are dependencies of this binding, so the Repeater below stays live.
+    readonly property var _visibleVoices: {
+        var all = root.settings ? root.settings.elevenlabsVoices : []
+        // Only filter when the search field is actually shown (list > 2). Otherwise a stale query left over
+        // from when the list was longer could hide every row with no visible way to clear it.
+        if (root._query.length === 0 || all.length <= 2)
+            return all
+        var q = root._query.toLowerCase()
+        var fields = ["name", "accent", "gender", "age", "useCase", "description"]
+        var out = []
+        for (var i = 0; i < all.length; ++i) {
+            var v = all[i]
+            for (var f = 0; f < fields.length; ++f) {
+                var val = v[fields[f]]
+                if (val && String(val).toLowerCase().indexOf(q) !== -1) {
+                    out.push(v)
+                    break
+                }
+            }
+        }
+        return out
+    }
+
+    // Format the visible metadata subtitle from a saved-voice record: "American · Female · Narration"
+    // (accent · gender · useCase, empties omitted). Never includes the raw id.
+    function _metaLine(v) {
+        var parts = []
+        var order = ["accent", "gender", "useCase"]
+        for (var i = 0; i < order.length; ++i) {
+            var val = v[order[i]]
+            if (val && String(val).length > 0)
+                parts.push(String(val))
+        }
+        return parts.join(" · ")
+    }
 
     // Hidden Tr instances for strings used in property bindings / accessibleName concatenation.
     Tr { id: trSelect; key: "barista.settings.elSelectVoice"; fallback: "Select voice"; visible: false }
@@ -89,18 +130,42 @@ ColumnLayout {
         color: Theme.textSecondaryColor; font: Theme.bodyFont; Accessible.ignored: true
     }
 
-    // Saved-voice rows. Bind to the PROPERTY (not the method) so the list re-evaluates on
-    // elevenlabsVoicesChanged. Row fill = Theme.backgroundColor so rows sit distinctly INSIDE the card's
-    // surface (matching BagCard/EquipmentCard/MaintenanceSettingsDialog content rows), not the same
-    // surfaceColor as the host card (which read flat/washed-out).
+    // Search the saved list by name / accent / gender / age / use case / description. Shown once there are
+    // enough rows to be worth filtering. Filters the rows below via root._query → root._visibleVoices.
+    StyledTextField {
+        id: savedSearchField
+        visible: !!root.settings && root.settings.elevenlabsVoices.length > 2 && !root._editorOpen
+        Layout.fillWidth: true
+        inputMethodHints: Qt.ImhNoPredictiveText | Qt.ImhNoAutoUppercase
+        placeholderText: TranslationManager.translate("barista.settings.elSearchPlaceholder",
+            "Search by name, accent, use case…")
+        accessibleName: TranslationManager.translate("barista.settings.elSearch", "Search saved voices")
+        onTextChanged: root._query = text
+    }
+
+    // "No matches" — the list is non-empty but the query filtered everything out.
+    Tr {
+        visible: savedSearchField.visible && root._query.length > 0 && root._visibleVoices.length === 0
+        key: "barista.settings.elNoMatches"; fallback: "No saved voices match your search."
+        Layout.fillWidth: true
+        wrapMode: Text.WordWrap
+        color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true
+    }
+
+    // Saved-voice rows. Bind to the FILTERED list (which itself depends on elevenlabsVoices, so it re-evaluates
+    // on elevenlabsVoicesChanged AND on the search query). Row fill = Theme.backgroundColor so rows sit
+    // distinctly INSIDE the card's surface (matching BagCard/EquipmentCard/MaintenanceSettingsDialog content
+    // rows), not the same surfaceColor as the host card (which read flat/washed-out).
     Repeater {
-        model: root.settings ? root.settings.elevenlabsVoices : []
+        model: root._visibleVoices
         delegate: Rectangle {
             id: voiceRow
             required property var modelData
             readonly property string voiceId: modelData["id"] !== undefined ? modelData["id"] : ""
             readonly property string voiceName: (modelData["name"] !== undefined && modelData["name"].length > 0)
                                                 ? modelData["name"] : voiceId
+            // Metadata subtitle (accent · gender · useCase). Never the raw id.
+            readonly property string metaLine: root._metaLine(modelData)
             readonly property bool isActive: root.activeId === voiceId
 
             Layout.fillWidth: true
@@ -114,6 +179,7 @@ ColumnLayout {
             AccessibleMouseArea {
                 anchors.fill: parent
                 accessibleName: trSelect.text + ": " + voiceRow.voiceName
+                    + (voiceRow.metaLine.length > 0 ? ", " + voiceRow.metaLine : "")
                     + (voiceRow.isActive ? " (" + trActive.text + ")" : "")
                 onAccessibleClicked: root.voiceSelected(voiceRow.voiceId)
             }
@@ -151,12 +217,11 @@ ColumnLayout {
                     }
                     Text {
                         Layout.fillWidth: true
-                        // Truncated id subtitle so the row stays scannable.
-                        text: voiceRow.voiceId.length > 14
-                              ? voiceRow.voiceId.substring(0, 14) + "…"
-                              : voiceRow.voiceId
-                        visible: voiceRow.voiceId.length > 0
-                                 && voiceRow.voiceName !== voiceRow.voiceId
+                        // Metadata subtitle (accent · gender · use case) — NOT the raw id, which stays
+                        // internal for selection only. A voice with no metadata (old manual add) shows just
+                        // its name (this row hides).
+                        text: voiceRow.metaLine
+                        visible: voiceRow.metaLine.length > 0
                         color: Theme.textSecondaryColor; font: Theme.labelFont
                         elide: Text.ElideRight
                         Accessible.ignored: true

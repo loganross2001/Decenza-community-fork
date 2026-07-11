@@ -4,6 +4,7 @@
 #include <QSettings>
 #include <QString>
 #include <QVariantList>
+#include <QVariantMap>
 
 // [barista-fork] The barista module's OWN settings, stored under its own "barista/" QSettings
 // group. Deliberately NOT a Settings-facade domain sub-object, so the upstream Settings classes
@@ -110,13 +111,21 @@ public:
     QString coachingElevenlabsVoiceId() const;    // ElevenLabs voice id (default the stock "Rachel")
     void setCoachingElevenlabsVoiceId(const QString& id);
 
-    // Saved ElevenLabs voices — a list of {name, id} maps, persisted as JSON under barista/elevenlabsVoices.
-    // The active voice remains elevenlabsVoiceId; selecting a saved voice just calls setElevenlabsVoiceId(id).
-    Q_INVOKABLE QVariantList elevenlabsVoices() const;              // parsed [{name, id}, ...]
-    Q_INVOKABLE void addElevenlabsVoice(const QString& name, const QString& id);  // upsert by id (dedupe), then persist
+    // Saved ElevenLabs voices — a list of {name, id, accent, gender, age, useCase, description} maps,
+    // persisted as JSON under barista/elevenlabsVoices. The metadata fields are OPTIONAL (empty for a
+    // manually-added voice or a legacy {name,id}-only row) and exist so the saved list can show/search on
+    // country/accent, voice type, etc. WITHOUT ever surfacing the raw voice id. The active voice remains
+    // elevenlabsVoiceId; selecting a saved voice just calls setElevenlabsVoiceId(id).
+    Q_INVOKABLE QVariantList elevenlabsVoices() const;              // parsed [{name, id, accent, ...}, ...]
+    // Upsert by id (dedupe), then persist. The 2-arg form (manual add — name + id only) preserves any
+    // metadata an earlier picker import stored (it never wipes existing keys). The map form (picker import)
+    // MERGES the supplied metadata (accent/gender/age/useCase/description) onto the row.
+    Q_INVOKABLE void addElevenlabsVoice(const QString& name, const QString& id);
+    Q_INVOKABLE void addElevenlabsVoiceWithMeta(const QVariantMap& voice);  // {name,id,accent,gender,age,useCase,description}
     // Edit a saved voice in place: rename it and/or change its id. If the id changed and it was the active
     // barista and/or coaching selection, the active id follows the edit (both are re-pointed — the list is
-    // shared between the two sections). Then persist + emit elevenlabsVoicesChanged.
+    // shared between the two sections). Metadata already on the row is preserved (only name/id are touched).
+    // Then persist + emit elevenlabsVoicesChanged.
     Q_INVOKABLE void updateElevenlabsVoice(const QString& oldId, const QString& name, const QString& newId);
     Q_INVOKABLE void removeElevenlabsVoice(const QString& id);     // remove by id, then persist
 

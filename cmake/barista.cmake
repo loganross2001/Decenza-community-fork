@@ -88,6 +88,7 @@ if(DECENZA_BARISTA)
             ${CMAKE_CURRENT_SOURCE_DIR}/qml/assistant/AssistantOverlay.qml
             ${CMAKE_CURRENT_SOURCE_DIR}/qml/assistant/AssistantSettingsPanel.qml
             ${CMAKE_CURRENT_SOURCE_DIR}/qml/assistant/AssistantSettingsSection.qml
+            ${CMAKE_CURRENT_SOURCE_DIR}/qml/assistant/BaristaSectionCard.qml
             ${CMAKE_CURRENT_SOURCE_DIR}/qml/assistant/BaristaSavedVoices.qml
             ${CMAKE_CURRENT_SOURCE_DIR}/qml/assistant/ElevenLabsVoicePicker.qml
             ${CMAKE_CURRENT_SOURCE_DIR}/qml/assistant/MaintenanceSettingsDialog.qml

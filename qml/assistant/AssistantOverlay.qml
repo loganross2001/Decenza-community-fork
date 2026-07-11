@@ -114,6 +114,17 @@ Item {
             // 5s cue timer + clear the cue (belt-and-suspenders alongside _markSpokeThisTurn on the speak call).
             if (root._voice && root._voice.speaking)
                 root._markSpokeThisTurn()
+            // [barista-fork] The lead-in just finished and a post-tool answer was held back → speak it NOW,
+            // so the answer never cut off the lead-in. Checked BEFORE the end-session/mic logic (a sign-off
+            // answer must still speak). Speaking flips speaking→true again; the next speaking_off resumes
+            // the normal end/mic handling once the real answer is done.
+            if (root._voice && !root._voice.speaking && root._pendingSpeech.length > 0) {
+                var deferred = root._pendingSpeech
+                root._pendingSpeech = ""
+                root._diag("speak_deferred_now", { chars: deferred.length })
+                root._speakSanitised(deferred)
+                return
+            }
             // [barista-fork] The barista signed off and asked to end the session → collapse only NOW that the
             // sign-off finished speaking (never cut it off). Checked BEFORE the listening guard so a text-only
             // reply that still spoke a sign-off dismisses too. _endSessionNow clears the flag + ends the session.
@@ -177,6 +188,12 @@ Item {
     // standalone farewell). Don't dismiss instantly — let the sign-off speak first, THEN collapse to the tab.
     // Cleared on any new user utterance / new engage / teardown so a stuck flag can never dismiss a later turn.
     property bool _endAfterReply: false
+
+    // [barista-fork] The post-tool answer, held when it arrives WHILE the pre-tool lead-in is still speaking.
+    // Speaking it immediately would hard-cut the lead-in mid-sentence (the "trips over itself" bug — confirmed
+    // in diagnostics: a long lead-in + a fast tool → speak_INTERRUPTS_previous). Instead we stash it here and
+    // speak it from onSpeakingChanged once the lead-in finishes. Cleared on teardown so it never leaks a turn.
+    property string _pendingSpeech: ""
 
     // [barista-fork] Safe passthrough to the diagnostic recorder (no-op if the module/recorder is absent).
     function _diag(event, detail) {
@@ -394,6 +411,7 @@ Item {
     // land only after the sign-off finished speaking (or right after a muted/text reply renders).
     function _endSessionNow() {
         root._endAfterReply = false
+        root._pendingSpeech = ""   // [barista-fork] never let a held answer speak into a torn-down session
         if (root._orch && typeof root._orch.dismiss === "function")
             root._orch.dismiss()
     }
@@ -422,6 +440,7 @@ Item {
         root._queuedFirstUtterance = ""
         root._awaitConfirm = false
         root._endAfterReply = false     // [barista-fork] a fresh engage never inherits a prior session's end-request
+        root._pendingSpeech = ""        // [barista-fork] nor a held answer from a prior session
         // Pre-shot (no undiscussed shot to talk about), surface any off-machine grind the user agreed to
         // but didn't confirm — so the barista can ask early whether it actually got set.
         root._pendingGrind = (!root._hasUndiscussedShot && typeof Barista !== "undefined" && Barista.actions)
@@ -1088,7 +1107,14 @@ Item {
             // so speak it per voiceEnabled — the old greetAloud-suppression of an opener no longer applies.
             if (root._voiceInput && root._voiceInput.listening) root._voiceInput.pauseMic()
             root._diag("response_received", { chars: (response || "").length, speakingNow: root._voice ? root._voice.speaking : false, endAfter: root._endAfterReply })
-            root._speakSanitised(response)               // (also strips fenced blocks before TTS)
+            // [barista-fork] Don't cut off a still-playing lead-in: if the barista is mid-sentence on its
+            // pre-tool lead-in, hold the answer and speak it when that finishes (onSpeakingChanged drains it).
+            if (root._voice && root._voice.speaking) {
+                root._pendingSpeech = response
+                root._diag("response_deferred_until_leadin_done", { chars: (response || "").length })
+            } else {
+                root._speakSanitised(response)           // (also strips fenced blocks before TTS)
+            }
             root._resetSilence()   // keep the mic session alive while we're conversing
             // [barista-fork] Ask→approve→apply. On Anthropic the model applies via the apply_dial_change tool
             // itself once the user approves — so we must NOT also arm the app-side voice-confirm (that would

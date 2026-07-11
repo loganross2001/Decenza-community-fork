@@ -2902,6 +2902,65 @@ void ShotHistoryStorage::requestUpdateShotMetadata(qint64 shotId, const QVariant
     });
 }
 
+// [barista-fork] Strip any prior "Tasted <choice>" marker line, append the new one, preserve the user's own
+// notes. Mirrors PostShotReviewPage.notesWithTasteMarker (CANONICAL-ENGLISH choice id, not localized).
+static QString notesWithTasteMarkerStatic(const QString& notes, const QString& choice)
+{
+    static const QString kPrefix = QStringLiteral("Tasted ");
+    QStringList kept;
+    const QStringList lines = notes.split(QLatin1Char('\n'));
+    for (const QString& l : lines)
+        if (!l.startsWith(kPrefix))
+            kept << l;
+    QString cleaned = kept.join(QLatin1Char('\n'));
+    while (cleaned.endsWith(QLatin1Char('\n')))
+        cleaned.chop(1);
+    if (choice.isEmpty())
+        return cleaned;
+    const QString marker = kPrefix + choice;
+    return cleaned.isEmpty() ? marker : (cleaned + QLatin1Char('\n') + marker);
+}
+
+void ShotHistoryStorage::requestApplyTasteToShot(qint64 shotId, int enjoyment, bool setEnjoyment,
+                                                 const QString& tasteChoice)
+{
+    if (!m_ready || shotId <= 0) {
+        emit shotMetadataUpdated(shotId, false);
+        return;
+    }
+    const QString dbPath = m_dbPath;
+    auto destroyed = m_destroyed;
+    runOnDbThread([this, dbPath, shotId, enjoyment, setEnjoyment, tasteChoice, destroyed]() {
+        bool success = false;
+        withTempDb(dbPath, "shs_taste", [&](QSqlDatabase& db) {
+            // LIVE read of the shot's CURRENT notes on the (serialized) DB thread — the whole point of this
+            // method vs a snapshot merge: notes the user typed after the barista opened are never clobbered.
+            QString current;
+            QSqlQuery sel(db);
+            sel.prepare(QStringLiteral("SELECT espresso_notes FROM shots WHERE id = :id"));
+            sel.bindValue(QStringLiteral(":id"), shotId);
+            if (sel.exec() && sel.next())
+                current = sel.value(0).toString();
+            QVariantMap meta;
+            if (setEnjoyment && enjoyment > 0)
+                meta.insert(QStringLiteral("enjoyment"), enjoyment);
+            if (!tasteChoice.isEmpty())
+                meta.insert(QStringLiteral("espressoNotes"), notesWithTasteMarkerStatic(current, tasteChoice));
+            if (!meta.isEmpty())
+                success = updateShotMetadataStatic(db, shotId, meta);
+        });
+        if (*destroyed) return;
+        QMetaObject::invokeMethod(this, [this, shotId, success, destroyed]() {
+            if (*destroyed) return;
+            if (success)
+                invalidateDistinctCache();
+            else
+                qWarning() << "ShotHistoryStorage: barista taste write FAILED for shot" << shotId;
+            emit shotMetadataUpdated(shotId, success);
+        }, Qt::QueuedConnection);
+    });
+}
+
 // Note: getDistinctValues / requestDistinct* / requestAutoFavorites* /
 // queryGrinderContext all live in shothistorystorage_queries.cpp.
 

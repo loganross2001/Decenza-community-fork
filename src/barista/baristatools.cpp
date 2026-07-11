@@ -444,27 +444,9 @@ static int baristaEnjoymentForTaste(const QString& choice)
     return 0;
 }
 
-// [barista-fork] Replace any existing "Tasted <choice>" marker line in `notes` with the new one, preserving the
-// user's own typed notes — a C++ port of PostShotReviewPage.notesWithTasteMarker so a spoken taste round-trips
-// with tasteChoiceFromNotes (the review page restores the selection). The marker is CANONICAL ENGLISH
-// (choice id), not a localized word, exactly like the tap-button path. Empty choice → strip the marker only.
-static QString baristaNotesWithTasteMarker(const QString& notes, const QString& choice)
-{
-    static const QString kPrefix = QStringLiteral("Tasted ");
-    QStringList kept;
-    const QStringList lines = notes.split(QLatin1Char('\n'));
-    for (const QString& l : lines) {
-        if (!l.startsWith(kPrefix))
-            kept << l;
-    }
-    QString cleaned = kept.join(QLatin1Char('\n'));
-    while (cleaned.endsWith(QLatin1Char('\n')))
-        cleaned.chop(1);
-    if (choice.isEmpty())
-        return cleaned;
-    const QString marker = kPrefix + choice;
-    return cleaned.isEmpty() ? marker : (cleaned + QLatin1Char('\n') + marker);
-}
+// [barista-fork] The "Tasted <choice>" note-merge now lives in ShotHistoryStorage::requestApplyTasteToShot
+// (notesWithTasteMarkerStatic), which merges against a LIVE read of the shot's notes on the DB thread — so a
+// spoken rating can't clobber notes typed after the barista opened. (Was a stale-snapshot merge here.)
 
 // [barista-fork] Run a barista client-tool query against the local shot DB on a background thread and deliver
 // the JSON result to `done` on the main thread. query_shots is a READ-ONLY lookup across the user's FULL shot
@@ -863,17 +845,11 @@ void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage*
         const qint64 anchorShotId = anchorSnapshot.value(QStringLiteral("shotId")).toLongLong();
         const QString tasteChoice = baristaTasteChoice(input);
         if (shotHistory && anchorShotId > 0 && (hasRating || !tasteChoice.isEmpty())) {
-            QVariantMap shotMeta;
             const int shotEnjoyment = hasRating ? rating : baristaEnjoymentForTaste(tasteChoice);
-            if (shotEnjoyment > 0)
-                shotMeta.insert(QStringLiteral("enjoyment"), shotEnjoyment);
-            if (!tasteChoice.isEmpty()) {
-                const QString mergedNotes = baristaNotesWithTasteMarker(
-                    anchorSnapshot.value(QStringLiteral("notes")).toString(), tasteChoice);
-                shotMeta.insert(QStringLiteral("espressoNotes"), mergedNotes);
-            }
-            if (!shotMeta.isEmpty())
-                shotHistory->requestUpdateShotMetadata(anchorShotId, shotMeta);
+            // Route through requestApplyTasteToShot: it does a LIVE read-modify-write of espresso_notes on the
+            // serialized DB thread, so a spoken rating can NEVER clobber notes the user typed after the barista
+            // opened (a stale session-snapshot merge could). enjoyment applied only when > 0.
+            shotHistory->requestApplyTasteToShot(anchorShotId, shotEnjoyment, shotEnjoyment > 0, tasteChoice);
         }
 
         // FeedbackStorage::requestLogFeedback is async (its own worker); fire it, and confirm to the model

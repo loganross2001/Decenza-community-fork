@@ -187,6 +187,12 @@ public:
     // Async: runs update on background thread, emits shotMetadataUpdated()
     Q_INVOKABLE void requestUpdateShotMetadata(qint64 shotId, const QVariantMap& metadata);
 
+    // [barista-fork] Apply a spoken taste rating to a shot with a LIVE read-modify-write on the DB thread:
+    // read the shot's CURRENT espresso_notes (never a stale snapshot), replace any "Tasted <choice>" marker
+    // line, and write it back together with enjoyment — so a verbal rating can never clobber notes the user
+    // typed after the barista session started. tasteChoice "" → enjoyment only; setEnjoyment false → notes only.
+    Q_INVOKABLE void requestApplyTasteToShot(qint64 shotId, int enjoyment, bool setEnjoyment, const QString& tasteChoice);
+
     // Async: fetch most recent shot ID on background thread, emits mostRecentShotIdReady()
     Q_INVOKABLE void requestMostRecentShotId();
 

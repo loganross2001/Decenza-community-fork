@@ -1596,12 +1596,10 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
                     if (shot.finalWeightG > 0)         snap["yieldG"] = shot.finalWeightG;
                     if (!shot.grinderSetting.isEmpty()) snap["grind"] = shot.grinderSetting;
                     if (shot.temperatureOverrideC > 0)  snap["tempC"] = shot.temperatureOverrideC;
-                    // [barista-fork] The anchor shot's CURRENT notes, so a VERBAL rating/taste can land on the
-                    // SHOT record (enjoyment + a "Tasted sour"-style marker) exactly like the post-shot tap
-                    // buttons — WITHOUT clobbering the user's own typed notes. log_tasting_feedback's executor
-                    // strips any prior "Tasted " marker line and appends the new one (mirrors PostShotReviewPage
-                    // notesWithTasteMarker), then writes the merged notes back via requestUpdateShotMetadata.
-                    snap["notes"] = shot.espressoNotes;
+                    // [barista-fork] A VERBAL rating/taste lands on the SHOT record (enjoyment + a "Tasted sour"
+                    // marker) via ShotHistoryStorage::requestApplyTasteToShot, which reads the shot's notes LIVE
+                    // on the DB thread — so we deliberately do NOT snapshot notes here (a session-stale snapshot
+                    // could clobber notes the user typed after the barista opened).
                 } else {
                     snap["shotId"] = 0;   // bean-general note (no matching shot for this exact bean)
                 }

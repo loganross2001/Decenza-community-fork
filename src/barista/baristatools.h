@@ -25,6 +25,14 @@ public:
     // (RequestOptions.clientTools).
     static QJsonArray toolDefinitions();
 
+    // [barista-fork] The FAST-PATH web tool JSON definitions (get_weather / get_stock_quote / get_local_news).
+    // Registered SEPARATELY from toolDefinitions() and appended to the request ONLY when RequestOptions.webSearch
+    // is set — i.e. gated by the SAME umbrella "barista may reach the internet" toggle (webSearchEnabled) as
+    // Anthropic web search, not by the clientTools/query_shots gate. They resolve via the `webTools` seam in
+    // executeTool below (async single GET each) — so the model prefers these fast keyless endpoints over the
+    // ~10s web-search round-trip for weather / stock prices / local news.
+    static QJsonArray webToolDefinitions();
+
     // Run ONE client tool OFF the main thread and deliver the JSON result via `done` (invoked back on the main
     // thread). `shotHistory` supplies the shots.db path; `feedback` supplies the assistant.db path for the two
     // tasting-feedback tools (both read lazily by the caller — may have been wired after construction; a null
@@ -48,10 +56,19 @@ public:
     // [barista-fork] `tasks` supplies the assistant.db reminders + maintenance store for the four
     // task tools (create_reminder / list_due_reminders / complete_reminder / log_maintenance). Read
     // lazily like `feedback`; a null pointer yields an error result for those tools only.
+    // [barista-fork] `webTools` runs the three FAST-PATH web tools (get_weather / get_stock_quote /
+    // get_local_news). Kept as a std::function seam (not a BaristaWebTools* pointer) for the SAME reason as
+    // applyDial/endConversation: this TU never names BaristaWebTools, so DB-only tests that compile
+    // baristatools.cpp don't drag in QtNetwork. The app wires it to BaristaWebTools's async getters (see
+    // baristamodule.cpp); each resolves `done(result)` on completion. An empty std::function yields an error
+    // result for those three tools only. Signature mirrors the generic tool executor:
+    // (toolName, input, done).
     static void executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage* feedback,
                             TasksStorage* tasks,
                             const std::function<QVariantMap(const QVariantMap&, qint64)>& applyDial,
                             const std::function<void()>& endConversation,
+                            const std::function<void(const QString&, const QJsonObject&,
+                                                     std::function<void(QJsonValue)>)>& webTools,
                             const QVariantMap& anchorSnapshot,
                             const QString& name, const QJsonObject& input,
                             std::function<void(QJsonValue)> done);

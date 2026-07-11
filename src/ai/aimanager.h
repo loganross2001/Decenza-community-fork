@@ -162,6 +162,15 @@ public:
     void setEndConversationHandler(std::function<void()> handler) {
         m_endConversationHandler = std::move(handler);
     }
+    // [barista-fork] FAST-PATH web-tool handler for get_weather / get_stock_quote / get_local_news. A
+    // std::function seam (not a BaristaWebTools* member) so this header/TU never names BaristaWebTools — keeps
+    // QtNetwork's web-tool service out of the DB-only tests. Wired from BaristaModule to BaristaWebTools's async
+    // getters (with the homeLocation fallback + query building done there). Signature mirrors the generic client
+    // tool executor: (toolName, input, done). Unset → those three tools return an error result.
+    void setWebToolsHandler(std::function<void(const QString&, const QJsonObject&,
+                                               std::function<void(QJsonValue)>)> handler) {
+        m_webToolsHandler = std::move(handler);
+    }
     // [barista-fork] The app-side provenance snapshot the write tool stamps (see m_lastBaristaAnchorSnapshot).
     QVariantMap lastBaristaAnchorSnapshot() const { return m_lastBaristaAnchorSnapshot; }
     // [barista-fork] Closed-loop bridge for the apply_dial_change WRITE tool (issue #1053 regression). When the
@@ -357,6 +366,8 @@ private:
     std::function<QVariantMap(const QVariantMap&, qint64)> m_applyDialHandler;
     // [barista-fork] end_conversation handler → AssistantOrchestrator::requestDismiss (std::function seam; see setter).
     std::function<void()> m_endConversationHandler;
+    // [barista-fork] fast-path web-tool handler → BaristaWebTools async getters (std::function seam; see setter).
+    std::function<void(const QString&, const QJsonObject&, std::function<void(QJsonValue)>)> m_webToolsHandler;
     ProfileManager* m_profileManager = nullptr;
 
     // Providers

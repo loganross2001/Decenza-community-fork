@@ -73,6 +73,11 @@ if(DECENZA_BARISTA)
         # DB-only tests (it pulls in QtNetwork).
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/maintenancedocsync.h
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/maintenancedocsync.cpp
+        # [barista-fork] Fast-path web tools (get_weather / get_stock_quote / get_local_news). Gated WITH the
+        # module — only baristamodule.cpp (also gated) names BaristaWebTools; baristatools.cpp reaches the tools
+        # through a std::function seam, so this stays out of the DB-only tests (it pulls in QtNetwork).
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristawebtools.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristawebtools.cpp
     )
 
     # New-assistant QML — its own resource, loaded by URL via a Loader in main.qml.

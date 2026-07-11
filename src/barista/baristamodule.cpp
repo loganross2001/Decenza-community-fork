@@ -10,6 +10,7 @@
 #include "feedbackstorage.h"
 #include "tasksstorage.h"
 #include "maintenancedocsync.h"
+#include "baristawebtools.h"      // [barista-fork] fast-path web tools (weather / stock / local news)
 #include "../controllers/maincontroller.h"
 #include "../history/shothistorystorage.h"
 #include "../ai/aimanager.h"
@@ -17,6 +18,8 @@
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QFileInfo>
+#include <QNetworkAccessManager>
+#include <QJsonObject>
 
 BaristaModule::BaristaModule(MainController* mainController, MachineState* machineState,
                              Settings* appSettings, QObject* parent)
@@ -38,7 +41,11 @@ BaristaModule::BaristaModule(MainController* mainController, MachineState* machi
     , m_feedbackStorage(new FeedbackStorage(this))
     , m_tasksStorage(new TasksStorage(this))
     // [barista-fork] Periodic Decent maintenance-docs check. Owns its own QNAM; persists via m_tasksStorage.
-    , m_docSync(new MaintenanceDocSync(m_tasksStorage, this)) {
+    , m_docSync(new MaintenanceDocSync(m_tasksStorage, this))
+    // [barista-fork] Fast-path web tools get a PRIVATE QNAM (no shared cookie jar) — each tool contacts only its
+    // one host with only the user's query (city/symbol/topic). See BaristaWebTools' privacy note.
+    , m_webNetwork(new QNetworkAccessManager(this))
+    , m_webTools(new BaristaWebTools(m_webNetwork, this)) {
     connect(m_settings, &AssistantSettings::enabledChanged,
             this, &BaristaModule::enabledChanged);
 
@@ -75,6 +82,44 @@ BaristaModule::BaristaModule(MainController* mainController, MachineState* machi
             AssistantOrchestrator* orch = m_orchestrator;
             ai->setEndConversationHandler([orch]() {
                 orch->requestDismiss();
+            });
+            // [barista-fork] Fast-path web tools. The module lambda owns the app-side glue the pure
+            // BaristaWebTools service shouldn't: (1) the homeLocation no-city fallback for weather/news, and
+            // (2) building the Google-News query from topic/location. Then it forwards to the async getter,
+            // which resolves `done` on the main thread. m_webTools + m_settings outlive AIManager (all parented
+            // under the module).
+            BaristaWebTools* web = m_webTools;
+            AssistantSettings* settings = m_settings;
+            ai->setWebToolsHandler([web, settings](const QString& name, const QJsonObject& input,
+                                                   std::function<void(QJsonValue)> done) {
+                const QString home = settings ? settings->homeLocation().trimmed() : QString();
+                if (name == QLatin1String("get_weather")) {
+                    QString location = input.value(QStringLiteral("location")).toString().trimmed();
+                    if (location.isEmpty()) location = home;   // "weather around here" → home location
+                    web->getWeather(location, std::move(done));
+                    return;
+                }
+                if (name == QLatin1String("get_stock_quote")) {
+                    web->getStockQuote(input.value(QStringLiteral("symbol")).toString(), std::move(done));
+                    return;
+                }
+                if (name == QLatin1String("get_local_news")) {
+                    // topic wins; else "<location or home> local news"; empty when no location AND no home.
+                    const QString topic    = input.value(QStringLiteral("topic")).toString().trimmed();
+                    QString location = input.value(QStringLiteral("location")).toString().trimmed();
+                    if (location.isEmpty()) location = home;
+                    QString query = topic;
+                    if (query.isEmpty() && !location.isEmpty())
+                        query = location + QStringLiteral(" local news");
+                    if (query.isEmpty()) {
+                        done(QJsonObject{{QStringLiteral("error"),
+                            QStringLiteral("no topic or location — ask the user what news they want")}});
+                        return;
+                    }
+                    web->getLocalNews(query, std::move(done));
+                    return;
+                }
+                done(QJsonObject{{QStringLiteral("error"), QStringLiteral("unknown web tool: ") + name}});
             });
         }
     }

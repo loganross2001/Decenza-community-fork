@@ -141,12 +141,16 @@ QJsonArray BaristaTools::toolDefinitions()
         "you can reason over it across sessions (\"3rd time this bean's been sour\"). Call this WHENEVER the user "
         "describes how a shot TASTED or FELT — at close-out, mid-conversation, or an unprompted \"that last one "
         "was sour\". Fill only the fields you can infer from what they actually said; leave the rest out. Do NOT "
-        "invent numbers or descriptors. The shot it attaches to and the dial (dose/yield/grind/temp/bean/profile) "
-        "are recorded automatically — you do NOT supply a shot id.");
+        "invent numbers or descriptors. By default the shot it attaches to and the dial "
+        "(dose/yield/grind/temp/bean/profile) are recorded automatically — you normally do NOT supply a shot id. "
+        "EXCEPTION: to rate or adjust a SPECIFIC PAST shot (\"update my rating for this morning's shot\", \"that "
+        "one from last Tuesday was actually bitter\"), first find that shot with query_shots, then pass its "
+        "shotId here as shot_id — the rating/taste then lands on THAT shot instead of the just-pulled one.");
     QJsonObject lfSchema;
     lfSchema["type"] = QString("object");
     QJsonObject lfProps;
     lfProps["raw_text"]              = strProp("What the user actually said about the taste/texture, in their own words (required).");
+    lfProps["shot_id"]               = intProp("OPTIONAL — the shotId of a SPECIFIC past shot to rate/adjust (from a query_shots result). Omit for the current/just-pulled shot; include ONLY to rate a different, already-recorded shot.");
     lfProps["overall_rating_0to100"]= intProp("How much they liked it, 0-100, ONLY if they gave a clear sense of it (optional).");
     lfProps["acidity"]              = strProp("One of: sour, bright, balanced, flat (optional).");
     lfProps["bitterness"]           = strProp("One of: none, mild, harsh (optional).");
@@ -370,6 +374,12 @@ QJsonArray BaristaTools::toolDefinitions()
     um["input_schema"] = umSchema;
     tools.append(um);
 
+    // [barista-fork] rate_shot (WRITE) is folded into log_tasting_feedback via an OPTIONAL shot_id field:
+    // when the user asks to rate/adjust a SPECIFIC past shot ("update my rating for this morning's shot"),
+    // the model first finds it with query_shots (whose result carries a shotId) and passes that shotId here.
+    // When shot_id is present + valid it OVERRIDES the app-side anchor for the shot-record write, so the user
+    // can rate any past shot by voice — not just the just-pulled one. See the executor + the schema field above.
+
     // [barista-fork] dismiss_maintenance_doc_change (WRITE) — the "no thanks" path. When the owner declines
     // the Decent-doc offer (or after all accepted changes are applied), call this ONCE to mark the change
     // reviewed so it is never re-offered until Decent changes the guide AGAIN. Takes no fields.
@@ -385,6 +395,71 @@ QJsonArray BaristaTools::toolDefinitions()
     dmSchema["properties"] = QJsonObject{};
     dm["input_schema"] = dmSchema;
     tools.append(dm);
+
+    return tools;
+}
+
+// [barista-fork] FAST-PATH web tool definitions (get_weather / get_stock_quote / get_local_news). SEPARATE from
+// toolDefinitions() so they can be gated on RequestOptions.webSearch (the umbrella "may reach the internet"
+// toggle) rather than the clientTools/query_shots gate. Each maps to one keyless HTTP GET (see BaristaWebTools),
+// so the model answers weather / stock / local-news questions in ~1s instead of the ~10s web-search round-trip.
+QJsonArray BaristaTools::webToolDefinitions()
+{
+    QJsonArray tools;
+    const auto strProp = [](const QString& d){ QJsonObject o; o["type"] = QString("string"); o["description"] = d; return o; };
+
+    // get_weather — current conditions for a city (open-meteo, keyless).
+    QJsonObject gw;
+    gw["name"] = QString("get_weather");
+    gw["description"] = QString(
+        "Get the CURRENT weather for a city — fast. Use this INSTEAD of web search whenever the user asks about "
+        "the weather (\"what's the weather in Bellevue\", \"is it raining outside\", \"how hot is it\"). Extract "
+        "the city from what they said and pass it as location. If they mean HERE / the local area and name no "
+        "city, omit location and it falls back to their saved home location; if there's no home location either "
+        "it will tell you to ask which city. Returns temperature, feels-like, condition, wind, and humidity — "
+        "answer briefly from that.");
+    QJsonObject gwSchema;
+    gwSchema["type"] = QString("object");
+    QJsonObject gwProps;
+    gwProps["location"] = strProp("City to get the weather for, e.g. \"Bellevue\" or \"Paris, France\". Omit for the user's home location (local/around here).");
+    gwSchema["properties"] = gwProps;
+    gw["input_schema"] = gwSchema;
+    tools.append(gw);
+
+    // get_stock_quote — latest price for a ticker (Yahoo Finance, keyless).
+    QJsonObject gs;
+    gs["name"] = QString("get_stock_quote");
+    gs["description"] = QString(
+        "Get the latest price for a stock/ETF ticker — fast. Use this INSTEAD of web search whenever the user "
+        "asks about a stock price (\"how's Apple doing\", \"what's Tesla at\", \"price of NVDA\"). YOU supply the "
+        "ticker symbol (you know AAPL/TSLA/NVDA/etc.); if the user gives a company name, map it to its symbol. "
+        "Returns price, change, percent change, and currency — answer briefly from that.");
+    QJsonObject gsSchema;
+    gsSchema["type"] = QString("object");
+    QJsonObject gsProps;
+    gsProps["symbol"] = strProp("The ticker symbol to quote, e.g. \"AAPL\" or \"TSLA\" (uppercase). Map a company name to its symbol yourself.");
+    gsSchema["properties"] = gsProps;
+    gsSchema["required"] = QJsonArray{ QString("symbol") };
+    gs["input_schema"] = gsSchema;
+    tools.append(gs);
+
+    // get_local_news — recent headlines (Google News RSS, keyless).
+    QJsonObject gn;
+    gn["name"] = QString("get_local_news");
+    gn["description"] = QString(
+        "Get recent news headlines — fast. Use this INSTEAD of web search whenever the user asks about the news "
+        "or current events (\"what's in the news\", \"any news about the election\", \"local news\"). Pass a "
+        "topic in `topic` for a subject search, or a city in `location` for local headlines; for \"news around "
+        "here\" with no city, omit both and it uses the user's home location (or tells you to ask). Returns the "
+        "top ~5 headlines — summarize a couple briefly.");
+    QJsonObject gnSchema;
+    gnSchema["type"] = QString("object");
+    QJsonObject gnProps;
+    gnProps["topic"]    = strProp("A subject/topic to search news for, e.g. \"AI regulation\" or \"Seattle Mariners\" (optional).");
+    gnProps["location"] = strProp("A city for LOCAL headlines, e.g. \"Bellevue\" (optional). Omit both topic and location for the user's home-location local news.");
+    gnSchema["properties"] = gnProps;
+    gn["input_schema"] = gnSchema;
+    tools.append(gn);
 
     return tools;
 }
@@ -456,10 +531,26 @@ void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage*
                                TasksStorage* tasks,
                                const std::function<QVariantMap(const QVariantMap&, qint64)>& applyDial,
                                const std::function<void()>& endConversation,
+                               const std::function<void(const QString&, const QJsonObject&,
+                                                        std::function<void(QJsonValue)>)>& webTools,
                                const QVariantMap& anchorSnapshot,
                                const QString& name, const QJsonObject& input,
                                std::function<void(QJsonValue)> done)
 {
+    // [barista-fork] FAST-PATH web tools (get_weather / get_stock_quote / get_local_news). Forwarded to the
+    // BaristaWebTools seam, which owns the QNAM and resolves `done` asynchronously. Only reached when the model
+    // calls one — and it is only OFFERED these definitions when webSearchEnabled is on (webToolDefinitions() is
+    // appended under RequestOptions.webSearch). An empty seam (module off / not wired) yields an error result.
+    if (name == QLatin1String("get_weather") || name == QLatin1String("get_stock_quote")
+        || name == QLatin1String("get_local_news")) {
+        if (!webTools) {
+            done(QJsonObject{{QStringLiteral("error"), QStringLiteral("web tools unavailable")}});
+            return;
+        }
+        webTools(name, input, std::move(done));
+        return;
+    }
+
     // [barista-fork] end_conversation — the barista dismisses itself on a spoken goodbye. The seam merely
     // emits a main-thread signal (AssistantOrchestrator::requestDismiss → dismissRequested); the overlay
     // collapses the dock AFTER the sign-off finishes speaking, so the sign-off is never cut off. We return
@@ -817,8 +908,44 @@ void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage*
             }
         }
 
-        // Field map for FeedbackStorage: provenance (bean/profile/dial/shotId) from the APP-SIDE snapshot,
-        // taste content from the (validated) model input. anchorSnapshot keys mirror the column keys.
+        // [barista-fork] Resolve the target shot ONCE: a valid model-supplied shot_id (rate a specific past
+        // shot) overrides the app-side anchor. Used for BOTH the shot-record write (below) and the KB row's
+        // shotId provenance, so a past-shot rating attaches its feedback row to the right shot too.
+        const qint64 anchorShotId = anchorSnapshot.value(QStringLiteral("shotId")).toLongLong();
+        const qint64 explicitShotId = input.value(QStringLiteral("shot_id")).toVariant().toLongLong();
+        const qint64 targetShotId = (explicitShotId > 0) ? explicitShotId : anchorShotId;
+
+        // [barista-fork] LAND IT ON THE SHOT RECORD. A spoken rating/taste must fully replace the post-shot tap
+        // buttons, which write enjoyment0to100 + a "Tasted <choice>" marker onto the SHOT (shots.db). We do this
+        // FIRST because it is the AUTHORITATIVE rating write, and it is the ONLY write for the rate-a-past-shot
+        // case below. enjoyment: an explicit overall_rating_0to100 wins; else the tap-button fallback for the
+        // derived taste choice. Routed through requestApplyTasteToShot, which does a LIVE read-modify-write of
+        // espresso_notes on the serialized DB thread (a spoken rating can NEVER clobber notes typed after the
+        // barista opened), so the write is byte-identical to the tap path and PostShotReviewPage round-trips it.
+        //
+        // RATE A SPECIFIED PAST SHOT. By default targetShotId is the app-side anchor (the current session's
+        // latest shot of the current bean). When the user asks to rate/adjust a SPECIFIC past shot ("update my
+        // rating for this morning's shot"), the model finds it via query_shots and passes its shotId as shot_id;
+        // that OVERRIDES the anchor (resolved above as targetShotId), so the rating lands on THAT shot.
+        const QString tasteChoice = baristaTasteChoice(input);
+        if (shotHistory && targetShotId > 0 && (hasRating || !tasteChoice.isEmpty())) {
+            const int shotEnjoyment = hasRating ? rating : baristaEnjoymentForTaste(tasteChoice);
+            shotHistory->requestApplyTasteToShot(targetShotId, shotEnjoyment, shotEnjoyment > 0, tasteChoice);
+        }
+
+        // [barista-fork] PAST-SHOT rating stops here — do NOT write a feedback-KB row. The KB row's bean/dial
+        // provenance comes from the CURRENT-session anchor snapshot, which is the WRONG bean/dial for an earlier
+        // shot; a mis-stamped row would surface under the wrong bean in search_tasting_feedback and corrupt the
+        // cross-session reasoning the KB exists for. The authoritative rating already landed on the shot record
+        // above, which is exactly what a "rate this past shot" ask needs. Confirm to the model and return.
+        if (explicitShotId > 0) {
+            done(QJsonObject{{QStringLiteral("ok"), true}, {QStringLiteral("ratedShotId"), explicitShotId}});
+            return;
+        }
+
+        // Field map for FeedbackStorage: provenance (bean/profile/dial/shotId) from the APP-SIDE snapshot, taste
+        // content from the (validated) model input. anchorSnapshot keys mirror the column keys. This path is the
+        // CURRENT-shot case only (past-shot returned above), so the anchor provenance matches the rated shot.
         QVariantMap fields;
         for (const char* k : {"shotId", "beanBrand", "beanType", "profile", "doseG", "yieldG",
                               "grind", "tempC", "source"}) {
@@ -833,24 +960,6 @@ void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage*
             fields.insert(QStringLiteral("rating0to100"), rating);
         if (!fields.contains(QStringLiteral("source")))
             fields.insert(QStringLiteral("source"), QStringLiteral("volunteered"));
-
-        // [barista-fork] LAND IT ON THE SHOT RECORD TOO. A spoken rating/taste must fully replace the post-shot
-        // tap buttons, which write enjoyment0to100 + a "Tasted <choice>" marker onto the SHOT (shots.db) — not
-        // just the feedback KB. When we have a REAL anchored shot (shotId > 0, stamped app-side; 0 = a
-        // bean-general note with no shot to attach to) AND the user gave a rating and/or a clear taste axis,
-        // mirror that write via requestUpdateShotMetadata. enjoyment: an explicit overall_rating_0to100 wins;
-        // else the tap-button fallback for the derived taste choice. notes: strip any prior "Tasted " marker and
-        // append the new one, preserving the user's own typed notes (never a full-column clobber). This keeps
-        // the barista's shot write byte-identical to the tap path so PostShotReviewPage round-trips the selection.
-        const qint64 anchorShotId = anchorSnapshot.value(QStringLiteral("shotId")).toLongLong();
-        const QString tasteChoice = baristaTasteChoice(input);
-        if (shotHistory && anchorShotId > 0 && (hasRating || !tasteChoice.isEmpty())) {
-            const int shotEnjoyment = hasRating ? rating : baristaEnjoymentForTaste(tasteChoice);
-            // Route through requestApplyTasteToShot: it does a LIVE read-modify-write of espresso_notes on the
-            // serialized DB thread, so a spoken rating can NEVER clobber notes the user typed after the barista
-            // opened (a stale session-snapshot merge could). enjoyment applied only when > 0.
-            shotHistory->requestApplyTasteToShot(anchorShotId, shotEnjoyment, shotEnjoyment > 0, tasteChoice);
-        }
 
         // FeedbackStorage::requestLogFeedback is async (its own worker); fire it, and confirm to the model
         // once the row lands. The connection uses `feedback` as its context object, so it self-disconnects if

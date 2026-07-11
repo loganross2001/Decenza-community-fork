@@ -17,6 +17,8 @@ class AssistantSettings;
 class AssistantOrchestrator;
 class AssistantVoice;
 class FeedbackStorage;   // [barista-fork] verbal-feedback KB
+class BaristaWebTools;   // [barista-fork] fast-path web tools (weather / stock / local news)
+class QNetworkAccessManager;
 
 // [barista-fork] Facade for the proactive barista assistant. The ENTIRE feature hangs off this
 // one object, exposed to QML as the "Barista" context property. `install()` is the single C++
@@ -85,4 +87,9 @@ private:
     // [barista-fork] Periodic Decent maintenance-docs check (network + rate-limit + hash). Owned here;
     // persists its state through m_tasksStorage (assistant.db maintenance_doc_state row).
     MaintenanceDocSync* m_docSync = nullptr;
+    // [barista-fork] Fast-path web tools (get_weather / get_stock_quote / get_local_news). Owns a private QNAM
+    // (child of this). Wired into AIManager via setWebToolsHandler; the module lambda resolves the homeLocation
+    // fallback + builds the news query before calling into it.
+    QNetworkAccessManager* m_webNetwork = nullptr;
+    BaristaWebTools* m_webTools = nullptr;
 };

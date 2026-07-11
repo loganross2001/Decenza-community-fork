@@ -16,6 +16,10 @@ class AssistantSettings : public QObject {
     Q_PROPERTY(QString assistantName READ assistantName WRITE setAssistantName NOTIFY assistantNameChanged)
     Q_PROPERTY(QString voiceName READ voiceName WRITE setVoiceName NOTIFY voiceNameChanged)
     Q_PROPERTY(QString userName READ userName WRITE setUserName NOTIFY userNameChanged)
+    // [barista-fork] Home location (city) — the default the fast-path web tools (get_weather / get_local_news)
+    // fall back to when the user asks about "the weather / news around here" with NO explicit city. Empty by
+    // default; when empty AND no city is given, the tool asks the user which city.
+    Q_PROPERTY(QString homeLocation READ homeLocation WRITE setHomeLocation NOTIFY homeLocationChanged)
     Q_PROPERTY(QString bellSound READ bellSound WRITE setBellSound NOTIFY bellSoundChanged)
     Q_PROPERTY(QString bellCustomPath READ bellCustomPath WRITE setBellCustomPath NOTIFY bellCustomPathChanged)
     Q_PROPERTY(QString ttsProvider READ ttsProvider WRITE setTtsProvider NOTIFY ttsProviderChanged)
@@ -70,6 +74,10 @@ public:
 
     QString userName() const;                     // what the assistant calls the user in greetings
     void setUserName(const QString& name);
+
+    // [barista-fork] Home city for the fast-path weather/news tools' no-city fallback (see Q_PROPERTY above).
+    QString homeLocation() const;
+    void setHomeLocation(const QString& location);
 
     QString bellSound() const;                    // "poof" | "ding" | ... | "off" | "custom"
     void setBellCustomPath(const QString& path);
@@ -162,6 +170,7 @@ signals:
     void assistantNameChanged();
     void voiceNameChanged();
     void userNameChanged();
+    void homeLocationChanged();   // [barista-fork]
     void bellSoundChanged();
     void bellCustomPathChanged();
     void ttsProviderChanged();

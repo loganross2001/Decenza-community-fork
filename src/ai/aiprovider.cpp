@@ -434,6 +434,13 @@ void AnthropicProvider::analyzeConversation(const QString& systemPrompt, const Q
         ws["name"] = QString("web_search");
         ws["max_uses"] = 3;
         tools.append(ws);
+        // [barista-fork] FAST-PATH web tools ship under the SAME webSearch gate (both = "may reach the
+        // internet"). They are CLIENT-side (run via m_toolExecutor, like the client tools) but gated by
+        // webSearch, not clientTools — so a fast keyless get_weather/get_stock_quote/get_local_news is offered
+        // exactly when the umbrella web toggle is on. The executor runs them on tool_use regardless of which
+        // gate added the def (see onAnalysisReply); webOn ⇒ clientTools-on in the QML, so it is always present.
+        for (const QJsonValue& def : m_webToolDefs)
+            tools.append(def);
     }
     // Client-side tools are registered by a feature module (the barista) via setClientTools(); this file has
     // no knowledge of the specific tools — it just appends the registered definitions when the caller opts in.

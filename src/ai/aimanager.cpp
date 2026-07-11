@@ -279,11 +279,16 @@ void AIManager::createProviders()
                     m_pendingToolStructuredNext = applied;
             }
             // [barista-fork] Thread the feedback KB + the app-side anchor/dial snapshot into the executor so
-            // log_tasting_feedback stamps shot_id + bean/profile/dial itself (never from the model).
+            // log_tasting_feedback stamps shot_id + bean/profile/dial itself (never from the model). The
+            // m_webToolsHandler seam runs the fast-path web tools (get_weather/get_stock_quote/get_local_news).
             BaristaTools::executeTool(m_shotHistory, m_feedbackStorage, m_tasksStorage, m_applyDialHandler,
-                                      m_endConversationHandler, m_lastBaristaAnchorSnapshot,
+                                      m_endConversationHandler, m_webToolsHandler, m_lastBaristaAnchorSnapshot,
                                       name, input, std::move(done));
         });
+    // [barista-fork] Register the fast-path web-tool DEFINITIONS separately. They ship under the webSearch gate
+    // (umbrella "may reach the internet" toggle), not the clientTools gate — but flow through the SAME executor
+    // above (dispatched by tool name). See AnthropicProvider::setWebTools / analyzeConversation.
+    anthropic->setWebTools(BaristaTools::webToolDefinitions());
     m_anthropicProvider.reset(anthropic);
 
     // Create Gemini provider

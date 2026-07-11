@@ -167,6 +167,16 @@ public:
         m_toolExecutor = std::move(exec);
     }
 
+    // [barista-fork] FAST-PATH web tool definitions. Registered SEPARATELY from setClientTools and appended to
+    // the request ONLY when RequestOptions.webSearch is set — the SAME gate as Anthropic's web_search (both mean
+    // "the barista may reach the internet"), NOT the clientTools/query_shots gate. There is NO separate executor:
+    // these tools flow through the SAME m_toolExecutor / tool_use loop as the client tools (the executor
+    // dispatches by tool name). That loop runs on any tool_use whenever an executor exists (see onAnalysisReply)
+    // — and the QML only turns webSearch on when clientTools is also on (webOn ⇒ toolsOn), so the executor is
+    // always present when these defs ship. Set once at construction; callers that never enable webSearch
+    // (advisor/coach) never receive them.
+    void setWebTools(const QJsonArray& defs) { m_webToolDefs = defs; }
+
 private slots:
     void onAnalysisReply(QNetworkReply* reply);
     void onTestReply(QNetworkReply* reply);
@@ -187,6 +197,7 @@ private:
     // definitions + executor are supplied by a feature module via setClientTools(); only callers that enable
     // RequestOptions.clientTools send them, so this path is inert for the advisor (it never gets a tool_use stop).
     QJsonArray m_clientToolDefs;   // registered client-tool JSON defs, appended to the request when clientTools is on
+    QJsonArray m_webToolDefs;      // [barista-fork] fast-path web-tool JSON defs, appended when RequestOptions.webSearch is on
     std::function<void(const QString&, const QJsonObject&, std::function<void(QJsonValue)>)> m_toolExecutor;
     int m_toolRounds = 0;
     static constexpr int MAX_TOOL_ROUNDS = 4;

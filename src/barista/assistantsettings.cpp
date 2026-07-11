@@ -107,6 +107,20 @@ void AssistantSettings::setUserName(const QString& name) {
     emit userNameChanged();
 }
 
+// [barista-fork] Home city for the fast-path weather/news tools' no-city fallback. Empty default: with no
+// explicit city AND no home location, the tool returns an error asking the user which city.
+QString AssistantSettings::homeLocation() const {
+    return m_settings.value(QStringLiteral("barista/homeLocation"), QString()).toString();
+}
+
+void AssistantSettings::setHomeLocation(const QString& location) {
+    const QString trimmed = location.trimmed();
+    if (homeLocation() == trimmed)
+        return;
+    m_settings.setValue(QStringLiteral("barista/homeLocation"), trimmed);
+    emit homeLocationChanged();
+}
+
 QString AssistantSettings::bellSound() const {
     return m_settings.value(QStringLiteral("barista/bellSound"), QStringLiteral("poof")).toString();
 }

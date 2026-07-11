@@ -155,6 +155,20 @@ Rectangle {
                         onEditingFinished: { Qt.inputMethod.commit(); if (root._settings) root._settings.userName = text }
                     }
 
+                    // [barista-fork] Home location — the default city the fast weather/news tools use when you
+                    // ask about "the weather / news around here" without naming a place. Empty = the barista asks.
+                    Tr {
+                        key: "barista.settings.homeLocation"; fallback: "Home location"
+                        color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true
+                    }
+                    StyledTextField {
+                        id: homeLocationField
+                        Layout.fillWidth: true
+                        Component.onCompleted: text = root._settings ? root._settings.homeLocation : ""
+                        placeholderText: TranslationManager.translate("barista.settings.homeLocationPlaceholder", "e.g. Bellevue — for local weather & news")
+                        onEditingFinished: { Qt.inputMethod.commit(); if (root._settings) root._settings.homeLocation = text }
+                    }
+
                     // Divider before behaviour controls.
                     Rectangle {
                         Layout.fillWidth: true

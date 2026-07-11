@@ -7,10 +7,37 @@
 #include <QTextStream>
 #include <QSettings>
 #include <QDebug>
+#ifdef Q_OS_ANDROID
+#include <QJniObject>
+#endif
 
 BaristaDiagnostics* BaristaDiagnostics::s_instance = nullptr;
 
 namespace {
+// [barista-fork] On Android, Qt's AppData/Documents locations resolve to the app-scoped
+// Android/data/<pkg>/files folder, which the tablet's file manager CANNOT open. The app's
+// StorageHelper writes to the PUBLIC Documents/Decenza/logs folder instead (reachable via
+// My Files / USB); use it, and media-scan written files so they appear right away.
+QString androidPublicLogsDir() {
+#ifdef Q_OS_ANDROID
+    QJniObject p = QJniObject::callStaticObjectMethod(
+        "io/github/kulitorum/decenza_de1/StorageHelper", "getLogsPath", "()Ljava/lang/String;");
+    if (p.isValid())
+        return p.toString();
+#endif
+    return QString();
+}
+void androidScan(const QString& path) {
+#ifdef Q_OS_ANDROID
+    if (!path.isEmpty())
+        QJniObject::callStaticMethod<void>(
+            "io/github/kulitorum/decenza_de1/StorageHelper", "scanFile",
+            "(Ljava/lang/String;)V", QJniObject::fromString(path).object<jstring>());
+#else
+    Q_UNUSED(path);
+#endif
+}
+
 // Render a detail map as compact "key=value key=value", stable order, no newlines.
 QString renderDetail(const QVariantMap& detail)
 {
@@ -35,15 +62,16 @@ BaristaDiagnostics::BaristaDiagnostics(QObject* parent)
     QSettings settings;
     m_enabled = settings.value(QStringLiteral("barista/diagnosticsEnabled"), true).toBool();
 
-    // Sit our log in the SAME directory as the app's own debug.log (AppDataLocation) — that's the location
-    // the owner has proven they can retrieve. An earlier build wrote to Documents, which the tablet's file UI
-    // can't reach; recoverPriorLogs() below rescues anything left there into here, next to debug.log.
-    QString base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    // Write to the PUBLIC Documents/Decenza/logs folder (via the app's StorageHelper) — the ONE spot the
+    // tablet's file manager can actually open. Qt's AppData/Documents locations resolve to the app-scoped
+    // Android/data/<pkg>/files folder, which the file UI blocks (the recurring "can't reach it" problem).
+    // Fall back to AppData only off-Android / if the JNI call fails.
+    QString base = androidPublicLogsDir();
+    if (base.isEmpty())
+        base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
     if (base.isEmpty())
         base = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
-    if (base.isEmpty())
-        base = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
-    m_dir = base;   // directly beside debug.log — no subdir, maximum findability
+    m_dir = base;
     QDir().mkpath(m_dir);
     m_filePath = m_dir + QStringLiteral("/barista-diagnostics.log");
 
@@ -194,6 +222,8 @@ void BaristaDiagnostics::openFileLocked()
     if (!m_file->open(QIODevice::Append | QIODevice::Text)) {
         delete m_file;
         m_file = nullptr;
+    } else {
+        androidScan(m_filePath);   // register the rolling log so the file manager can see it
     }
 }
 
@@ -246,6 +276,7 @@ QString BaristaDiagnostics::exportSnapshot()
     ts << m_ring.join('\n') << '\n';
     ts.flush();
     out.close();
+    androidScan(outPath);   // make it show up in the file manager / USB right away
     return outPath;
 }
 

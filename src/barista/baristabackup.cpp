@@ -19,6 +19,9 @@
 #include <QPointer>
 #include <QSqlDatabase>
 #include <QUrl>
+#ifdef Q_OS_ANDROID
+#include <QJniObject>
+#endif
 
 namespace {
 constexpr const char* kEnabledKey = "barista/kbBackupEnabled";
@@ -44,6 +47,15 @@ BaristaBackup::BaristaBackup(QObject* parent) : QObject(parent) {
 }
 
 QString BaristaBackup::defaultDir() const {
+    // Prefer the PUBLIC Documents/Decenza Backups folder (via the app's StorageHelper) — reachable in the
+    // tablet's file manager. Qt's AppDataLocation is the app-scoped Android/data/<pkg> folder the file UI
+    // blocks. Fall back to AppData off-Android / if JNI fails.
+#ifdef Q_OS_ANDROID
+    QJniObject p = QJniObject::callStaticObjectMethod(
+        "io/github/kulitorum/decenza_de1/StorageHelper", "getBackupsPath", "()Ljava/lang/String;");
+    if (p.isValid() && !p.toString().isEmpty())
+        return p.toString() + QStringLiteral("/BaristaKnowledgeBackups");
+#endif
     QString base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
     if (base.isEmpty())
         base = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);

@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Effects
 import QtQuick.Layouts
 import Decenza
 
@@ -23,6 +24,10 @@ FocusScope {
     property bool modified: false
     // When modified, format as "Name (modified)" for read-only presets; otherwise "*Name".
     property bool modifiedIsReadOnly: false
+    // Optional per-preset icon: a preset may carry an `icon` url (e.g. the
+    // recipe pills' drink-type icon, add-recipe-wizard-tea). Presets without
+    // one render exactly as before. Colorized to match the pill text.
+    readonly property real pillIconSize: Theme.scaled(20)
 
     // Effective max width - ensures we never exceed parent width even if maxWidth is larger
     readonly property real effectiveMaxWidth: {
@@ -67,7 +72,9 @@ FocusScope {
             var name = pillLayoutName(focusedIndex)
             var modifiedText = (root.modified && focusedIndex === selectedIndex) ? ", " + TranslationManager.translate("presets.unsaved", "unsaved changes") : ""
             var status = focusedIndex === selectedIndex ? ", " + TranslationManager.translate("presets.selected", "selected") : ""
-            AccessibilityManager.announce(name + modifiedText + status)
+            var hint = (presets[focusedIndex] && presets[focusedIndex].stateHint)
+                ? ", " + presets[focusedIndex].stateHint : ""
+            AccessibilityManager.announce(name + modifiedText + status + hint)
         }
     }
 
@@ -153,6 +160,8 @@ FocusScope {
         var totalWidth = 0
         for (var i = 0; i < presets.length; i++) {
             var textWidth = measureTextWidth(pillLayoutName(i)) + (pillSuffixFn ? pillSuffixMaxWidth : 0)
+            if (presets[i] && presets[i].icon)
+                textWidth += pillIconSize + Theme.scaled(6)
             var pillWidth = textWidth + pillPadding
             pillWidths.push(pillWidth)
             totalWidth += pillWidth
@@ -253,10 +262,18 @@ FocusScope {
                         // that stops heating instead of setting a temp/time). Render it
                         // muted so it's visibly distinct from real time/temp presets.
                         property bool isDisabled: modelData && modelData.preset && modelData.preset.disabled === true
+                        // A preset may mark itself dimmed (e.g. a stale recipe whose
+                        // linked bag is finished): rendered faded but fully tappable —
+                        // an indication, never a lock (recipe-bag-lifecycle). An
+                        // optional `stateHint` string carries the reason to screen
+                        // readers (the dimming alone is invisible to them).
+                        property bool isDimmed: modelData && modelData.preset && modelData.preset.dimmed === true
+                        property string stateHint: (modelData && modelData.preset && modelData.preset.stateHint) || ""
 
                         width: pillText.implicitWidth + root.pillPadding
                         height: Theme.scaled(50)
                         radius: Theme.scaled(10)
+                        opacity: isDimmed ? 0.55 : 1.0
 
                         color: isSelected
                             ? (isDisabled ? Theme.textSecondaryColor : Theme.primaryColor)
@@ -294,15 +311,34 @@ FocusScope {
                             radius: parent.radius + Theme.focusMargin
                         }
 
-                        Text {
-                            id: pillText
+                        Row {
                             anchors.centerIn: parent
-                            text: pillDisplayName(modelData.index)
-                            color: pill.isSelected ? Theme.primaryContrastColor : Theme.textColor
-                            font.pixelSize: Theme.scaled(16)
-                            font.bold: true
-                            // Decorative - accessibility handled by AccessibleTapHandler
-                            Accessible.ignored: true
+                            spacing: Theme.scaled(6)
+                            Image {
+                                visible: !!(modelData.preset && modelData.preset.icon)
+                                anchors.verticalCenter: parent.verticalCenter
+                                source: (modelData.preset && modelData.preset.icon) || ""
+                                sourceSize.width: root.pillIconSize
+                                sourceSize.height: root.pillIconSize
+                                fillMode: Image.PreserveAspectFit
+                                Accessible.ignored: true
+                                layer.enabled: true
+                                layer.smooth: true
+                                layer.effect: MultiEffect {
+                                    colorization: 1.0
+                                    colorizationColor: pill.isSelected ? Theme.primaryContrastColor : Theme.textColor
+                                }
+                            }
+                            Text {
+                                id: pillText
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: pillDisplayName(modelData.index)
+                                color: pill.isSelected ? Theme.primaryContrastColor : Theme.textColor
+                                font.pixelSize: Theme.scaled(16)
+                                font.bold: true
+                                // Decorative - accessibility handled by AccessibleTapHandler
+                                Accessible.ignored: true
+                            }
                         }
 
                         // Using TapHandler for better touch responsiveness (avoids Flickable conflicts)
@@ -315,7 +351,8 @@ FocusScope {
                                 var name = pillDisplayName(modelData.index)
                                 var modifiedText = (root.modified && modelData.index === root.selectedIndex) ? ", " + TranslationManager.translate("presets.unsaved", "unsaved changes") : ""
                                 var status = modelData.index === root.selectedIndex ? ", " + TranslationManager.translate("presets.selected", "selected") : ""
-                                return name + modifiedText + status
+                                var hint = pill.stateHint !== "" ? ", " + pill.stateHint : ""
+                                return name + modifiedText + status + hint
                             }
                             accessibleItem: pill
 

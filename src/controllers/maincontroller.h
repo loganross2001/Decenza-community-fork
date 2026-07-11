@@ -19,6 +19,7 @@
 #include "../history/coffeebagstorage.h"
 #include "../history/baristastorage.h"
 #include "../history/equipmentstorage.h"
+#include "../history/recipestorage.h"
 #include "../history/unifiedbeansearchmodel.h"
 #include "../history/shotimporter.h"
 #include "../profile/profileconverter.h"
@@ -67,6 +68,12 @@ class MainController : public QObject {
     Q_PROPERTY(CoffeeBagStorage* bagStorage READ bagStorage CONSTANT)
     Q_PROPERTY(BaristaStorage* baristaStorage READ baristaStorage CONSTANT)
     Q_PROPERTY(EquipmentStorage* equipmentStorage READ equipmentStorage CONSTANT)
+    Q_PROPERTY(RecipeStorage* recipeStorage READ recipeStorage CONSTANT)
+    // The active recipe's full row (empty map = none). Refreshed on
+    // activation, on external edits to the active row, and cleared on
+    // deactivation. QML reads name/steam fields from here; the id itself
+    // lives in Settings.dye.activeRecipeId.
+    Q_PROPERTY(QVariantMap activeRecipe READ activeRecipe NOTIFY activeRecipeChanged)
     Q_PROPERTY(UnifiedBeanSearchModel* beanSearch READ beanSearch CONSTANT)
     Q_PROPERTY(ShotImporter* shotImporter READ shotImporter CONSTANT)
     Q_PROPERTY(ProfileConverter* profileConverter READ profileConverter CONSTANT)
@@ -133,6 +140,8 @@ public:
     CoffeeBagStorage* bagStorage() const { return m_bagStorage; }
     BaristaStorage* baristaStorage() const { return m_baristaStorage; }
     EquipmentStorage* equipmentStorage() const { return m_equipmentStorage; }
+    RecipeStorage* recipeStorage() const { return m_recipeStorage; }
+    QVariantMap activeRecipe() const { return m_activeRecipe; }
     UnifiedBeanSearchModel* beanSearch() const { return m_beanSearch; }
     ShotImporter* shotImporter() const { return m_shotImporter; }
     ProfileConverter* profileConverter() const { return m_profileConverter; }
@@ -156,9 +165,45 @@ public:
     // the nearest 0.5 g). Pass 0 to use the shot's saved dose unchanged.
     Q_INVOKABLE void loadShotWithMetadata(qint64 shotId, double doseOverride = 0);
 
+    // --- Recipes (add-recipes) ---
+    // Activate a recipe: apply its profile, linked bag (whether or not it is
+    // still in inventory — stale recipes activate fully), equipment,
+    // dose/yield/temp, grind routing, and steam block (the single activation
+    // path shared by QML pill taps, MCP recipe_activate, and the web
+    // /activate route). Async; terminal status via recipeActivated().
+    Q_INVOKABLE void activateRecipe(qint64 recipeId);
+    // Leave the recipe (pill deselects). The recipe row itself is unchanged;
+    // live settings stay as they are — the user is free-styling now.
+    Q_INVOKABLE void deactivateRecipe();
+    // Compact-JSON snapshot of the steam spec currently in effect (recipe's
+    // hasMilk when one is active, plus live steam settings + pitcher +
+    // milk weight). Stamped onto every saved shot and used by the composer
+    // to prefill promote-from-shot steam. Public for the shot-save path,
+    // MCP, and web prefill.
+    QString currentSteamSpecJson() const;
+
+    // Compact-JSON snapshot of the hot-water spec currently in effect (recipe's
+    // hasWater when a hot-water recipe is active, plus the selected water
+    // vessel's values). Empty unless a hot-water recipe is active. Stamped onto
+    // every saved shot and used by the composer to prefill promote-from-shot.
+    QString currentHotWaterSpecJson() const;
+
     // Clipboard
     Q_INVOKABLE void copyToClipboard(const QString& text);
     Q_INVOKABLE QString pasteFromClipboard() const;
+
+    // --- Recipes-first layout upgrade offer (recipes-idle-layout-upgrade) ---
+    // Background check for the one-time upgrade dialog: whether accepting
+    // will create a starter recipe (user has zero recipes and at least one
+    // saved shot), plus the drink-type heuristic pre-selection from that
+    // shot's steam snapshot. Emits recipesUpgradeOfferReady() when done.
+    Q_INVOKABLE void checkRecipesUpgradeEligibility();
+    // Accept path: applies the layout transform and, when eligible, creates
+    // and activates a starter recipe from the last shot using `name` (already
+    // translated by the caller) and the user's Espresso/Milk choice. Emits
+    // recipesUpgradeApplied() when finished — see its doc for the three
+    // possible outcomes.
+    Q_INVOKABLE void acceptRecipesFirstUpgrade(const QString& name, bool hasMilk);
 
 public slots:
     void applySteamSettings();
@@ -241,6 +286,24 @@ signals:
 
     // Shot metadata loaded from history (for async loadShotWithMetadata)
     void shotMetadataLoaded(qint64 shotId, bool success);
+
+    // Recipe activation finished (add-recipes). success=false when the
+    // recipe id was not found or storage failed. Terminal status for QML
+    // pill taps, MCP recipe_activate, and the web /activate route.
+    void recipeActivated(qint64 recipeId, bool success);
+    void activeRecipeChanged();
+
+    // Recipes-first layout upgrade offer (recipes-idle-layout-upgrade):
+    // willCreateStarterRecipe/milkPreselected answer checkRecipesUpgradeEligibility().
+    // recipesUpgradeApplied() answers acceptRecipesFirstUpgrade() — the layout
+    // transform has always already applied by the time it fires. Three
+    // outcomes: (recipeName, false) = starter recipe created; ("", false) =
+    // no starter recipe was requested (not eligible); ("", true) = a starter
+    // recipe WAS requested but creation failed — starterRecipeFailed
+    // distinguishes this from the "not requested" case so the UI can surface
+    // the failure instead of showing a silent success toast.
+    void recipesUpgradeOfferReady(bool willCreateStarterRecipe, bool milkPreselected);
+    void recipesUpgradeApplied(const QString& recipeName, bool starterRecipeFailed);
 
     // Auto-wake: emitted when scheduled wake time is reached
     void autoWakeTriggered();
@@ -384,6 +447,44 @@ private:
     CoffeeBagStorage* m_bagStorage = nullptr;
     BaristaStorage* m_baristaStorage = nullptr;
     EquipmentStorage* m_equipmentStorage = nullptr;
+    RecipeStorage* m_recipeStorage = nullptr;
+
+    // --- Recipes (add-recipes) ---
+    // Cached row of the active recipe (empty = none), kept fresh by
+    // activation and by recipesChanged re-reads. Drives grind routing
+    // (pinned vs inherited) and the write-through stamps.
+    QVariantMap m_activeRecipe;
+    // Event-based guard (never a timer): true while activation is applying
+    // the recipe's values, so the deactivate-on-ingredient-swap watchers and
+    // the write-through stamps ignore self-inflicted change signals.
+    bool m_applyingRecipe = false;
+    // Outstanding write-through stamps whose recipeUpdated echo should not
+    // trigger a cache re-read (mirrors SettingsDye::m_pendingSelfWrites).
+    int m_pendingRecipeSelfWrites = 0;
+    // Apply the activation bundle on the main thread (recipeActivationReady).
+    void applyActivatedRecipe(qint64 recipeId, const QVariantMap& recipe,
+                              qint64 linkedBagId, const QVariantMap& linkedBag);
+    // Stamp a tweak onto the active recipe row (no-op when none is active
+    // or activation is applying).
+    void stampActiveRecipe(const QString& field, const QVariant& value);
+    // Recipes-first layout upgrade offer (recipes-idle-layout-upgrade):
+    // cached result of the last checkRecipesUpgradeEligibility() background
+    // pass, consumed by acceptRecipesFirstUpgrade().
+    bool m_recipesUpgradeWillCreate = false;
+    ShotRecord m_recipesUpgradeShotRecord;
+    // Rebuild + stamp the active recipe's steam block from live settings.
+    void stampActiveRecipeSteam();
+    // Rebuild + stamp the active recipe's hot-water block from live settings
+    // (selected water vessel). No-op unless a hot-water recipe is active.
+    void stampActiveRecipeHotWater();
+    // True when the active recipe's steam block declares a milk drink.
+    // sendMachineSettings treats this like keepSteamHeaterOn — the steam
+    // heater takes 5-9 minutes to warm, so a milk recipe holds it on for
+    // as long as it is active and the machine is awake.
+    bool activeRecipeHasMilk() const;
+    // Wire the deactivation watchers + write-through stamps (called once
+    // from the constructor after storages exist).
+    void setupRecipeConnections();
     UnifiedBeanSearchModel* m_beanSearch = nullptr;
     ShotImporter* m_shotImporter = nullptr;
     ProfileConverter* m_profileConverter = nullptr;

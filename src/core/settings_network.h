@@ -37,6 +37,8 @@ class SettingsNetwork : public QObject {
 
     // Layout configuration
     Q_PROPERTY(QString layoutConfiguration READ layoutConfiguration WRITE setLayoutConfiguration NOTIFY layoutConfigurationChanged)
+    // One-time recipes-first layout upgrade offer (recipes-idle-layout-upgrade)
+    Q_PROPERTY(bool recipesUpgradeOffered READ recipesUpgradeOffered WRITE setRecipesUpgradeOffered NOTIFY recipesUpgradeOfferedChanged)
 
     // Discuss Shot URLs
     Q_PROPERTY(int discussShotApp READ discussShotApp WRITE setDiscussShotApp NOTIFY discussShotAppChanged)
@@ -107,12 +109,18 @@ public:
     // Layout configuration (dynamic IdlePage layout)
     QString layoutConfiguration() const;
     void setLayoutConfiguration(const QString& json);
+    bool recipesUpgradeOffered() const;
+    void setRecipesUpgradeOffered(bool offered);
     Q_INVOKABLE QVariantList getZoneItems(const QString& zoneName) const;
     Q_INVOKABLE void moveItem(const QString& itemId, const QString& fromZone, const QString& toZone, int toIndex);
     Q_INVOKABLE void addItem(const QString& type, const QString& zone, int index = -1);
     Q_INVOKABLE void removeItem(const QString& itemId, const QString& zone);
     Q_INVOKABLE void reorderItem(const QString& zoneName, int fromIndex, int toIndex);
     Q_INVOKABLE void resetLayoutToDefault();
+    // One-time upgrade for existing users: transforms the current layout to the
+    // recipes-first arrangement in place (or applies the full new default when
+    // the layout is pristine). See recipes-idle-layout-upgrade.
+    Q_INVOKABLE void applyRecipesFirstUpgrade();
     Q_INVOKABLE bool hasItemType(const QString& type) const;
     Q_INVOKABLE int getZoneYOffset(const QString& zoneName) const;
     Q_INVOKABLE void setZoneYOffset(const QString& zoneName, int offset);
@@ -127,6 +135,14 @@ public:
     Q_INVOKABLE void setZoneItems(const QString& zoneName, const QVariantList& items);
     // Reset a single zone to its default items + options (counterpart to clear).
     Q_INVOKABLE void resetZoneToDefault(const QString& zoneName);
+    // Ensure at least one placed widget can reach Settings (a "settings" item,
+    // or a "custom" item whose action is "navigate:settings"); if none is found
+    // across the standard zones, adds a settings widget to bottomRight. Shared
+    // by the in-app layout editor and the web layout editor so both mutation
+    // paths keep Settings reachable from the home screen. The scan used to
+    // live in QML (SettingsLayoutTab.ensureSettingsAccessible); that function
+    // now just delegates here so there is a single implementation.
+    Q_INVOKABLE void ensureSettingsAccessible();
     // Both setters return false when the write was refused (unstorable value)
     // or no item with itemId exists (e.g. deleted from another device while an
     // editor was open) — callers should surface that instead of assuming success.
@@ -190,6 +206,7 @@ signals:
     void discussShotCustomUrlChanged();
     void claudeRcSessionUrlChanged();
     void layoutConfigurationChanged();
+    void recipesUpgradeOfferedChanged();
 
 private:
     QString defaultLayoutJson() const;

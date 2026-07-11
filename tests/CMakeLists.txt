@@ -99,6 +99,12 @@ add_decenza_test(tst_basketaliases
     tst_basketaliases.cpp
 )
 
+# --- tst_drinktypes: recipe-wizard tea profile type-matching, temp proximity,
+# and per-type default temps (header-only target; add-recipe-wizard-tea) ---
+add_decenza_test(tst_drinktypes
+    tst_drinktypes.cpp
+)
+
 # --- tst_mcptools_shots_helpers: detectorResults envelope reshape (issue #1012) ---
 add_decenza_test(tst_mcptools_shots_helpers
     tst_mcptools_shots_helpers.cpp
@@ -347,6 +353,7 @@ add_decenza_test(tst_aimanager
     ${CMAKE_SOURCE_DIR}/src/history/shothistorystorage_queries.cpp
     ${CMAKE_SOURCE_DIR}/src/history/coffeebagstorage.cpp
     ${CMAKE_SOURCE_DIR}/src/history/equipmentstorage.cpp
+    ${CMAKE_SOURCE_DIR}/src/history/recipestorage.cpp
     ${PROFILE_SOURCES}
     ${CORE_SOURCES}
     ${CODEC_SOURCES}
@@ -355,6 +362,17 @@ add_decenza_test(tst_aimanager
 )
 target_link_libraries(tst_aimanager PRIVATE Qt6::Quick Qt6::Graphs)
 target_include_directories(tst_aimanager PRIVATE ${CMAKE_BINARY_DIR})
+
+# --- tst_aiproviders: per-provider model catalog + setModel guard contract ---
+# Pins availableModels()/setModel()/shortModelName()/modelName() for the
+# user-selectable providers (OpenAI, Anthropic, Gemini): catalog order,
+# constructor default = first entry, and the empty/unknown/valid setModel
+# branches that AIManager drives from Settings.ai.providerModel(). Pure logic,
+# so the target only needs aiprovider.cpp (no network/mocking).
+add_decenza_test(tst_aiproviders
+    tst_aiproviders.cpp
+    ${CMAKE_SOURCE_DIR}/src/ai/aiprovider.cpp
+)
 
 # --- tst_shotcorpus: Qt Test wrapper around shot_eval --validate.
 # Runs the curated corpus under tests/data/shots/ as part of the regular
@@ -483,6 +501,7 @@ set(HISTORY_SOURCES
     ${CMAKE_SOURCE_DIR}/src/barista/feedbackstorage.cpp    # [barista-fork] verbal-feedback KB (baristatools.cpp/aimanager.cpp dep)
     ${CMAKE_SOURCE_DIR}/src/barista/tasksstorage.cpp       # [barista-fork] reminders + maintenance (baristatools.cpp/aimanager.cpp dep)
     ${CMAKE_SOURCE_DIR}/src/history/equipmentstorage.cpp
+    ${CMAKE_SOURCE_DIR}/src/history/recipestorage.cpp
     ${CMAKE_SOURCE_DIR}/src/history/shotprojection.cpp
     ${CMAKE_SOURCE_DIR}/src/history/shotprojection.h
     ${CMAKE_SOURCE_DIR}/src/ai/conductance.cpp
@@ -540,6 +559,27 @@ add_decenza_test(tst_equipment
 )
 target_include_directories(tst_equipment PRIVATE ${CMAKE_BINARY_DIR})
 
+# --- tst_recipestorage: recipe storage statics + lifecycle (add-recipes) —
+# variant-map round-trip, CRUD, inventory MRU/shot-count aggregate,
+# delete-vs-archive guard, clone provenance, bean-link open-bag resolution.
+# CoffeeBagStorage rides along for the bag-resolution cases. ---
+add_decenza_test(tst_recipestorage
+    tst_recipestorage.cpp
+    ${CMAKE_SOURCE_DIR}/src/history/recipestorage.cpp
+    ${CMAKE_SOURCE_DIR}/src/history/coffeebagstorage.cpp
+    ${CMAKE_BINARY_DIR}/version_code.cpp
+)
+target_include_directories(tst_recipestorage PRIVATE ${CMAKE_BINARY_DIR})
+
+# --- tst_recipepromotion: RecipePromotion::fieldsFromShotRecord — the shared
+# promotion field-builder behind recipe_create_from_shot (MCP) and the
+# recipes-idle-layout-upgrade starter-recipe hook. Header-only dependency
+# (beanbase_blob.h's canonicalId is inline), no DB needed. ---
+add_decenza_test(tst_recipepromotion
+    tst_recipepromotion.cpp
+    ${CMAKE_SOURCE_DIR}/src/history/recipepromotion.cpp
+)
+
 # --- tst_dialing_blocks: DB-backed coverage for the four shared
 # block builders that drive both `dialing_get_context` (MCP) and the
 # in-app advisor's user-prompt enrichment (issue #1044). Stands up a
@@ -569,8 +609,12 @@ target_link_libraries(tst_dialing_blocks PRIVATE Qt6::Graphs Qt6::Quick)
 target_include_directories(tst_dialing_blocks PRIVATE ${CMAKE_BINARY_DIR})
 # Built-in profile corpus, for the KB-coverage gate (every shipped profile
 # must resolve to a KB entry — restructure-kb-as-validated-json, task 5.2/6.6).
+# SHOTS_CORPUS_DIR: the tests/data/shots/ regression corpus, for the
+# companion KB-coverage gate over every shot fixture's profile_title
+# (task 5.2 supplement).
 target_compile_definitions(tst_dialing_blocks PRIVATE
-    PROFILES_DIR="${CMAKE_SOURCE_DIR}/resources/profiles")
+    PROFILES_DIR="${CMAKE_SOURCE_DIR}/resources/profiles"
+    SHOTS_CORPUS_DIR="${CMAKE_SOURCE_DIR}/tests/data/shots")
 
 # --- tst_shotrecord_cache: ShotRecord::cachedAnalysis dedup + fallback ---
 add_decenza_test(tst_shotrecord_cache
@@ -786,6 +830,7 @@ add_decenza_test(tst_mcptools_write
     ${CMAKE_SOURCE_DIR}/src/history/shothistorystorage_queries.cpp
     ${CMAKE_SOURCE_DIR}/src/history/coffeebagstorage.cpp
     ${CMAKE_SOURCE_DIR}/src/history/equipmentstorage.cpp
+    ${CMAKE_SOURCE_DIR}/src/history/recipestorage.cpp
     ${CMAKE_SOURCE_DIR}/src/history/shotprojection.cpp
     ${CMAKE_SOURCE_DIR}/src/history/shotprojection.h
     ${CMAKE_SOURCE_DIR}/src/ai/shotanalysis.cpp
@@ -819,6 +864,7 @@ add_decenza_test(tst_mcptools_presets
     ${CMAKE_SOURCE_DIR}/src/history/shothistorystorage_queries.cpp
     ${CMAKE_SOURCE_DIR}/src/history/coffeebagstorage.cpp
     ${CMAKE_SOURCE_DIR}/src/history/equipmentstorage.cpp
+    ${CMAKE_SOURCE_DIR}/src/history/recipestorage.cpp
     ${CMAKE_SOURCE_DIR}/src/history/shotprojection.cpp
     ${CMAKE_SOURCE_DIR}/src/history/shotprojection.h
     ${CMAKE_SOURCE_DIR}/src/ai/shotanalysis.cpp
@@ -850,6 +896,7 @@ add_decenza_test(tst_mcpserver_session
     ${CMAKE_SOURCE_DIR}/src/history/shothistorystorage_queries.cpp
     ${CMAKE_SOURCE_DIR}/src/history/coffeebagstorage.cpp
     ${CMAKE_SOURCE_DIR}/src/history/equipmentstorage.cpp
+    ${CMAKE_SOURCE_DIR}/src/history/recipestorage.cpp
     ${CMAKE_SOURCE_DIR}/src/history/shotprojection.cpp
     ${CMAKE_SOURCE_DIR}/src/history/shotprojection.h
     ${CMAKE_SOURCE_DIR}/src/ai/shotanalysis.cpp
@@ -882,6 +929,7 @@ add_decenza_test(tst_mcpserver_protocol
     ${CMAKE_SOURCE_DIR}/src/history/shothistorystorage_queries.cpp
     ${CMAKE_SOURCE_DIR}/src/history/coffeebagstorage.cpp
     ${CMAKE_SOURCE_DIR}/src/history/equipmentstorage.cpp
+    ${CMAKE_SOURCE_DIR}/src/history/recipestorage.cpp
     ${CMAKE_SOURCE_DIR}/src/history/shotprojection.cpp
     ${CMAKE_SOURCE_DIR}/src/history/shotprojection.h
     ${CMAKE_SOURCE_DIR}/src/ai/shotanalysis.cpp
@@ -939,4 +987,29 @@ add_decenza_test(tst_raceconditionfix
 add_decenza_test(tst_maintenancedocsync
     tst_maintenancedocsync.cpp
     ${CMAKE_SOURCE_DIR}/src/barista/tasksstorage.cpp
+)
+
+# --- tst_kb_schema: build-time KB validator (tools/validate_kb.py) coverage
+# (change: restructure-kb-as-validated-json, task 5.1). Shells out to the
+# same Python interpreter the root CMakeLists.txt's `validate_kb` build gate
+# uses (find_package(Python3) there defines Python3_EXECUTABLE in this
+# subdirectory's scope since add_subdirectory(tests) runs after that block),
+# so this test exercises the exact command CI/local builds run — not a
+# reimplementation. Asserts the real shipped profile_knowledge.json passes,
+# and that a representative set of deliberately-corrupted fixtures (written
+# to a QTemporaryDir at runtime) fail with an error naming the offending
+# entry/key, per the profile-knowledge-base spec's five validator scenarios.
+# No Decenza sources needed — pure QProcess + QJsonDocument plumbing.
+if(NOT Python3_Interpreter_FOUND)
+    message(FATAL_ERROR
+        "Python3 not found — tst_kb_schema requires the same interpreter "
+        "the validate_kb build gate uses. Install Python 3.")
+endif()
+add_decenza_test(tst_kb_schema
+    tst_kb_schema.cpp
+)
+target_compile_definitions(tst_kb_schema PRIVATE
+    VALIDATE_KB_PYTHON3="${Python3_EXECUTABLE}"
+    VALIDATE_KB_SCRIPT="${CMAKE_SOURCE_DIR}/tools/validate_kb.py"
+    VALIDATE_KB_REAL_JSON="${CMAKE_SOURCE_DIR}/resources/ai/profile_knowledge.json"
 )

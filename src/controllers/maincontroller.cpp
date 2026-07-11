@@ -1,5 +1,6 @@
 #include "core/settings_app.h"
 #include "maincontroller.h"
+#include <QUuid>
 #include "shottimingcontroller.h"
 #include "autoflowcalclassifier.h"
 #include "abortedshotclassifier.h"
@@ -23,6 +24,7 @@
 #include "../history/shothistorystorage.h"
 #include "../history/shotimporter.h"
 #include "../history/shotdebuglogger.h"
+#include "../history/recipepromotion.h"
 #include "../network/shotserver.h"
 #include "../network/locationprovider.h"
 #include "../core/crashhandler.h"
@@ -48,6 +50,8 @@
 #include <QJsonObject>
 #include <QSettings>
 #include <QStandardPaths>
+#include <QSqlQuery>
+#include <optional>
 #include <QVariantMap>
 #include <QRandomGenerator>
 #include <algorithm>
@@ -224,6 +228,15 @@ MainController::MainController(QNetworkAccessManager* networkManager,
     m_equipmentStorage = new EquipmentStorage(this);
     m_equipmentStorage->initialize(m_shotHistory->databasePath());
     m_settings->dye()->setEquipmentStorage(m_equipmentStorage);
+
+    // Recipe storage shares the same database (recipes table, migration 25).
+    // Wired BEFORE the clearBrewOverrides connection below on purpose: the
+    // deactivate-on-bag-swap watcher inside must see the swap first, so the
+    // override reset that follows a bag change cannot be stamped onto a
+    // recipe the user is in the act of leaving (add-recipes).
+    m_recipeStorage = new RecipeStorage(this);
+    m_recipeStorage->initialize(m_shotHistory->databasePath());
+    setupRecipeConnections();
 
     // Switching beans resets the brew overrides to the active profile's
     // defaults — a new coffee starts from the profile + bean baseline, not
@@ -443,6 +456,8 @@ MainController::MainController(QNetworkAccessManager* networkManager,
 
     // Set MachineState on ShotServer for home automation API
     m_shotServer->setMachineState(m_machineState);
+    // MainController for the recipes/bags/equipment web surfaces (add-recipes)
+    m_shotServer->setMainController(this);
 
     // Emit remoteSleepRequested when sleep command received via REST API
     connect(m_shotServer, &ShotServer::sleepRequested, this, &MainController::remoteSleepRequested);
@@ -759,6 +774,694 @@ void MainController::applyLoadedShotMetadata(qint64 shotId, const ShotRecord& sh
     }, Qt::QueuedConnection);
 }
 
+// ---------------------------------------------------------------------------
+// Recipes (add-recipes)
+//
+// A recipe is the whole drink: profile + linked bag + equipment + dose/yield/
+// temp + grind routing + steam block. This is the SINGLE activation path —
+// QML pill taps, MCP recipe_activate, and the web /activate route all land
+// here, so activation semantics cannot drift between surfaces.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// The recipe steam block's JSON shape, shared by activation, the shot-save
+// snapshot, the composer prefill, MCP, and the web UI:
+//   { "hasMilk": bool, "milkWeightG": n, "pitcherName": s,
+//     "durationSec": n, "flow": n, "temperatureC": n }
+QJsonObject parseSteamBlock(const QString& json) {
+    if (json.isEmpty())
+        return QJsonObject();
+    return QJsonDocument::fromJson(json.toUtf8()).object();
+}
+
+// The recipe hot-water block's JSON shape, shared by activation, the shot-save
+// snapshot, the composer prefill, MCP, and the web UI. Hot water is opt-in and
+// the selected water vessel carries the values (there is no separate per-recipe
+// amount), so the block is a by-value vessel snapshot plus the on/off flag and
+// a pour-order flag:
+//   { "hasWater": bool, "vesselName": s, "volume": n, "mode": "weight"|"volume",
+//     "flowRate": n, "temperatureC": n, "order": "before"|"after" }
+// order is the drink intent: "before" = water first (a long black), "after" =
+// water last (an Americano, the default). Field names mirror the steam block
+// (name->vesselName, temperature->temperatureC) while keeping the vessel's native
+// volume/mode/flowRate so a snapshot round-trips straight through SettingsBrew's
+// water-vessel preset API. The order is guidance (surfaced in the UI), not a
+// scripted two-stage pour.
+QJsonObject parseHotWaterBlock(const QString& json) {
+    if (json.isEmpty())
+        return QJsonObject();
+    return QJsonDocument::fromJson(json.toUtf8()).object();
+}
+
+QString compactJson(const QJsonObject& o) {
+    return o.isEmpty() ? QString()
+                       : QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact));
+}
+
+} // namespace
+
+void MainController::setupRecipeConnections() {
+    // Activation bundles arrive here from the storage worker.
+    connect(m_recipeStorage, &RecipeStorage::recipeActivationReady, this,
+            &MainController::applyActivatedRecipe);
+
+    // --- Relink lifecycle (recipe-bag-lifecycle): recipes follow bag
+    // inventory events, silently and dup-guarded — roll-on-finish when a
+    // bag leaves inventory, wake-on-restock when a new bag arrives. Pure
+    // event hooks on the storage signals (no polling, no timers); the
+    // courtesy toast lives in main.qml on recipesRelinked.
+    connect(m_bagStorage, &CoffeeBagStorage::bagFinished, this, [this](qint64 bagId) {
+        m_recipeStorage->requestRelinkForFinishedBag(bagId);
+    });
+    connect(m_bagStorage, &CoffeeBagStorage::bagCreated, this,
+            [this](qint64 bagId, const QVariantMap&) {
+        if (bagId > 0)
+            m_recipeStorage->requestRelinkForRestockedBag(bagId);
+    });
+    // A bag RETURNING to inventory (un-finished via MCP/web update) wakes
+    // stale siblings exactly like a new bag — idempotent + dup-guarded.
+    connect(m_bagStorage, &CoffeeBagStorage::bagRestocked, this, [this](qint64 bagId) {
+        m_recipeStorage->requestRelinkForRestockedBag(bagId);
+    });
+    // When an automatic relink moved the ACTIVE recipe, refresh its cache so
+    // grind routing and the deactivate watchers see the new bag link.
+    connect(m_recipeStorage, &RecipeStorage::recipesRelinked, this,
+            [this](const QVariantList& movedRecipeIds, qint64, const QString&) {
+        const qint64 activeId = m_settings->dye()->activeRecipeId();
+        if (activeId <= 0)
+            return;
+        for (const QVariant& moved : movedRecipeIds) {
+            if (moved.toLongLong() == activeId) {
+                m_recipeStorage->requestRecipe(activeId);
+                break;
+            }
+        }
+    });
+
+    // Keep the active-recipe cache fresh after edits (composer, MCP, web,
+    // our own stamps). recipeUpdated fires for every update, success or not.
+    connect(m_recipeStorage, &RecipeStorage::recipeUpdated, this,
+            [this](qint64 recipeId, bool success) {
+        if (recipeId != m_settings->dye()->activeRecipeId())
+            return;
+        // Skip the re-read for our own write-through stamps — the cache
+        // already holds those values (mirrors SettingsDye's bag echo skip).
+        // Decrement even on a FAILED stamp: the counter must track every
+        // stamp we issued, or a failed self-write would leak the count and
+        // silently swallow the next external edit's refresh. (A leaked
+        // count across a recipe switch is separately cleared in
+        // applyActivatedRecipe / deactivateRecipe.)
+        if (m_pendingRecipeSelfWrites > 0) {
+            m_pendingRecipeSelfWrites--;
+            return;
+        }
+        if (success)
+            m_recipeStorage->requestRecipe(recipeId);
+    });
+
+    // Cache refresh + startup restore both land here.
+    connect(m_recipeStorage, &RecipeStorage::recipeReady, this,
+            [this](qint64 recipeId, const QVariantMap& recipe) {
+        if (recipeId != m_settings->dye()->activeRecipeId())
+            return;
+        if (recipe.isEmpty() || recipe.value("archived").toBool()) {
+            // Row vanished or was archived out from under the selection.
+            deactivateRecipe();
+            return;
+        }
+        const qint64 resolvedBagId = m_activeRecipe.value(
+            QStringLiteral("resolvedBagId"), m_settings->dye()->activeBagId()).toLongLong();
+        const bool hadMilk = activeRecipeHasMilk();
+        m_activeRecipe = recipe;
+        m_activeRecipe.insert(QStringLiteral("resolvedBagId"), resolvedBagId);
+        m_settings->dye()->setGrindBagWriteThroughSuspended(
+            !recipe.value("grindPinned").toString().isEmpty());
+        emit activeRecipeChanged();
+        // Re-assert the heater hold when hasMilk changed (composer/MCP edit
+        // of the active recipe) or on the startup restore of a milk recipe —
+        // the 5-9 minute warm-up means the hold must follow the cache.
+        if (activeRecipeHasMilk() != hadMilk || activeRecipeHasMilk())
+            applySteamSettings();
+    });
+
+    // --- Deactivate on ingredient swaps (tweaks refine the recipe; swapping
+    // an ingredient means the user has left it). Each watcher compares the
+    // new value against the recipe's OWN ingredient, so re-selecting the
+    // same thing (or the startup auto-load of the recipe's profile) never
+    // deactivates, and a recipe without that rung doesn't own the choice.
+    connect(m_settings->dye(), &SettingsDye::activeBagIdChanged, this, [this]() {
+        if (m_applyingRecipe || m_activeRecipe.isEmpty())
+            return;
+        const bool hasBeanLink = m_activeRecipe.value("bagId").toLongLong() > 0
+            || !m_activeRecipe.value("beanBaseId").toString().isEmpty()
+            || !m_activeRecipe.value("roasterName").toString().isEmpty()
+            || !m_activeRecipe.value("coffeeName").toString().isEmpty();
+        if (!hasBeanLink)
+            return;
+        if (m_settings->dye()->activeBagId()
+            != m_activeRecipe.value(QStringLiteral("resolvedBagId")).toLongLong())
+            deactivateRecipe();
+    });
+    connect(m_settings->dye(), &SettingsDye::activeEquipmentIdChanged, this, [this]() {
+        if (m_applyingRecipe || m_activeRecipe.isEmpty())
+            return;
+        const qint64 recipeEq = m_activeRecipe.value("equipmentId").toLongLong();
+        if (recipeEq > 0 && m_settings->dye()->activeEquipmentId() != recipeEq)
+            deactivateRecipe();
+    });
+    connect(m_profileManager, &ProfileManager::currentProfileChanged, this, [this]() {
+        if (m_applyingRecipe || m_activeRecipe.isEmpty())
+            return;
+        if (m_profileManager->currentProfile().title()
+            != m_activeRecipe.value("profileTitle").toString())
+            deactivateRecipe();
+    });
+
+    // --- Write-through stamps: tweaks while a recipe is active refine the
+    // recipe (bag-style, no dirty state). All gated inside stampActiveRecipe
+    // on active-recipe presence and the m_applyingRecipe guard.
+    connect(m_settings->dye(), &SettingsDye::dyeBeanWeightChanged, this, [this]() {
+        stampActiveRecipe(QStringLiteral("doseG"), m_settings->dye()->dyeBeanWeight());
+    });
+    connect(m_settings->brew(), &SettingsBrew::brewOverridesChanged, this, [this]() {
+        stampActiveRecipe(QStringLiteral("yieldG"), m_settings->brew()->brewYieldOverride());
+    });
+    connect(m_settings->brew(), &SettingsBrew::temperatureOverrideChanged, this, [this]() {
+        stampActiveRecipe(QStringLiteral("tempOverrideC"), m_settings->brew()->temperatureOverride());
+    });
+    // Grind/rpm route to the PIN only when the recipe pins them; inherited
+    // values reach the bag through SettingsDye's own write-through as always.
+    connect(m_settings->dye(), &SettingsDye::dyeGrinderSettingChanged, this, [this]() {
+        if (!m_activeRecipe.value("grindPinned").toString().isEmpty())
+            stampActiveRecipe(QStringLiteral("grindPinned"), m_settings->dye()->dyeGrinderSetting());
+    });
+    connect(m_settings->dye(), &SettingsDye::dyeGrinderRpmChanged, this, [this]() {
+        if (!m_activeRecipe.value("grindPinned").toString().isEmpty())
+            stampActiveRecipe(QStringLiteral("rpmPinned"), m_settings->dye()->dyeGrinderRpm());
+    });
+    // Steam tweaks (pitcher selection/edits, milk weight) refresh the block.
+    connect(m_settings->brew(), &SettingsBrew::selectedSteamPitcherChanged, this,
+            [this]() { stampActiveRecipeSteam(); });
+    connect(m_settings->brew(), &SettingsBrew::steamPitcherPresetsChanged, this,
+            [this]() { stampActiveRecipeSteam(); });
+    connect(m_settings->brew(), &SettingsBrew::lastSteamMilkGChanged, this,
+            [this]() { stampActiveRecipeSteam(); });
+
+    // Hot-water tweaks (vessel selection/edits) refresh the block the same way.
+    // Only fires for a hot-water recipe: stampActiveRecipeHotWater re-snapshots
+    // the selected vessel, and stampActiveRecipe's equality guard means
+    // re-selecting the same vessel is a no-op (never deactivates).
+    connect(m_settings->brew(), &SettingsBrew::selectedWaterVesselChanged, this,
+            [this]() { stampActiveRecipeHotWater(); });
+    connect(m_settings->brew(), &SettingsBrew::waterVesselPresetsChanged, this,
+            [this]() { stampActiveRecipeHotWater(); });
+
+    // Startup restore: the persisted selection survives a restart (the live
+    // settings already persist on their own — nothing is re-applied; this
+    // only restores the pill highlight, cache, and pinned-grind routing).
+    const int savedRecipeId = m_settings->dye()->activeRecipeId();
+    if (savedRecipeId > 0)
+        m_recipeStorage->requestRecipe(savedRecipeId);
+}
+
+void MainController::activateRecipe(qint64 recipeId) {
+    if (!m_recipeStorage) {
+        emit recipeActivated(recipeId, false);
+        return;
+    }
+    m_recipeStorage->requestRecipeForActivation(recipeId);
+}
+
+void MainController::checkRecipesUpgradeEligibility() {
+    if (!m_shotHistory) {
+        m_recipesUpgradeWillCreate = false;
+        m_recipesUpgradeShotRecord = ShotRecord();
+        emit recipesUpgradeOfferReady(false, false);
+        return;
+    }
+    const QString dbPath = m_shotHistory->databasePath();
+    auto record = std::make_shared<ShotRecord>();
+    auto recipeCount = std::make_shared<qint64>(0);
+    auto shotId = std::make_shared<qint64>(-1);
+    // Tracks whether the recipe count is trustworthy — a failed/unopened
+    // query must never be read as "zero recipes" (that would offer, and on
+    // accept create, a spurious duplicate starter recipe for a user who
+    // already has some).
+    auto recipeCountOk = std::make_shared<bool>(false);
+    QThread* thread = QThread::create([dbPath, record, recipeCount, shotId, recipeCountOk]() {
+        const bool opened = withTempDb(dbPath, "recipes_upgrade_offer", [&](QSqlDatabase& db) {
+            QSqlQuery countQuery(db);
+            *recipeCountOk = countQuery.exec(QStringLiteral("SELECT COUNT(*) FROM recipes"))
+                && countQuery.next();
+            if (*recipeCountOk) {
+                *recipeCount = countQuery.value(0).toLongLong();
+            } else {
+                qWarning() << "checkRecipesUpgradeEligibility: recipe count query failed:"
+                           << countQuery.lastError().text();
+            }
+
+            QSqlQuery latestQuery(db);
+            if (latestQuery.exec(QStringLiteral("SELECT id FROM shots ORDER BY timestamp DESC LIMIT 1"))
+                && latestQuery.next())
+                *shotId = latestQuery.value(0).toLongLong();
+
+            if (*shotId > 0)
+                *record = ShotHistoryStorage::loadShotRecordStatic(db, *shotId);
+        });
+        if (!opened) {
+            *recipeCountOk = false;
+            qWarning() << "checkRecipesUpgradeEligibility: could not open shot history DB";
+        }
+    });
+    connect(thread, &QThread::finished, this, [this, record, recipeCount, shotId, recipeCountOk]() {
+        m_recipesUpgradeWillCreate = RecipePromotion::isEligibleForStarterRecipe(
+            *recipeCountOk, *recipeCount, *shotId, record->summary.id);
+        m_recipesUpgradeShotRecord = m_recipesUpgradeWillCreate ? *record : ShotRecord();
+
+        const bool milkPreselected = m_recipesUpgradeWillCreate
+            && RecipePromotion::milkPreselectedFromSteamJson(m_recipesUpgradeShotRecord.steamJson);
+        emit recipesUpgradeOfferReady(m_recipesUpgradeWillCreate, milkPreselected);
+    });
+    connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+    thread->start();
+}
+
+void MainController::acceptRecipesFirstUpgrade(const QString& name, bool hasMilk) {
+    if (m_settings && m_settings->network()) {
+        m_settings->network()->applyRecipesFirstUpgrade();
+        m_settings->network()->setRecipesUpgradeOffered(true);
+    }
+
+    if (!m_recipesUpgradeWillCreate || !m_recipeStorage) {
+        emit recipesUpgradeApplied(QString(), false);
+        return;
+    }
+
+    QVariantMap fields = RecipePromotion::fieldsFromShotRecord(
+        m_recipesUpgradeShotRecord, name, std::optional<bool>(hasMilk), currentSteamSpecJson());
+    // Correlation token: recipeCreated is a broadcast — a concurrent MCP/web
+    // create (or its failure) must not be mistaken for the starter recipe.
+    const QString token = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    fields.insert(QStringLiteral("requestToken"), token);
+
+    auto conn = std::make_shared<QMetaObject::Connection>();
+    *conn = connect(m_recipeStorage, &RecipeStorage::recipeCreated, this,
+        [this, conn, name, token](qint64 recipeId, const QVariantMap& recipe) {
+            if (recipe.value(QStringLiteral("requestToken")).toString() != token)
+                return;
+            QObject::disconnect(*conn);
+            if (recipeId > 0) {
+                activateRecipe(recipeId);
+                emit recipesUpgradeApplied(name, false);
+            } else {
+                // Requested but failed (RecipeStorage logs the cause) — must
+                // not look like "no starter recipe was requested" to the UI.
+                emit recipesUpgradeApplied(QString(), true);
+            }
+        });
+    m_recipeStorage->requestCreateRecipe(fields);
+}
+
+void MainController::applyActivatedRecipe(qint64 recipeId, const QVariantMap& recipe,
+                                          qint64 linkedBagId, const QVariantMap& linkedBag) {
+    if (recipe.isEmpty()) {
+        qWarning() << "applyActivatedRecipe: recipe" << recipeId << "not found";
+        emit recipeActivated(recipeId, false);
+        return;
+    }
+
+    // Profile — installed by title, stored JSON as fallback (the same rule
+    // as applyLoadedShotMetadata). loadProfile resets brew overrides to the
+    // profile defaults; the recipe's own overrides re-apply below.
+    //
+    // The profile IS the drink — if neither the titled profile is installed
+    // nor a JSON fallback exists (e.g. an MCP/web recipe whose profileTitle
+    // was mistyped, or the profile was later deleted), activation must FAIL,
+    // not silently light up the pill while the machine keeps the previously
+    // loaded profile. Bail before any state changes so the caller can report
+    // the failure honestly.
+    //
+    // Exception (add-recipe-wizard-tea): a PROFILE-LESS recipe — no title,
+    // hot-water block present — is a valid hot-water drink (tea). It skips
+    // every profile-coupled stage below (profile load, dose write, yield/temp
+    // overrides, steam-heater hold) and leaves the loaded espresso profile
+    // untouched: the machine action is the user starting Hot Water.
+    const QString profileTitle = recipe.value("profileTitle").toString();
+    const QString profileJson = recipe.value("profileJson").toString();
+    const bool profileLess = profileTitle.trimmed().isEmpty()
+        && Recipe::hotWaterActive(recipe.value("hotWaterJson").toString());
+    const QString filename = profileLess ? QString()
+                                         : m_profileManager->findProfileByTitle(profileTitle);
+    if (filename.isEmpty() && profileJson.isEmpty() && !profileLess) {
+        qWarning() << "applyActivatedRecipe: no profile data for recipe" << recipeId
+                   << "(title" << profileTitle << "not installed, no JSON) - activation failed";
+        emit recipeActivated(recipeId, false);
+        return;
+    }
+
+    m_applyingRecipe = true;
+    // Clear any leaked self-write count from a prior recipe (a stamp whose
+    // echo arrived after the recipe was deactivated/switched never got a
+    // chance to decrement) so it can't swallow this recipe's first edit.
+    m_pendingRecipeSelfWrites = 0;
+
+    if (!profileLess) {
+        if (!filename.isEmpty()) {
+            m_profileManager->loadProfile(filename);
+        } else {
+            m_profileManager->loadProfileFromJson(profileJson);
+            m_profileManager->persistCurrentProfile();
+        }
+    }
+
+    if (m_settings) {
+        auto* dye = m_settings->dye();
+
+        // Bag: select keep-fields (deterministic — no async applyActiveBag
+        // racing our values below), then apply the bag's OWN bean fields from
+        // the bundle's snapshot. Write-throughs write the bag's values back
+        // into it: no-ops. A bean-less recipe (linkedBagId <= 0) leaves the
+        // current bag untouched — the ladder says it doesn't own that choice.
+        if (linkedBagId > 0) {
+            dye->setActiveBagKeepFields(static_cast<int>(linkedBagId));
+            dye->setDyeBeanBrand(linkedBag.value("roasterName").toString());
+            dye->setDyeBeanType(linkedBag.value("coffeeName").toString());
+            dye->setDyeRoastDate(linkedBag.value("roastDate").toString());
+            dye->setDyeRoastLevel(linkedBag.value("roastLevel").toString());
+            dye->setDyeBeanBaseData(linkedBag.value("beanBaseData").toString());
+            dye->setDyeBeanBaseId(linkedBag.value("beanBaseId").toString());
+        }
+
+        // Equipment: the recipe's own package, else the bag's.
+        const qint64 equipmentId = recipe.value("equipmentId").toLongLong() > 0
+            ? recipe.value("equipmentId").toLongLong()
+            : linkedBag.value("equipmentId").toLongLong();
+        if (equipmentId > 0)
+            dye->setActiveEquipmentId(equipmentId);
+
+        // Grind routing: a pin is the recipe's private dial — grind AND rpm
+        // together (bag write-through suspended so sibling recipes don't
+        // follow it); inherited values come from the bag. Suspension must be
+        // set BEFORE the setters.
+        const QString pin = recipe.value("grindPinned").toString();
+        const qint64 rpmPin = recipe.value("rpmPinned").toLongLong();
+        dye->setGrindBagWriteThroughSuspended(!pin.isEmpty());
+        if (!pin.isEmpty()) {
+            dye->setDyeGrinderSetting(pin);
+            if (rpmPin > 0)
+                dye->setDyeGrinderRpm(static_cast<int>(rpmPin));
+        } else if (linkedBagId > 0) {
+            dye->setDyeGrinderSetting(linkedBag.value("grinderSetting").toString());
+        }
+        if (pin.isEmpty() && linkedBagId > 0 && linkedBag.value("rpm").toLongLong() > 0)
+            dye->setDyeGrinderRpm(static_cast<int>(linkedBag.value("rpm").toLongLong()));
+
+        // Dose — queued so it wins over loadProfile's own deferred
+        // setDyeBeanWeight(recommendedDose) (same trick as shot load).
+        // Profile-less recipes skip it: dyeBeanWeight is espresso-shot
+        // metadata, and a hot-water tea's leaf dose is not a shot dose.
+        const double doseG = recipe.value("doseG").toDouble();
+        if (doseG > 0 && !profileLess) {
+            QPointer<Settings> settings(m_settings);
+            QMetaObject::invokeMethod(this, [settings, doseG]() {
+                if (settings) settings->dye()->setDyeBeanWeight(doseG);
+            }, Qt::QueuedConnection);
+        }
+
+        // Yield / temperature overrides on top of the profile defaults.
+        // Profile-less recipes have no profile to override or re-upload.
+        bool hasOverrides = false;
+        if (!profileLess) {
+            const double yieldG = recipe.value("yieldG").toDouble();
+            if (yieldG > 0) {
+                m_settings->brew()->setBrewYieldOverride(yieldG);
+                hasOverrides = true;
+            }
+            const double tempC = recipe.value("tempOverrideC").toDouble();
+            if (tempC > 0) {
+                m_settings->brew()->setTemperatureOverride(tempC);
+                hasOverrides = true;
+            }
+        }
+        if (hasOverrides)
+            m_profileManager->uploadCurrentProfile();
+
+        // Steam block: pitcher (the pitcher preset IS the steam spec —
+        // duration/flow/temperature live on it), milk weight, heater intent.
+        const QJsonObject steam = parseSteamBlock(recipe.value("steamJson").toString());
+        if (!steam.isEmpty()) {
+            auto* brew = m_settings->brew();
+            const QString pitcherName = steam.value("pitcherName").toString();
+            if (!pitcherName.isEmpty()) {
+                const QVariantList presets = brew->steamPitcherPresets();
+                int index = -1;
+                for (int i = 0; i < presets.size(); ++i) {
+                    if (presets.at(i).toMap().value("name").toString()
+                            .compare(pitcherName, Qt::CaseInsensitive) == 0) {
+                        index = i;
+                        break;
+                    }
+                }
+                if (index < 0) {
+                    // The snapshotted pitcher was deleted — resurrect it from
+                    // the recipe's own values so the drink steams as saved
+                    // (snapshot-not-reference; visible, not silent).
+                    brew->addSteamPitcherPreset(pitcherName,
+                                                steam.value("durationSec").toInt(),
+                                                steam.value("flow").toInt(),
+                                                steam.value("temperatureC").toDouble());
+                    index = static_cast<int>(brew->steamPitcherPresets().size()) - 1;
+                    qDebug() << "applyActivatedRecipe: recreated deleted pitcher" << pitcherName;
+                }
+                brew->setSelectedSteamCup(index);
+            }
+            const double milkG = steam.value("milkWeightG").toDouble();
+            if (milkG > 0)
+                brew->setLastSteamMilkG(milkG);
+        }
+
+        // Cache before the heater derivation below: sendMachineSettings
+        // reads activeRecipeHasMilk() from this cache. Safe — the watchers
+        // are still behind the m_applyingRecipe guard.
+        m_activeRecipe = recipe;
+        m_activeRecipe.insert(QStringLiteral("resolvedBagId"), linkedBagId);
+
+        // Heater intent derives from hasMilk — no new setting. The steam
+        // heater takes 5-9 MINUTES to warm, so a milk recipe HOLDS the
+        // heater on for as long as it is active and the machine is awake:
+        // sendMachineSettings treats an active milk recipe like
+        // keepSteamHeaterOn, so every later settings re-send (wake,
+        // reconnect, edits) keeps it warm. A milk-less recipe returns the
+        // heater to the user's baseline. Never fights an explicit keep-on.
+        // Profile-less (hot-water) recipes never take the hold — hot water
+        // needs no pre-warm, and activeRecipeHasMilk() mirrors this rule so
+        // later sendMachineSettings re-sends don't re-assert it either.
+        if (steam.value("hasMilk").toBool() && !profileLess)
+            startSteamHeating(QStringLiteral("recipe-activated"));
+        else
+            applySteamSettings();
+
+        // Hot-water block (Americano): opt-in, vessel-carried. Re-select the
+        // snapshotted vessel by name so its values become the live hot-water
+        // settings; recreate the preset from the snapshot if it was deleted
+        // (snapshot-not-reference, mirroring the pitcher path above). Unlike
+        // steam there is NO heater hold — hot water needs no multi-minute
+        // pre-warm — so a milk-less hot-water recipe never lit the steam heater
+        // (the branch above already ran applySteamSettings for it).
+        const QJsonObject water = parseHotWaterBlock(recipe.value("hotWaterJson").toString());
+        // Require a vessel: hasWater with no vessel is an incomplete block (the
+        // user toggled it on but never picked one) — applying it would push a
+        // 0-volume hot-water target. Leave the live settings at the user's
+        // baseline instead.
+        if (water.value("hasWater").toBool() && !water.value("vesselName").toString().isEmpty()) {
+            auto* brew = m_settings->brew();
+            const QString vesselName = water.value("vesselName").toString();
+            // Block values are the snapshot (composer). A name-only block (the
+            // web form stores just the name, mirroring the steam pitcher form)
+            // has no positive volume — resolve those from the live vessel below.
+            int volume = water.value("volume").toInt();
+            QString mode = water.value("mode").toString(QStringLiteral("weight"));
+            int flowRate = water.value("flowRate").toInt(40);
+            double tempC = water.value("temperatureC").toDouble(brew->waterTemperature());
+            const bool blockHasValues = volume > 0;
+            if (!vesselName.isEmpty()) {
+                const QVariantList vessels = brew->waterVesselPresets();
+                int index = -1;
+                for (int i = 0; i < vessels.size(); ++i) {
+                    if (vessels.at(i).toMap().value("name").toString()
+                            .compare(vesselName, Qt::CaseInsensitive) == 0) {
+                        index = i;
+                        break;
+                    }
+                }
+                if (index < 0) {
+                    // The snapshotted vessel was deleted — resurrect it from the
+                    // block's own values so the drink pours as saved
+                    // (snapshot-not-reference; visible, not silent).
+                    brew->addWaterVesselPreset(vesselName, volume, mode, flowRate, tempC);
+                    index = static_cast<int>(brew->waterVesselPresets().size()) - 1;
+                    qDebug() << "applyActivatedRecipe: recreated deleted water vessel" << vesselName;
+                } else if (!blockHasValues) {
+                    // Name-only block (web): adopt the live vessel's values.
+                    const QVariantMap p = brew->getWaterVesselPreset(index);
+                    volume = p.value("volume").toInt();
+                    const QString pMode = p.value("mode").toString();
+                    if (!pMode.isEmpty()) mode = pMode;
+                    flowRate = p.value("flowRate").toInt();
+                    tempC = p.value("temperature").toDouble();
+                }
+                brew->setSelectedWaterCup(index);
+            }
+            // Push the vessel's values into the live hot-water settings and send
+            // (the non-UI equivalent of selecting the vessel on the brew screen).
+            brew->setWaterVolume(volume);
+            brew->setWaterVolumeMode(mode);
+            m_settings->hardware()->setHotWaterFlowRate(flowRate);
+            brew->setWaterTemperature(tempC);
+            applyHotWaterSettings();
+        }
+
+        // Selection state last, so the watchers above never see a half-
+        // applied recipe.
+        dye->setActiveRecipeId(static_cast<int>(recipeId));
+    } else {
+        m_activeRecipe = recipe;
+        m_activeRecipe.insert(QStringLiteral("resolvedBagId"), linkedBagId);
+    }
+
+    emit activeRecipeChanged();
+    m_recipeStorage->requestTouchLastUsed(recipeId);
+    m_applyingRecipe = false;
+
+    // Queued like shotMetadataLoaded: lands after the queued dose write, so
+    // a UI navigating on this signal shows the recipe's dose, not the
+    // profile default.
+    QMetaObject::invokeMethod(this, [this, recipeId]() {
+        emit recipeActivated(recipeId, true);
+    }, Qt::QueuedConnection);
+}
+
+void MainController::deactivateRecipe() {
+    const bool hadMilk = activeRecipeHasMilk();
+    // Drop any in-flight self-write count with the recipe it belonged to —
+    // its echo would otherwise land with no active recipe and leak the count.
+    m_pendingRecipeSelfWrites = 0;
+    if (m_settings) {
+        m_settings->dye()->setGrindBagWriteThroughSuspended(false);
+        m_settings->dye()->setActiveRecipeId(-1);
+    }
+    if (!m_activeRecipe.isEmpty()) {
+        m_activeRecipe.clear();
+        emit activeRecipeChanged();
+    }
+    // Leaving a milk recipe releases the heater hold: re-send settings so
+    // the heater returns to the user's baseline (keep-on users stay warm,
+    // eco users go cold).
+    if (hadMilk)
+        applySteamSettings();
+}
+
+bool MainController::activeRecipeHasMilk() const {
+    if (m_activeRecipe.isEmpty())
+        return false;
+    // A profile-less (hot-water tea) recipe never holds the steam heater,
+    // even if an MCP/web author attached a milk block to one — activation
+    // skipped the hold and re-sends must not re-assert it.
+    if (m_activeRecipe.value(QStringLiteral("profileTitle")).toString().trimmed().isEmpty())
+        return false;
+    return parseSteamBlock(m_activeRecipe.value(QStringLiteral("steamJson")).toString())
+        .value(QStringLiteral("hasMilk")).toBool();
+}
+
+void MainController::stampActiveRecipe(const QString& field, const QVariant& value) {
+    if (m_applyingRecipe || m_activeRecipe.isEmpty() || !m_recipeStorage || !m_settings)
+        return;
+    const int recipeId = m_settings->dye()->activeRecipeId();
+    if (recipeId <= 0)
+        return;
+    if (m_activeRecipe.value(field) == value)
+        return;  // echo of our own apply, or no actual change
+    m_activeRecipe.insert(field, value);
+    m_pendingRecipeSelfWrites++;
+    m_recipeStorage->requestUpdateRecipe(recipeId, {{field, value}});
+}
+
+void MainController::stampActiveRecipeSteam() {
+    if (m_applyingRecipe || m_activeRecipe.isEmpty())
+        return;
+    stampActiveRecipe(QStringLiteral("steamJson"), currentSteamSpecJson());
+}
+
+QString MainController::currentSteamSpecJson() const {
+    if (!m_settings)
+        return QString();
+    auto* brew = m_settings->brew();
+    QJsonObject o;
+    // hasMilk is declared intent (a recipe field), not derivable from live
+    // settings — carry it over from the active recipe when one is set.
+    if (!m_activeRecipe.isEmpty()) {
+        const QJsonObject active = parseSteamBlock(m_activeRecipe.value("steamJson").toString());
+        if (active.contains("hasMilk"))
+            o.insert("hasMilk", active.value("hasMilk"));
+    }
+    const QVariantMap pitcher = brew->getSteamPitcherPreset(brew->selectedSteamPitcher());
+    if (!pitcher.isEmpty() && !pitcher.value("disabled").toBool()) {
+        o.insert("pitcherName", pitcher.value("name").toString());
+        o.insert("durationSec", pitcher.value("duration").toInt());
+        o.insert("flow", pitcher.value("flow").toInt());
+        o.insert("temperatureC", pitcher.value("temperature").toDouble());
+    }
+    if (brew->lastSteamMilkG() > 0)
+        o.insert("milkWeightG", brew->lastSteamMilkG());
+    return compactJson(o);
+}
+
+void MainController::stampActiveRecipeHotWater() {
+    if (m_applyingRecipe || m_activeRecipe.isEmpty())
+        return;
+    // Only write through for a recipe that actually uses hot water. Otherwise a
+    // brew-screen vessel change (unrelated to this recipe) would stamp an empty
+    // block over a dormant hasWater:false recipe, erasing its remembered vessel
+    // and pour order. currentHotWaterSpecJson() returns "" when hasWater is
+    // false, so without this guard the equality check would persist that "".
+    if (!parseHotWaterBlock(m_activeRecipe.value(QStringLiteral("hotWaterJson")).toString())
+             .value(QStringLiteral("hasWater")).toBool())
+        return;
+    stampActiveRecipe(QStringLiteral("hotWaterJson"), currentHotWaterSpecJson());
+}
+
+QString MainController::currentHotWaterSpecJson() const {
+    if (!m_settings)
+        return QString();
+    auto* brew = m_settings->brew();
+    QJsonObject o;
+    // hasWater is declared intent (a recipe field), not derivable from live
+    // settings — carry it over from the active recipe when one is set. Without
+    // an active hot-water recipe there is nothing to snapshot.
+    if (m_activeRecipe.isEmpty())
+        return QString();
+    const QJsonObject active = parseHotWaterBlock(m_activeRecipe.value("hotWaterJson").toString());
+    if (!active.value("hasWater").toBool())
+        return QString();
+    o.insert("hasWater", true);
+    // order (before/after) is declared intent, not derivable from live settings
+    // — carry it over from the active recipe's block (default "after").
+    const QString order = active.value("order").toString();
+    o.insert("order", order.isEmpty() ? QStringLiteral("after") : order);
+    // The selected water vessel IS the values — snapshot it by value.
+    const QVariantMap vessel = brew->getWaterVesselPreset(brew->selectedWaterVessel());
+    if (!vessel.isEmpty()) {
+        const QString mode = vessel.value("mode").toString();
+        o.insert("vesselName", vessel.value("name").toString());
+        o.insert("volume", vessel.value("volume").toInt());
+        o.insert("mode", mode.isEmpty() ? QStringLiteral("weight") : mode);
+        o.insert("flowRate", vessel.value("flowRate").toInt());
+        o.insert("temperatureC", vessel.value("temperature").toDouble());
+    }
+    return compactJson(o);
+}
+
 void MainController::copyToClipboard(const QString& text) {
     auto* cb = QGuiApplication::clipboard();
     if (cb) {
@@ -974,7 +1677,12 @@ void MainController::sendMachineSettings(const QString& reason) {
     double steamTemp;
     if (currentPitcherDisabled || m_settings->brew()->steamDisabled()) {
         steamTemp = 0.0;
-    } else if (!m_settings->brew()->keepSteamHeaterOn()) {
+    } else if (!m_settings->brew()->keepSteamHeaterOn() && !activeRecipeHasMilk()) {
+        // The steam heater needs 5-9 MINUTES to come up to temperature, so a
+        // milk recipe must HOLD the heater on for as long as it is active and
+        // the machine is awake (add-recipes) — a one-time warm at activation
+        // would be undone by the next settings re-send for keep-heater-off
+        // users, and warming at steam time would mean a long wait.
         steamTemp = 0.0;
     } else {
         steamTemp = m_settings->brew()->steamTemperature();
@@ -2086,6 +2794,11 @@ void MainController::onShotEnded() {
     metadata.bagId = m_settings->dye()->activeBagId();
     metadata.frozenDate = m_settings->dye()->activeBagFrozenDate();
     metadata.defrostDate = m_settings->dye()->activeBagDefrostDate();
+    // Recipe provenance (add-recipes): the recipe active at shot time and
+    // the steam spec in effect, so promote-from-shot round-trips the drink.
+    metadata.recipeId = m_settings->dye()->activeRecipeId();
+    metadata.steamJson = currentSteamSpecJson();
+    metadata.hotWaterJson = currentHotWaterSpecJson();
 
     // For volume/timer-based profiles (targetWeight=0), use the actual final weight
     // so favorites can restore a meaningful yield target
@@ -2258,6 +2971,11 @@ void MainController::onShotEnded() {
                 stamp.insert(QStringLiteral("lastUsedEpoch"), QDateTime::currentSecsSinceEpoch());
                 m_bagStorage->requestUpdateBag(metadata.bagId, stamp);
             }
+
+            // Pulling a shot with a recipe active bumps its MRU standing
+            // (the idle pills order by last use, add-recipes).
+            if (m_recipeStorage && metadata.recipeId > 0)
+                m_recipeStorage->requestTouchLastUsed(metadata.recipeId);
         }
     } else {
         qWarning() << "[metadata] Could not save shot - history not ready!";
@@ -2333,6 +3051,11 @@ void MainController::uploadPendingShot() {
     metadata.bagId = m_settings->dye()->activeBagId();
     metadata.frozenDate = m_settings->dye()->activeBagFrozenDate();
     metadata.defrostDate = m_settings->dye()->activeBagDefrostDate();
+    // Recipe provenance (add-recipes): the recipe active at shot time and
+    // the steam spec in effect, so promote-from-shot round-trips the drink.
+    metadata.recipeId = m_settings->dye()->activeRecipeId();
+    metadata.steamJson = currentSteamSpecJson();
+    metadata.hotWaterJson = currentHotWaterSpecJson();
 
     // Build notes: user notes + AI recommendation (if any)
     QString notes = m_settings->dye()->dyeShotNotes();
@@ -2490,6 +3213,9 @@ void MainController::generateFakeShotData() {
             metadata.bagId = m_settings->dye()->activeBagId();
             metadata.frozenDate = m_settings->dye()->activeBagFrozenDate();
             metadata.defrostDate = m_settings->dye()->activeBagDefrostDate();
+            metadata.recipeId = m_settings->dye()->activeRecipeId();
+            metadata.steamJson = currentSteamSpecJson();
+            metadata.hotWaterJson = currentHotWaterSpecJson();
 
             // Use current profile's temperature and target weight as overrides
             double temperatureOverride = m_profileManager->currentProfile().espressoTemperature();

@@ -1,0 +1,120 @@
+# recipe-model Specification
+
+## Purpose
+TBD - created by archiving change add-recipes. Update Purpose after archive.
+## Requirements
+### Requirement: Recipe entity
+The system SHALL store recipes in a `recipes` table in the shot-history database, managed by a `RecipeStorage` class following the `CoffeeBagStorage` patterns (async request/ready signal API, background-thread I/O via `withTempDb`). A recipe SHALL have: a name (required), a profile reference by title with embedded profile JSON fallback (required unless the recipe carries a hot-water block with `hasWater` true, in which case the profile MAY be absent), a drink type, an optional bean link, an optional equipment package reference, dose (g), yield target (g), optional temperature override, an optional pinned grind value, a steam block, and an optional hot-water block. Optional structured sub-fields (steam block, hot-water block, pinned grind) SHALL be stored as JSON text columns.
+
+#### Scenario: Minimal recipe is valid
+- **WHEN** a recipe is created with only a name and a profile
+- **THEN** it saves successfully and can be activated, with no bean, equipment, dose, steam, or hot-water fields required
+
+#### Scenario: Profile-less hot-water recipe is valid
+- **WHEN** a recipe is created with a name and a hot-water block but no profile
+- **THEN** it saves successfully and can be activated
+
+#### Scenario: Profile-less recipe without hot water is rejected
+- **WHEN** a save is attempted with no profile and no hot-water block
+- **THEN** validation fails on every surface (wizard, MCP, web)
+
+#### Scenario: Storage runs off the main thread
+- **WHEN** any recipe read or write is requested
+- **THEN** the database work runs on a background thread and results are delivered to the main thread via a queued signal
+
+### Requirement: Steam block with pitcher snapshot
+A recipe's steam block SHALL contain: `hasMilk` (bool), milk weight (g), a pitcher snapshot (name and volume copied by value — never a reference into the global pitcher preset list), and steam temperature, flow, and timeout values.
+
+#### Scenario: Pitcher preset edited after recipe creation
+- **WHEN** the user reorders, edits, or deletes entries in the global steam pitcher presets after a recipe was saved
+- **THEN** the recipe's steam behavior is unchanged, because the pitcher was snapshotted by value
+
+### Requirement: Grind inherit-or-pin
+Grind SHALL remain a bag property by default: a recipe with no pinned grind inherits its linked bag's grind (and rpm) at all times, and the wizard SHALL display the inherited values read-only. A recipe MAY override with a pinned grind value (free-form text, stored opaquely) and an optional pinned rpm — the override covers grind and rpm together and SHALL be freely toggleable off (returning to inherit). A recipe with no linked bag SHALL store its grind/rpm locally on the recipe.
+
+#### Scenario: Re-dial updates sibling recipes
+- **WHEN** the bag's grind is changed (with or without a recipe active)
+- **THEN** every recipe inheriting from that bag reflects the new grind
+
+#### Scenario: Pinned recipe is isolated
+- **WHEN** a recipe has a pinned grind and the bag's grind changes
+- **THEN** the pinned recipe's grind is unchanged
+
+#### Scenario: Sibling bags are independent
+- **WHEN** two recipes inherit grind from two different bags of the same bean and one bag is re-dialed
+- **THEN** only the recipe linked to the re-dialed bag reflects the change
+
+### Requirement: Recipe lifecycle mirrors bags
+A recipe with zero shots SHALL be hard-deletable. A recipe that any shot references SHALL only be archivable: archived recipes disappear from pickers and quick-select but remain readable so shot history provenance never dangles.
+
+#### Scenario: Deleting an unused recipe
+- **WHEN** the user deletes a recipe no shot references
+- **THEN** it is removed permanently
+
+#### Scenario: Archiving a used recipe
+- **WHEN** the user archives a recipe that has shots
+- **THEN** it leaves all pickers and the MRU pills, and its shots still display its name
+
+### Requirement: Shots record recipe provenance and steam snapshot
+The `shots` table SHALL gain a nullable `recipe_id` recording which recipe (if any) was active at shot start, and SHALL record a snapshot of the steam spec and the hot-water spec in effect, so that promoting any shot to a recipe round-trips the whole drink. Existing rows SHALL be unaffected (nullable columns, single forward migration).
+
+#### Scenario: Shot pulled with a recipe active
+- **WHEN** a shot is pulled while a recipe is active
+- **THEN** the shot row stores that recipe's id, the steam spec used, and the hot-water spec used
+
+#### Scenario: Legacy shots
+- **WHEN** shots recorded before this change are read
+- **THEN** they load normally with no recipe provenance and no steam or hot-water snapshot
+
+### Requirement: Hot-water block is an opt-in water-vessel snapshot
+A recipe MAY carry an optional hot-water block describing added hot water (enabling drinks such as an Americano — espresso plus added hot water). Hot water is opt-in: `hasWater` (bool) turns it on, and when on the recipe SHALL reference a selected water vessel. The vessel supplies all values — the block SHALL store a snapshot of that vessel copied **by value** (its name, amount as volume ml or weight g per the vessel's mode, temperature, and flow) rather than a reference into the global water-vessel preset list. There SHALL be no separate per-recipe amount/temperature/flow input distinct from the vessel; the vessel is the single source of those values. The block SHALL also carry an `order` — whether the water is added `before` the espresso (a long black) or `after` it (an Americano) — defaulting to `after`. The steam block and the hot-water block SHALL be independent, so a recipe MAY carry either, both, or neither.
+
+#### Scenario: Enabling hot water requires a vessel
+- **WHEN** the user turns on added hot water for a recipe
+- **THEN** the recipe references a water vessel and the block stores that vessel's amount, temperature, flow, and mode as a by-value snapshot
+
+#### Scenario: Water order distinguishes long black from Americano
+- **WHEN** the user sets the hot-water order to `before` (long black) or `after` (Americano)
+- **THEN** the recipe's hot-water block records that order and returns it unchanged when the recipe is loaded
+
+#### Scenario: Water vessel preset edited after recipe creation
+- **WHEN** the user reorders, edits, or deletes entries in the global water-vessel presets after a recipe was saved
+- **THEN** the recipe's hot-water behavior is unchanged, because the vessel was snapshotted by value
+
+#### Scenario: Steam and hot water coexist on one recipe
+- **WHEN** a recipe carries both a milk steam block and a hot-water block
+- **THEN** both are stored and neither overrides the other
+
+### Requirement: Recipes carry a drink type
+The `recipes` table SHALL gain a `drink_type` TEXT column (values: `espresso`, `filter`, `americano`, `long_black`, `latte`, `tea`, `tea_hotwater`), added by migration with kCols registration, riding transfer/backup import like other recipe columns. The value records user intent and SHALL NOT drive machine behavior — activation reads only the blocks and profile. For rows without a stored value (pre-migration recipes) and for promote-from-shot, the type SHALL be derived from the blocks and profile beverage type (hot-water order "after" → americano, "before" → long black; milk → latte; profile filter/pourover → filter; profile tea_portafilter → tea; hot-water block without profile → tea_hotwater; else espresso), and the derived value SHALL be stored on the next save.
+
+#### Scenario: Legacy recipe derives its type
+- **WHEN** a pre-migration americano recipe (hot-water block, order "after") is opened for edit
+- **THEN** the summary shows drink type Americano, and saving stores `americano`
+
+#### Scenario: Drink type never gates activation
+- **WHEN** a recipe's blocks contradict its stored drink type
+- **THEN** activation applies the blocks exactly as stored
+
+### Requirement: Recipes link a specific bag
+A recipe SHALL link a specific bag via a `bag_id` column (kCols-registered, CREATE TABLE + migration step, riding transfer/backup import with id remapping like `equipment_id`). Bean identity fields (Bean Base canonical id, roaster, coffee) SHALL be retained on the recipe as a display fallback and as the matching key for automatic relinking (see `recipe-bag-lifecycle`). Activation SHALL use the linked bag directly — no most-recently-used resolution. A recipe MAY still have no bag at all (bean-less recipes per the optionality ladder).
+
+#### Scenario: Two open bags of the same bean
+- **WHEN** two recipes link two different open bags of the same bean and each is activated in turn
+- **THEN** each activation selects exactly its own linked bag and inherits that bag's grind
+
+#### Scenario: Bean-less recipe unaffected
+- **WHEN** a recipe with no bag link is activated
+- **THEN** the active bag is unchanged and recipe-local grind applies, exactly as before
+
+### Requirement: Existing recipes migrate to bag links
+A one-time forward migration SHALL populate `bag_id` for existing recipes by resolving each recipe's bean identity to the current open bag (canonical id first, else case-insensitive roaster+coffee, most recently used first — the previous resolver's logic, run once). Recipes whose bean has no open bag SHALL migrate with no bag link and present as stale.
+
+#### Scenario: Migration resolves the open bag
+- **WHEN** the database migrates with a recipe whose bean has one open bag
+- **THEN** the recipe's `bag_id` points at that bag and behavior is unchanged from the user's perspective
+
+#### Scenario: Migration with no open bag
+- **WHEN** the database migrates with a recipe whose bean has no open bag
+- **THEN** the recipe migrates without a bag link and shows the bag-finished state until relinked
+

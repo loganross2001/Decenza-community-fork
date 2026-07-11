@@ -145,6 +145,53 @@ OpenAIProvider::OpenAIProvider(QNetworkAccessManager* networkManager,
     : AIProvider(networkManager, parent)
     , m_apiKey(apiKey)
 {
+    // Default to the recommended model = first catalog entry. Keeps the default
+    // a single source of truth (no parallel DEFAULT_MODEL constant to keep in
+    // sync with the list order). availableModels() dispatches to this class
+    // since the object under construction is an OpenAIProvider.
+    const QList<ModelOption> models = availableModels();
+    if (!models.isEmpty())
+        m_model = models.first().id;
+}
+
+QList<AIProvider::ModelOption> OpenAIProvider::availableModels() const
+{
+    // Order = UI order; first entry is the recommended default. GPT-5.4 mini
+    // leads as the low-cost default for shot analysis; GPT-5.4 is the same-family
+    // mid-tier opt-in (more capable, higher cost). Pricing figures and why the
+    // other tiers (GPT-5.5, GPT-5.4 nano) are omitted live in
+    // docs/CLAUDE_MD/AI_ADVISOR.md so they don't rot in code. Revisit as models land.
+    return {
+        { "gpt-5.4-mini", "GPT-5.4 mini" },
+        { "gpt-5.4", "GPT-5.4" },
+    };
+}
+
+QString OpenAIProvider::modelHint() const
+{
+    return QStringLiteral("GPT-5.4 is more capable. GPT-5.4 mini is cheaper and faster.");
+}
+
+void OpenAIProvider::setModel(const QString& modelId)
+{
+    if (modelId.isEmpty())
+        return;  // unset → keep the current default
+    for (const ModelOption& opt : availableModels()) {
+        if (opt.id == modelId) {
+            m_model = modelId;
+            return;
+        }
+    }
+    qWarning() << "OpenAIProvider::setModel ignoring unknown model id:" << modelId;
+}
+
+QString OpenAIProvider::shortModelName() const
+{
+    for (const ModelOption& opt : availableModels()) {
+        if (opt.id == m_model)
+            return opt.displayName;
+    }
+    return m_model;
 }
 
 void OpenAIProvider::sendRequest(const QJsonObject& requestBody)
@@ -177,7 +224,7 @@ void OpenAIProvider::analyze(const QString& systemPrompt, const QString& userPro
     ++m_reqGen;
 
     QJsonObject requestBody;
-    requestBody["model"] = QString::fromLatin1(MODEL);
+    requestBody["model"] = m_model;
     QJsonArray messages;
     QJsonObject sysMsg;
     sysMsg["role"] = QString("system");
@@ -188,9 +235,132 @@ void OpenAIProvider::analyze(const QString& systemPrompt, const QString& userPro
     userMsg["content"] = userPrompt;
     messages.append(userMsg);
     requestBody["messages"] = messages;
-    requestBody["max_tokens"] = 4096;   // [barista-fork] was 1024 — short replies were truncating mid-sentence
+    // gpt-5-family reasoning models REJECT the legacy max_tokens parameter on
+    // chat/completions ("Unsupported parameter") — max_completion_tokens is
+    // the accepted cap. Live-caught July 2026: stage-1 extraction and the
+    // advisor both 400'd on gpt-5.4/gpt-5.4-mini.
+    requestBody["max_completion_tokens"] = 1024;
+    // GPT-5 family are reasoning models; keep reasoning off so hidden
+    // reasoning tokens don't count against the 1024-token output cap (which would
+    // risk truncating the trailing nextShot JSON block) and to keep latency/cost
+    // low. Dial-in advice needs little chain-of-thought. Mirrors Gemini's
+    // thinking=off. The 5.4 generation REPLACED the value "minimal" with "none"
+    // (live-caught 400: supported = none/low/medium/high). INVARIANT: assumes
+    // every availableModels() entry is a reasoning model that accepts
+    // reasoning_effort "none" — guard/branch here if the catalog ever gains
+    // one that doesn't.
+    requestBody["reasoning_effort"] = "none";
 
     sendRequest(requestBody);
+}
+
+void OpenAIProvider::analyzeUrl(const QString& systemPrompt, const QString& userPrompt)
+{
+    if (!isConfigured()) {
+        emit analysisFailed("OpenAI API key not configured");
+        return;
+    }
+
+    setStatus(Status::Busy);
+    m_retryCount = 0;
+    ++m_reqGen;
+
+    // The web_search tool lives on the Responses API, not chat/completions.
+    // Its open_page action lets the model retrieve the specific URL named in
+    // the user prompt (add-recipe-wizard-tea stage-2 extraction).
+    QJsonObject requestBody;
+    requestBody["model"] = m_model;
+    requestBody["instructions"] = systemPrompt;
+    requestBody["input"] = userPrompt;
+    QJsonObject searchTool;
+    searchTool["type"] = QString("web_search");
+    requestBody["tools"] = QJsonArray{searchTool};
+    // Reasoning "low", not the "none" floor: the gpt-5.4 generation rejects
+    // web_search below "low". max_output_tokens covers reasoning + the JSON answer.
+    QJsonObject reasoning;
+    reasoning["effort"] = QString("low");
+    requestBody["reasoning"] = reasoning;
+    requestBody["max_output_tokens"] = 2048;
+
+    sendResponsesRequest(requestBody);
+}
+
+void OpenAIProvider::sendResponsesRequest(const QJsonObject& requestBody)
+{
+    QUrl url(QString::fromLatin1(RESPONSES_API_URL));
+    QNetworkRequest req;
+    req.setUrl(url);
+    req.setHeader(QNetworkRequest::ContentTypeHeader, QVariant(QString("application/json")));
+    req.setRawHeader("Authorization", ("Bearer " + m_apiKey).toUtf8());
+    req.setTransferTimeout(ANALYSIS_TIMEOUT_MS);
+
+    m_retryFn = [this, requestBody]() { sendResponsesRequest(requestBody); };
+
+    QByteArray body = QJsonDocument(requestBody).toJson();
+    QNetworkReply* reply = m_networkManager->post(req, body);
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        onResponsesReply(reply);
+    });
+}
+
+void OpenAIProvider::onResponsesReply(QNetworkReply* reply)
+{
+    if (tryScheduleRetry(reply)) { reply->deleteLater(); return; }
+    reply->deleteLater();
+    setStatus(Status::Ready);
+
+    if (reply->error() != QNetworkReply::NoError) {
+        QByteArray body = reply->readAll();
+        if (!body.isEmpty()) {
+            QJsonDocument bodyDoc = QJsonDocument::fromJson(body);
+            QString apiError = bodyDoc.object()["error"].toObject()["message"].toString();
+            if (!apiError.isEmpty()) {
+                int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+                qWarning() << "OpenAI Responses API error" << status << "-" << apiError;
+                emit analysisFailed("OpenAI error: " + apiError);
+                return;
+            }
+            qWarning() << "AI request failed"
+                       << reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt()
+                       << "-" << body;
+        }
+        emit analysisFailed(friendlyNetworkError(reply));
+        return;
+    }
+
+    QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
+    QJsonObject root = doc.object();
+
+    if (root.contains("error") && root["error"].isObject()) {
+        QString errorMsg = root["error"].toObject()["message"].toString();
+        if (!errorMsg.isEmpty()) {
+            emit analysisFailed("OpenAI error: " + errorMsg);
+            return;
+        }
+    }
+
+    // The Responses output array interleaves reasoning/web_search_call items
+    // with message items; the answer is the message items' output_text parts.
+    QString text;
+    const QJsonArray output = root["output"].toArray();
+    for (const QJsonValue& itemVal : output) {
+        const QJsonObject item = itemVal.toObject();
+        if (item["type"].toString() != QLatin1String("message"))
+            continue;
+        const QJsonArray content = item["content"].toArray();
+        for (const QJsonValue& partVal : content) {
+            const QJsonObject part = partVal.toObject();
+            if (part["type"].toString() == QLatin1String("output_text"))
+                text += part["text"].toString();
+        }
+    }
+    if (text.isEmpty()) {
+        qWarning() << "OpenAI Responses: no output_text (status"
+                   << root["status"].toString() << ")";
+        emit analysisFailed("OpenAI returned empty response content");
+        return;
+    }
+    emit analysisComplete(text);
 }
 
 void OpenAIProvider::analyzeConversation(const QString& systemPrompt, const QJsonArray& messages)
@@ -205,9 +375,14 @@ void OpenAIProvider::analyzeConversation(const QString& systemPrompt, const QJso
     ++m_reqGen;
 
     QJsonObject requestBody;
-    requestBody["model"] = QString::fromLatin1(MODEL);
+    requestBody["model"] = m_model;
     requestBody["messages"] = buildOpenAIMessages(systemPrompt, messages);
-    requestBody["max_tokens"] = 4096;   // [barista-fork] was 1024 — short replies were truncating mid-sentence
+    // [barista-fork] Voice path: GPT-5 needs max_completion_tokens (not the legacy
+    // max_tokens — see analyze()), but keep the barista's larger 4096 cap so spoken
+    // replies aren't truncated mid-sentence. reasoning_effort=none keeps hidden
+    // reasoning tokens from eating that cap.
+    requestBody["max_completion_tokens"] = 4096;
+    requestBody["reasoning_effort"] = "none";  // see analyze(): 5.4 generation dropped "minimal"
 
     sendRequest(requestBody);
 }
@@ -344,6 +519,51 @@ AnthropicProvider::AnthropicProvider(QNetworkAccessManager* networkManager,
     : AIProvider(networkManager, parent)
     , m_apiKey(apiKey)
 {
+    // Default to the recommended model = first catalog entry. Keeps the default
+    // a single source of truth (no parallel DEFAULT_MODEL constant to keep in
+    // sync with the list order). availableModels() dispatches to this class
+    // since the object under construction is an AnthropicProvider.
+    const QList<ModelOption> models = availableModels();
+    if (!models.isEmpty())
+        m_model = models.first().id;
+}
+
+QList<AIProvider::ModelOption> AnthropicProvider::availableModels() const
+{
+    // Order = UI order; first entry is the recommended default. Sonnet 4.6 leads
+    // as the established default so upgrading users keep their current behavior;
+    // Sonnet 5 is the opt-in "more capable" choice. Revisit as new models land.
+    return {
+        { "claude-sonnet-4-6", "Sonnet 4.6" },
+        { "claude-sonnet-5", "Sonnet 5" },
+    };
+}
+
+QString AnthropicProvider::modelHint() const
+{
+    return QStringLiteral("Sonnet 5 is the most capable. Sonnet 4.6 is the established default.");
+}
+
+void AnthropicProvider::setModel(const QString& modelId)
+{
+    if (modelId.isEmpty())
+        return;  // unset → keep the current default
+    for (const ModelOption& opt : availableModels()) {
+        if (opt.id == modelId) {
+            m_model = modelId;
+            return;
+        }
+    }
+    qWarning() << "AnthropicProvider::setModel ignoring unknown model id:" << modelId;
+}
+
+QString AnthropicProvider::shortModelName() const
+{
+    for (const ModelOption& opt : availableModels()) {
+        if (opt.id == m_model)
+            return opt.displayName;
+    }
+    return m_model;
 }
 
 void AnthropicProvider::sendRequest(const QJsonObject& requestBody)
@@ -385,8 +605,8 @@ void AnthropicProvider::analyze(const QString& systemPrompt, const QString& user
     ++m_reqGen;
 
     QJsonObject requestBody;
-    requestBody["model"] = QString::fromLatin1(MODEL);
-    requestBody["max_tokens"] = 4096;   // [barista-fork] was 1024 — short replies were truncating mid-sentence
+    requestBody["model"] = m_model;
+    requestBody["max_tokens"] = 1024;   // advisor dial-in — short structured reply
     requestBody["system"] = buildCachedSystemPrompt(systemPrompt);
     QJsonArray messages;
     QJsonObject userMsg;
@@ -394,6 +614,41 @@ void AnthropicProvider::analyze(const QString& systemPrompt, const QString& user
     userMsg["content"] = userPrompt;
     messages.append(userMsg);
     requestBody["messages"] = messages;
+
+    sendRequest(requestBody);
+}
+
+void AnthropicProvider::analyzeUrl(const QString& systemPrompt, const QString& userPrompt)
+{
+    if (!isConfigured()) {
+        emit analysisFailed("Anthropic API key not configured");
+        return;
+    }
+
+    setStatus(Status::Busy);
+    m_retryCount = 0;
+    ++m_reqGen;
+
+    QJsonObject requestBody;
+    requestBody["model"] = m_model;
+    requestBody["max_tokens"] = 1024;
+    requestBody["system"] = buildCachedSystemPrompt(systemPrompt);
+    QJsonArray messages;
+    QJsonObject userMsg;
+    userMsg["role"] = QString("user");
+    userMsg["content"] = userPrompt;
+    messages.append(userMsg);
+    requestBody["messages"] = messages;
+    // The web_fetch server tool (add-recipe-wizard-tea stage-2 extraction):
+    // the API fetches the URL named in the user prompt during the request.
+    // max_uses 2 allows one retry; max_content_tokens bounds the token cost
+    // of a huge page (fetched content is billed as input tokens).
+    QJsonObject fetchTool;
+    fetchTool["type"] = QString("web_fetch_20250910");
+    fetchTool["name"] = QString("web_fetch");
+    fetchTool["max_uses"] = 2;
+    fetchTool["max_content_tokens"] = 20000;
+    requestBody["tools"] = QJsonArray{fetchTool};
 
     sendRequest(requestBody);
 }
@@ -419,8 +674,10 @@ void AnthropicProvider::analyzeConversation(const QString& systemPrompt, const Q
     ++m_reqGen;
 
     QJsonObject requestBody;
-    requestBody["model"] = QString::fromLatin1(MODEL);
-    requestBody["max_tokens"] = 4096;   // [barista-fork] was 1024 — short replies were truncating mid-sentence
+    requestBody["model"] = m_model;
+    // [barista-fork] Voice path keeps the larger 4096 cap so spoken replies don't
+    // truncate mid-sentence (advisor dial-in above stays at 1024).
+    requestBody["max_tokens"] = 4096;
     requestBody["system"] = buildCachedSystemPrompt(systemPrompt);
     requestBody["messages"] = messagesWithCachedFirstUser(messages);
     // [barista-fork] Tools. web_search runs on Anthropic's side (resume on "pause_turn"); the client-side
@@ -700,7 +957,7 @@ void AnthropicProvider::testConnection()
 
     // Send a minimal request to test the API key
     QJsonObject requestBody;
-    requestBody["model"] = QString::fromLatin1(MODEL);
+    requestBody["model"] = m_model;
     requestBody["max_tokens"] = 10;
     QJsonArray messages;
     QJsonObject userMsg;
@@ -810,6 +1067,11 @@ QList<AIProvider::ModelOption> GeminiProvider::availableModels() const
     };
 }
 
+QString GeminiProvider::modelHint() const
+{
+    return QStringLiteral("3.5 Flash is the most capable. 2.5 Flash is more available (fewer busy errors).");
+}
+
 void GeminiProvider::setModel(const QString& modelId)
 {
     if (modelId.isEmpty())
@@ -916,6 +1178,47 @@ void GeminiProvider::analyze(const QString& systemPrompt, const QString& userPro
     sendRequest(requestBody);
 }
 
+void GeminiProvider::analyzeUrl(const QString& systemPrompt, const QString& userPrompt)
+{
+    if (!isConfigured()) {
+        emit analysisFailed("Gemini API key not configured");
+        return;
+    }
+
+    setStatus(Status::Busy);
+    m_retryCount = 0;
+    ++m_reqGen;
+
+    // Same body as analyze() plus the url_context server tool: the API
+    // fetches the URL named in the user prompt during generateContent
+    // (add-recipe-wizard-tea stage-2 extraction).
+    QJsonObject requestBody;
+    QJsonObject sysInstruction;
+    QJsonArray sysParts;
+    QJsonObject sysTextPart;
+    sysTextPart["text"] = systemPrompt;
+    sysParts.append(sysTextPart);
+    sysInstruction["parts"] = sysParts;
+    requestBody["system_instruction"] = sysInstruction;
+
+    QJsonArray contents;
+    QJsonObject userContent;
+    userContent["role"] = QString("user");
+    QJsonArray userParts;
+    QJsonObject userTextPart;
+    userTextPart["text"] = userPrompt;
+    userParts.append(userTextPart);
+    userContent["parts"] = userParts;
+    contents.append(userContent);
+    requestBody["contents"] = contents;
+
+    QJsonObject urlContextTool;
+    urlContextTool["url_context"] = QJsonObject{};
+    requestBody["tools"] = QJsonArray{urlContextTool};
+
+    sendRequest(requestBody);
+}
+
 void GeminiProvider::analyzeConversation(const QString& systemPrompt, const QJsonArray& messages)
 {
     if (!isConfigured()) {
@@ -1013,7 +1316,16 @@ void GeminiProvider::onAnalysisReply(QNetworkReply* reply)
         return;
     }
 
-    QString text = parts[0].toObject()["text"].toString();
+    // Join every non-thought text part: plain replies have exactly one, but
+    // a url_context response (analyzeUrl) may split the answer across parts;
+    // thought parts are hidden reasoning and must not leak into the answer.
+    QString text;
+    for (const QJsonValue& partVal : parts) {
+        const QJsonObject part = partVal.toObject();
+        if (part["thought"].toBool())
+            continue;
+        text += part["text"].toString();
+    }
     if (text.isEmpty()) {
         emit analysisFailed("Gemini returned empty response content");
         return;

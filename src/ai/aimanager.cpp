@@ -244,6 +244,7 @@ void AIManager::createProviders()
     // Create OpenAI provider
     QString openaiKey = m_settings->ai()->openaiApiKey();
     auto* openai = new OpenAIProvider(m_networkManager, openaiKey, this);
+    openai->setModel(m_settings->ai()->providerModel("openai"));  // empty → keeps default
     connect(openai, &AIProvider::analysisComplete, this, &AIManager::onAnalysisComplete);
     connect(openai, &AIProvider::analysisFailed, this, &AIManager::onAnalysisFailed);
     connect(openai, &AIProvider::testResult, this, &AIManager::onTestResult);
@@ -252,6 +253,7 @@ void AIManager::createProviders()
     // Create Anthropic provider
     QString anthropicKey = m_settings->ai()->anthropicApiKey();
     auto* anthropic = new AnthropicProvider(m_networkManager, anthropicKey, this);
+    anthropic->setModel(m_settings->ai()->providerModel("anthropic"));  // empty → keeps default
     connect(anthropic, &AIProvider::analysisComplete, this, &AIManager::onAnalysisComplete);
     connect(anthropic, &AIProvider::analysisFailed, this, &AIManager::onAnalysisFailed);
     connect(anthropic, &AIProvider::testResult, this, &AIManager::onTestResult);
@@ -346,14 +348,22 @@ QVariantList AIManager::availableModels(const QString& providerId) const
     if (!provider) return out;
     const QList<AIProvider::ModelOption> models = provider->availableModels();
     for (const AIProvider::ModelOption& opt : models) {
-        // Keys are a contract with SettingsAITab.qml: "name" is the combo's
-        // textRole, "id" is read back on selection. Keep both in sync with the QML.
+        // Keys are a contract with SettingsAITab.qml and the ShotServer
+        // settings page JS (served as providerModelCatalogs): "name" is the
+        // display label, "id" is read back on selection. Keep both in sync
+        // with those consumers.
         QVariantMap entry;
         entry["id"] = opt.id;
         entry["name"] = opt.displayName;
         out.append(entry);
     }
     return out;
+}
+
+QString AIManager::modelHint(const QString& providerId) const
+{
+    AIProvider* provider = providerById(providerId);
+    return provider ? provider->modelHint() : QString();
 }
 
 void AIManager::setSelectedProvider(const QString& provider)
@@ -1730,7 +1740,8 @@ void AIManager::analyze(const QString& systemPrompt, const QString& userPrompt)
     provider->analyze(systemPrompt, userPrompt);
 }
 
-void AIManager::extractCoffeeBagDetails(const QString& requestToken, const QString& pageText)
+void AIManager::extractCoffeeBagDetails(const QString& requestToken, const QString& pageText,
+                                        const QString& kind)
 {
     if (m_analyzing) {
         emit bagDetailsExtractionFailed(requestToken, QStringLiteral("busy"));
@@ -1745,7 +1756,7 @@ void AIManager::extractCoffeeBagDetails(const QString& requestToken, const QStri
     // Extraction contract mirrors Visualizer's "Get info": page text in, a
     // flat JSON object of only-what-the-page-states out. Keys = the blob
     // vocabulary so the caller can merge without remapping.
-    static const QString kSystemPrompt = QStringLiteral(
+    static const QString kCoffeePrompt = QStringLiteral(
         "You extract coffee bag details from the plain text of a roaster's product page. "
         "Reply with ONLY a JSON object - no markdown, no commentary. Use exactly these keys, "
         "omitting any the page does not clearly state: origin (country), region, farm, "
@@ -1755,6 +1766,28 @@ void AIManager::extractCoffeeBagDetails(const QString& requestToken, const QStri
         "wording), tastingNotes (comma-separated flavor descriptors from the page). "
         "Never guess or infer a value the text does not state. For blends without a stated "
         "origin, leave origin out and describe the blend in variety if stated.");
+    // Tea vocabulary (add-recipe-wizard-tea): descriptive keys renamed for
+    // tea (garden/cultivar/flush) plus STRUCTURED brewing numbers the recipe
+    // wizard seeds from — brewTempC must be Celsius (the model converts °F
+    // and boiling-water wordings), leafGramsPer100Ml must be normalized from
+    // per-cup dosing (1 cup = 237 ml unless the page defines one).
+    static const QString kTeaPrompt = QStringLiteral(
+        "You extract loose-leaf tea details from the plain text of a tea vendor's product page. "
+        "Reply with ONLY a JSON object - no markdown, no commentary. Use exactly these keys, "
+        "omitting any the page does not clearly state: teaType (one of: black, green, oolong, "
+        "white, herbal, pu-erh - map the page's wording; a tisane or infusion is herbal), "
+        "origin (country), region, garden (the estate or garden name), cultivar, flush (the "
+        "harvest or flush, e.g. \"First flush 2026\", \"Spring 2026\"), tastingNotes "
+        "(comma-separated flavor descriptors from the page), brewTempC (NUMBER, Celsius - "
+        "convert Fahrenheit, e.g. 212 -> 100; \"boiling\" or \"freshly-boiled\" -> 100), "
+        "leafGramsPer100Ml (NUMBER - normalize the stated leaf dose to grams per 100 ml of "
+        "water; treat one cup as 237 ml unless the page defines a cup), steepTime (display "
+        "string, e.g. \"3-5 minutes\"). "
+        "Never guess or infer a value the text does not state - in particular, never invent "
+        "brewing numbers the page does not give.");
+
+    const QString& systemPrompt =
+        (kind == QLatin1String("tea")) ? kTeaPrompt : kCoffeePrompt;
 
     m_analyzing = true;
     m_isConversationRequest = false;
@@ -1762,11 +1795,87 @@ void AIManager::extractCoffeeBagDetails(const QString& requestToken, const QStri
     m_bagExtractionToken = requestToken;
     emit analyzingChanged();
 
-    m_lastSystemPrompt = kSystemPrompt;
+    m_lastSystemPrompt = systemPrompt;
     m_lastUserPrompt = QStringLiteral("[Bag page text from %1, %2 chars]")
                            .arg(requestToken).arg(pageText.size());
-    logPrompt(selectedProvider(), kSystemPrompt, m_lastUserPrompt);
-    provider->analyze(kSystemPrompt, pageText);
+    logPrompt(selectedProvider(), systemPrompt, m_lastUserPrompt);
+    provider->analyze(systemPrompt, pageText);
+}
+
+bool AIManager::supportsUrlExtraction() const
+{
+    AIProvider* provider = const_cast<AIManager*>(this)->currentProvider();
+    return provider && provider->supportsUrlAnalysis();
+}
+
+void AIManager::extractCoffeeBagDetailsFromUrl(const QString& requestToken, const QString& url,
+                                               const QString& kind)
+{
+    // Stage-2 extraction (add-recipe-wizard-tea): the local page fetch got
+    // nothing (JS-rendered shop), so the PROVIDER fetches the URL itself via
+    // its server-side web-fetch tool. Same JSON contract as stage 1 plus one
+    // extra key: imageUrl (the main product photo) — SPA pages have no
+    // og:image for the normal photo pipeline to find.
+    if (m_analyzing) {
+        emit bagDetailsExtractionFailed(requestToken, QStringLiteral("busy"));
+        return;
+    }
+    AIProvider* provider = currentProvider();
+    if (!provider || !isConfigured()) {
+        emit bagDetailsExtractionFailed(requestToken, QStringLiteral("notConfigured"));
+        return;
+    }
+    if (!provider->supportsUrlAnalysis()) {
+        emit bagDetailsExtractionFailed(requestToken, QStringLiteral("urlFetchUnsupported"));
+        return;
+    }
+
+    // Re-run extractCoffeeBagDetails' prompt selection with the stage-2
+    // addendum. The prompts are function-local statics there; keep this
+    // addendum in sync with the keys documented on parseBagExtraction.
+    const QString base = (kind == QLatin1String("tea"))
+        ? QStringLiteral(
+            "You extract loose-leaf tea details from a tea vendor's product page. "
+            "Reply with ONLY a JSON object - no markdown, no commentary. Use exactly these keys, "
+            "omitting any the page does not clearly state: teaType (one of: black, green, oolong, "
+            "white, herbal, pu-erh - map the page's wording; a tisane or infusion is herbal), "
+            "origin (country), region, garden (the estate or garden name), cultivar, flush (the "
+            "harvest or flush, e.g. \"First flush 2026\", \"Spring 2026\"), tastingNotes "
+            "(comma-separated flavor descriptors from the page), brewTempC (NUMBER, Celsius - "
+            "convert Fahrenheit, e.g. 212 -> 100; \"boiling\" or \"freshly-boiled\" -> 100), "
+            "leafGramsPer100Ml (NUMBER - normalize the stated leaf dose to grams per 100 ml of "
+            "water; treat one cup as 237 ml unless the page defines a cup), steepTime (display "
+            "string, e.g. \"3-5 minutes\"). "
+            "Never guess or infer a value the text does not state - in particular, never invent "
+            "brewing numbers the page does not give.")
+        : QStringLiteral(
+            "You extract coffee bag details from a roaster's product page. "
+            "Reply with ONLY a JSON object - no markdown, no commentary. Use exactly these keys, "
+            "omitting any the page does not clearly state: origin (country), region, farm, "
+            "producer (person or company that grew it), variety, elevation (display string, e.g. "
+            "\"1900-2100 m\"), process (e.g. \"Washed\", \"Natural\"), harvest (e.g. \"Late 2025\"), "
+            "roastLevel (one of: Light, Medium-Light, Medium, Medium-Dark, Dark - map the page's "
+            "wording), tastingNotes (comma-separated flavor descriptors from the page). "
+            "Never guess or infer a value the text does not state. For blends without a stated "
+            "origin, leave origin out and describe the blend in variety if stated.");
+    const QString systemPrompt = base + QStringLiteral(
+        " Retrieve the product page URL in the user message yourself with your web tool first. "
+        "Additionally include the key imageUrl (the MAIN product photo's absolute URL from the "
+        "fetched page, when one is shown - an image file URL, never the page URL itself, and "
+        "never a logo or banner).");
+    const QString userPrompt = QStringLiteral(
+        "Fetch this product page and extract the details: %1").arg(url);
+
+    m_analyzing = true;
+    m_isConversationRequest = false;
+    m_isBagExtractionRequest = true;
+    m_bagExtractionToken = requestToken;
+    emit analyzingChanged();
+
+    m_lastSystemPrompt = systemPrompt;
+    m_lastUserPrompt = userPrompt;
+    logPrompt(selectedProvider(), systemPrompt, userPrompt);
+    provider->analyzeUrl(systemPrompt, userPrompt);
 }
 
 // static
@@ -1790,7 +1899,16 @@ QVariantMap AIManager::parseBagExtraction(const QString& response, bool* ok)
         QStringLiteral("origin"), QStringLiteral("region"), QStringLiteral("farm"),
         QStringLiteral("producer"), QStringLiteral("variety"), QStringLiteral("elevation"),
         QStringLiteral("process"), QStringLiteral("harvest"), QStringLiteral("roastLevel"),
-        QStringLiteral("tastingNotes")};
+        QStringLiteral("tastingNotes"),
+        // Tea vocabulary (add-recipe-wizard-tea). Union whitelist: the prompt
+        // selected by bag kind controls which keys come back; this filter just
+        // has to let both vocabularies through.
+        QStringLiteral("teaType"), QStringLiteral("garden"), QStringLiteral("cultivar"),
+        QStringLiteral("flush"), QStringLiteral("brewTempC"),
+        QStringLiteral("leafGramsPer100Ml"), QStringLiteral("steepTime"),
+        // Stage-2 only (extractCoffeeBagDetailsFromUrl): the product photo's
+        // URL, consumed by the image cache — never a form field.
+        QStringLiteral("imageUrl")};
     const QJsonObject obj = doc.object();
     QVariantMap fields;
     for (const QString& key : kKeys) {
@@ -1967,11 +2085,13 @@ void AIManager::onSettingsChanged()
     auto* openai = dynamic_cast<OpenAIProvider*>(m_openaiProvider.get());
     if (openai) {
         openai->setApiKey(m_settings->ai()->openaiApiKey());
+        openai->setModel(m_settings->ai()->providerModel("openai"));  // empty → keeps default
     }
 
     auto* anthropic = dynamic_cast<AnthropicProvider*>(m_anthropicProvider.get());
     if (anthropic) {
         anthropic->setApiKey(m_settings->ai()->anthropicApiKey());
+        anthropic->setModel(m_settings->ai()->providerModel("anthropic"));  // empty → keeps default
     }
 
     auto* gemini = dynamic_cast<GeminiProvider*>(m_geminiProvider.get());

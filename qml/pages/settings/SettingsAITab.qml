@@ -294,12 +294,22 @@ KeyboardAwareContainer {
                         }
                     }
 
-                    // Provider-specific guidance. Gated to Gemini so it can't show
-                    // wrong copy for a future provider that gains multiple models.
+                    // Provider-specific guidance. The English copy lives in
+                    // AIProvider::modelHint() (next to the model catalog) so the
+                    // app and the ShotServer web settings page share one source;
+                    // the per-provider translation key keeps it translatable.
+                    // The key is built dynamically, which the QML string scanner
+                    // cannot see -- main.cpp registers these keys at startup so
+                    // the batch-translation registry stays complete.
                     Text {
-                        visible: modelSelect.currentProvider === "gemini"
-                        text: TranslationManager.translate("settings.ai.modelHint.gemini",
-                            "3.5 Flash is the most capable. 2.5 Flash is more available (fewer busy errors).")
+                        visible: text.length > 0
+                        text: {
+                            var hint = MainController.aiManager
+                                ? MainController.aiManager.modelHint(modelSelect.currentProvider) : ""
+                            if (hint === "") return ""
+                            return TranslationManager.translate(
+                                "settings.ai.modelHint." + modelSelect.currentProvider, hint)
+                        }
                         color: Theme.textSecondaryColor
                         font.pixelSize: Theme.scaled(11)
                         wrapMode: Text.Wrap

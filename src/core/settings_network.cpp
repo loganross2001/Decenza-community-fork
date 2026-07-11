@@ -266,10 +266,10 @@ QString SettingsNetwork::defaultLayoutJson() const {
     // readouts to this zone if they want the larger center display.
     zones["centerStatus"] = QJsonArray();
     zones["centerTop"] = QJsonArray({
-        QJsonObject({{"type", "espresso"}, {"id", "espresso1"}}),
+        QJsonObject({{"type", "recipes"}, {"id", "recipes1"}}),
+        QJsonObject({{"type", "beans"}, {"id", "beans1"}}),
         QJsonObject({{"type", "steam"}, {"id", "steam1"}}),
         QJsonObject({{"type", "hotwater"}, {"id", "hotwater1"}}),
-        QJsonObject({{"type", "flush"}, {"id", "flush1"}}),
     });
     zones["centerMiddle"] = QJsonArray({
         QJsonObject({{"type", "shotPlan"}, {"id", "plan1"}}),
@@ -278,11 +278,10 @@ QString SettingsNetwork::defaultLayoutJson() const {
         QJsonObject({{"type", "sleep"}, {"id", "sleep1"}}),
     });
     zones["bottomRight"] = QJsonArray({
+        QJsonObject({{"type", "flush"}, {"id", "flush1"}}),
         QJsonObject({{"type", "history"}, {"id", "history1"}}),
-        QJsonObject({{"type", "spacer"}, {"id", "spacer2"}}),
-        QJsonObject({{"type", "beans"}, {"id", "beans1"}}),
         QJsonObject({{"type", "equipment"}, {"id", "equipment1"}}),
-        QJsonObject({{"type", "autofavorites"}, {"id", "autofavorites1"}}),
+        QJsonObject({{"type", "espresso"}, {"id", "espresso1"}}),
         QJsonObject({{"type", "settings"}, {"id", "settings1"}}),
     });
     // Status bar uses icon display mode for its readouts — more compact and
@@ -432,7 +431,51 @@ QJsonObject SettingsNetwork::getLayoutObject() const {
         }
     }
 
-    if (textMigrated || equipmentInjected || connMigrated) {
+    // Migration: ensure a Recipes idle button exists (add-recipes). Default
+    // home is immediately LEFT of the espresso button; if espresso was removed
+    // from the layout, fall back to sitting beside equipment in the bottom
+    // row, then to appending to bottomRight. Idempotent + persisted once.
+    bool recipesInjected = false;
+    {
+        bool hasRecipes = false;
+        for (const QString& zoneName : zones.keys()) {
+            const QJsonArray items = zones[zoneName].toArray();
+            for (const QJsonValue& v : items) {
+                if (v.toObject()["type"].toString() == "recipes") {
+                    hasRecipes = true;
+                    break;
+                }
+            }
+            if (hasRecipes)
+                break;
+        }
+        if (!hasRecipes) {
+            const QJsonObject recipesItem{{"type", "recipes"}, {"id", "recipes1"}};
+            auto insertRelativeTo = [&zones, &recipesItem](const QString& anchorType,
+                                                           int offsetFromAnchor) {
+                for (const QString& zoneName : zones.keys()) {
+                    QJsonArray items = zones[zoneName].toArray();
+                    for (qsizetype i = 0; i < items.size(); ++i) {
+                        if (items[i].toObject()["type"].toString() == anchorType) {
+                            items.insert(i + offsetFromAnchor, recipesItem);
+                            zones[zoneName] = items;
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            };
+            if (!insertRelativeTo(QStringLiteral("espresso"), 0)        // left of espresso
+                && !insertRelativeTo(QStringLiteral("equipment"), 1)) { // beside equipment
+                QJsonArray br = zones.value("bottomRight").toArray();
+                br.append(recipesItem);
+                zones["bottomRight"] = br;
+            }
+            recipesInjected = true;
+        }
+    }
+
+    if (textMigrated || equipmentInjected || connMigrated || recipesInjected) {
         layout["zones"] = zones;
         // Persist the migration so it only runs once
         const_cast<SettingsNetwork*>(this)->saveLayoutObject(layout);
@@ -486,6 +529,17 @@ void SettingsNetwork::setLayoutConfiguration(const QString& json) {
     invalidateLayoutCache();
     m_settings.setValue("layout/configuration", json);
     emit layoutConfigurationChanged();
+}
+
+bool SettingsNetwork::recipesUpgradeOffered() const {
+    return m_settings.value("layout/recipesUpgradeOffered", false).toBool();
+}
+
+void SettingsNetwork::setRecipesUpgradeOffered(bool offered) {
+    if (recipesUpgradeOffered() != offered) {
+        m_settings.setValue("layout/recipesUpgradeOffered", offered);
+        emit recipesUpgradeOfferedChanged();
+    }
 }
 
 QVariantList SettingsNetwork::getZoneItems(const QString& zoneName) const {
@@ -593,6 +647,201 @@ void SettingsNetwork::resetLayoutToDefault() {
     emit layoutConfigurationChanged();
 }
 
+namespace {
+// Frozen composition of the *old* (pre-recipes-idle-layout-upgrade) default
+// layout, used only to detect whether an upgrading user's current layout is
+// still pristine. defaultLayoutJson() itself changes in this release, so this
+// snapshot must not be derived from it.
+//
+// Every zone here except centerStatus has been structurally invariant across
+// every past default (verified against git history back to the layout
+// system's introduction in #855): the pre-existing equipment/recipes
+// injection migrations and the connectionStatus->machineStatus rename
+// unconditionally normalize any older stored layout to this exact
+// centerTop/bottomRight composition by the time getLayoutObject() returns
+// it, regardless of which release the user first installed on. centerStatus
+// is the one exception — it shipped as {temperature, waterLevel,
+// machineStatus} from #855 through #1372, then as empty from #1372 ("Layout
+// editor: drag-reorder... default cleanups") onward, and nothing ever
+// migrates an existing stored centerStatus between those two forms. Both are
+// pristine (never-customized), so isPristineOldDefault() accepts either.
+QJsonObject oldDefaultTypeSequences() {
+    QJsonObject seq;
+    seq["topLeft"] = QJsonArray();
+    seq["topRight"] = QJsonArray();
+    seq["centerTop"] = QJsonArray({"recipes", "espresso", "steam", "hotwater", "flush"});
+    seq["centerMiddle"] = QJsonArray({"shotPlan"});
+    seq["bottomLeft"] = QJsonArray({"sleep"});
+    seq["bottomRight"] = QJsonArray({"history", "spacer", "beans", "equipment", "autofavorites", "settings"});
+    seq["lowerMidBar"] = QJsonArray();
+    return seq;
+}
+
+// The historical centerStatus variants that count as pristine (see comment
+// above oldDefaultTypeSequences).
+QVector<QJsonArray> oldDefaultCenterStatusVariants() {
+    return {
+        QJsonArray(),                                              // #1372 onward
+        QJsonArray({"temperature", "waterLevel", "machineStatus"}), // #855 through #1372
+    };
+}
+
+QJsonArray typeSequenceForZone(const QJsonArray& items) {
+    QJsonArray types;
+    for (const QJsonValue& v : items)
+        types.append(v.toObject()["type"].toString());
+    return types;
+}
+
+bool isPristineOldDefault(const QJsonObject& zones) {
+    const QJsonObject oldDefault = oldDefaultTypeSequences();
+    for (auto it = oldDefault.constBegin(); it != oldDefault.constEnd(); ++it) {
+        if (typeSequenceForZone(zones.value(it.key()).toArray()) != it.value().toArray())
+            return false;
+    }
+    const QJsonArray centerStatus = typeSequenceForZone(zones.value("centerStatus").toArray());
+    return oldDefaultCenterStatusVariants().contains(centerStatus);
+}
+} // namespace
+
+void SettingsNetwork::applyRecipesFirstUpgrade() {
+    QJsonObject layout = getLayoutObject();
+    QJsonObject zones = layout["zones"].toObject();
+
+    if (isPristineOldDefault(zones)) {
+        resetLayoutToDefault();
+        return;
+    }
+
+    static const QSet<QString> kCenterZones = {
+        QStringLiteral("centerTop"), QStringLiteral("centerMiddle"), QStringLiteral("centerStatus")
+    };
+
+    // Does any zone in `zoneNames` hold a widget of `type`?
+    auto zoneSetContainsType = [&zones](const QSet<QString>& zoneNames, const QLatin1String& type) {
+        for (const QString& zoneName : zoneNames) {
+            const QJsonArray items = zones.value(zoneName).toArray();
+            for (const QJsonValue& v : items)
+                if (v.toObject()["type"].toString() == type)
+                    return true;
+        }
+        return false;
+    };
+    // Does ANY zone hold a widget of `type` — including the unclassified
+    // lowerMidBar/statusBar bands that are neither "center" nor "bar"?
+    auto layoutContainsType = [&zones](const QLatin1String& type) {
+        for (const QString& zoneName : zones.keys()) {
+            const QJsonArray items = zones.value(zoneName).toArray();
+            for (const QJsonValue& v : items)
+                if (v.toObject()["type"].toString() == type)
+                    return true;
+        }
+        return false;
+    };
+
+    const bool espressoInCenter = zoneSetContainsType(kCenterZones, QLatin1String("espresso"));
+
+    // Swap Recipes into the Profiles (espresso) button's center slot and move
+    // Profiles down to the bottom bar. This runs only when Profiles actually
+    // sits in a center zone; otherwise the user has already placed it (and
+    // their Recipes button) elsewhere, so both are left untouched.
+    //
+    // The swap RELOCATES the existing Recipes button into the Profiles slot
+    // rather than only inserting one when none exists — the fix for the former
+    // "insert only if !hasRecipes" guard, which was dead code: by the time this
+    // ran, getLayoutObject() (called above) had already injected a Recipes
+    // button (by default immediately left of Profiles), so hasRecipes was always
+    // true. A user whose Recipes button lived anywhere but the center (e.g. the
+    // bottom bar) thus had Profiles pulled out with nothing put in its place.
+    // Correctness no longer depends on that injection: the recipesItem default
+    // below drops a Recipes button into the slot even if none is found; an
+    // existing button is reused only to carry its id/options across.
+    if (espressoInCenter) {
+        // Pull every existing Recipes item out (dedupe), remembering one to
+        // reuse so its id and any per-instance options survive. Removing them
+        // all first — rather than overwriting Profiles in place and leaving the
+        // others — is what guarantees exactly one Recipes button remains when a
+        // Recipes item already shares Profiles' center zone.
+        QJsonObject recipesItem{{"type", "recipes"}, {"id", "recipes1"}};
+        bool haveRecipesItem = false;
+        for (const QString& zoneName : zones.keys()) {
+            QJsonArray items = zones.value(zoneName).toArray();
+            bool changed = false;
+            for (qsizetype i = items.size() - 1; i >= 0; --i) {
+                if (items[i].toObject()["type"].toString() == QLatin1String("recipes")) {
+                    if (!haveRecipesItem) {
+                        recipesItem = items[i].toObject();
+                        haveRecipesItem = true;
+                    }
+                    items.removeAt(i);
+                    changed = true;
+                }
+            }
+            if (changed) zones[zoneName] = items;
+        }
+
+        // Replace the (still-present) Profiles button in place with Recipes, so
+        // Recipes lands at Profiles' exact former center position.
+        for (const QString& zoneName : kCenterZones) {
+            QJsonArray items = zones.value(zoneName).toArray();
+            bool done = false;
+            for (qsizetype i = 0; i < items.size(); ++i) {
+                if (items[i].toObject()["type"].toString() == QLatin1String("espresso")) {
+                    items[i] = recipesItem;
+                    zones[zoneName] = items;
+                    done = true;
+                    break;
+                }
+            }
+            if (done) break;
+        }
+
+        // Relocate Profiles to the bottom bar — after Equipment, falling back to
+        // before Settings, then to appending — but only if the swap left no
+        // Profiles button anywhere else: a bar copy, one the user parked in
+        // lowerMidBar/statusBar, or a second center zone all count, so a
+        // duplicate is never created.
+        if (!layoutContainsType(QLatin1String("espresso"))) {
+            const QJsonObject espressoItem{{"type", "espresso"}, {"id", "espresso1"}};
+            QJsonArray br = zones.value("bottomRight").toArray();
+            int insertAt = -1;
+            for (qsizetype i = 0; i < br.size(); ++i) {
+                if (br[i].toObject()["type"].toString() == QLatin1String("equipment")) {
+                    insertAt = static_cast<int>(i) + 1;
+                    break;
+                }
+            }
+            if (insertAt < 0) {
+                for (qsizetype i = 0; i < br.size(); ++i) {
+                    if (br[i].toObject()["type"].toString() == QLatin1String("settings")) {
+                        insertAt = static_cast<int>(i);
+                        break;
+                    }
+                }
+            }
+            if (insertAt < 0) insertAt = static_cast<int>(br.size());
+            br.insert(insertAt, espressoItem);
+            zones["bottomRight"] = br;
+        }
+    }
+
+    // Remove every Auto-Favorites item, wherever the user placed it.
+    for (const QString& zoneName : zones.keys()) {
+        QJsonArray items = zones.value(zoneName).toArray();
+        bool changed = false;
+        for (qsizetype i = items.size() - 1; i >= 0; --i) {
+            if (items[i].toObject()["type"].toString() == QLatin1String("autofavorites")) {
+                items.removeAt(i);
+                changed = true;
+            }
+        }
+        if (changed) zones[zoneName] = items;
+    }
+
+    layout["zones"] = zones;
+    saveLayoutObject(layout);
+}
+
 // Capability schema: the single source of truth for which per-instance option
 // keys each widget type supports. Readout types list the sections the unified
 // readout options editor shows; types with a dedicated editor (custom, sleep,
@@ -681,7 +930,7 @@ struct WidgetCatalogEntry {
 const QVector<WidgetCatalogEntry>& widgetCatalogTable() {
     static const QVector<WidgetCatalogEntry> kCatalog = {
         // Actions (0)
-        { "espresso",      0, "layoutEditor.widgetEspresso",  "Espresso",  "layoutEditor.chipEspresso",  "Espresso",  "", true },
+        { "espresso",      0, "layoutEditor.widgetProfiles",  "Profiles",  "layoutEditor.chipProfiles",  "Profiles",  "", true },
         { "steam",         0, "layoutEditor.widgetSteam",     "Steam",     "layoutEditor.chipSteam",     "Steam",     "", true },
         { "hotwater",      0, "layoutEditor.widgetHotWater",  "Hot Water", "layoutEditor.chipHotWater",  "Hot Water", "", true },
         { "flush",         0, "layoutEditor.widgetFlush",     "Flush",     "layoutEditor.chipFlush",     "Flush",     "", true },
@@ -690,6 +939,7 @@ const QVector<WidgetCatalogEntry>& widgetCatalogTable() {
         { "quit",          0, "layoutEditor.widgetQuit",      "Quit",      "layoutEditor.chipQuit",      "Quit",      "special", true },
         { "history",       0, "layoutEditor.widgetHistory",   "History",   "layoutEditor.chipHistory",   "History",   "", true },
         { "beans",         0, "layoutEditor.widgetBeans",     "Beans",     "layoutEditor.chipBeans",     "Beans",     "", true },
+        { "recipes",       0, "layoutEditor.widgetRecipes",   "Recipes",   "layoutEditor.chipRecipes",   "Recipes",   "", true },
         { "equipment",     0, "layoutEditor.widgetEquipment", "Equipment", "layoutEditor.chipEquipment", "Equipment", "", true },
         { "autofavorites", 0, "layoutEditor.widgetFavorites", "Favorites", "layoutEditor.chipFavorites", "Favorites", "", true },
         { "discuss",       0, "layoutEditor.widgetDiscuss",   "Discuss",   "layoutEditor.chipDiscuss",   "Discuss",   "", true },
@@ -958,6 +1208,33 @@ void SettingsNetwork::resetZoneToDefault(const QString& zoneName) {
         }
     }
     saveLayoutObject(layout);
+}
+
+void SettingsNetwork::ensureSettingsAccessible() {
+    // Keep in sync with the (now-delegating) QML copy in
+    // qml/pages/settings/SettingsLayoutTab.qml::ensureSettingsAccessible().
+    static const QStringList kZones = {
+        QStringLiteral("statusBar"), QStringLiteral("topLeft"), QStringLiteral("topRight"),
+        QStringLiteral("centerStatus"), QStringLiteral("centerTop"), QStringLiteral("centerMiddle"),
+        QStringLiteral("lowerMidBar"), QStringLiteral("bottomLeft"), QStringLiteral("bottomRight")
+    };
+
+    for (const QString& zone : kZones) {
+        const QVariantList items = getZoneItems(zone);
+        for (const QVariant& itemVar : items) {
+            const QVariantMap item = itemVar.toMap();
+            const QString type = item.value("type").toString();
+            if (type == QStringLiteral("settings")) return;
+            if (type == QStringLiteral("custom")) {
+                const QVariantMap props = getItemProperties(item.value("id").toString());
+                if (props.value("action").toString() == QStringLiteral("navigate:settings")) return;
+            }
+        }
+    }
+
+    // No settings access found — add a settings widget to bottom right.
+    addItem(QStringLiteral("settings"), QStringLiteral("bottomRight"));
+    qDebug() << "SettingsNetwork: Added settings widget to bottomRight (no settings access found)";
 }
 
 bool SettingsNetwork::setItemProperty(const QString& itemId, const QString& key, const QVariant& value) {

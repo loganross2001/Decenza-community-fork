@@ -134,9 +134,27 @@ void ShotServer::handleBackupManifest(QTcpSocket* socket)
         QString dbPath = m_storage->databasePath();
         QFileInfo dbInfo(dbPath);
         manifest["shotsSize"] = dbInfo.exists() ? dbInfo.size() : 0;
+
+        // Recipes / bags / equipment ride inside shots.db and transfer with the
+        // Shots import — advertise their counts so the migration UI isn't
+        // silent about them (finish-recipes-first-class). One quick read; the
+        // tables may not exist on very old source DBs (COUNT then fails → 0).
+        int recipeCount = 0, bagCount = 0, equipmentCount = 0;
+        withTempDb(dbPath, "manifest_counts", [&](QSqlDatabase& db) {
+            QSqlQuery q(db);
+            if (q.exec("SELECT COUNT(*) FROM recipes") && q.next()) recipeCount = q.value(0).toInt();
+            if (q.exec("SELECT COUNT(*) FROM coffee_bags") && q.next()) bagCount = q.value(0).toInt();
+            if (q.exec("SELECT COUNT(*) FROM equipment_packages") && q.next()) equipmentCount = q.value(0).toInt();
+        });
+        manifest["recipeCount"] = recipeCount;
+        manifest["bagCount"] = bagCount;
+        manifest["equipmentCount"] = equipmentCount;
     } else {
         manifest["shotCount"] = 0;
         manifest["shotsSize"] = 0;
+        manifest["recipeCount"] = 0;
+        manifest["bagCount"] = 0;
+        manifest["equipmentCount"] = 0;
     }
 
     // AI conversations info
@@ -185,15 +203,60 @@ void ShotServer::handleBackupSettings(QTcpSocket* socket, bool includeSensitive)
         return;
     }
 
-    // Privacy: never emit raw secret VALUES (API keys / passwords) over the LAN
-    // web server, even when includeSensitive=true is requested. The parameter is
-    // ignored here and secrets are always excluded from the served backup JSON.
-    // Trade-off: a settings backup taken via the web endpoint will NOT restore
-    // these secret fields (they must be re-entered or restored from the native
-    // app's own backup path, which is unaffected).
+    // Privacy: never emit raw credential VALUES (API keys, passwords, and the
+    // visualizer/MQTT usernames) over the LAN web server, even when
+    // includeSensitive=true is requested. This endpoint is UNauthenticated when
+    // webSecurityEnabled is off (the default), so the parameter is ignored and
+    // exportToJson is always called with includeSensitive=false. Trade-off: a settings
+    // backup/restore or device migration taken via the web endpoint carries only
+    // non-credential settings; all credentials (keys, passwords, usernames) must be
+    // re-entered on the target. (The native on-device backup path is likewise
+    // credential-free today — it also passes includeSensitive=false.)
     Q_UNUSED(includeSensitive);
     QJsonObject settingsJson = SettingsSerializer::exportToJson(m_settings, /*includeSensitive=*/false);
     sendJson(socket, QJsonDocument(settingsJson).toJson(QJsonDocument::Compact));
+}
+
+// Extra QSettings not covered by SettingsSerializer: shot-map location,
+// accessibility preferences, and language. Shared by the full-archive backup
+// (extra_settings.json) and the /api/backup/extra-settings LAN endpoint so the
+// two transfer paths stay in parity (finish-recipes-first-class).
+QJsonObject ShotServer::buildExtraSettingsObject()
+{
+    QSettings settings;
+    QJsonObject extra;
+
+    QJsonObject shotMap;
+    shotMap["manualCity"] = settings.value("shotMap/manualCity", "").toString();
+    shotMap["manualLat"] = settings.value("shotMap/manualLat", 0.0).toDouble();
+    shotMap["manualLon"] = settings.value("shotMap/manualLon", 0.0).toDouble();
+    shotMap["manualCountryCode"] = settings.value("shotMap/manualCountryCode", "").toString();
+    shotMap["manualGeocoded"] = settings.value("shotMap/manualGeocoded", false).toBool();
+    extra["shotMap"] = shotMap;
+
+    // Accessibility lives in the PRIMARY store (AccessibilityManager uses
+    // QSettings("DecentEspresso","DE1Qt") like every other settings domain).
+    // Reading it off the bare/secondary `settings` would silently capture
+    // defaults.
+    QSettings accessStore(QStringLiteral("DecentEspresso"), QStringLiteral("DE1Qt"));
+    QJsonObject accessibility;
+    accessibility["enabled"] = accessStore.value("accessibility/enabled", false).toBool();
+    accessibility["ttsEnabled"] = accessStore.value("accessibility/ttsEnabled", true).toBool();
+    accessibility["tickEnabled"] = accessStore.value("accessibility/tickEnabled", true).toBool();
+    accessibility["tickSoundIndex"] = accessStore.value("accessibility/tickSoundIndex", 1).toInt();
+    accessibility["tickVolume"] = accessStore.value("accessibility/tickVolume", 100).toInt();
+    accessibility["extractionAnnouncementsEnabled"] = accessStore.value("accessibility/extractionAnnouncementsEnabled", true).toBool();
+    accessibility["extractionAnnouncementInterval"] = accessStore.value("accessibility/extractionAnnouncementInterval", 5).toInt();
+    accessibility["extractionAnnouncementMode"] = accessStore.value("accessibility/extractionAnnouncementMode", "both").toString();
+    extra["accessibility"] = accessibility;
+
+    extra["language"] = settings.value("localization/language", "en").toString();
+    return extra;
+}
+
+void ShotServer::handleBackupExtraSettings(QTcpSocket* socket)
+{
+    sendJson(socket, QJsonDocument(buildExtraSettingsObject()).toJson(QJsonDocument::Compact));
 }
 
 void ShotServer::handleBackupProfilesList(QTcpSocket* socket)
@@ -421,38 +484,10 @@ void ShotServer::handleBackupFull(QTcpSocket* socket)
         }
     }
 
-    // 3. Extra QSettings data (not in Settings class)
+    // 3. Extra QSettings data (not in Settings class) — shared with the
+    // /api/backup/extra-settings LAN endpoint via buildExtraSettingsObject().
     {
-        QSettings settings;
-        QJsonObject extra;
-
-        QJsonObject shotMap;
-        shotMap["manualCity"] = settings.value("shotMap/manualCity", "").toString();
-        shotMap["manualLat"] = settings.value("shotMap/manualLat", 0.0).toDouble();
-        shotMap["manualLon"] = settings.value("shotMap/manualLon", 0.0).toDouble();
-        shotMap["manualCountryCode"] = settings.value("shotMap/manualCountryCode", "").toString();
-        shotMap["manualGeocoded"] = settings.value("shotMap/manualGeocoded", false).toBool();
-        extra["shotMap"] = shotMap;
-
-        // Accessibility lives in the PRIMARY store (AccessibilityManager
-        // now uses QSettings("DecentEspresso","DE1Qt") like every other
-        // settings domain). Reading it off the bare/secondary `settings`
-        // would silently capture defaults — the bug this fixes.
-        QSettings accessStore(QStringLiteral("DecentEspresso"), QStringLiteral("DE1Qt"));
-        QJsonObject accessibility;
-        accessibility["enabled"] = accessStore.value("accessibility/enabled", false).toBool();
-        accessibility["ttsEnabled"] = accessStore.value("accessibility/ttsEnabled", true).toBool();
-        accessibility["tickEnabled"] = accessStore.value("accessibility/tickEnabled", true).toBool();
-        accessibility["tickSoundIndex"] = accessStore.value("accessibility/tickSoundIndex", 1).toInt();
-        accessibility["tickVolume"] = accessStore.value("accessibility/tickVolume", 100).toInt();
-        accessibility["extractionAnnouncementsEnabled"] = accessStore.value("accessibility/extractionAnnouncementsEnabled", true).toBool();
-        accessibility["extractionAnnouncementInterval"] = accessStore.value("accessibility/extractionAnnouncementInterval", 5).toInt();
-        accessibility["extractionAnnouncementMode"] = accessStore.value("accessibility/extractionAnnouncementMode", "both").toString();
-        extra["accessibility"] = accessibility;
-
-        extra["language"] = settings.value("localization/language", "en").toString();
-
-        QByteArray extraData = QJsonDocument(extra).toJson(QJsonDocument::Compact);
+        QByteArray extraData = QJsonDocument(buildExtraSettingsObject()).toJson(QJsonDocument::Compact);
         mainThreadEntries.append({"extra_settings.json", extraData});
     }
 

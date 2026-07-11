@@ -80,6 +80,9 @@ public:
     // order (first = recommended default). Empty when the provider has a single
     // fixed model — the UI hides the model picker in that case.
     Q_INVOKABLE QVariantList availableModels(const QString& providerId) const;
+    // One-line guidance comparing the provider's catalog models (see
+    // AIProvider::modelHint). Empty when the provider has no hint.
+    Q_INVOKABLE QString modelHint(const QString& providerId) const;
     AIConversation* conversation() const { return m_conversation; }
     bool hasAnyConversation() const { return !m_conversationIndex.isEmpty(); }
     QList<ConversationEntry> conversationIndex() const { return m_conversationIndex; }
@@ -217,11 +220,28 @@ public:
     // that the user may have moved on to a different bag by the time it lands.
     // Guard failures use stable codes ("busy", "notConfigured", "unreadable")
     // the QML layer translates; provider errors pass through as text.
-    Q_INVOKABLE void extractCoffeeBagDetails(const QString& requestToken, const QString& pageText);
-    // Response JSON -> whitelisted blob-vocabulary fields (origin, region,
-    // farm, producer, variety, elevation, process, harvest, roastLevel,
-    // tastingNotes). Tolerates markdown fences; string-array values are
-    // joined ", "; object values are skipped; values capped at 500 chars.
+    // `kind` selects the extraction vocabulary: "coffee" (default) or "tea"
+    // (add-recipe-wizard-tea) — tea pages yield teaType/garden/cultivar/flush
+    // plus structured brewing fields (brewTempC normalized to Celsius,
+    // leafGramsPer100Ml normalized from per-cup wordings, steepTime).
+    Q_INVOKABLE void extractCoffeeBagDetails(const QString& requestToken, const QString& pageText,
+                                             const QString& kind = QStringLiteral("coffee"));
+    // Stage-2 extraction fallback: the local page fetch got nothing (a
+    // JS-rendered shop), so the provider fetches the URL itself via its
+    // server-side web tool (Anthropic web_fetch, OpenAI Responses web_search,
+    // Gemini url_context; Ollama/OpenRouter report "urlFetchUnsupported").
+    // Same signals + JSON contract as stage 1, plus an imageUrl key (SPA
+    // pages have no og:image for the photo pipeline). Gate calls on
+    // supportsUrlExtraction().
+    Q_INVOKABLE bool supportsUrlExtraction() const;
+    Q_INVOKABLE void extractCoffeeBagDetailsFromUrl(const QString& requestToken, const QString& url,
+                                                    const QString& kind = QStringLiteral("coffee"));
+    // Response JSON -> whitelisted blob-vocabulary fields (coffee: origin,
+    // region, farm, producer, variety, elevation, process, harvest,
+    // roastLevel, tastingNotes; tea adds teaType, garden, cultivar, flush,
+    // brewTempC, leafGramsPer100Ml, steepTime). Tolerates markdown fences;
+    // string-array values are joined ", "; object values are skipped;
+    // values capped at 500 chars.
     // ok=false when nothing parses OR the object had content but no usable
     // whitelisted values ("couldn't read it" is distinct from the honest
     // empty-object "the page states nothing"). Static + public for tests.

@@ -254,10 +254,13 @@ QJsonObject SettingsSerializer::exportToJson(Settings* settings, bool includeSen
 
     // Visualizer settings
     QJsonObject visualizer;
+    // Username AND password are gated behind includeSensitive. The username is a
+    // credential (often an email) and must not be emitted by the LAN backup/migration
+    // endpoints (handleBackupSettings / handleBackupFull force includeSensitive=false),
+    // which are UNauthenticated when webSecurityEnabled is off (the default). Every
+    // current caller passes includeSensitive=false; the flag exists for a future
+    // credential-complete backup that never leaves the device.
     if (includeSensitive) {
-        // Username is a credential too — keep it behind includeSensitive so the LAN
-        // web-backup endpoint (which forces includeSensitive=false) never emits it,
-        // consistent with how /api/settings redacts it.
         visualizer["username"] = settings->visualizer()->visualizerUsername();
         visualizer["password"] = settings->visualizer()->visualizerPassword();
     }
@@ -347,8 +350,10 @@ QJsonObject SettingsSerializer::exportToJson(Settings* settings, bool includeSen
     mqtt["enabled"] = mqttSettings->mqttEnabled();
     mqtt["brokerHost"] = mqttSettings->mqttBrokerHost();
     mqtt["brokerPort"] = mqttSettings->mqttBrokerPort();
+    // Username and password are both gated behind includeSensitive so the
+    // unauthenticated LAN backup/migration endpoints never emit them (see visualizer
+    // above for the rationale).
     if (includeSensitive) {
-        // Username is a credential too — gated with the password (see visualizer above).
         mqtt["username"] = mqttSettings->mqttUsername();
         mqtt["password"] = mqttSettings->mqttPassword();
     }
@@ -382,6 +387,14 @@ QJsonObject SettingsSerializer::exportToJson(Settings* settings, bool includeSen
         machineTuning["perProfileFlowCalibration"] = perProfileMap;
     }
     root["machineTuning"] = machineTuning;
+
+    // SAW (stop-at-weight) learning — its own top-level section, NOT under
+    // machineTuning: unlike flow calibration (machine-specific, excluded on
+    // import) SAW learning is scale+profile specific and portable, so it must
+    // survive device transfer / backup (finish-recipes-first-class).
+    const QJsonObject sawLearning = settings->calibration()->sawLearningExport();
+    if (!sawLearning.isEmpty())
+        root["sawLearning"] = sawLearning;
 
     // Daily backup hour
     root["dailyBackupHour"] = settings->app()->dailyBackupHour();
@@ -891,6 +904,13 @@ bool SettingsSerializer::importFromJson(Settings* settings, const QJsonObject& j
                            << imported << "imported," << rejected << "rejected";
             }
         }
+    }
+
+    // SAW learning (scale+profile specific, portable) — imported on LAN too;
+    // NOT gated by the flowCalibration excludeKey (that guards machine-specific
+    // tuning). A dedicated "sawLearning" excludeKey can still opt out.
+    if (json.contains("sawLearning") && !excludeKeys.contains("sawLearning")) {
+        settings->calibration()->sawLearningImport(json["sawLearning"].toObject());
     }
 
     // Daily backup hour

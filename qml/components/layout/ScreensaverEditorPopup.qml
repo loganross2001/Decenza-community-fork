@@ -661,12 +661,13 @@ Dialog {
                     }
 
                     StyledSwitch {
-                        // ON, Profile shown: the "Brew … of Espresso, using … at …" scaffold
-                        // (its own word order) with the remaining items trailing in chip order.
-                        // ON, Profile removed: the profile-less "recipe" sentence — "Brew 40.0g
-                        // of Espresso at 92°C from 18.0g of <Roaster> <Bean>" — consuming dose/
-                        // roaster/coffee. OFF: all items as separator-joined fragments in chip
-                        // order. The preview reflects each case live.
+                        // ON, profile anchor available (Profile shown with a profile loaded):
+                        // the "Brew … of Espresso, using … at …" scaffold (its own word order)
+                        // with the remaining items trailing in chip order. ON, no profile anchor
+                        // (Profile removed, or none loaded): the profile-less "recipe" sentence —
+                        // "Brew 40.0g of Espresso at 92°C from 18.0g of <Roaster> <Bean>" —
+                        // consuming dose/temperature/roaster/coffee. OFF: all items as separator-
+                        // joined fragments in chip order. The preview reflects each case live.
                         text: TranslationManager.translate("shotPlanEditor.sentenceStyle", "Sentence style")
                         checked: popup.shotPlanSentence
                         onToggled: popup.shotPlanSentence = checked
@@ -684,7 +685,8 @@ Dialog {
                     StyledSwitch {
                         // Yield display: ON shows only the effective target yield (e.g. "40.0g");
                         // OFF keeps the "profileDefault → target" arrow (e.g. "36.0 → 40.0g").
-                        // Only affects the Dose & yield item, so disabled when it isn't shown.
+                        // Only affects the Dose & yield item, so disabled when it isn't shown —
+                        // and only visibly differs while a deliberate yield override is active.
                         text: TranslationManager.translate("shotPlanEditor.yieldTargetOnly", "Final yield only (hide profile default)")
                         enabled: popup.shotPlanItems.indexOf("doseYield") !== -1
                         checked: popup.shotPlanYieldTargetOnly

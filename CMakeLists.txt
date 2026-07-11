@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(Decenza VERSION 1.8.1 LANGUAGES CXX)
+project(Decenza VERSION 2.0.0 LANGUAGES CXX)
 
 message(STATUS "Developer note: executable target is now 'Decenza'. If Qt Creator shows 'No executable specified', re-run CMake and select the 'Decenza' Run configuration.")
 
@@ -313,6 +313,8 @@ set(SOURCES
     src/history/coffeebagstorage.cpp
     src/history/baristastorage.cpp
     src/history/equipmentstorage.cpp
+    src/history/recipestorage.cpp
+    src/history/recipepromotion.cpp
     src/history/unifiedbeansearchmodel.cpp
     src/history/shotprojection.cpp
     src/history/shotdebuglogger.cpp
@@ -322,6 +324,9 @@ set(SOURCES
     src/models/shotcomparisonmodel.cpp
     src/models/flowcalibrationmodel.cpp
     src/network/shotserver.cpp
+    src/network/shotserver_recipes.cpp
+    src/network/shotserver_bags.cpp
+    src/network/shotserver_equipment.cpp
     src/network/shotserver_shots.cpp
     src/network/shotserver_upload.cpp
     src/network/shotserver_backup.cpp
@@ -336,6 +341,7 @@ set(SOURCES
     src/mcp/mcptools_profiles.cpp
     src/mcp/mcptools_settings.cpp
     src/mcp/mcptools_presets.cpp
+    src/mcp/mcptools_recipes.cpp
     src/mcp/mcptools_beansearch.cpp
     src/mcp/mcptools_dialing.cpp
     src/ai/dialing_blocks.cpp
@@ -502,6 +508,8 @@ set(HEADERS
     src/history/coffeebagstorage.h
     src/history/baristastorage.h
     src/history/equipmentstorage.h
+    src/history/recipestorage.h
+    src/history/recipepromotion.h
     src/history/unifiedbeansearchmodel.h
     src/history/shotprojection.h
     src/history/shotdebuglogger.h
@@ -679,6 +687,7 @@ endif()
 set_source_files_properties(qml/Theme.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
 set_source_files_properties(qml/components/SettingsTabs.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
 set_source_files_properties(qml/components/layout/WidgetColor.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
+set_source_files_properties(qml/components/DrinkType.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
 
 # Define QML files list for dependency tracking
 set(QML_FILES
@@ -703,6 +712,8 @@ set(QML_FILES
     qml/pages/VisualizerMultiImportPage.qml
     qml/pages/BeanInfoPage.qml
     qml/pages/EquipmentPage.qml
+    qml/pages/RecipesPage.qml
+    qml/pages/RecipeWizardPage.qml
     qml/pages/PostShotReviewPage.qml
     qml/pages/AISettingsPage.qml
     qml/pages/DialingAssistantPage.qml
@@ -790,6 +801,12 @@ set(QML_FILES
     qml/components/Tr.qml
     qml/components/RecipeSection.qml
     qml/components/RecipeRow.qml
+    qml/components/RecipeDrinkCard.qml
+    qml/components/RecipeField.qml
+    qml/components/RecipeResolver.qml
+    qml/components/DrinkType.qml
+    qml/components/ProfileKnowledgeDialog.qml
+    qml/components/BeanThumbnail.qml
     qml/components/PresetButton.qml
     qml/components/AccessibleLabel.qml
     qml/components/ComparisonGraph.qml
@@ -837,6 +854,7 @@ set(QML_FILES
     qml/components/layout/items/HotWaterItem.qml
     qml/components/layout/items/FlushItem.qml
     qml/components/layout/items/BeansItem.qml
+    qml/components/layout/items/RecipesItem.qml
     qml/components/layout/items/EquipmentItem.qml
     qml/components/layout/items/HistoryItem.qml
     qml/components/layout/items/DiscussItem.qml

@@ -34,6 +34,7 @@
 #include "ai/aiconversation.h"
 #include "core/settings.h"
 #include "core/settings_dye.h"
+#include "core/settings_ai.h"  // settings.ai()->set*: full type for the extraction-routing tests
 #include "history/shotprojection.h"
 #include "history/shothistory_types.h"
 #include "ai/dialing_blocks.h"
@@ -72,6 +73,47 @@ ShotProjection makeShot(qint64 id, qint64 timestamp,
     p.beanType = beanType;
     return p;
 }
+
+// RAII guard for tests that need a guaranteed-unconfigured AI provider.
+// Settings reads/writes the REAL on-disk QSettings store ("DecentEspresso",
+// "DE1Qt"), so a bare `Settings settings;` does NOT mean "no provider
+// configured" on a machine that has actually set one up (e.g. dev use) —
+// it means "whatever this machine's real AI settings currently are". Snapshot
+// + clear on construction, restore on destruction (runs even if a QVERIFY
+// fails mid-test and returns early).
+struct AiSettingsGuard {
+    explicit AiSettingsGuard(Settings* s) : m_settings(s) {
+        SettingsAI* ai = s->ai();
+        m_provider = ai->aiProvider();
+        m_openaiKey = ai->openaiApiKey();
+        m_anthropicKey = ai->anthropicApiKey();
+        m_geminiKey = ai->geminiApiKey();
+        m_openrouterKey = ai->openrouterApiKey();
+        m_ollamaEndpoint = ai->ollamaEndpoint();
+        m_ollamaModel = ai->ollamaModel();
+
+        ai->setAiProvider(QString());
+        ai->setOpenaiApiKey(QString());
+        ai->setAnthropicApiKey(QString());
+        ai->setGeminiApiKey(QString());
+        ai->setOpenrouterApiKey(QString());
+        ai->setOllamaEndpoint(QString());
+        ai->setOllamaModel(QString());
+    }
+    ~AiSettingsGuard() {
+        SettingsAI* ai = m_settings->ai();
+        ai->setAiProvider(m_provider);
+        ai->setOpenaiApiKey(m_openaiKey);
+        ai->setAnthropicApiKey(m_anthropicKey);
+        ai->setGeminiApiKey(m_geminiKey);
+        ai->setOpenrouterApiKey(m_openrouterKey);
+        ai->setOllamaEndpoint(m_ollamaEndpoint);
+        ai->setOllamaModel(m_ollamaModel);
+    }
+    Settings* m_settings;
+    QString m_provider, m_openaiKey, m_anthropicKey, m_geminiKey, m_openrouterKey,
+            m_ollamaEndpoint, m_ollamaModel;
+};
 
 } // namespace
 
@@ -124,6 +166,87 @@ private slots:
         QTest::ignoreMessage(QtWarningMsg, QRegularExpression("returned an object"));
         QVERIFY(AIManager::parseBagExtraction("{\"origin\":{\"country\":\"Ethiopia\"}}", &ok).isEmpty());
         QVERIFY(!ok);
+    }
+
+    // Tea vocabulary (add-recipe-wizard-tea): the union whitelist passes the
+    // tea keys through, numeric brewing values survive (as strings, like
+    // elevation above), and the coffee-only keys still coexist. The °F/cup
+    // NORMALIZATION itself is the model's job (prompt contract) — what the
+    // parser must guarantee is that normalized numbers arrive intact.
+    void parseBagExtractionTeaKeys()
+    {
+        bool ok = false;
+        const QVariantMap fields = AIManager::parseBagExtraction(
+            "{\"teaType\":\"black\",\"origin\":\"Sri Lanka\",\"garden\":\"Kenilworth\","
+            "\"cultivar\":\"TRI 2025\",\"flush\":\"Spring 2026\","
+            "\"tastingNotes\":\"malty, honey\",\"brewTempC\":100,"
+            "\"leafGramsPer100Ml\":0.85,\"steepTime\":\"3-5 minutes\","
+            "\"price\":\"£17.95\"}", &ok);
+        QVERIFY(ok);
+        QCOMPARE(fields.value("teaType").toString(), QString("black"));
+        QCOMPARE(fields.value("garden").toString(), QString("Kenilworth"));
+        QCOMPARE(fields.value("cultivar").toString(), QString("TRI 2025"));
+        QCOMPARE(fields.value("flush").toString(), QString("Spring 2026"));
+        QCOMPARE(fields.value("brewTempC").toString(), QString("100"));
+        QCOMPARE(fields.value("leafGramsPer100Ml").toString(), QString("0.85"));
+        QCOMPARE(fields.value("steepTime").toString(), QString("3-5 minutes"));
+        QVERIFY(!fields.contains("price"));
+
+        // imageUrl is the stage-2-only channel for SPA product photos into the
+        // bag-image cache — it must survive the whitelist.
+        bool ok2 = false;
+        const QVariantMap withImage = AIManager::parseBagExtraction(
+            "{\"teaType\":\"black\",\"imageUrl\":\"https://x/tin.jpg\"}", &ok2);
+        QVERIFY(ok2);
+        QCOMPARE(withImage.value("imageUrl").toString(), QString("https://x/tin.jpg"));
+    }
+
+    // The extraction prompt must switch vocabulary by bag kind: a tea page
+    // asked for coffee keys (roastLevel) would silently return the wrong data.
+    // Drives the request builder via the friend seam (m_lastSystemPrompt).
+    void extractionKindSelectsVocabulary()
+    {
+        QNetworkAccessManager nam;
+        Settings settings;
+        settings.ai()->setAiProvider("openai");
+        settings.ai()->setOpenaiApiKey("sk-test");  // isConfigured() so the request builds
+        AIManager mgr(&nam, &settings);
+
+        mgr.extractCoffeeBagDetails("https://x/tea", "tea page text", "tea");
+        QVERIFY(mgr.m_lastSystemPrompt.contains("teaType"));
+        QVERIFY(mgr.m_lastSystemPrompt.contains("leafGramsPer100Ml"));
+        QVERIFY(!mgr.m_lastSystemPrompt.contains("roastLevel"));
+        mgr.m_analyzing = false;  // clear the in-flight guard for the next call
+
+        mgr.extractCoffeeBagDetails("https://x/coffee", "coffee page text", "coffee");
+        QVERIFY(mgr.m_lastSystemPrompt.contains("roastLevel"));
+        QVERIFY(!mgr.m_lastSystemPrompt.contains("teaType"));
+    }
+
+    // Stable guard codes on the stage-2 URL path: notConfigured with no
+    // provider, urlFetchUnsupported when the provider has no web tool
+    // (ChangeBeansDialog and bag_extract_details both branch on these).
+    void urlExtractionGuardCodes()
+    {
+        QNetworkAccessManager nam;
+        Settings settings;
+        AiSettingsGuard guard(&settings);  // guarantee no provider configured
+        AIManager mgr(&nam, &settings);
+        QSignalSpy failed(&mgr, &AIManager::bagDetailsExtractionFailed);
+
+        mgr.extractCoffeeBagDetailsFromUrl("https://x/bag", "https://x/bag", "coffee");
+        QCOMPARE(failed.count(), 1);
+        QCOMPARE(failed.last().at(1).toString(), QString("notConfigured"));
+
+        // Ollama is configured but has no server-side web tool.
+        settings.ai()->setAiProvider("ollama");
+        settings.ai()->setOllamaEndpoint("http://localhost:11434");
+        settings.ai()->setOllamaModel("llama3");
+        AIManager mgr2(&nam, &settings);
+        QSignalSpy failed2(&mgr2, &AIManager::bagDetailsExtractionFailed);
+        mgr2.extractCoffeeBagDetailsFromUrl("https://x/bag", "https://x/bag", "coffee");
+        QCOMPARE(failed2.count(), 1);
+        QCOMPARE(failed2.last().at(1).toString(), QString("urlFetchUnsupported"));
     }
 
     // The extraction request-type routing: ANY leak into recommendationReceived

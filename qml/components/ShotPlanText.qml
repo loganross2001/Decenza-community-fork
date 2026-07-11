@@ -9,10 +9,11 @@ import "../"
 //    (wherever they sit in the order; sentence word order belongs to the
 //    translated template), and everything else — including doseYield's dose-in
 //    fragment — trails after it in list order.
-//  - sentence ON, profile NOT shown: the profile-less "recipe" sentence —
-//    "Brew 40.0g of Espresso at 92°C from 18.0g of <Roaster> <Bean>" — anchored
-//    on the beverage word. Dose, roaster and coffee are consumed into it; only
-//    grind/roastDate trail. Driven by the same chips (drop Profile to get it).
+//  - sentence ON, no profile anchor (item removed, or no profile name
+//    available): the profile-less "recipe" sentence — "Brew 40.0g of Espresso
+//    at 92°C from 18.0g of <Roaster> <Bean>" — anchored on the beverage word.
+//    Dose, temperature, roaster and coffee are consumed into it; only
+//    grind/roastDate trail.
 //  - sentence OFF: every item renders as a separator-joined fragment, in list
 //    order.
 //  - stacked ON (sentence mode only, display path only): the detail tail
@@ -40,9 +41,8 @@ Item {
     // Sentence mode only: render the detail tail on its own line(s) below the
     // sentence (display path — the a11y text stays one joined sentence).
     property bool stacked: false
-    // Yield rendering: when true, show only the effective target yield (e.g.
-    // "40.0g") and suppress the "profileDefault → target" arrow. The default
-    // (false) keeps the arrow, mirroring the temperature-override treatment.
+    // Yield rendering: when true, suppress the "profileDefault → target" arrow
+    // and show only the effective target — see _yieldStr for the full rule.
     property bool yieldTargetOnly: false
     // Wrap budget before eliding: 2 in the full-size widget, 1 in compact bars.
     property int maxLines: 2
@@ -59,22 +59,35 @@ Item {
     property double dose: Settings.dye.dyeBeanWeight
     property double profileYield: ProfileManager.profileTargetWeight
     property double targetWeight: ProfileManager.targetWeight
+    // Override flags, parameterizable so non-live consumers (recipe cards)
+    // can render THEIR overrides; defaults preserve the live-widget behavior.
+    property bool yieldOverridden: Settings.brew.hasBrewYieldOverride
+    property bool tempOverridden: Settings.brew.hasTemperatureOverride
+    // Grind RPM + whether the grinder reports RPM, the beverage word, and the
+    // cleaning flag — all default to the live singleton reads so the home
+    // widget is unchanged, but a per-shot consumer can override every one with
+    // the shot's own frozen snapshot values.
+    property int grindRpm: Settings.dye.dyeGrinderRpm
+    property bool rpmCapable: Settings.dye.grinderRpmCapable(Settings.dye.dyeGrinderBrand, Settings.dye.dyeGrinderModel)
+    property string beverageType: ProfileManager.currentProfileBeverageType
+    property bool isCleaning: ProfileManager.currentProfileIsMaintenance
 
     // Highlight (espresso-button yellow) on a brew TEMPERATURE override only.
     // Yield is intentionally excluded: the target output is dose × ratio and the
     // measured dose never exactly equals the profile's listed dose, so yield would
     // almost always differ — leaving the plan permanently highlighted.
     readonly property bool _tempOverride:
-        Settings.brew.hasTemperatureOverride && Math.abs(overrideTemp - profileTemp) > 0.1
+        tempOverridden && Math.abs(overrideTemp - profileTemp) > 0.1
 
     // --- Per-item segments (empty string = hidden). ---
     // Dose & yield: the shot's target output, plus dose-in (e.g. "18.0g in"). A DELIBERATE yield
     // override (the hasBrewYieldOverride flag, not raw drift — measured dose never exactly matches
-    // the profile's) renders as "36.0 → 40.0g", mirroring the temperature-override treatment —
-    // UNLESS yieldTargetOnly is set, in which case only the effective target ("40.0g") shows.
+    // the profile's) renders as "36.0 → 40.0g" — the yield counterpart of the temperature-override
+    // call-out (which uses a delta tag, not an arrow). yieldTargetOnly suppresses the arrow and
+    // shows only the effective target ("40.0g"); with no active override it's a visible no-op.
     readonly property string _yieldStr: {
         if (!(_has("doseYield") && targetWeight > 0)) return ""
-        if (!yieldTargetOnly && Settings.brew.hasBrewYieldOverride && profileYield > 0
+        if (!yieldTargetOnly && yieldOverridden && profileYield > 0
                 && Math.abs(targetWeight - profileYield) > 0.1)
             return profileYield.toFixed(1) + " → " + targetWeight.toFixed(1) + "g"
         return targetWeight.toFixed(1) + "g"
@@ -86,7 +99,7 @@ Item {
     readonly property string _tempStr: {
         void(Settings.app.temperatureUnit)
         if (!(_has("temperature") && profileTemp > 0)) return ""
-        return ProfileManager.temperatureDisplay(profileTemp, Settings.brew.hasTemperatureOverride, overrideTemp)
+        return ProfileManager.temperatureDisplay(profileTemp, tempOverridden, overrideTemp)
     }
     // Roaster = brand only; Coffee = bean name only; Grind = grinder setting + RPM when recorded.
     // Each item gates exactly its named content so saved widget configs mean what they say.
@@ -96,8 +109,8 @@ Item {
         if (!_has("grind")) return ""
         var parts = []
         if (grindSize.length > 0) parts.push(grindSize)
-        if (Settings.dye.dyeGrinderRpm > 0)
-            parts.push(TranslationManager.translate("equipment.card.lastRpm", "%1 rpm").arg(Settings.dye.dyeGrinderRpm))
+        if (grindRpm > 0 && rpmCapable)
+            parts.push(TranslationManager.translate("equipment.card.lastRpm", "%1 rpm").arg(grindRpm))
         return parts.join(" · ")
     }
     readonly property string _roastDateStr: (_has("roastDate") && roastDate.length > 0) ? roastDate : ""
@@ -105,11 +118,12 @@ Item {
     // generic "coffee" for filter/pourover/any other coffee type, "tea" for tea
     // profiles ("tea"/"tea_portafilter"). Cleaning/descale profiles get their own
     // sentence in _build() — no bean/dose tail, plus the do-not-load-coffee warning.
-    readonly property string _bevType: ProfileManager.currentProfileBeverageType
-    // The cleaning/descale/calibrate no-coffee tier is Profile::isMaintenanceBeverageType
-    // in C++ — the same call the shot-history, Visualizer and MCP gates make — so this
-    // warning genuinely can't drift from them.
-    readonly property bool _isCleaning: ProfileManager.currentProfileIsMaintenance
+    readonly property string _bevType: beverageType
+    // The cleaning/descale/calibrate no-coffee tier: by default `isCleaning`
+    // reads Profile::isMaintenanceBeverageType (the same C++ call the shot-history,
+    // Visualizer and MCP gates make, so the live widget can't drift from them);
+    // per-shot consumers override `isCleaning` from the shot's own frozen flag.
+    readonly property bool _isCleaning: isCleaning
     readonly property string _beverage: {
         var _ = TranslationManager.translationVersion   // re-evaluate on a live language switch
         if (_bevType === "espresso") return TranslationManager.translate("idle.button.espresso", "Espresso")
@@ -177,16 +191,18 @@ Item {
             return tail.length > 0 ? (s + blockSep + tail.join(sep)) : s
         }
 
-        // Recipe sentence — the profile-less anchor. When Sentence is on but the
-        // profile item isn't shown, the plan reads as the recipe itself:
-        // "Brew 40.0g of Espresso at 92°C from 18.0g of <Roaster> <Bean>". Dose,
-        // roaster and coffee are CONSUMED into the sentence (they don't also trail
-        // as fragments); only grind/roastDate trail after. Each piece stays gated
-        // by its item's presence via the _xStr getters, so the chips still drive
-        // what shows. The beverage word is always present, so this never degrades
-        // to a fragment list while Sentence is on. Built by appending translatable
-        // clauses (at %/from %) onto the head — English word order; the a11y and
-        // rich paths share this builder so they can't drift.
+        // Recipe sentence — the profile-less anchor. Reached when Sentence is on
+        // but there's no profile anchor (item removed, or no profile name
+        // available), so the plan reads as the recipe itself: "Brew 40.0g of
+        // Espresso at 92°C from 18.0g of <Roaster> <Bean>". Dose, temperature,
+        // roaster and coffee are CONSUMED into the sentence (they don't also
+        // trail as fragments); only grind/roastDate trail after. Each piece
+        // stays gated by its item's presence via the _xStr getters, so the
+        // chips still drive what shows. The beverage word is always present,
+        // so this never degrades to a fragment list while Sentence is on.
+        // Built by appending translatable clauses (at %/from %) onto the head —
+        // English word order; the a11y and rich paths share this builder so
+        // they can't drift.
         if (sentence) {
             var beans = ""
             if (_roasterStr !== "" && _coffeeStr !== "")

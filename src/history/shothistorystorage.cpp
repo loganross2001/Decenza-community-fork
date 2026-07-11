@@ -3,6 +3,7 @@
 #include "coffeebagstorage.h"
 #include "baristastorage.h"
 #include "equipmentstorage.h"
+#include "recipestorage.h"
 #include "ai/conductance.h"
 #include "ai/shotanalysis.h"
 #include "ai/shotsummarizer.h"
@@ -78,6 +79,12 @@ void ShotHistoryStorage::close()
     if (m_db.isOpen()) {
         m_db.close();
     }
+    // Drop THIS object's handle to the named connection BEFORE removing it.
+    // removeDatabase() warns ("connection is still in use, all queries will
+    // cease to work") when a live QSqlDatabase still references the connection
+    // — and the member m_db is exactly such a reference. Reset it to an
+    // invalid database first so removeDatabase runs cleanly.
+    m_db = QSqlDatabase();
     if (QSqlDatabase::contains(DB_CONNECTION_NAME)) {
         QSqlDatabase::removeDatabase(DB_CONNECTION_NAME);
     }
@@ -94,10 +101,10 @@ bool ShotHistoryStorage::initialize(const QString& dbPath)
 
     qDebug() << "ShotHistoryStorage: Initializing database at" << m_dbPath;
 
-    // Remove existing connection if any
-    if (QSqlDatabase::contains(DB_CONNECTION_NAME)) {
-        QSqlDatabase::removeDatabase(DB_CONNECTION_NAME);
-    }
+    // Drop any existing connection (a re-initialize) cleanly first — close()
+    // resets m_db before removing so removeDatabase doesn't warn about a
+    // still-referenced connection.
+    close();
 
     m_db = QSqlDatabase::addDatabase("QSQLITE", DB_CONNECTION_NAME);
     m_db.setDatabaseName(m_dbPath);
@@ -1397,6 +1404,148 @@ bool ShotHistoryStorage::runMigrations()
         }
     }
 
+    // Migration 26: recipes (add-recipes). Create the recipes table and add
+    // shot provenance: recipe_id names the recipe active at shot start, and
+    // steam_json snapshots the steam spec in effect so promote-from-shot
+    // round-trips the whole drink. Both nullable — legacy rows unaffected.
+    // Idempotent (CREATE IF NOT EXISTS + hasColumn guards); the bump gates on
+    // the post-conditions like migrations 19/24. Whitespace before the
+    // open-paren dodges the QSqlQuery permission-hook false-positive, as
+    // elsewhere. Do not auto-format.
+    // [barista-fork] Renumbered 25 -> 26: upstream shipped recipes as migration
+    // 25, but the fork's bag visualizer_sync_pending migration already holds 25
+    // on-device, so recipes must advance from a committed migration 25.
+    if (currentVersion >= 25 && currentVersion < 26) {
+        qDebug() << "ShotHistoryStorage: Running migration to version 26 (recipes)";
+
+        const bool tableOk = RecipeStorage::ensureTableStatic(m_db);
+
+        if (!hasColumn("shots", "recipe_id"))
+            query.exec ("ALTER TABLE shots ADD COLUMN recipe_id INTEGER");
+        if (!hasColumn("shots", "steam_json"))
+            query.exec ("ALTER TABLE shots ADD COLUMN steam_json TEXT");
+        query.exec("CREATE INDEX IF NOT EXISTS idx_shots_recipe_id ON shots(recipe_id)");
+
+        if (tableOk && hasColumn("shots", "recipe_id") && hasColumn("shots", "steam_json")) {
+            query.exec ("DELETE FROM schema_version");
+            query.exec ("INSERT INTO schema_version (version) VALUES (26)");
+            currentVersion = 26;
+        } else {
+            qWarning() << "ShotHistoryStorage: migration 26 (recipes) incomplete - will retry next launch";
+        }
+    }
+
+    // Migration 27: recipes.rpm_pinned (add-recipes follow-up) — the grind
+    // override pins grind AND rpm together. Fresh DBs get the column from
+    // ensureTableStatic (the hasColumn guard makes both paths converge);
+    // this repairs branch-dev DBs that already ran migration 26 with the
+    // old table. One idempotent additive column, gated ">= 26 && < 27".
+    // [barista-fork] Renumbered 26 -> 27 (recipes chain shifted +1; see mig 26).
+    if (currentVersion >= 26 && currentVersion < 27) {
+        qDebug() << "ShotHistoryStorage: Running migration to version 27 (recipes rpm_pinned)";
+
+        if (!hasColumn("recipes", "rpm_pinned"))
+            query.exec ("ALTER TABLE recipes ADD COLUMN rpm_pinned INTEGER");
+
+        if (hasColumn("recipes", "rpm_pinned")) {
+            query.exec ("DELETE FROM schema_version");
+            query.exec ("INSERT INTO schema_version (version) VALUES (27)");
+            currentVersion = 27;
+        } else {
+            qWarning() << "ShotHistoryStorage: migration 27 incomplete - will retry next launch";
+        }
+    }
+
+    // Migration 28: hot_water_json (finish-recipes-first-class) — the opt-in
+    // added-hot-water block (water-vessel snapshot) that lets a recipe describe
+    // an Americano. Added on BOTH recipes (the recipe's own block) and shots
+    // (the snapshot in effect at shot start, so promote-from-shot round-trips
+    // the whole drink, exactly like shots.steam_json from migration 26). Fresh
+    // DBs get recipes.hot_water_json from ensureTableStatic (the hasColumn guard
+    // makes both paths converge); this repairs DBs that already ran migration
+    // 26/27 with the old table. Idempotent additive columns, gated
+    // ">= 27 && < 28", mirroring migration 27.
+    // [barista-fork] Renumbered 27 -> 28 (recipes chain shifted +1).
+    if (currentVersion >= 27 && currentVersion < 28) {
+        qDebug() << "ShotHistoryStorage: Running migration to version 28 (hot_water_json)";
+
+        if (!hasColumn("recipes", "hot_water_json"))
+            query.exec ("ALTER TABLE recipes ADD COLUMN hot_water_json TEXT");
+        if (!hasColumn("shots", "hot_water_json"))
+            query.exec ("ALTER TABLE shots ADD COLUMN hot_water_json TEXT");
+
+        if (hasColumn("recipes", "hot_water_json") && hasColumn("shots", "hot_water_json")) {
+            query.exec ("DELETE FROM schema_version");
+            query.exec ("INSERT INTO schema_version (version) VALUES (28)");
+            currentVersion = 28;
+        } else {
+            qWarning() << "ShotHistoryStorage: migration 28 incomplete - will retry next launch";
+        }
+    }
+
+    // Migration 29: recipes.drink_type + coffee_bags.kind (add-recipe-wizard-tea).
+    // drink_type records the wizard's drink intent (empty on legacy rows =
+    // derive from blocks at read time); kind marks a bag as coffee or tea and
+    // is stamped at creation only. Both are additive with safe defaults —
+    // existing bags become 'coffee' via the column default; existing recipes
+    // keep an empty drink_type. Fresh DBs get both columns from the
+    // ensureTableStatic CREATE TABLEs (the hasColumn guards make both paths
+    // converge). Idempotent, gated ">= 28 && < 29", mirroring migration 28.
+    // [barista-fork] Renumbered 28 -> 29 (recipes chain shifted +1).
+    if (currentVersion >= 28 && currentVersion < 29) {
+        qDebug() << "ShotHistoryStorage: Running migration to version 29 (drink_type + bag kind)";
+
+        if (!hasColumn("recipes", "drink_type")
+            && !query.exec ("ALTER TABLE recipes ADD COLUMN drink_type TEXT"))
+            qWarning() << "ShotHistoryStorage: migration 28 add recipes.drink_type failed -"
+                       << query.lastError().text();
+        if (!hasColumn("coffee_bags", "kind")
+            && !query.exec ("ALTER TABLE coffee_bags ADD COLUMN kind TEXT NOT NULL DEFAULT 'coffee'"))
+            qWarning() << "ShotHistoryStorage: migration 28 add coffee_bags.kind failed -"
+                       << query.lastError().text();
+
+        if (hasColumn("recipes", "drink_type") && hasColumn("coffee_bags", "kind")) {
+            query.exec ("DELETE FROM schema_version");
+            query.exec ("INSERT INTO schema_version (version) VALUES (29)");
+            currentVersion = 29;
+        } else {
+            qWarning() << "ShotHistoryStorage: migration 29 incomplete - will retry next launch";
+        }
+    }
+
+    // Migration 29: recipes.bag_id (recipes-bag-links-ui-polish). Recipes now
+    // link a SPECIFIC bag instead of resolving their bean identity to the
+    // most-recently-used open bag at every activation (which silently picked
+    // the wrong bag for users running two bags of one bean at different
+    // ages). Additive column plus a one-time data pass that resolves each
+    // existing recipe's bean identity to its current open bag — the retired
+    // resolver's logic, run once; recipes whose bean has no open bag stay
+    // NULL and present as stale. Fresh DBs get the column from
+    // ensureTableStatic (the hasColumn guard makes both paths converge).
+    // Idempotent (the data pass only touches NULL bag_id rows), gated
+    // ">= 29 && < 30", mirroring migration 29.
+    // [barista-fork] Renumbered 29 -> 30 (recipes chain shifted +1).
+    if (currentVersion >= 29 && currentVersion < 30) {
+        qDebug() << "ShotHistoryStorage: Running migration to version 30 (recipes bag_id)";
+
+        if (!hasColumn("recipes", "bag_id")
+            && !query.exec ("ALTER TABLE recipes ADD COLUMN bag_id INTEGER"))
+            qWarning() << "ShotHistoryStorage: migration 29 add recipes.bag_id failed -"
+                       << query.lastError().text();
+
+        // The version bump gates on the DATA pass too: the pass is
+        // idempotent (NULL bag_id rows only), so a transient failure —
+        // locked DB at upgrade time — simply retries next launch instead
+        // of permanently stranding every recipe stale.
+        if (hasColumn("recipes", "bag_id") && RecipeStorage::migrateBagLinksStatic(m_db)) {
+            query.exec ("DELETE FROM schema_version");
+            query.exec ("INSERT INTO schema_version (version) VALUES (30)");
+            currentVersion = 30;
+        } else {
+            qWarning() << "ShotHistoryStorage: migration 30 incomplete - will retry next launch";
+        }
+    }
+
     m_schemaVersion = currentVersion;
     return true;
 }
@@ -1568,6 +1717,9 @@ qint64 ShotHistoryStorage::saveShot(ShotDataModel* shotData,
     data.bagId = metadata.bagId;
     data.frozenDate = metadata.frozenDate;
     data.defrostDate = metadata.defrostDate;
+    data.recipeId = metadata.recipeId;
+    data.steamJson = metadata.steamJson;
+    data.hotWaterJson = metadata.hotWaterJson;
 
     if (profile) {
         data.profileKbId = ShotSummarizer::computeProfileKbId(profile->title(), profile->editorType());
@@ -1740,7 +1892,8 @@ qint64 ShotHistoryStorage::saveShotStatic(const QString& dbPath, const ShotSaveD
                     channeling_detected, grind_issue_detected,
                     skip_first_frame_detected, pour_truncated_detected,
                     stopped_by, beanbase_json, beanbase_id,
-                    bag_id, frozen_date, defrost_date
+                    bag_id, frozen_date, defrost_date,
+                    recipe_id, steam_json, hot_water_json
                 ) VALUES (
                     :uuid, :timestamp, :profile_name, :profile_json, :beverage_type,
                     :duration, :final_weight, :dose_weight,
@@ -1753,7 +1906,8 @@ qint64 ShotHistoryStorage::saveShotStatic(const QString& dbPath, const ShotSaveD
                     :channeling_detected, :grind_issue_detected,
                     :skip_first_frame_detected, :pour_truncated_detected,
                     :stopped_by, :beanbase_json, :beanbase_id,
-                    :bag_id, :frozen_date, :defrost_date
+                    :bag_id, :frozen_date, :defrost_date,
+                    :recipe_id, :steam_json, :hot_water_json
                 )
             )");
 
@@ -1801,6 +1955,9 @@ qint64 ShotHistoryStorage::saveShotStatic(const QString& dbPath, const ShotSaveD
             query.bindValue(":bag_id", bagIdIsSet(data.bagId) ? QVariant(data.bagId) : QVariant());
             query.bindValue(":frozen_date", data.frozenDate.isEmpty() ? QVariant() : data.frozenDate);
             query.bindValue(":defrost_date", data.defrostDate.isEmpty() ? QVariant() : data.defrostDate);
+            query.bindValue(":recipe_id", data.recipeId > 0 ? QVariant(data.recipeId) : QVariant());
+            query.bindValue(":steam_json", data.steamJson.isEmpty() ? QVariant() : data.steamJson);
+            query.bindValue(":hot_water_json", data.hotWaterJson.isEmpty() ? QVariant() : data.hotWaterJson);
 
             if (!query.exec()) {
                 locked = isLockError(query.lastError());
@@ -2453,7 +2610,8 @@ ShotRecord ShotHistoryStorage::loadShotRecordStatic(QSqlDatabase& db, qint64 sho
                s.equipment_id, s.rpm,
                ep.in_inventory, ep.superseded_by, ep.name,
                eb.brand, eb.model,
-               epp.model
+               epp.model,
+               s.recipe_id, s.steam_json, s.hot_water_json
         FROM shots s
         LEFT JOIN equipment_items eg ON eg.package_id = s.equipment_id AND eg.kind = 'grinder'
         LEFT JOIN equipment_items eb ON eb.package_id = s.equipment_id AND eb.kind = 'basket'
@@ -2537,6 +2695,12 @@ ShotRecord ShotHistoryStorage::loadShotRecordStatic(QSqlDatabase& db, qint64 sho
     // (add-puckprep-equipment); empty when the package has no puck prep. Flags +
     // distribution are derived downstream (core/puckprep.h), never stored.
     record.puckPrep = query.value(46).toString();
+    // Recipe provenance (cols 47/48, add-recipes): NULL = pre-recipe shot.
+    // hot_water_json (col 49, finish-recipes-first-class) is the added-hot-water
+    // snapshot for promote-from-shot round-trip.
+    record.recipeId = query.value(47).isNull() ? -1 : query.value(47).toLongLong();
+    record.steamJson = query.value(48).toString();
+    record.hotWaterJson = query.value(49).toString();
     record.summary.hasVisualizerUpload = !record.visualizerId.isEmpty();
 
     // Snapshot stored badge values before the recompute block overwrites them, so
@@ -3359,6 +3523,21 @@ bool ShotHistoryStorage::importDatabaseStatic(const QString& destDbPath, const Q
                 goto cleanup;
             }
 
+            // Import recipes after bags so shots.recipe_id can be remapped
+            // (finish-recipes-first-class): recipe row ids change on insert,
+            // exactly like bag ids. Pre-migration-25 sources have no recipes
+            // table and yield an empty map. packageIdMap remaps each recipe's
+            // equipment_id; bagIdMap remaps its bag_id (an unmatched source
+            // bag becomes NULL → stale); the bean identity fields carry
+            // verbatim as the relink matching key.
+            QHash<qint64, qint64> recipeIdMap;
+            if (!RecipeStorage::importRecipesStatic(srcDb, destDb, merge, recipeIdMap, packageIdMap,
+                                                    bagIdMap)) {
+                qWarning() << "ShotHistoryStorage::importDatabaseStatic: Recipe import failed";
+                destDb.rollback();
+                goto cleanup;
+            }
+
             // Get existing UUIDs for merge mode
             QSet<QString> existingUuids;
             if (merge) {
@@ -3394,6 +3573,16 @@ bool ShotHistoryStorage::importDatabaseStatic(const QString& destDbPath, const Q
             // sources lack both — they resolve to NULL.
             const int idxEquipmentId = srcRecord.indexOf("equipment_id");
             const int idxRpm = srcRecord.indexOf("rpm");
+            // Recipe provenance (finish-recipes-first-class): recipe_id is a
+            // source recipe row id (remapped like bag_id); steam_json and
+            // hot_water_json are the whole-drink snapshots taken at shot start,
+            // carried verbatim so promote-from-shot round-trips after transfer.
+            // All three exist only on post-migration-25/27 sources → NULL on
+            // older ones. Before this change none of them were carried at all,
+            // dropping recipe provenance on every transfer.
+            const int idxRecipeId = srcRecord.indexOf("recipe_id");
+            const int idxSteamJson = srcRecord.indexOf("steam_json");
+            const int idxHotWaterJson = srcRecord.indexOf("hot_water_json");
             auto srcValueOrNull = [&srcShots](int idx) {
                 return idx >= 0 ? srcShots.value(idx) : QVariant();
             };
@@ -3418,8 +3607,9 @@ bool ShotHistoryStorage::importDatabaseStatic(const QString& destDbPath, const Q
                         channeling_detected, grind_issue_detected,
                         skip_first_frame_detected, pour_truncated_detected,
                         stopped_by, beanbase_json, beanbase_id,
-                        bag_id, frozen_date, defrost_date)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        bag_id, frozen_date, defrost_date,
+                        recipe_id, steam_json, hot_water_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 )");
 
                 insert.addBindValue(uuid);
@@ -3478,6 +3668,18 @@ bool ShotHistoryStorage::importDatabaseStatic(const QString& destDbPath, const Q
                 }
                 insert.addBindValue(srcValueOrNull(idxFrozenDate));
                 insert.addBindValue(srcValueOrNull(idxDefrostDate));
+                // recipe_id is a row id in the SOURCE database — remap to the
+                // imported recipe's new id, or NULL when the recipe wasn't
+                // imported (so provenance never dangles). steam_json and
+                // hot_water_json are opaque snapshots, carried verbatim.
+                {
+                    const QVariant srcRecipeId = srcValueOrNull(idxRecipeId);
+                    const qint64 mappedRecipe = recipeIdMap.value(srcRecipeId.toLongLong(), -1);
+                    insert.addBindValue((srcRecipeId.isValid() && !srcRecipeId.isNull() && mappedRecipe > 0)
+                                            ? QVariant(mappedRecipe) : QVariant());
+                }
+                insert.addBindValue(srcValueOrNull(idxSteamJson));
+                insert.addBindValue(srcValueOrNull(idxHotWaterJson));
 
                 if (!insert.exec()) {
                     qWarning() << "ShotHistoryStorage::importDatabaseStatic: Failed to import shot:" << insert.lastError().text();

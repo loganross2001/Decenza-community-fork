@@ -42,6 +42,8 @@ AIConversation::AIConversation(AIManager* aiManager, QObject* parent)
     if (m_aiManager) {
         connect(m_aiManager, &AIManager::conversationResponseReceived,
                 this, &AIConversation::onAnalysisComplete);
+        connect(m_aiManager, &AIManager::conversationInterimText,
+                this, &AIConversation::onInterimText);   // [barista-fork] pre-tool lead-in
         connect(m_aiManager, &AIManager::conversationErrorOccurred,
                 this, &AIConversation::onAnalysisFailed);
         connect(m_aiManager, &AIManager::providerChanged,
@@ -474,6 +476,17 @@ void AIConversation::onAnalysisComplete(const QString& response)
     emit responseReceived(response);
 
     qDebug() << "AIConversation: Response received, history now has" << m_messages.size() << "messages";
+}
+
+void AIConversation::onInterimText(const QString& text)
+{
+    // [barista-fork] The manager's shared conversation signals fan out to EVERY AIConversation; the one whose
+    // turn is actually in flight is the one with m_busy == true (same guard as onAnalysisComplete). This is a
+    // mid-turn "speak this lead-in now" nudge only — do NOT touch m_busy, history, or lastResponse (the turn is
+    // NOT finished; the real answer still arrives via onAnalysisComplete). Just forward it to the overlay.
+    if (!m_busy) return;  // Not our request
+    if (text.trimmed().isEmpty()) return;
+    emit interimReceived(text);
 }
 
 void AIConversation::onAnalysisFailed(const QString& error)

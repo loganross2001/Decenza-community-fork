@@ -409,6 +409,21 @@ void AssistantVoice::previewBell(const QString& name) {
     m_bell->play();
 }
 
+void AssistantVoice::playThinkingCue() {
+    // [barista-fork] Non-verbal silence-breaker. Honor the barista mute (a muted barista stays fully silent),
+    // and use a FIXED soft asset at low volume — never the configurable bell (which may be "off" or loud). The
+    // QML side already skips this when the coaching voice is speaking (the speech arbiter), so we don't re-check
+    // here. A gentle "still working" tick, deliberately quiet and non-jarring.
+    if (m_role == Role::Barista && m_settings && !m_settings->voiceEnabled())
+        return;
+    if (!m_cue) {
+        m_cue = new QSoundEffect(this);
+        m_cue->setSource(QUrl(QStringLiteral("qrc:/sounds/tick.wav")));
+        m_cue->setVolume(0.25);   // low — a subtle presence, not an alert
+    }
+    m_cue->play();
+}
+
 void AssistantVoice::applyVoiceFromSettings() {
     if (!m_tts || !m_settings)
         return;

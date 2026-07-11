@@ -287,6 +287,11 @@ public:
 
 signals:
     void responseReceived(const QString& response);
+    // [barista-fork] Interim (pre-tool) lead-in for THIS conversation's in-flight turn — the model's short
+    // "let me pull that up" written before a tool/search runs. The overlay speaks it immediately so there's
+    // no dead air. NOT a turn completion (busy stays true, no history write); the final responseReceived
+    // still delivers the actual answer. Emitted at most once per turn (first tool round / first continuation).
+    void interimReceived(const QString& text);
     void errorOccurred(const QString& error);
     void busyChanged();
     void historyChanged();
@@ -300,6 +305,7 @@ signals:
 
 private slots:
     void onAnalysisComplete(const QString& response);
+    void onInterimText(const QString& text);   // [barista-fork] re-emit the manager's interim lead-in (own turns only)
     void onAnalysisFailed(const QString& error);
 
 private:

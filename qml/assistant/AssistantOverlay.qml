@@ -46,6 +46,48 @@ Item {
         else
             silenceTimer.stop()
     }
+
+    // [barista-fork] Part B — non-verbal silence-breaker. A single-shot UI-timeout timer (per CLAUDE.md, a
+    // genuine UI timeout, not a polling loop): started the instant a real model turn is dispatched (_send),
+    // cancelled the moment ANY speech starts (the lead-in or the answer) or the turn resolves/errs. If it
+    // still fires at 5s with nothing spoken, we break the silence WITHOUT a canned phrase — a soft "thinking"
+    // tick plus a more pronounced avatar thinking beat. Gentle, and never while the coaching voice is talking.
+    Timer {
+        id: slowOpTimer
+        interval: 5000
+        repeat: false
+        onTriggered: {
+            // Guard: only cue if we're still genuinely working, silently, on THIS turn.
+            if (!root._thinking || root._spokeThisTurn || root._state !== "conversing")
+                return
+            root._thinkingCue = true   // avatar shows a more pronounced thinking beat
+            // Soft non-verbal tick — skip if the coaching voice is mid-cue (speech arbiter: never overlap), or
+            // if the barista just started speaking. playThinkingCue() itself also honors the barista mute.
+            var coachBusy = (typeof Barista !== "undefined" && Barista.coachingVoice
+                             && Barista.coachingVoice.speaking)
+            if (root._voice && !(root._voice.speaking) && !coachBusy
+                    && typeof root._voice.playThinkingCue === "function")
+                root._voice.playThinkingCue()
+        }
+    }
+    // Start the 5s silence-breaker for a freshly dispatched slow op (called from _send after the model turn
+    // is actually sent). Clears the per-turn spoken flag + cue so each turn starts fresh.
+    function _beginSlowOpWatch() {
+        root._spokeThisTurn = false
+        root._thinkingCue = false
+        slowOpTimer.restart()
+    }
+    // Silence is broken (something was spoken) or the turn ended → stop watching + drop the cue.
+    function _cancelSlowOpWatch() {
+        slowOpTimer.stop()
+        root._thinkingCue = false
+    }
+    // Mark that the barista has produced audible/visible words this turn → suppress the Part B cue and stop
+    // the timer. Called from BOTH the lead-in (onInterimReceived) and the final answer (onResponseReceived).
+    function _markSpokeThisTurn() {
+        root._spokeThisTurn = true
+        root._cancelSlowOpWatch()
+    }
     Connections {
         target: root._voiceInput
         ignoreUnknownSignals: true
@@ -67,6 +109,10 @@ Item {
         target: root._voice
         ignoreUnknownSignals: true
         function onSpeakingChanged() {
+            // [barista-fork] Part B: the barista actually started talking → the silence is broken, so kill the
+            // 5s cue timer + clear the cue (belt-and-suspenders alongside _markSpokeThisTurn on the speak call).
+            if (root._voice && root._voice.speaking)
+                root._markSpokeThisTurn()
             // [barista-fork] The barista signed off and asked to end the session → collapse only NOW that the
             // sign-off finished speaking (never cut it off). Checked BEFORE the listening guard so a text-only
             // reply that still spoke a sign-off dismisses too. _endSessionNow clears the flag + ends the session.
@@ -100,6 +146,14 @@ Item {
 
     property string _message: ""       // the assistant's latest line
     property bool _thinking: false
+    // [barista-fork] "Don't leave the user in silence" (Part A + B). _spokeThisTurn goes true the moment ANY
+    // speech starts for the in-flight turn — the model's pre-tool lead-in ("let me pull that up", spoken via
+    // onInterimReceived) OR the final answer. The 5s silence-breaker (Part B) only fires while this is still
+    // false, so a natural verbal acknowledgment always suppresses the non-verbal cue. Reset at each turn start.
+    property bool _spokeThisTurn: false
+    // [barista-fork] Part B cue latch: a more pronounced avatar "thinking" beat while the slow op drags on with
+    // nothing spoken. Set when the 5s timer fires; cleared as soon as anything is spoken or the turn resolves.
+    property bool _thinkingCue: false
     property bool _showSettings: false
     property bool _collapsed: false     // panel minimised to a thin edge tab (frees the whole screen)
     property var _pendingNext: null     // structuredNext recommendation awaiting apply/skip
@@ -311,6 +365,8 @@ Item {
         if (root._voiceInput) root._voiceInput.stop()
         if (root._voice) root._voice.stop()
         silenceTimer.stop()
+        root._cancelSlowOpWatch()   // [barista-fork] Part B: session torn down → stop the 5s cue timer + clear cue
+        root._spokeThisTurn = false
         root._pendingNext = null
         root._awaitConfirm = false
         root._pendingGrind = null
@@ -687,6 +743,23 @@ Item {
                 + "words to a month (1-12) and day (1-31), add a year only if they pinned a specific one (otherwise "
                 + "leave it out so it recurs yearly), give a short label ('anniversary', 'Mom's birthday'), and "
                 + "confirm briefly. On the day itself it'll show up in todaysOccasion so you can wish them well."
+                // [barista-fork] "Don't leave the user in silence" — a real lookup (weather, stocks, news, web
+                // search, or pulling shots from history) takes a moment, and the app SPEAKS what you write BEFORE
+                // the tool runs. So when — and ONLY when — you're about to call a tool or look something up,
+                // FIRST say a brief, natural acknowledgment in your OWN words, then call the tool in the SAME
+                // turn. Keep it to a few words and VARY it every time so it never sounds canned ('let me pull
+                // that up', 'one sec, checking', 'hmm, let me find out', 'give me a moment'). Make it a STATEMENT,
+                // never a question — do NOT ask permission ('want me to look that up?'), just acknowledge and go.
+                // For anything you can answer instantly from what you already know, skip it and just answer — the
+                // acknowledgment is only for a genuine lookup, so there's never dead air while a tool runs.
+                + "\nBEFORE A LOOKUP (no dead air) — a real lookup takes a moment (get_weather, get_stock_quote, "
+                + "get_local_news, web search, query_shots / get_shot_detail and the other history tools). The app "
+                + "speaks whatever you write BEFORE the tool runs, so whenever you're about to call one of these "
+                + "tools, FIRST say a SHORT, natural acknowledgment in your OWN words — then call the tool in the "
+                + "same reply. Vary it every time so it never sounds scripted ('let me pull that up', 'one sec, "
+                + "checking', 'hmm, let me find out', 'give me a moment on that'). Make it a brief STATEMENT, not a "
+                + "question, and never ask permission. Do this ONLY when a real lookup is actually coming — for "
+                + "anything you already know, just answer straight away with no lead-in."
 
         // dataBlock is the pre-formatted, combined context (dial-in + bean profile + profile guidance).
         var block = (dataBlock && dataBlock.length > 0) ? dataBlock : "recordedShots: 0"
@@ -891,9 +964,12 @@ Item {
                 root._thinking = false
                 root._message = TranslationManager.translate("barista.err",
                     "Something went wrong — tap Chat or type to try again.")
+            } else {
+                root._beginSlowOpWatch()   // [barista-fork] Part B: model turn dispatched → arm the 5s cue
             }
         } else {
             root._conv.followUp(t)
+            root._beginSlowOpWatch()       // [barista-fork] Part B: model turn dispatched → arm the 5s cue
         }
     }
 
@@ -961,6 +1037,25 @@ Item {
     Connections {
         target: root._conv
         ignoreUnknownSignals: true
+        // [barista-fork] Part A — the model's short pre-tool lead-in ("let me pull that up"), emitted BEFORE
+        // the tool/search runs. Speak it IMMEDIATELY so there's no dead air, and show it as the working line.
+        // This is NOT the turn's answer — _thinking stays true, the mic stays paused, and the real reply still
+        // arrives via onResponseReceived (which replaces this line). Marking _spokeThisTurn cancels the Part B
+        // 5s cue (a natural verbal acknowledgment always wins over the non-verbal fallback). Model-generated
+        // and varied — no hard-coded string anywhere.
+        function onInterimReceived(text) {
+            if (root._state !== "conversing")
+                return
+            if (root._awaitingContext)
+                return
+            var clean = root._stripBlock(text)
+            if (clean.length === 0)
+                return
+            root._message = clean          // show the lead-in while the tool runs (replaced by the answer)
+            root._markSpokeThisTurn()      // suppress the Part B cue + stop the 5s timer
+            if (root._voiceInput && root._voiceInput.listening) root._voiceInput.pauseMic()
+            root._speakSanitised(text)     // speak the model's OWN words now, before the tool result lands
+        }
         function onResponseReceived(response) {
             if (root._state !== "conversing")   // BL-1: reply landed after dismiss (or it's an advisor turn) → ignore
                 return
@@ -968,6 +1063,7 @@ Item {
                 return
             root._message = root._stripBlock(response)   // hide the JSON action block from the display
             root._thinking = false
+            root._markSpokeThisTurn()   // [barista-fork] Part B: the answer is here → stop the 5s cue timer
             // [barista-fork] Recency stamp: this reply completes a real user↔barista EXCHANGE (the session
             // only ever begins on the user's first utterance now), so mark it — the single source of truth
             // for greeting cadence next time. Routed through the orchestrator (one write path for lastExchangeAt).
@@ -1016,6 +1112,7 @@ Item {
             if (root._awaitingContext)   // N-R3-2: a preempted turn's error during our context build → not ours
                 return
             root._thinking = false
+            root._cancelSlowOpWatch()   // [barista-fork] Part B: the turn failed → stop the 5s cue timer
             root._message = (error && error.length > 0)
                 ? error
                 : TranslationManager.translate("barista.err", "Something went wrong — tap Chat or type to try again.")
@@ -1139,6 +1236,9 @@ Item {
                     : root._thinking ? "thinking"
                     : (root._voiceInput && root._voiceInput.listening && !root._voiceInput.paused) ? "listening"
                     : "idle"
+                // [barista-fork] Part B non-verbal cue: a more pronounced thinking beat once a slow op has run
+                // ~5s with nothing spoken (set by slowOpTimer). Only meaningful while actually thinking.
+                thinkingCue: root._thinkingCue && root._thinking
             }
 
             // The assistant's line (or a thinking indicator) — fills the panel so the input pins to the bottom.

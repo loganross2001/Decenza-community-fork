@@ -337,10 +337,15 @@ signals:
     void recentShotContextReady(const QString& context);
     void baristaContextReady(const QString& dataBlock);   // [barista-fork]
     void conversationResponseReceived(const QString& response);
+    // [barista-fork] Interim (pre-tool) prose for a conversation turn — the provider's lead-in ("let me pull
+    // that up") emitted BEFORE a tool/search runs, so the barista can speak it right away instead of sitting
+    // silent. Only re-emitted for a conversation request (mirrors conversationResponseReceived gating).
+    void conversationInterimText(const QString& text);
     void conversationErrorOccurred(const QString& error);
 
 private slots:
     void onAnalysisComplete(const QString& response);
+    void onInterimText(const QString& text);   // [barista-fork] route provider interimText → conversation
     void onAnalysisFailed(const QString& error);
     void onTestResult(bool success, const QString& message);
     void onOllamaModelsRefreshed(const QStringList& models);

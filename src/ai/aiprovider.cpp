@@ -581,7 +581,19 @@ void AnthropicProvider::onAnalysisReply(QNetworkReply* reply)
         }
         if (!toolUses.isEmpty()) {
             ++m_toolRounds;
-            if (!text.isEmpty()) m_accumulatedText += text;   // keep prose written before the tool call (mirrors pause_turn)
+            // [barista-fork] "Don't leave the user in silence": the model often writes a short natural lead-in
+            // ("let me pull that up") BEFORE the tool_use block. Emit it NOW via interimText so the overlay can
+            // speak it while the tool runs, instead of buffering it until the whole turn finishes. Only the
+            // FIRST tool round's lead-in is worth speaking (a second round's stray prose would talk over the
+            // first). The first round's lead-in is NOT folded into m_accumulatedText — the final
+            // analysisComplete carries only the post-tool answer, so the lead-in is spoken exactly once (early)
+            // and never double-spoken. Later rounds keep the old buffering so their prose isn't lost.
+            if (!text.isEmpty()) {
+                if (m_toolRounds == 1)
+                    emit interimText(text);
+                else
+                    m_accumulatedText += text;
+            }
             setStatus(Status::Busy);           // stay Busy while the DB queries run (line 499 already set Ready)
             const int gen = m_reqGen;           // guard: a superseded turn's late callback must NOT re-POST
             auto pending = std::make_shared<int>(toolUses.size());
@@ -626,7 +638,17 @@ void AnthropicProvider::onAnalysisReply(QNetworkReply* reply)
     // content appended verbatim (the API detects the trailing tool block and continues). Bounded loop.
     if (stopReason == QLatin1String("pause_turn") && m_continuations < MAX_CONTINUATIONS) {
         ++m_continuations;
-        m_accumulatedText += text;
+        // [barista-fork] Same "don't leave the user in silence" lead-in as the tool_use path: a server-side
+        // web search paused mid-turn, and any prose written before it is a natural lead-in. On the FIRST
+        // continuation, emit it now via interimText so it's spoken while the search runs (not folded into
+        // m_accumulatedText → not double-spoken at the end). Later continuations keep the old buffering so
+        // their prose isn't lost.
+        if (!text.isEmpty()) {
+            if (m_continuations == 1)
+                emit interimText(text);
+            else
+                m_accumulatedText += text;
+        }
         QJsonObject body = m_pendingRequestBody;
         QJsonArray msgs = body["messages"].toArray();
         QJsonObject asst;

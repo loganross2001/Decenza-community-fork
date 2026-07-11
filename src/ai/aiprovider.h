@@ -66,6 +66,12 @@ public:
 signals:
     void analysisComplete(const QString& response);
     void analysisFailed(const QString& error);
+    // [barista-fork] Interim (pre-tool) prose. When the model writes a short lead-in ("let me pull that up")
+    // BEFORE a tool_use / pause_turn, that text is emitted here immediately — so the UI can speak it while the
+    // tool runs (fills the silence with the model's OWN words), instead of buffering it until the whole turn
+    // completes. Emitted at most once per top-level turn's first tool round; only AnthropicProvider raises it.
+    // The final analysisComplete then carries ONLY the post-tool answer (no re-fold), so nothing double-speaks.
+    void interimText(const QString& text);
     void statusChanged(Status status);
     void testResult(bool success, const QString& message);
 

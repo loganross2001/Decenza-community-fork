@@ -255,6 +255,8 @@ void AIManager::createProviders()
     connect(anthropic, &AIProvider::analysisComplete, this, &AIManager::onAnalysisComplete);
     connect(anthropic, &AIProvider::analysisFailed, this, &AIManager::onAnalysisFailed);
     connect(anthropic, &AIProvider::testResult, this, &AIManager::onTestResult);
+    // [barista-fork] Interim pre-tool lead-in (only Anthropic emits it — the tool_use/pause_turn paths).
+    connect(anthropic, &AIProvider::interimText, this, &AIManager::onInterimText);
     // [barista-fork] Register the barista's private client-side tools (definitions + executor) behind the
     // provider's generic seam. The executor reads m_shotHistory lazily (it's wired after construction via
     // setShotHistoryStorage), so capturing `this` and forwarding at call time preserves the original behavior.
@@ -1912,6 +1914,15 @@ void AIManager::onAnalysisComplete(const QString& response)
     } else {
         emit recommendationReceived(response);
     }
+}
+
+void AIManager::onInterimText(const QString& text)
+{
+    // [barista-fork] Pre-tool lead-in. Route it ONLY for a live conversation turn (mirrors the
+    // conversationResponseReceived gating) — a recommendation/extraction turn has no spoken overlay to fill.
+    // This is NOT a turn completion: m_analyzing stays true, nothing is finalized; it's a "speak this now" nudge.
+    if (m_isConversationRequest)
+        emit conversationInterimText(text);
 }
 
 void AIManager::onAnalysisFailed(const QString& error)

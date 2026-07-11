@@ -55,6 +55,11 @@ public:
     Q_INVOKABLE void preview();                            // speak a sample line to audition a voice
     Q_INVOKABLE void playBell();                           // play the configured bell (unless "off")
     Q_INVOKABLE void previewBell(const QString& name);     // audition a specific bell (qrc:/sounds/<name>.wav)
+    // [barista-fork] "Don't leave the user in silence" NON-VERBAL cue: a soft, fixed thinking tick played when
+    // a slow op has run ~5s with nothing spoken yet. Deliberately NOT the configurable bell (which can be "off"
+    // or a loud "ding") — it plays a fixed quiet asset at low volume so it's gentle and always present. No-op
+    // when the barista voice is muted (voiceEnabled() off), so a muted barista stays silent.
+    Q_INVOKABLE void playThinkingCue();
 
 signals:
     void availableVoicesChanged();
@@ -91,6 +96,9 @@ private:
 
     QTextToSpeech* m_tts = nullptr;
     QSoundEffect* m_bell = nullptr;
+    // [barista-fork] SEPARATE soft-tick effect for the silence-breaker cue — kept apart from m_bell so setting a
+    // low cue volume never leaks into the configurable bell (and vice-versa). Created lazily on first cue.
+    QSoundEffect* m_cue = nullptr;
     QMediaPlayer* m_player = nullptr;
     QAudioOutput* m_audioOut = nullptr;
     QBuffer* m_audioBuffer = nullptr;

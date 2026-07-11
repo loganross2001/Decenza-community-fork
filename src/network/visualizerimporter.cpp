@@ -843,11 +843,28 @@ void VisualizerImporter::recoverFetchListPage(int page)
             m_recoverQueue.append({id, clock});
         }
 
-        // Stop when paging is exhausted, the ceiling is hit, or (relying on
-        // newest-first sort) this whole page predates the window start.
-        const bool pagedOut = page >= totalPages || page >= kMaxPages;
+        // Newest-first sort: once a whole page predates the window start, every
+        // later page is older too, so we've collected all in-window shots.
         const bool wholePageOlder =
             !data.isEmpty() && minClockThisPage < m_recoverFromEpoch;
+
+        // Hitting the page ceiling BEFORE reaching the window (and before we've
+        // paged past it) means older in-window shots may exist beyond the cap.
+        // Reporting the partial result as "complete" would be silent data loss,
+        // so fail loudly instead (mirrors VisualizerUploader's abnormal-exit
+        // policy). This can't trip for a recent range — wholePageOlder stops us
+        // within a few pages regardless of library size.
+        if (page >= kMaxPages && page < totalPages && !wholePageOlder) {
+            m_recovering = false;
+            emit recoveringChanged();
+            emit recoveryFailed(QStringLiteral(
+                "Too many shots to search through (over %1). "
+                "Pick a more recent date range.")
+                .arg(kMaxPages * kItemsPerPage));
+            return;
+        }
+
+        const bool pagedOut = page >= totalPages;
         if (pagedOut || wholePageOlder) {
             m_recoverTotal = static_cast<int>(m_recoverQueue.size());
             emit recoveryProgress(m_recoverTotal, 0, 0, 0);
@@ -909,10 +926,18 @@ void VisualizerImporter::recoverNextShot()
             QString profileJson;
             if (preply->error() == QNetworkReply::NoError)
                 profileJson = QString::fromUtf8(preply->readAll());
+            else
+                qWarning() << "VisualizerImporter: profile fetch failed for"
+                           << m_recoverCurrent.visualizerId << preply->errorString()
+                           << "- importing shot without a profile";
 
-            // Step 3: parse and insert (importShotRecord dedupes).
+            // Step 3: parse and insert (importShotRecord dedupes). Run the body
+            // through sanitizeVisualizerJson first: visualizer.coffee can emit the
+            // malformed number tokens (.5, 9.) that QJsonDocument rejects outright,
+            // which would otherwise drop the whole shot (the sibling profile path
+            // sanitizes for the same reason).
             QJsonParseError perr{};
-            const QJsonDocument doc = QJsonDocument::fromJson(shotBody, &perr);
+            const QJsonDocument doc = QJsonDocument::fromJson(sanitizeVisualizerJson(shotBody), &perr);
             if (perr.error != QJsonParseError::NoError || !doc.isObject()) {
                 qWarning() << "VisualizerImporter: shot parse error for"
                            << m_recoverCurrent.visualizerId << perr.errorString();

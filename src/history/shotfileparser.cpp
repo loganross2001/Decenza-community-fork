@@ -33,6 +33,21 @@ QVector<double> jsonArrayToDoubles(const QJsonArray& arr)
     }
     return out;
 }
+
+// Scalar sibling of the above. visualizer.coffee string-encodes DYE scalars too
+// ("16.2", "0"), while a few (espresso_enjoyment) arrive as bare numbers.
+// QJsonValue::toDouble()/toInt() return 0 for a *string* value — no coercion —
+// so a bare .toDouble() silently zeroes every string-encoded field. Branch on
+// the type (mirrors jsonToDouble in profileframe.cpp).
+double jsonToScalar(const QJsonValue& v, double defaultVal = 0.0)
+{
+    if (v.isString()) {
+        bool ok = false;
+        const double d = v.toString().toDouble(&ok);
+        return ok ? d : defaultVal;
+    }
+    return v.toDouble(defaultVal);
+}
 }  // namespace
 
 ShotFileParser::ParseResult ShotFileParser::parse(const QByteArray& fileContents, const QString& filename)
@@ -250,6 +265,14 @@ ShotFileParser::ParseResult ShotFileParser::parseVisualizerShot(const QJsonObjec
     // Core + goal + auxiliary series. Keys mirror the DE1 .shot field names
     // (the visualizer download echoes them verbatim).
     const QVector<double> pressure     = jsonArrayToDoubles(data.value("espresso_pressure").toArray());
+    // Every espresso shot has a pressure series. If timeframe is present but the
+    // telemetry object is missing/empty/renamed (a partial upload, or a schema
+    // change on visualizer.coffee), fail loudly rather than importing a hollow
+    // shot with blank traces that would still be counted as "imported".
+    if (pressure.isEmpty()) {
+        result.errorMessage = "Missing pressure samples";
+        return result;
+    }
     const QVector<double> flow         = jsonArrayToDoubles(data.value("espresso_flow").toArray());
     const QVector<double> tempBasket   = jsonArrayToDoubles(data.value("espresso_temperature_basket").toArray());
     const QVector<double> weight       = jsonArrayToDoubles(data.value("espresso_weight").toArray());
@@ -287,7 +310,7 @@ ShotFileParser::ParseResult ShotFileParser::parseVisualizerShot(const QJsonObjec
         result.record.weightFlowRate = toPointVector(elapsed, flowWeight);
 
     // Duration: prefer the reported value, else the last elapsed sample.
-    double duration = shotJson.value("duration").toDouble();
+    double duration = jsonToScalar(shotJson.value("duration"));
     if (duration <= 0) duration = elapsed.isEmpty() ? 0 : elapsed.last();
     result.record.summary.duration = duration;
 
@@ -310,14 +333,14 @@ ShotFileParser::ParseResult ShotFileParser::parseVisualizerShot(const QJsonObjec
         result.record.grinderModel = rawGrinder;
     }
     result.record.grinderSetting = shotJson.value("grinder_setting").toString();
-    result.record.drinkTds = shotJson.value("drink_tds").toDouble();
-    result.record.drinkEy  = shotJson.value("drink_ey").toDouble();
-    result.record.summary.enjoyment = shotJson.value("espresso_enjoyment").toInt();
+    result.record.drinkTds = jsonToScalar(shotJson.value("drink_tds"));
+    result.record.drinkEy  = jsonToScalar(shotJson.value("drink_ey"));
+    result.record.summary.enjoyment = qRound(jsonToScalar(shotJson.value("espresso_enjoyment")));
     result.record.espressoNotes = shotJson.value("espresso_notes").toString();
     result.record.beanNotes = shotJson.value("bean_notes").toString();
     result.record.barista = shotJson.value("barista").toString();
-    result.record.summary.doseWeight = shotJson.value("bean_weight").toDouble();
-    result.record.summary.finalWeight = shotJson.value("drink_weight").toDouble();
+    result.record.summary.doseWeight = jsonToScalar(shotJson.value("bean_weight"));
+    result.record.summary.finalWeight = jsonToScalar(shotJson.value("drink_weight"));
     result.record.summary.beverageType = "espresso";
 
     // If final weight is unset but we recorded weight samples, use the peak.
@@ -336,14 +359,26 @@ ShotFileParser::ParseResult ShotFileParser::parseVisualizerShot(const QJsonObjec
     const QVector<double> stateChange = jsonArrayToDoubles(data.value("espresso_state_change").toArray());
     if (stateChange.size() >= 2 && stateChange.size() <= elapsed.size()) {
         int frameNumber = 0;
-        for (qsizetype i = 1; i < stateChange.size(); ++i) {
-            const bool prevPos = stateChange[i - 1] >= 0;
-            const bool curPos = stateChange[i] >= 0;
+        // Real downloads start the series at 0.0; seed the reference sign from the
+        // first *non-zero* sample so the leading 0 -> ±1e7 step isn't recorded as
+        // a phantom frame boundary at t≈0.
+        bool havePrev = false;
+        bool prevPos = false;
+        for (qsizetype i = 0; i < stateChange.size(); ++i) {
+            if (stateChange[i] == 0.0)
+                continue;
+            const bool curPos = stateChange[i] > 0;
+            if (!havePrev) {
+                prevPos = curPos;
+                havePrev = true;
+                continue;
+            }
             if (prevPos != curPos) {
                 HistoryPhaseMarker marker;
                 marker.time = elapsed[i];
                 marker.frameNumber = ++frameNumber;
                 result.record.phases.append(marker);
+                prevPos = curPos;
             }
         }
     }
@@ -353,6 +388,9 @@ ShotFileParser::ParseResult ShotFileParser::parseVisualizerShot(const QJsonObjec
         QJsonDocument pdoc = QJsonDocument::fromJson(profileJson.toUtf8());
         if (!pdoc.isNull())
             result.record.profileJson = profileJson;
+        else
+            qWarning() << "parseVisualizerShot: malformed profile JSON for"
+                       << visualizerId << "- importing shot without a profile";
     }
 
     result.success = true;

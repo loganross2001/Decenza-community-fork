@@ -98,7 +98,10 @@ if [[ "$OS" == "Darwin" ]]; then
                 echo "Notice: JAVA_HOME not set, using detected: $JAVA_HOME"
             fi
             
-            EXTRA_CMAKE_ARGS="-DQT_HOST_PATH=$QT_HOST_PATH -DANDROID_SDK_ROOT=$ANDROID_SDK_ROOT -DANDROID_NDK_ROOT=$ANDROID_NDK_ROOT -DJAVA_HOME=$JAVA_HOME"
+            # Force tests OFF for Android: a Debug build otherwise defaults BUILD_TESTS=ON, which pulls in
+            # tests/CMakeLists.txt -> find_package(OpenSSL), unavailable for the Android toolchain (a clean
+            # configure then fails). The Android APK never runs unit tests; they run on the macOS build.
+            EXTRA_CMAKE_ARGS="-DQT_HOST_PATH=$QT_HOST_PATH -DANDROID_SDK_ROOT=$ANDROID_SDK_ROOT -DANDROID_NDK_ROOT=$ANDROID_NDK_ROOT -DJAVA_HOME=$JAVA_HOME -DBUILD_TESTS=OFF"
             ;;
         *)
             echo "Error: Unsupported target $TARGET on macOS host."

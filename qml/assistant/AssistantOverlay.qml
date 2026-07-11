@@ -54,19 +54,24 @@ Item {
     // tick plus a more pronounced avatar thinking beat. Gentle, and never while the coaching voice is talking.
     Timer {
         id: slowOpTimer
-        interval: 5000
-        repeat: false
+        // [barista-fork] A REPEATING "still-here" heartbeat, not a one-shot. First beat at 3s (past ~3s of
+        // silence a user starts wondering if it froze), then every 3s FOR AS LONG AS the turn is still working
+        // silently — crucially this now keeps beating through the wait AFTER a spoken lead-in (a fast lead-in
+        // used to cancel the watch, leaving dead air while the tool ran). It never plays over speech (the
+        // guard skips while the barista or coach voice is talking), so it only fills genuine silence.
+        interval: 3000
+        repeat: true
         onTriggered: {
-            // Guard: only cue if we're still genuinely working, silently, on THIS turn.
-            if (!root._thinking || root._spokeThisTurn || root._state !== "conversing")
+            if (!root._thinking || root._state !== "conversing")
                 return
-            root._thinkingCue = true   // avatar shows a more pronounced thinking beat
-            // Soft non-verbal tick — skip if the coaching voice is mid-cue (speech arbiter: never overlap), or
-            // if the barista just started speaking. playThinkingCue() itself also honors the barista mute.
+            // Never beat over the barista's own speech or a coaching cue (speech arbiter: no overlap).
             var coachBusy = (typeof Barista !== "undefined" && Barista.coachingVoice
                              && Barista.coachingVoice.speaking)
-            if (root._voice && !(root._voice.speaking) && !coachBusy
-                    && typeof root._voice.playThinkingCue === "function")
+            if ((root._voice && root._voice.speaking) || coachBusy)
+                return
+            root._thinkingCue = true   // avatar shows a more pronounced thinking beat
+            // Soft non-verbal tick. playThinkingCue() itself also honors the barista mute.
+            if (root._voice && typeof root._voice.playThinkingCue === "function")
                 root._voice.playThinkingCue()
         }
     }
@@ -82,11 +87,14 @@ Item {
         slowOpTimer.stop()
         root._thinkingCue = false
     }
-    // Mark that the barista has produced audible/visible words this turn → suppress the Part B cue and stop
-    // the timer. Called from BOTH the lead-in (onInterimReceived) and the final answer (onResponseReceived).
+    // Mark that the barista has produced audible/visible words this turn.
+    // [barista-fork] NOTE: this no longer cancels the slow-op heartbeat. A spoken LEAD-IN doesn't mean the
+    // turn is done — the tool/response is still coming, and the heartbeat must keep filling that wait so it
+    // doesn't feel frozen after "give me a second." The heartbeat is stopped instead when the real answer
+    // lands (onResponseReceived → _thinking=false + _cancelSlowOpWatch) or the turn ends/teardown. The
+    // heartbeat's own guard already keeps it from playing over the lead-in while it speaks.
     function _markSpokeThisTurn() {
         root._spokeThisTurn = true
-        root._cancelSlowOpWatch()
     }
     Connections {
         target: root._voiceInput
@@ -1097,7 +1105,8 @@ Item {
                 return
             root._message = root._stripBlock(response)   // hide the JSON action block from the display
             root._thinking = false
-            root._markSpokeThisTurn()   // [barista-fork] Part B: the answer is here → stop the 5s cue timer
+            root._markSpokeThisTurn()
+            root._cancelSlowOpWatch()   // [barista-fork] the real answer is here → stop the still-working heartbeat
             // [barista-fork] Recency stamp: this reply completes a real user↔barista EXCHANGE (the session
             // only ever begins on the user's first utterance now), so mark it — the single source of truth
             // for greeting cadence next time. Routed through the orchestrator (one write path for lastExchangeAt).

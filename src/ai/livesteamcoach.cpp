@@ -1,4 +1,5 @@
 #include "livesteamcoach.h"
+#include "../barista/baristadiagnostics.h"  // [barista-fork] coaching timeline recorder
 
 #include <QDebug>
 
@@ -117,8 +118,13 @@ void LiveSteamCoach::onSteamFlowStopped() {
     // No coaching without a milk-derived duration (see evaluate()) — a "done"
     // for a fixed preset timer would bless a duration that may have ruined
     // the milk long before it fired.
-    if (!m_durationMilkDerived)
+    if (!m_durationMilkDerived) {
+        // [barista-fork][diag] The #1 reason a user "sees no steam coaching": steam ran on a fixed timer,
+        // not a scale-derived milk weight, so the coach deliberately stays silent.
+        BaristaDiagnostics::record(QStringLiteral("coach"), QStringLiteral("steam_silent_not_milk_derived"),
+            {{QStringLiteral("steamTimeoutSec"), timeout}});
         return;
+    }
 
     // Early manual abort (flow stopped well before the target): deliberate,
     // needs no announcement. Within the window = natural completion — this also
@@ -259,6 +265,10 @@ void LiveSteamCoach::emitCue(const QString& id, const QString& text,
     m_cueText = text;
     m_cueSeverity = severity;
     m_cueActive = true;
+    // [barista-fork][diag] Every steam cue: whether it wanted to speak and whether the audio setting let it.
+    BaristaDiagnostics::record(QStringLiteral("coach"), QStringLiteral("steam_cue"),
+        {{QStringLiteral("id"), id}, {QStringLiteral("wantSpeak"), speak},
+         {QStringLiteral("audioEnabled"), m_audioEnabled}, {QStringLiteral("didSpeak"), speak && m_audioEnabled}});
     emit cueChanged();
 
     // Voice is a service concern, gated only on the dedicated audio setting —

@@ -6,6 +6,7 @@
 #include "../core/dbutils.h"
 #include "feedbackstorage.h"
 #include "tasksstorage.h"
+#include "baristadiagnostics.h"  // [barista-fork] tool-call timeline recorder
 
 #include <QJsonDocument>
 #include <QJsonArray>
@@ -537,6 +538,8 @@ void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage*
                                const QString& name, const QJsonObject& input,
                                std::function<void(QJsonValue)> done)
 {
+    BaristaDiagnostics::record(QStringLiteral("tool"), QStringLiteral("call"),
+        {{QStringLiteral("name"), name}});
     // [barista-fork] FAST-PATH web tools (get_weather / get_stock_quote / get_local_news). Forwarded to the
     // BaristaWebTools seam, which owns the QNAM and resolves `done` asynchronously. Only reached when the model
     // calls one — and it is only OFFERED these definitions when webSearchEnabled is on (webToolDefinitions() is
@@ -1084,6 +1087,11 @@ void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage*
                     }
                     o[QStringLiteral("detectorResults")] = dr;
                 }
+                // [barista-fork][diag] Record when we hand the model the raw skip-first-frame flag — this is
+                // the ONLY path that flag reaches the barista, so it pinpoints the "skipped frame error" chatter.
+                if (o.value(QStringLiteral("skipFirstFrameDetected")).toBool())
+                    BaristaDiagnostics::record(QStringLiteral("tool"), QStringLiteral("get_shot_detail_skipframe_flag_TRUE"),
+                        {{QStringLiteral("shotId"), shotId}});
                 result = o;
             });
             // DB-open failure must surface as an error, not an empty object — same rule as query_shots.

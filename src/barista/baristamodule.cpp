@@ -45,7 +45,10 @@ BaristaModule::BaristaModule(MainController* mainController, MachineState* machi
     // [barista-fork] Fast-path web tools get a PRIVATE QNAM (no shared cookie jar) — each tool contacts only its
     // one host with only the user's query (city/symbol/topic). See BaristaWebTools' privacy note.
     , m_webNetwork(new QNetworkAccessManager(this))
-    , m_webTools(new BaristaWebTools(m_webNetwork, this)) {
+    , m_webTools(new BaristaWebTools(m_webNetwork, this))
+    // [barista-fork] Diagnostic recorder. Constructed FIRST-class here so its static record() has a live
+    // instance for the whole session; sets BaristaDiagnostics::s_instance in its ctor.
+    , m_diagnostics(new BaristaDiagnostics(this)) {
     connect(m_settings, &AssistantSettings::enabledChanged,
             this, &BaristaModule::enabledChanged);
 

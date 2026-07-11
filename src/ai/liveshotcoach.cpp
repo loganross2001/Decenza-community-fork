@@ -1,4 +1,5 @@
 #include "liveshotcoach.h"
+#include "../barista/baristadiagnostics.h"  // [barista-fork] coaching timeline recorder
 
 #include <QtGlobal>
 #include <cmath>
@@ -231,6 +232,12 @@ void LiveShotCoach::emitCue(const QString& id, const QString& text,
     m_cueSeverity = severity;
     m_cueSpeak = willSpeak;
     m_cueActive = true;
+    // [barista-fork][diag] Every espresso cue: whether it WANTED to speak, whether it DID, or was throttled —
+    // this is how we tell "no verbal espresso coaching" (clean shot = no speak cue) from a real silence bug.
+    BaristaDiagnostics::record(QStringLiteral("coach"), QStringLiteral("espresso_cue"),
+        {{QStringLiteral("id"), id}, {QStringLiteral("severity"), severity},
+         {QStringLiteral("wantSpeak"), speak}, {QStringLiteral("didSpeak"), willSpeak},
+         {QStringLiteral("throttled"), speak && !willSpeak}});
     emit cueChanged();
 
     // Voice: upstream's banner is visual-only now, so the coach owns the speak

@@ -39,6 +39,9 @@ Rectangle {
     // Which tab is showing (persisted in this local property only — a settings panel doesn't warrant a
     // stored preference). 0 = General, 1 = Voice, 2 = Coaching, 3 = Maintenance.
     property int _tab: 0
+    // [barista-fork] Feedback line for the diagnostics "Export log" button (shows the written path).
+    property string _diagExportedPath: ""
+    readonly property var _diag: (typeof Barista !== "undefined") ? Barista.diagnostics : null
 
     // Transparent root: this panel is embedded inside the AssistantOverlay's chromed settingsCard, so it
     // must NOT draw its own surface/border (that produced a card-in-card double outline). The host card owns
@@ -351,6 +354,78 @@ Rectangle {
                                 if (i >= 0) currentIndex = i
                             }
                             onActivated: if (root._settings) root._settings.avatarTabSize = currentValue
+                        }
+                    }
+
+                    // [barista-fork] Diagnostics — the always-on voice/coaching timeline recorder. Lets the
+                    // owner reproduce a glitch and hand back the exported log; stays on the device.
+                    BaristaSectionCard {
+                        caption: TranslationManager.translate("barista.settings.diagnostics", "Diagnostics")
+
+                        Tr {
+                            Layout.fillWidth: true
+                            key: "barista.settings.diagnosticsDesc"
+                            fallback: "Records a timeline of the barista's voice, coaching, tools and mic so a glitch can be pinned down. Stays on this device — nothing is sent anywhere."
+                            color: Theme.textSecondaryColor; font: Theme.labelFont; wrapMode: Text.WordWrap
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.spacingSmall
+                            Switch {
+                                id: diagSwitch
+                                checked: root._diag ? root._diag.enabled : false
+                                onToggled: if (root._diag) root._diag.enabled = checked
+                                Accessible.role: Accessible.CheckBox
+                                Accessible.name: trDiagOn.text
+                                Accessible.checked: checked
+                                Accessible.focusable: true
+                                Accessible.onToggleAction: toggle()
+                            }
+                            Tr {
+                                id: trDiagOn
+                                Layout.fillWidth: true
+                                key: "barista.settings.diagnosticsEnabled"
+                                fallback: "Record diagnostics"
+                                color: Theme.textColor; font: Theme.bodyFont; wrapMode: Text.WordWrap
+                            }
+                        }
+
+                        Text {
+                            Layout.fillWidth: true
+                            text: root._diag
+                                  ? (root._diag.eventCount + " events · " + root._diag.logFilePath)
+                                  : ""
+                            color: Theme.textSecondaryColor; font: Theme.labelFont; wrapMode: Text.WrapAnywhere
+                        }
+
+                        Text {
+                            Layout.fillWidth: true
+                            visible: root._diagExportedPath.length > 0
+                            text: root._diagExportedPath
+                            color: Theme.successColor; font: Theme.labelFont; wrapMode: Text.WrapAnywhere
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.spacingMedium
+                            AccessibleButton {
+                                text: TranslationManager.translate("barista.settings.diagnosticsExport", "Export log")
+                                accessibleName: TranslationManager.translate("barista.settings.diagnosticsExport", "Export diagnostic log")
+                                onClicked: {
+                                    if (!root._diag) return
+                                    var p = root._diag.exportSnapshot()
+                                    root._diagExportedPath = (p && p.length > 0)
+                                        ? TranslationManager.translate("barista.settings.diagnosticsSaved", "Saved to: ") + p
+                                        : TranslationManager.translate("barista.settings.diagnosticsSaveFail", "Could not write the log file.")
+                                }
+                            }
+                            AccessibleButton {
+                                subtle: true
+                                text: TranslationManager.translate("common.button.clear", "Clear")
+                                accessibleName: TranslationManager.translate("barista.settings.diagnosticsClear", "Clear diagnostic log")
+                                onClicked: { if (root._diag) root._diag.clearLog(); root._diagExportedPath = "" }
+                            }
                         }
                     }
                 }

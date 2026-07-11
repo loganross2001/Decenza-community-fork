@@ -8,6 +8,7 @@
 #include "baristacontextbuilder.h" // ditto for Q_PROPERTY(BaristaContextBuilder*)
 #include "tasksstorage.h"          // complete type needed for the Q_PROPERTY(TasksStorage*) metatype
 #include "maintenancedocsync.h"    // ditto for Q_PROPERTY(MaintenanceDocSync*)
+#include "baristadiagnostics.h"    // ditto for Q_PROPERTY(BaristaDiagnostics*)
 
 class QQmlApplicationEngine;
 class MainController;
@@ -40,6 +41,9 @@ class BaristaModule : public QObject {
     // [barista-fork] Periodic Decent maintenance-docs check, exposed so the maintenance settings dialog can
     // show last-checked / toggle the periodic check / run "Check now".
     Q_PROPERTY(MaintenanceDocSync* docSync READ docSync CONSTANT)
+    // [barista-fork] Always-on voice/coaching diagnostic recorder, exposed so the diagnostics settings card
+    // can toggle it, show the log path/count, export a snapshot, and copy recent events.
+    Q_PROPERTY(BaristaDiagnostics* diagnostics READ diagnostics CONSTANT)
 
 public:
     // Single upstream hook: construct the module (settings + orchestrator), register the
@@ -62,6 +66,7 @@ public:
     BaristaContextBuilder* contextBuilder() const { return m_contextBuilder; }
     TasksStorage* tasks() const { return m_tasksStorage; }   // [barista-fork] reminders + maintenance
     MaintenanceDocSync* docSync() const { return m_docSync; } // [barista-fork] periodic Decent docs check
+    BaristaDiagnostics* diagnostics() const { return m_diagnostics; } // [barista-fork] voice/coaching recorder
 
 signals:
     void enabledChanged();
@@ -92,4 +97,7 @@ private:
     // fallback + builds the news query before calling into it.
     QNetworkAccessManager* m_webNetwork = nullptr;
     BaristaWebTools* m_webTools = nullptr;
+    // [barista-fork] Always-on voice/coaching timeline recorder (owned here). Its static record() is used
+    // across subsystems; this instance is what backs Barista.diagnostics and the settings card.
+    BaristaDiagnostics* m_diagnostics = nullptr;
 };

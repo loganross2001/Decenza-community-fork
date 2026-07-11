@@ -1,6 +1,7 @@
 #include "assistantvoice.h"
 
 #include "assistantsettings.h"
+#include "baristadiagnostics.h"  // [barista-fork] voice/coaching timeline recorder
 #include "speechnormalize.h"   // [barista-fork] rewrite grams/ratios/units for reliable TTS pronunciation
 #include "../core/settings.h"
 #include "../core/settings_ai.h"
@@ -71,6 +72,9 @@ void AssistantVoice::updateSpeaking() {
     if (now == m_speaking)
         return;
     m_speaking = now;
+    BaristaDiagnostics::record(QStringLiteral("voice"),
+        now ? QStringLiteral("speaking_on") : QStringLiteral("speaking_off"),
+        {{QStringLiteral("role"), m_role == Role::Barista ? QStringLiteral("barista") : QStringLiteral("coaching")}});
     emit speakingChanged();
 }
 
@@ -159,14 +163,26 @@ void AssistantVoice::speak(const QString& rawText) {
     // The barista voice honors voiceEnabled() (the barista mute). The COACHING voice deliberately does NOT
     // — the live coaches have their own upstream enable gates (extractionAnnouncements for the shot coach,
     // steamCoachAudioEnabled for the steam coach), so muting the barista must not silence coaching.
-    if (m_role == Role::Barista && !m_settings->voiceEnabled())
+    if (m_role == Role::Barista && !m_settings->voiceEnabled()) {
+        BaristaDiagnostics::record(QStringLiteral("voice"), QStringLiteral("speak_suppressed_muted"),
+            {{QStringLiteral("chars"), rawText.size()}, {QStringLiteral("say"), rawText.left(80)}});
         return;
+    }
+    // [barista-fork][diag] A new speak() while still talking is the "trips over itself" cut-off — record it.
+    const bool wasSpeaking = m_speaking;
     // Mark speaking BEFORE dispatch so speakingChanged(true) fires synchronously — the mic pauses now,
     // not after the cloud-TTS POST finally starts playback (which is the "listening while talking" bug).
     ++m_speakGen;
     m_pendingSynth = true;
     updateSpeaking();
     const QString provider = effectiveProvider();
+    BaristaDiagnostics::record(QStringLiteral("voice"),
+        wasSpeaking ? QStringLiteral("speak_INTERRUPTS_previous") : QStringLiteral("speak_start"),
+        {{QStringLiteral("role"), m_role == Role::Barista ? QStringLiteral("barista") : QStringLiteral("coaching")},
+         {QStringLiteral("provider"), provider},
+         {QStringLiteral("chars"), rawText.size()},
+         {QStringLiteral("gen"), static_cast<int>(m_speakGen)},
+         {QStringLiteral("say"), rawText.left(80)}});
     if (provider == QLatin1String("openai"))
         synthOpenAI(text);
     else if (provider == QLatin1String("elevenlabs"))

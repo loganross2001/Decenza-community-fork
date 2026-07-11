@@ -31,6 +31,15 @@ target_sources(Decenza PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristatools.cpp
 )
 
+# BaristaDiagnostics — the always-on voice/coaching timeline recorder. Registered UNCONDITIONALLY
+# because its static record() is called from always-compiled files (aiprovider.cpp, the live
+# coaches, baristatools.cpp); a DECENZA_BARISTA=OFF build must still link those record() calls
+# (they no-op with no instance). Depends only on Qt Core.
+target_sources(Decenza PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristadiagnostics.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristadiagnostics.cpp
+)
+
 # FeedbackStorage owns the barista's verbal-feedback KB (separate assistant.db). Registered
 # UNCONDITIONALLY like BaristaTools: baristatools.cpp (unconditional) references FeedbackStorage
 # symbols in the log_tasting_feedback/search_tasting_feedback executors, and aimanager.cpp reads

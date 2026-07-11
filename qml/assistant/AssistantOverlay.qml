@@ -109,6 +109,7 @@ Item {
         target: root._voice
         ignoreUnknownSignals: true
         function onSpeakingChanged() {
+            root._diag("speaking_changed", { speaking: root._voice ? root._voice.speaking : false, endAfter: root._endAfterReply })
             // [barista-fork] Part B: the barista actually started talking → the silence is broken, so kill the
             // 5s cue timer + clear the cue (belt-and-suspenders alongside _markSpokeThisTurn on the speak call).
             if (root._voice && root._voice.speaking)
@@ -176,6 +177,12 @@ Item {
     // standalone farewell). Don't dismiss instantly — let the sign-off speak first, THEN collapse to the tab.
     // Cleared on any new user utterance / new engage / teardown so a stuck flag can never dismiss a later turn.
     property bool _endAfterReply: false
+
+    // [barista-fork] Safe passthrough to the diagnostic recorder (no-op if the module/recorder is absent).
+    function _diag(event, detail) {
+        if (typeof Barista !== "undefined" && Barista.diagnostics)
+            Barista.diagnostics.mark("overlay", event, detail || ({}))
+    }
 
     // Strip markdown/code so cloud voices don't read asterisks, hashes, or JSON aloud.
     function _speakSanitised(t) {
@@ -1061,6 +1068,7 @@ Item {
             root._message = clean          // show the lead-in while the tool runs (replaced by the answer)
             root._markSpokeThisTurn()      // suppress the Part B cue + stop the 5s timer
             if (root._voiceInput && root._voiceInput.listening) root._voiceInput.pauseMic()
+            root._diag("interim_leadin", { chars: clean.length, speakingNow: root._voice ? root._voice.speaking : false })
             root._speakSanitised(text)     // speak the model's OWN words now, before the tool result lands
         }
         function onResponseReceived(response) {
@@ -1079,6 +1087,7 @@ Item {
             // [barista-fork] Every reply is now a reply TO THE USER (no unprompted machine-first greeting),
             // so speak it per voiceEnabled — the old greetAloud-suppression of an opener no longer applies.
             if (root._voiceInput && root._voiceInput.listening) root._voiceInput.pauseMic()
+            root._diag("response_received", { chars: (response || "").length, speakingNow: root._voice ? root._voice.speaking : false, endAfter: root._endAfterReply })
             root._speakSanitised(response)               // (also strips fenced blocks before TTS)
             root._resetSilence()   // keep the mic session alive while we're conversing
             // [barista-fork] Ask→approve→apply. On Anthropic the model applies via the apply_dial_change tool

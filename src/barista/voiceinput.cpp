@@ -1,4 +1,5 @@
 #include "voiceinput.h"
+#include "baristadiagnostics.h"  // [barista-fork] STT / mic timeline recorder
 
 #include <QCoreApplication>
 #include <QDateTime>
@@ -136,6 +137,7 @@ void VoiceInput::pauseMic() {
         return;
     m_paused = true;
     m_errorStreak = 0;  // S10: the cancel here can raise ERROR_CLIENT(5) — don't let it count toward the kill
+    BaristaDiagnostics::record(QStringLiteral("mic"), QStringLiteral("pause"));
     emit pausedChanged();
     stopRecogniser();   // stop hearing while the assistant speaks (no echo)
 }
@@ -149,6 +151,8 @@ void VoiceInput::resumeMic() {
     // short window so the recogniser can't transcribe the tail of that speech (or deliver a stale result
     // buffered while paused) as if it were a new user turn — which is what feeds the listen/hear loop.
     m_ignoreFinalUntilMs = QDateTime::currentMSecsSinceEpoch() + kPostTtsIgnoreMs;
+    BaristaDiagnostics::record(QStringLiteral("mic"), QStringLiteral("resume"),
+        {{QStringLiteral("echoGuardMs"), kPostTtsIgnoreMs}});
     emit pausedChanged();
     startRecogniser();
 }
@@ -178,6 +182,9 @@ void VoiceInput::handleFinal(const QString& text) {
     // it doesn't become a new turn (the listen/hear loop). Clear the partial and let listening continue.
     if (m_ignoreFinalUntilMs != 0) {
         if (QDateTime::currentMSecsSinceEpoch() < m_ignoreFinalUntilMs) {
+            // [barista-fork][diag] Dropped inside the post-TTS echo window (self-hearing guard).
+            BaristaDiagnostics::record(QStringLiteral("stt"), QStringLiteral("final_dropped_echo_window"),
+                {{QStringLiteral("heard"), text.trimmed().left(80)}});
             setPartial(QString());
             return;   // NOTE: don't touch m_errorStreak — this isn't a genuine user result
         }
@@ -186,8 +193,11 @@ void VoiceInput::handleFinal(const QString& text) {
     m_errorStreak = 0;   // a real result → the recogniser is healthy
     setPartial(QString());
     const QString t = text.trimmed();
-    if (!t.isEmpty())
+    if (!t.isEmpty()) {
+        BaristaDiagnostics::record(QStringLiteral("stt"), QStringLiteral("final_result"),
+            {{QStringLiteral("heard"), t.left(120)}});
         emit finalText(t);
+    }
     // Do NOT auto-restart here. The overlay pauses the mic while the assistant thinks/speaks and calls
     // resumeMic() when the turn is done — restarting into that pending stop is what triggers ERROR_CLIENT (5).
 }

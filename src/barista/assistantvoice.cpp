@@ -12,6 +12,8 @@
 #include <QUrl>
 #include <QMediaPlayer>
 #include <QAudioOutput>
+#include <QMediaDevices>
+#include <QAudioDevice>
 #include <QBuffer>
 #include <QDir>
 #include <QFile>
@@ -36,6 +38,17 @@ AssistantVoice::AssistantVoice(AssistantSettings* settings, Settings* appSetting
     , m_appSettings(appSettings)
     , m_role(role) {
     m_player->setAudioOutput(m_audioOut);
+    // [barista-fork] Follow the CURRENT default output. A QAudioOutput pins to whatever device was default
+    // when it was constructed (the tablet's own speaker) and does NOT switch when an external USB-C or
+    // Bluetooth speaker connects later — so the barista kept playing out of the tablet. Bind to the live
+    // default now, and re-bind whenever the set of audio outputs changes (a speaker connecting/disconnecting).
+    m_audioOut->setDevice(QMediaDevices::defaultAudioOutput());
+    {
+        auto* mediaDevices = new QMediaDevices(this);
+        connect(mediaDevices, &QMediaDevices::audioOutputsChanged, this, [this]() {
+            m_audioOut->setDevice(QMediaDevices::defaultAudioOutput());
+        });
+    }
     applyVoiceFromSettings();
     if (m_settings) {
         // Re-apply the native voice when THIS role's voice-name setting changes.
@@ -350,8 +363,13 @@ void AssistantVoice::playMp3(const QByteArray& audio) {
     // [barista-fork] Apply THIS role's playback volume to the cloud-TTS output. Cloud providers (OpenAI /
     // ElevenLabs) have no request-side volume, so gain is applied here on the QAudioOutput driving the mp3
     // player. Read fresh so a moved slider takes effect on the next utterance.
-    if (m_audioOut)
+    if (m_audioOut) {
+        // Re-bind to the live default output every utterance too (belt-and-suspenders on top of the
+        // audioOutputsChanged signal, which is unreliable on some Android builds) — so a speaker connected
+        // mid-session is used immediately instead of falling back to the tablet.
+        m_audioOut->setDevice(QMediaDevices::defaultAudioOutput());
         m_audioOut->setVolume(effectiveVolume());
+    }
     // Android's media backend truncates in-memory (QBuffer) sources after a fraction of a second —
     // write the mp3 to a temp file and play that; files play reliably and to completion.
     // ALTERNATE the filename each utterance: reusing one path makes the Android backend cache the prior

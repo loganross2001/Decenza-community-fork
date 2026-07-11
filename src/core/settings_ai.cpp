@@ -7,7 +7,11 @@ SettingsAI::SettingsAI(QObject* parent)
 }
 
 QString SettingsAI::aiProvider() const {
-    return m_settings.value("ai/provider", "openai").toString();
+    // [barista-fork] Default to Anthropic: the barista's client tools + web search
+    // only run on the Anthropic provider (the overlay gates them on
+    // selectedProvider === "anthropic"), so a fresh install would otherwise get a
+    // degraded, tool-less barista. Existing installs keep their saved choice.
+    return m_settings.value("ai/provider", "anthropic").toString();
 }
 
 void SettingsAI::setAiProvider(const QString& provider) {

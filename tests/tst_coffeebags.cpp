@@ -1228,6 +1228,41 @@ private slots:
         });
     }
 
+    // [barista-fork] A shot DB from a DIFFERENT Decenza build (e.g. an upstream
+    // v2.0.0 database pulled in via device transfer) is stamped at a version
+    // number >= the fork's migration-24/25 gates but LACKS the fork-only artifacts
+    // (baristas table; and, from a non-upstream source, visualizer_sync_pending).
+    // The version-gated chain skips 24/25 for it, so the version-INDEPENDENT repair
+    // pass at the tail of migrate() must create them — otherwise the app reads a
+    // missing table/column and crashes.
+    void foreignHighVersionDbGetsForkSchemaRepaired() {
+        const QString path = freshDb();
+        {
+            ShotHistoryStorage storage;
+            QVERIFY(initAndClose(path, storage));
+        }
+        withRawDb(path, "foreign_setup", [&](QSqlDatabase& db) {
+            QSqlQuery q(db);
+            // Simulate a foreign DB: drop the fork-only artifacts, stamp a high version.
+            QVERIFY(q.exec("DROP TABLE IF EXISTS baristas"));
+            if (hasColumn(db, "coffee_bags", "visualizer_sync_pending"))
+                QVERIFY(q.exec("ALTER TABLE coffee_bags DROP COLUMN visualizer_sync_pending"));
+            QVERIFY(q.exec("DELETE FROM schema_version"));
+            QVERIFY(q.exec("INSERT INTO schema_version (version) VALUES (29)"));
+        });
+        {
+            ShotHistoryStorage storage;
+            QVERIFY(initAndClose(path, storage));  // repair pass must recreate fork schema
+        }
+        withRawDb(path, "foreign_check", [&](QSqlDatabase& db) {
+            QSqlQuery q(db);
+            QVERIFY(q.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='baristas'"));
+            QVERIFY2(q.next(), "baristas table not repaired for a foreign high-version DB");
+            QVERIFY2(hasColumn(db, "coffee_bags", "visualizer_sync_pending"),
+                     "visualizer_sync_pending not repaired for a foreign high-version DB");
+        });
+    }
+
     // The entry point of the edit-push retry state machine: an edit made
     // before any upload has probed CM (state Unknown - e.g. offline start)
     // must be parked as sync-pending, NOT silently dropped. Parks before any

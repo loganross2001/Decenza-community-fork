@@ -1025,7 +1025,7 @@ bool ShotHistoryStorage::runMigrations()
     // unconditionally, so version 19 is only recorded when they all exist.
     // Whitespace before the open-paren dodges the QSqlQuery permission-hook
     // false-positive, as elsewhere. Do not auto-format.
-    if (currentVersion < 19) {
+    if (currentVersion >= 18 && currentVersion < 19) {  // [barista-fork] sequential gate: don't leap a gated mig 18
         qDebug() << "ShotHistoryStorage: Running migration to version 19 (coffee bags)";
 
         const bool tableOk = CoffeeBagStorage::ensureTableStatic(m_db);
@@ -1070,7 +1070,7 @@ bool ShotHistoryStorage::runMigrations()
     // migrations) — that path is covered by the same link call inside
     // convertLegacyPresetSettings. This migration repairs devices that
     // upgraded before the link existed.
-    if (currentVersion < 20) {
+    if (currentVersion >= 19 && currentVersion < 20) {  // [barista-fork] sequential gate: don't leap a gated mig 19
         qDebug() << "ShotHistoryStorage: Running migration to version 20 (link pre-bag shots to bags)";
         // Gate the bump on success: linkOrphanShotsStatic returns -1 on a SQL
         // failure (e.g. a locked DB at migration time). The op is idempotent,
@@ -1114,7 +1114,7 @@ bool ShotHistoryStorage::runMigrations()
     // straight from ensureTableStatic. RENAME COLUMN needs SQLite >= 3.25
     // (we require >= 3.35). Whitespace before the open-paren dodges the
     // QSqlQuery permission-hook false-positive, as elsewhere.
-    if (currentVersion < 21) {
+    if (currentVersion >= 20 && currentVersion < 21) {  // [barista-fork] sequential gate: don't leap a gated mig 20
         qDebug() << "ShotHistoryStorage: Running migration to version 21 (yield_target_g -> yield_override_g)";
         bool renameFaulted = false;
 #ifdef DECENZA_TESTING
@@ -1548,6 +1548,24 @@ bool ShotHistoryStorage::runMigrations()
         } else {
             qWarning() << "ShotHistoryStorage: migration 30 incomplete - will retry next launch";
         }
+    }
+
+    // [barista-fork] Version-independent fork-schema repair. A shot DB written by a
+    // DIFFERENT Decenza build (e.g. an upstream v2.0.0 database pulled in via
+    // device-to-device import) carries a schema_version NUMBER that may sit at or
+    // beyond the fork's migration-24/25 gates while LACKING the fork-only artifacts:
+    // the baristas table, and (from a non-upstream source) coffee_bags.visualizer_sync_pending.
+    // The version-gated chain above would skip 24/25 for such a DB, leaving the app
+    // to read a missing table/column and crash. Ensure both here idempotently on every
+    // open (the same version-independent pattern as importLegacyBeanPresets) — no
+    // schema_version write, so it never fights the gated chain or thrashes the version.
+    BaristaStorage::ensureTableStatic(m_db);
+    if (m_db.tables().contains(QStringLiteral("coffee_bags"))
+        && !hasColumn("coffee_bags", "visualizer_sync_pending")) {
+        QSqlQuery repair(m_db);
+        if (!repair.exec("ALTER TABLE coffee_bags ADD COLUMN visualizer_sync_pending INTEGER NOT NULL DEFAULT 0"))
+            qWarning() << "ShotHistoryStorage: fork-schema repair (visualizer_sync_pending) failed:"
+                       << repair.lastError().text();
     }
 
     m_schemaVersion = currentVersion;

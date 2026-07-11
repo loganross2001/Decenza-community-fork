@@ -4,11 +4,36 @@
 #include <QRegularExpression>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonArray>
 #include <QUuid>
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <QTimeZone>
 #include <QDebug>
+
+namespace {
+// visualizer.coffee serialises telemetry samples as JSON *strings*
+// ("0.0", "9.42") — the same Tcl-huddle convention the profile JSON uses.
+// Convert an array of them to doubles, tolerating already-numeric values.
+QVector<double> jsonArrayToDoubles(const QJsonArray& arr)
+{
+    QVector<double> out;
+    out.reserve(arr.size());
+    for (const QJsonValue& v : arr) {
+        if (v.isDouble()) {
+            out.append(v.toDouble());
+        } else if (v.isString()) {
+            bool ok = false;
+            double d = v.toString().toDouble(&ok);
+            if (ok) out.append(d);
+            else out.append(0.0);  // keep alignment with the timeframe array
+        } else {
+            out.append(0.0);
+        }
+    }
+    return out;
+}
+}  // namespace
 
 ShotFileParser::ParseResult ShotFileParser::parse(const QByteArray& fileContents, const QString& filename)
 {
@@ -183,6 +208,155 @@ ShotFileParser::ParseResult ShotFileParser::parseFile(const QString& filePath)
 
     QString filename = filePath.section('/', -1).section('\\', -1);
     return parse(file.readAll(), filename);
+}
+
+ShotFileParser::ParseResult ShotFileParser::parseVisualizerShot(const QJsonObject& shotJson,
+                                                                const QString& profileJson,
+                                                                const QString& visualizerId,
+                                                                qint64 clockEpoch)
+{
+    ParseResult result;
+
+    // The download response's `clock` is null and `start_time` is an ISO
+    // string, so the authoritative start time comes from the shot-list
+    // entry the caller already fetched. Fall back to parsing start_time.
+    qint64 timestamp = clockEpoch;
+    if (timestamp <= 0) {
+        const QString startStr = shotJson.value("start_time").toString();
+        if (!startStr.isEmpty()) {
+            QDateTime dt = QDateTime::fromString(startStr, Qt::ISODate);
+            if (dt.isValid()) timestamp = dt.toSecsSinceEpoch();
+        }
+    }
+    if (timestamp <= 0) {
+        result.errorMessage = "Missing shot start time";
+        return result;
+    }
+
+    result.record.summary.timestamp = timestamp;
+    // A deterministic uuid keyed on the Visualizer id makes re-runs of the
+    // recovery idempotent (importShotRecord dedupes on uuid first). Feed the
+    // visualizer id as the "filename" so it stays stable across runs.
+    result.record.summary.uuid = generateUuid(timestamp, visualizerId);
+    result.record.visualizerId = visualizerId;
+
+    const QJsonObject data = shotJson.value("data").toObject();
+    const QVector<double> elapsed = jsonArrayToDoubles(shotJson.value("timeframe").toArray());
+    if (elapsed.isEmpty()) {
+        result.errorMessage = "Missing timeframe data";
+        return result;
+    }
+
+    // Core + goal + auxiliary series. Keys mirror the DE1 .shot field names
+    // (the visualizer download echoes them verbatim).
+    const QVector<double> pressure     = jsonArrayToDoubles(data.value("espresso_pressure").toArray());
+    const QVector<double> flow         = jsonArrayToDoubles(data.value("espresso_flow").toArray());
+    const QVector<double> tempBasket   = jsonArrayToDoubles(data.value("espresso_temperature_basket").toArray());
+    const QVector<double> weight       = jsonArrayToDoubles(data.value("espresso_weight").toArray());
+    const QVector<double> pressureGoal = jsonArrayToDoubles(data.value("espresso_pressure_goal").toArray());
+    const QVector<double> flowGoal     = jsonArrayToDoubles(data.value("espresso_flow_goal").toArray());
+    const QVector<double> tempGoal     = jsonArrayToDoubles(data.value("espresso_temperature_goal").toArray());
+    const QVector<double> tempMix      = jsonArrayToDoubles(data.value("espresso_temperature_mix").toArray());
+    const QVector<double> resistance   = jsonArrayToDoubles(data.value("espresso_resistance").toArray());
+    QVector<double> waterDisp          = jsonArrayToDoubles(data.value("espresso_water_dispensed").toArray());
+    const QVector<double> flowWeight   = jsonArrayToDoubles(data.value("espresso_flow_weight").toArray());
+
+    result.record.pressure        = toPointVector(elapsed, pressure);
+    result.record.flow            = toPointVector(elapsed, flow);
+    result.record.temperature     = toPointVector(elapsed, tempBasket);
+    result.record.weight          = toPointVector(elapsed, weight);
+    result.record.pressureGoal    = toPointVector(elapsed, pressureGoal);
+    result.record.flowGoal        = toPointVector(elapsed, flowGoal);
+    result.record.temperatureGoal = toPointVector(elapsed, tempGoal);
+    if (!tempMix.isEmpty())
+        result.record.temperatureMix = toPointVector(elapsed, tempMix);
+    if (!resistance.isEmpty())
+        result.record.resistance = toPointVector(elapsed, resistance);
+    if (!waterDisp.isEmpty()) {
+        // visualizer.coffee stores espresso_water_dispensed at the same 0.1x
+        // (tenths-of-ml) scale de1app .shot files use — Decenza's uploader
+        // multiplies the DB's real-ml values by 0.1 on the way up (see
+        // VisualizerUploader::buildHistoryShotJson). Apply the identical x10
+        // the Tcl import path does so recovered shots match natively-stored
+        // ones (the DB unit is real ml).
+        for (auto& v : waterDisp)
+            v *= 10.0;
+        result.record.waterDispensed = toPointVector(elapsed, waterDisp);
+    }
+    if (!flowWeight.isEmpty())
+        result.record.weightFlowRate = toPointVector(elapsed, flowWeight);
+
+    // Duration: prefer the reported value, else the last elapsed sample.
+    double duration = shotJson.value("duration").toDouble();
+    if (duration <= 0) duration = elapsed.isEmpty() ? 0 : elapsed.last();
+    result.record.summary.duration = duration;
+
+    // DYE metadata (flat on the download response).
+    result.record.summary.profileName = shotJson.value("profile_title").toString();
+    if (result.record.summary.profileName.isEmpty())
+        result.record.summary.profileName = "Unknown";
+    result.record.summary.beanBrand = shotJson.value("bean_brand").toString();
+    result.record.summary.beanType  = shotJson.value("bean_type").toString();
+    result.record.roastDate  = shotJson.value("roast_date").toString();
+    result.record.roastLevel = shotJson.value("roast_level").toString();
+
+    const QString rawGrinder = shotJson.value("grinder_model").toString();
+    auto grinderLookup = GrinderAliases::lookup(rawGrinder);
+    if (grinderLookup.found) {
+        result.record.grinderBrand = grinderLookup.brand;
+        result.record.grinderModel = grinderLookup.model;
+        result.record.grinderBurrs = grinderLookup.stockBurrs;
+    } else {
+        result.record.grinderModel = rawGrinder;
+    }
+    result.record.grinderSetting = shotJson.value("grinder_setting").toString();
+    result.record.drinkTds = shotJson.value("drink_tds").toDouble();
+    result.record.drinkEy  = shotJson.value("drink_ey").toDouble();
+    result.record.summary.enjoyment = shotJson.value("espresso_enjoyment").toInt();
+    result.record.espressoNotes = shotJson.value("espresso_notes").toString();
+    result.record.beanNotes = shotJson.value("bean_notes").toString();
+    result.record.barista = shotJson.value("barista").toString();
+    result.record.summary.doseWeight = shotJson.value("bean_weight").toDouble();
+    result.record.summary.finalWeight = shotJson.value("drink_weight").toDouble();
+    result.record.summary.beverageType = "espresso";
+
+    // If final weight is unset but we recorded weight samples, use the peak.
+    if (result.record.summary.finalWeight <= 0 && !result.record.weight.isEmpty()) {
+        double maxWeight = 0;
+        for (const auto& pt : result.record.weight)
+            if (pt.y() > maxWeight) maxWeight = pt.y();
+        result.record.summary.finalWeight = maxWeight;
+    }
+
+    // Frame boundaries: the download has no de1app timers block, but it does
+    // carry espresso_state_change — a per-sample array that flips sign
+    // (+/-10000000) at each frame transition (the same convention Decenza
+    // uploads; see VISUALIZER.md "state_change Array"). Emit a phase marker
+    // at each sign change so the shot-detail view still draws frame lines.
+    const QVector<double> stateChange = jsonArrayToDoubles(data.value("espresso_state_change").toArray());
+    if (stateChange.size() >= 2 && stateChange.size() <= elapsed.size()) {
+        int frameNumber = 0;
+        for (qsizetype i = 1; i < stateChange.size(); ++i) {
+            const bool prevPos = stateChange[i - 1] >= 0;
+            const bool curPos = stateChange[i] >= 0;
+            if (prevPos != curPos) {
+                HistoryPhaseMarker marker;
+                marker.time = elapsed[i];
+                marker.frameNumber = ++frameNumber;
+                result.record.phases.append(marker);
+            }
+        }
+    }
+
+    // Profile JSON is fetched separately (the download carries only a URL).
+    if (!profileJson.isEmpty()) {
+        QJsonDocument pdoc = QJsonDocument::fromJson(profileJson.toUtf8());
+        if (!pdoc.isNull())
+            result.record.profileJson = profileJson;
+    }
+
+    result.success = true;
+    return result;
 }
 
 QVector<double> ShotFileParser::parseTclList(const QString& listStr)

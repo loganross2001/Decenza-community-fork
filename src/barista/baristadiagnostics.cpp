@@ -85,13 +85,27 @@ int BaristaDiagnostics::recoverPriorLogs()
         for (const QString& name : logs) {
             const QString src = priorDir + QLatin1Char('/') + name;
             const QString dst = m_dir + QStringLiteral("/recovered-") + name;
-            if (!QFile::exists(dst) && QFile::copy(src, dst))
-                ++copied;
-            // Belt-and-braces: also put it at the Downloads root beside debug.log.
-            if (!downloadsRoot.isEmpty()) {
-                const QString flat = downloadsRoot + QStringLiteral("/barista-diag-recovered-") + name;
-                if (!QFile::exists(flat))
-                    QFile::copy(src, flat);
+            if (QFile::exists(dst))
+                continue;   // already recovered this file on a prior launch — one-time only
+            if (!QFile::copy(src, dst))
+                continue;
+            ++copied;
+            // Belt-and-braces: also put it at the Downloads root.
+            if (!downloadsRoot.isEmpty())
+                QFile::copy(src, downloadsRoot + QStringLiteral("/barista-diag-recovered-") + name);
+            // AND re-emit the recovered timeline INLINE into debug.log (via qDebug), so it comes along even
+            // if the owner's export grabs only that single file. One-time (gated by dst existing above).
+            QFile in(src);
+            if (in.open(QIODevice::ReadOnly | QIODevice::Text)) {
+                qDebug().noquote() << (QStringLiteral("[BaristaDiag-recovered:") + name + QStringLiteral("] BEGIN"));
+                int n = 0;
+                QTextStream ts(&in);
+                while (!ts.atEnd() && n < 50000) {
+                    qDebug().noquote() << (QStringLiteral("[BaristaDiag-recovered] ") + ts.readLine());
+                    ++n;
+                }
+                qDebug().noquote() << (QStringLiteral("[BaristaDiag-recovered:") + name
+                                       + QStringLiteral("] END ") + QString::number(n) + QStringLiteral(" lines"));
             }
         }
     }

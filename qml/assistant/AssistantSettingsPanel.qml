@@ -58,6 +58,18 @@ Rectangle {
         anchors.fill: parent
         spacing: Theme.spacingMedium
 
+        // [barista-fork] Build stamp (diagnostic): shows the REAL compiled-in version code so a stale
+        // install/QML cache is obvious at a glance — if this number lags the APK you installed, it's stale.
+        Text {
+            Layout.fillWidth: true
+            horizontalAlignment: Text.AlignRight
+            text: (typeof AppVersionCode !== "undefined") ? ("build " + AppVersionCode) : ""
+            color: Theme.textSecondaryColor
+            font.pixelSize: Theme.scaled(11)
+            opacity: 0.7
+            Accessible.ignored: true
+        }
+
         // [barista-fork] No internal title/× header here — the host settingsCard already draws a "Back +
         // Assistant" header, so a second "Assistant" + × stacked on top was redundant and ate vertical space.
         // The host Back button closes the panel; the closed() signal is kept for any external caller.

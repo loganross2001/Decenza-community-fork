@@ -6,6 +6,7 @@
 #include <QStandardPaths>
 #include <QTextStream>
 #include <QSettings>
+#include <QDebug>
 
 BaristaDiagnostics* BaristaDiagnostics::s_instance = nullptr;
 
@@ -34,9 +35,11 @@ BaristaDiagnostics::BaristaDiagnostics(QObject* parent)
     QSettings settings;
     m_enabled = settings.value(QStringLiteral("barista/diagnosticsEnabled"), true).toBool();
 
-    // Prefer the user-visible Documents dir so the log is retrievable without a file manager
-    // deep-dive; fall back to app data if Documents is unavailable.
-    QString base = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
+    // Write to the DOWNLOADS folder — on Android that's the one location the tablet's file UI and a USB pull
+    // both reach without a deep dive. Fall back to Documents, then app data, if Downloads is unavailable.
+    QString base = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+    if (base.isEmpty())
+        base = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
     if (base.isEmpty())
         base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
     m_dir = base + QStringLiteral("/DecenzaBaristaDiagnostics");
@@ -103,6 +106,11 @@ void BaristaDiagnostics::appendLocked(const QString& category, const QString& ev
     m_ring.append(line);
     if (m_ring.size() > m_ringCap)
         m_ring.removeFirst();
+
+    // Also emit through qDebug so every event lands INLINE in the app's own debug.log — the file the owner
+    // can already retrieve. The "[BaristaDiag]" tag makes the whole timeline greppable out of that log even
+    // if the dedicated file below is somewhere the tablet's file UI won't reach.
+    qDebug().noquote() << (QStringLiteral("[BaristaDiag] ") + line);
 
     if (!m_file)
         openFileLocked();

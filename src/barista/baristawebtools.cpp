@@ -94,6 +94,12 @@ void BaristaWebTools::getWeather(const QString& location, Done done)
         fcQuery.addQueryItem(QStringLiteral("longitude"), QString::number(lon, 'f', 4));
         fcQuery.addQueryItem(QStringLiteral("current"),
             QStringLiteral("temperature_2m,apparent_temperature,weather_code,wind_speed_10m,relative_humidity_2m"));
+        // [barista-fork] Also pull a short DAILY forecast so "what's the forecast / this weekend?" is answerable
+        // from this fast tool (previously only `current` was fetched, so forecast questions fell through).
+        fcQuery.addQueryItem(QStringLiteral("daily"),
+            QStringLiteral("temperature_2m_max,temperature_2m_min,weather_code,precipitation_probability_max"));
+        fcQuery.addQueryItem(QStringLiteral("forecast_days"), QStringLiteral("4"));
+        fcQuery.addQueryItem(QStringLiteral("timezone"),      QStringLiteral("auto"));
         fcQuery.addQueryItem(QStringLiteral("temperature_unit"), QStringLiteral("fahrenheit"));
         fcQuery.addQueryItem(QStringLiteral("wind_speed_unit"),  QStringLiteral("mph"));
         fcUrl.setQuery(fcQuery);
@@ -120,6 +126,27 @@ void BaristaWebTools::getWeather(const QString& location, Done done)
             out[QStringLiteral("condition")]  = WeatherManager::weatherDescription(wmo);
             out[QStringLiteral("windMph")]    = static_cast<int>(std::lround(cur.value(QStringLiteral("wind_speed_10m")).toDouble()));
             out[QStringLiteral("humidity")]   = cur.value(QStringLiteral("relative_humidity_2m")).toInt();
+            // [barista-fork] Daily forecast rows (parallel arrays from open-meteo) → a compact forecast list the
+            // model can read for "what's the forecast / how's the weekend looking?".
+            const QJsonObject daily = root.value(QStringLiteral("daily")).toObject();
+            const QJsonArray days = daily.value(QStringLiteral("time")).toArray();
+            const QJsonArray hi   = daily.value(QStringLiteral("temperature_2m_max")).toArray();
+            const QJsonArray lo   = daily.value(QStringLiteral("temperature_2m_min")).toArray();
+            const QJsonArray code = daily.value(QStringLiteral("weather_code")).toArray();
+            const QJsonArray pop  = daily.value(QStringLiteral("precipitation_probability_max")).toArray();
+            QJsonArray forecast;
+            for (int i = 0; i < days.size(); ++i) {
+                QJsonObject d;
+                d[QStringLiteral("date")]      = days.at(i).toString();
+                d[QStringLiteral("highF")]     = static_cast<int>(std::lround(hi.at(i).toDouble()));
+                d[QStringLiteral("lowF")]      = static_cast<int>(std::lround(lo.at(i).toDouble()));
+                d[QStringLiteral("condition")] = WeatherManager::weatherDescription(code.at(i).toInt());
+                if (i < pop.size() && !pop.at(i).isNull())
+                    d[QStringLiteral("precipChancePct")] = pop.at(i).toInt();
+                forecast.append(d);
+            }
+            if (!forecast.isEmpty())
+                out[QStringLiteral("forecast")] = forecast;
             done(out);
         });
     });

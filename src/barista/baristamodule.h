@@ -9,6 +9,7 @@
 #include "tasksstorage.h"          // complete type needed for the Q_PROPERTY(TasksStorage*) metatype
 #include "maintenancedocsync.h"    // ditto for Q_PROPERTY(MaintenanceDocSync*)
 #include "baristadiagnostics.h"    // ditto for Q_PROPERTY(BaristaDiagnostics*)
+#include "baristabackup.h"         // ditto for Q_PROPERTY(BaristaBackup*)
 
 class QQmlApplicationEngine;
 class MainController;
@@ -44,6 +45,9 @@ class BaristaModule : public QObject {
     // [barista-fork] Always-on voice/coaching diagnostic recorder, exposed so the diagnostics settings card
     // can toggle it, show the log path/count, export a snapshot, and copy recent events.
     Q_PROPERTY(BaristaDiagnostics* diagnostics READ diagnostics CONSTANT)
+    // [barista-fork] Independent 10-day KB backup, exposed so the backup settings card can toggle it, show
+    // status (last/count/dir), and trigger a manual "Back up now".
+    Q_PROPERTY(BaristaBackup* backup READ backup CONSTANT)
 
 public:
     // Single upstream hook: construct the module (settings + orchestrator), register the
@@ -67,6 +71,7 @@ public:
     TasksStorage* tasks() const { return m_tasksStorage; }   // [barista-fork] reminders + maintenance
     MaintenanceDocSync* docSync() const { return m_docSync; } // [barista-fork] periodic Decent docs check
     BaristaDiagnostics* diagnostics() const { return m_diagnostics; } // [barista-fork] voice/coaching recorder
+    BaristaBackup* backup() const { return m_backup; }                // [barista-fork] independent KB backup
 
 signals:
     void enabledChanged();
@@ -100,4 +105,7 @@ private:
     // [barista-fork] Always-on voice/coaching timeline recorder (owned here). Its static record() is used
     // across subsystems; this instance is what backs Barista.diagnostics and the settings card.
     BaristaDiagnostics* m_diagnostics = nullptr;
+    // [barista-fork] Independent 10-day rolling backup of the private KB (assistant.db + settings), initialized
+    // with the assistant.db path once feedback/tasks storage are up.
+    BaristaBackup* m_backup = nullptr;
 };

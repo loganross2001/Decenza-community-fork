@@ -76,6 +76,9 @@ if(DECENZA_BARISTA)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristaactions.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristacontextbuilder.h
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristacontextbuilder.cpp
+        # [barista-fork] Independent 10-day rolling backup of the private KB (assistant.db + settings).
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristabackup.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristabackup.cpp
         # [barista-fork] Periodic Decent maintenance-docs check (network + rate-limit + hash). Gated with
         # the module — nothing unconditional references it (the DB state/apply helpers live in the
         # unconditional TasksStorage), so it must NOT be built into a DECENZA_BARISTA=OFF binary or the

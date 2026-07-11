@@ -56,7 +56,9 @@ BaristaModule::BaristaModule(MainController* mainController, MachineState* machi
     , m_webTools(new BaristaWebTools(m_webNetwork, this))
     // [barista-fork] Diagnostic recorder. Constructed FIRST-class here so its static record() has a live
     // instance for the whole session; sets BaristaDiagnostics::s_instance in its ctor.
-    , m_diagnostics(new BaristaDiagnostics(this)) {
+    , m_diagnostics(new BaristaDiagnostics(this))
+    // [barista-fork] Independent 10-day KB backup; initialized with the assistant.db path below.
+    , m_backup(new BaristaBackup(this)) {
     connect(m_settings, &AssistantSettings::enabledChanged,
             this, &BaristaModule::enabledChanged);
 
@@ -72,6 +74,9 @@ BaristaModule::BaristaModule(MainController* mainController, MachineState* machi
             // [barista-fork] Reminders + maintenance share the SAME assistant.db file (each store's
             // ensureSchema is idempotent and touches only its own tables).
             m_tasksStorage->initialize(assistantDb);
+            // [barista-fork] Start the independent KB backup now that assistant.db's path is known — a
+            // startup backup runs if today's set is missing, then a 6h re-check keeps the 10-day history.
+            m_backup->initialize(assistantDb);
             // [barista-fork] Now that assistant.db is initialized, kick the once-per-launch, rate-limited
             // Decent maintenance-docs check (~30-day window, owner-toggle-gated, single GET, nothing sent).
             m_docSync->maybeCheckOnStartup();

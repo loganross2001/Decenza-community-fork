@@ -1258,11 +1258,23 @@ void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage*
                     }
                     o[QStringLiteral("detectorResults")] = dr;
                 }
-                // [barista-fork][diag] Record when we hand the model the raw skip-first-frame flag — this is
-                // the ONLY path that flag reaches the barista, so it pinpoints the "skipped frame error" chatter.
-                if (o.value(QStringLiteral("skipFirstFrameDetected")).toBool())
-                    BaristaDiagnostics::record(QStringLiteral("tool"), QStringLiteral("get_shot_detail_skipframe_flag_TRUE"),
+                // [barista-fork] Soften the skip-first-frame flag before the model sees it. A bare
+                // `skipFirstFrameDetected: true` gets over-dramatized into an alarming "skipped frame error
+                // impacting your shots" — but this detector is LOW-CONFIDENCE and false-positives on
+                // preinfusion frames that legitimately hit their target between BLE samples (a benign DE1
+                // firmware quirk). Replace the raw boolean with a note that tells the model to keep it in
+                // proportion and not raise it unprompted.
+                if (o.value(QStringLiteral("skipFirstFrameDetected")).toBool()) {
+                    o.remove(QStringLiteral("skipFirstFrameDetected"));
+                    o[QStringLiteral("firstFrameNote")] = QStringLiteral(
+                        "A possible skipped first frame was flagged, but this is LOW CONFIDENCE and usually "
+                        "benign (often a preinfusion frame that hit its target between sensor samples, or a very "
+                        "short first frame — a known DE1 quirk, not a shot-ruining error). Do NOT raise it "
+                        "proactively or call it a problem; only mention it if the user asks about frames/skips, "
+                        "and even then keep it in proportion.");
+                    BaristaDiagnostics::record(QStringLiteral("tool"), QStringLiteral("get_shot_detail_skipframe_softened"),
                         {{QStringLiteral("shotId"), shotId}});
+                }
                 result = o;
             });
             // DB-open failure must surface as an error, not an empty object — same rule as query_shots.

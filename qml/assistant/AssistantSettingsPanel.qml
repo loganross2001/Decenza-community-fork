@@ -42,6 +42,7 @@ Rectangle {
     // [barista-fork] Feedback line for the diagnostics "Export log" button (shows the written path).
     property string _diagExportedPath: ""
     readonly property var _diag: (typeof Barista !== "undefined") ? Barista.diagnostics : null
+    readonly property var _backup: (typeof Barista !== "undefined") ? Barista.backup : null
 
     // Transparent root: this panel is embedded inside the AssistantOverlay's chromed settingsCard, so it
     // must NOT draw its own surface/border (that produced a card-in-card double outline). The host card owns
@@ -426,6 +427,72 @@ Rectangle {
                                 accessibleName: TranslationManager.translate("barista.settings.diagnosticsClear", "Clear diagnostic log")
                                 onClicked: { if (root._diag) root._diag.clearLog(); root._diagExportedPath = "" }
                             }
+                        }
+                    }
+
+                    // [barista-fork] Knowledge-base backup — independent 10-day rolling backup of the private
+                    // barista data (assistant.db: tasting notes, reminders, maintenance, dates + settings),
+                    // separate from Decent's main backup.
+                    BaristaSectionCard {
+                        caption: TranslationManager.translate("barista.settings.kbBackup", "Knowledge-base backup")
+
+                        Tr {
+                            Layout.fillWidth: true
+                            key: "barista.settings.kbBackupDesc"
+                            fallback: "Automatically keeps a 10-day rolling backup of your barista knowledge base — tasting notes, reminders, maintenance history, personal dates — plus your settings. Separate from Decent's main backup, and stays on this device."
+                            color: Theme.textSecondaryColor; font: Theme.labelFont; wrapMode: Text.WordWrap
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.spacingSmall
+                            Switch {
+                                id: kbBackupSwitch
+                                checked: root._backup ? root._backup.enabled : false
+                                onToggled: if (root._backup) root._backup.enabled = checked
+                                Accessible.role: Accessible.CheckBox
+                                Accessible.name: trKbBackupOn.text
+                                Accessible.checked: checked
+                                Accessible.focusable: true
+                                Accessible.onToggleAction: toggle()
+                            }
+                            Tr {
+                                id: trKbBackupOn
+                                Layout.fillWidth: true
+                                key: "barista.settings.kbBackupEnabled"
+                                fallback: "Keep an automatic 10-day backup"
+                                color: Theme.textColor; font: Theme.bodyFont; wrapMode: Text.WordWrap
+                            }
+                        }
+
+                        Text {
+                            Layout.fillWidth: true
+                            text: {
+                                if (!root._backup) return ""
+                                var last = root._backup.lastBackupAt > 0
+                                    ? new Date(root._backup.lastBackupAt * 1000).toLocaleString(Qt.locale(), Locale.ShortFormat)
+                                    : TranslationManager.translate("barista.settings.kbBackupNever", "never")
+                                return TranslationManager.translate("barista.settings.kbBackupStatus", "%1 backups · last: %2")
+                                       .arg(root._backup.backupCount).arg(last)
+                            }
+                            color: Theme.textSecondaryColor; font: Theme.labelFont; wrapMode: Text.WordWrap
+                        }
+                        Text {
+                            Layout.fillWidth: true
+                            text: root._backup ? root._backup.backupDir : ""
+                            color: Theme.textSecondaryColor; font: Theme.labelFont; wrapMode: Text.WrapAnywhere
+                        }
+                        Text {
+                            Layout.fillWidth: true
+                            visible: root._backup && root._backup.lastError.length > 0
+                            text: root._backup ? (TranslationManager.translate("barista.settings.kbBackupError", "Last backup failed: ") + root._backup.lastError) : ""
+                            color: Theme.errorColor; font: Theme.labelFont; wrapMode: Text.WordWrap
+                        }
+
+                        AccessibleButton {
+                            text: TranslationManager.translate("barista.settings.kbBackupNow", "Back up now")
+                            accessibleName: TranslationManager.translate("barista.settings.kbBackupNow", "Back up the knowledge base now")
+                            onClicked: if (root._backup) root._backup.backupNow()
                         }
                     }
                 }

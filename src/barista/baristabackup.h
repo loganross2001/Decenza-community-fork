@@ -44,6 +44,12 @@ public:
     Q_INVOKABLE void backupNow();
     // Newest backup .db path (for the settings card / retrieval hint); empty if none.
     Q_INVOKABLE QString newestBackupPath() const;
+    // Change the backup folder (persisted). Accepts a plain path or a file:// URL (from the folder picker).
+    // Pass a Google-Drive-synced local folder to keep the KB backup on Drive. Empty → reset to default.
+    Q_INVOKABLE void setBackupDir(const QString& folderUrlOrPath);
+    Q_INVOKABLE void resetBackupDir();
+    // True when the backup folder is the built-in default (vs a user-chosen one) — for the settings UI.
+    Q_INVOKABLE bool isDefaultDir() const;
 
 signals:
     void enabledChanged();
@@ -52,6 +58,8 @@ signals:
 private:
     void runBackup(bool force);
     void refreshStatus();   // recompute count/last from the directory
+    QString defaultDir() const;
+    void applyDir(const QString& path);   // set m_dir, mkpath, refresh, back up
 
     static constexpr int kKeepDays = 10;
 

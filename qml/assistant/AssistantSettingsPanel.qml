@@ -489,10 +489,32 @@ Rectangle {
                             color: Theme.errorColor; font: Theme.labelFont; wrapMode: Text.WordWrap
                         }
 
-                        AccessibleButton {
-                            text: TranslationManager.translate("barista.settings.kbBackupNow", "Back up now")
-                            accessibleName: TranslationManager.translate("barista.settings.kbBackupNow", "Back up the knowledge base now")
-                            onClicked: if (root._backup) root._backup.backupNow()
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.spacingMedium
+                            AccessibleButton {
+                                text: TranslationManager.translate("barista.settings.kbBackupNow", "Back up now")
+                                accessibleName: TranslationManager.translate("barista.settings.kbBackupNow", "Back up the knowledge base now")
+                                onClicked: if (root._backup) root._backup.backupNow()
+                            }
+                            AccessibleButton {
+                                text: TranslationManager.translate("barista.settings.kbBackupChangeFolder", "Change folder…")
+                                accessibleName: TranslationManager.translate("barista.settings.kbBackupChangeFolder", "Change the backup folder")
+                                onClicked: kbBackupFolderDialog.open()
+                            }
+                            AccessibleButton {
+                                subtle: true
+                                visible: root._backup && !root._backup.isDefaultDir()
+                                text: TranslationManager.translate("barista.settings.kbBackupResetFolder", "Reset")
+                                accessibleName: TranslationManager.translate("barista.settings.kbBackupResetFolder", "Reset backup folder to default")
+                                onClicked: if (root._backup) root._backup.resetBackupDir()
+                            }
+                        }
+
+                        FolderDialog {
+                            id: kbBackupFolderDialog
+                            title: TranslationManager.translate("barista.settings.kbBackupPickTitle", "Choose the knowledge-base backup folder")
+                            onAccepted: if (root._backup) root._backup.setBackupDir(selectedFolder)
                         }
                     }
                 }

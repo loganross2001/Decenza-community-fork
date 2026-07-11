@@ -18,9 +18,11 @@
 #include <QJsonDocument>
 #include <QPointer>
 #include <QSqlDatabase>
+#include <QUrl>
 
 namespace {
 constexpr const char* kEnabledKey = "barista/kbBackupEnabled";
+constexpr const char* kDirKey     = "barista/kbBackupDir";   // empty = built-in default location
 
 QString todayStamp() { return QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd")); }
 
@@ -34,12 +36,51 @@ bool isSecretKey(const QString& key) {
 
 BaristaBackup::BaristaBackup(QObject* parent) : QObject(parent) {
     m_enabled = QSettings().value(QLatin1String(kEnabledKey), true).toBool();
-    // Live beside the app's debug.log (AppDataLocation) — the one location retrievable off the tablet.
+    // A user-chosen folder (e.g. a Google-Drive-synced local folder) wins; else the built-in default
+    // beside the app's debug.log (AppDataLocation) — the one location retrievable off the tablet.
+    const QString custom = QSettings().value(QLatin1String(kDirKey)).toString().trimmed();
+    m_dir = custom.isEmpty() ? defaultDir() : custom;
+    QDir().mkpath(m_dir);
+}
+
+QString BaristaBackup::defaultDir() const {
     QString base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
     if (base.isEmpty())
         base = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
-    m_dir = base + QStringLiteral("/BaristaKnowledgeBackups");
+    return base + QStringLiteral("/BaristaKnowledgeBackups");
+}
+
+bool BaristaBackup::isDefaultDir() const {
+    return QSettings().value(QLatin1String(kDirKey)).toString().trimmed().isEmpty();
+}
+
+void BaristaBackup::setBackupDir(const QString& folderUrlOrPath) {
+    QString path = folderUrlOrPath.trimmed();
+    if (path.isEmpty()) { resetBackupDir(); return; }
+    if (path.startsWith(QLatin1String("file:")) || path.startsWith(QLatin1String("content:")))
+        path = QUrl(path).toLocalFile();
+    if (path.isEmpty() || !QDir().mkpath(path)) {
+        // content:// (cloud-only Drive) yields an empty local path — can't write there directly.
+        m_lastError = QStringLiteral("That folder can't be used for backups (not a writable local folder). "
+                                     "Pick a folder that's synced/offline on the tablet.");
+        emit statusChanged();
+        return;
+    }
+    QSettings().setValue(QLatin1String(kDirKey), path);
+    applyDir(path);
+}
+
+void BaristaBackup::resetBackupDir() {
+    QSettings().remove(QLatin1String(kDirKey));
+    applyDir(defaultDir());
+}
+
+void BaristaBackup::applyDir(const QString& path) {
+    m_dir = path;
     QDir().mkpath(m_dir);
+    m_lastError.clear();
+    refreshStatus();                 // recompute count/last for the new folder + emit statusChanged
+    if (m_enabled) runBackup(false); // seed the new location with today's set
 }
 
 BaristaBackup::~BaristaBackup() = default;

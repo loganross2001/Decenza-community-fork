@@ -70,10 +70,23 @@ Item {
             if ((root._voice && root._voice.speaking) || coachBusy)
                 return
             root._thinkingCue = true   // avatar shows a more pronounced thinking beat
-            // Soft non-verbal tick. playThinkingCue() itself also honors the barista mute.
-            if (root._voice && typeof root._voice.playThinkingCue === "function")
-                root._voice.playThinkingCue()
+            // [barista-fork] The AUDIO fill is now the continuous thinking-loop earcon (started immediately in
+            // _beginSlowOpWatch, stopped when audio is audible) — NOT a delayed 3s tick. This timer keeps only
+            // the visual "thinking beat" going; the loop covers the silence from the moment the user stops.
         }
+    }
+    // [barista-fork] Reactive control of the thinking-earcon loop: it should hum whenever a model turn is in
+    // flight and NOTHING is audible yet (fills the model round-trip silence), and stop the instant real audio
+    // starts (or the barista/coach voice speaks a lead-in). Called on turn start + whenever `audible`/speech
+    // flips. C++ startThinkingLoop honors the barista mute + the "off" setting + is idempotent.
+    function _updateThinkingLoop() {
+        if (!root._voice)
+            return
+        var coachBusy = (typeof Barista !== "undefined" && Barista.coachingVoice && Barista.coachingVoice.speaking)
+        var want = root._thinking && root._state === "conversing"
+                   && !root._voice.audible && !root._voice.speaking && !coachBusy
+        if (want) root._voice.startThinkingLoop()
+        else root._voice.stopThinkingLoop()
     }
     // Start the 5s silence-breaker for a freshly dispatched slow op (called from _send after the model turn
     // is actually sent). Clears the per-turn spoken flag + cue so each turn starts fresh.
@@ -81,11 +94,13 @@ Item {
         root._spokeThisTurn = false
         root._thinkingCue = false
         slowOpTimer.restart()
+        root._updateThinkingLoop()   // [barista-fork] start the continuous thinking hum immediately
     }
     // Silence is broken (something was spoken) or the turn ended → stop watching + drop the cue.
     function _cancelSlowOpWatch() {
         slowOpTimer.stop()
         root._thinkingCue = false
+        if (root._voice) root._voice.stopThinkingLoop()   // [barista-fork] turn resolved → stop the hum
     }
     // Mark that the barista has produced audible/visible words this turn.
     // [barista-fork] NOTE: this no longer cancels the slow-op heartbeat. A spoken LEAD-IN doesn't mean the
@@ -100,6 +115,10 @@ Item {
         target: root._voiceInput
         ignoreUnknownSignals: true
         function onFinalText(text) {   // spoken utterance → the AI; pause the mic until the turn is done
+            // [barista-fork] NOTE: voice-ID must NEVER capture during a live STT turn — Android's mic-contention
+            // policy silences the recognizer while a 2nd QAudioSource is open, so the recognizer missed the first
+            // 3-6s of speech. The increment-2 concurrent capture was removed; ID now happens only off the STT
+            // path (enrollment + the on-demand testers). See [[decenza-barista-voice-matching]].
             root._resetSilence()
             if (root._voiceInput) root._voiceInput.pauseMic()
             root._send(text)
@@ -116,6 +135,17 @@ Item {
     Connections {
         target: root._voice
         ignoreUnknownSignals: true
+        // [barista-fork] Real audio started/stopped → re-evaluate the thinking hum (stop it when the voice is
+        // audible; resume it if a lead-in finished but the tool is still running). Avatar sync is a binding.
+        function onAudibleChanged() {
+            root._updateThinkingLoop()
+            // [barista-fork] Text-on-speak: reveal the held reply text the instant the voice is actually audible,
+            // so the words appear WITH the sound, not before it.
+            if (root._voice && root._voice.audible && root._pendingDisplayText.length > 0) {
+                root._message = root._pendingDisplayText
+                root._pendingDisplayText = ""
+            }
+        }
         function onSpeakingChanged() {
             root._diag("speaking_changed", { speaking: root._voice ? root._voice.speaking : false, endAfter: root._endAfterReply })
             // [barista-fork] Part B: the barista actually started talking → the silence is broken, so kill the
@@ -142,7 +172,14 @@ Item {
             }
             if (!root._voiceInput || !root._voiceInput.listening) return
             if (root._voice.speaking) root._voiceInput.pauseMic()
-            else { root._voiceInput.resumeMic(); root._resetSilence() }
+            // [barista-fork] Only reopen the mic when the TURN is actually done. A lead-in finishing while a
+            // tool is still running (_thinking stays true until onResponseReceived) is NOT the end of the turn —
+            // keep the mic paused so the barista doesn't "hang" with an open mic, and let the hum refill the gap
+            // (below). Abnormal turn death is recovered separately by onErrorOccurred (clears _thinking, resumes).
+            else if (!root._thinking && !root._paused) { root._voiceInput.resumeMic(); root._resetSilence() }
+            // Re-evaluate the thinking hum on every speech transition: after a lead-in finishes it resumes to fill
+            // the tool-running silence; once the real answer is audible onAudibleChanged stops it.
+            root._updateThinkingLoop()
         }
     }
     readonly property string _state: _orch ? _orch.state : "present"   // "present" | "conversing"
@@ -174,6 +211,12 @@ Item {
     // [barista-fork] Part B cue latch: a more pronounced avatar "thinking" beat while the slow op drags on with
     // nothing spoken. Set when the 5s timer fires; cleared as soon as anything is spoken or the turn resolves.
     property bool _thinkingCue: false
+    // [barista-fork] Text-on-speak: the reply text is HELD here until the voice actually starts (onAudibleChanged
+    // reveals it into _message), so text no longer appears before you hear anything. Muted replies show at once.
+    property string _pendingDisplayText: ""
+    // [barista-fork] Pause: the session is held (mic paused; speech also stopped in "freeze" mode). Only the
+    // user's explicit Resume tap clears this — auto-resume paths are guarded on !_paused so they never reopen.
+    property bool _paused: false
     property bool _showSettings: false
     property bool _collapsed: false     // panel minimised to a thin edge tab (frees the whole screen)
     property var _pendingNext: null     // structuredNext recommendation awaiting apply/skip
@@ -270,7 +313,7 @@ Item {
     // S4: after a locally-spoken line, a MUTED engine won't fire speakingChanged to reopen the mic —
     // so reopen it here (mirrors the muted-resume path in onResponseReceived).
     function _resumeMicAfterLocal() {
-        if (root._voiceInput && root._voiceInput.listening
+        if (root._voiceInput && root._voiceInput.listening && !root._paused
                 && (!root._voice || !root._voice.speaking))
             root._voiceInput.resumeMic()
     }
@@ -340,6 +383,14 @@ Item {
         if (Settings.dye.dyeBarista && Settings.dye.dyeBarista.length > 0) return Settings.dye.dyeBarista
         return ""
     }
+    // [barista-fork] Phase 1 identity: WHO is talking right NOW. The roster active user (dyeBarista — set by the
+    // set_active_user tool when someone says who they are) wins over the owner's configured name, so the barista
+    // addresses the current speaker. Falls back to the owner name, then generic. dyeBarista→userName→"".
+    readonly property string _activeUserName: {
+        if (Settings.dye.dyeBarista && Settings.dye.dyeBarista.length > 0) return Settings.dye.dyeBarista
+        if (_settings && _settings.userName && _settings.userName.length > 0) return _settings.userName
+        return ""
+    }
     readonly property string _bean: {
         var s = ((Settings.dye.dyeBeanBrand || "") + " " + (Settings.dye.dyeBeanType || "")).trim()
         return s
@@ -390,6 +441,27 @@ Item {
         if (root._voice) root._voice.stop()
         root._voiceInput.start()
         silenceTimer.restart()
+    }
+    // [barista-fork] Engage: if the V2 "engage capture test" is ON, run a short capture BEFORE opening the STT
+    // mic (never concurrent — the anti-probe test), then open the mic when it signals done. Default off → open
+    // the mic immediately. The done-signal always fires (even on capture failure), so the mic always opens.
+    function _engageOpenMic() {
+        if (root._settings && root._settings.voiceIdEngageTest
+                && typeof Barista !== "undefined" && Barista.voiceId
+                && Barista.voiceId.enrolledNames.length > 0) {
+            Barista.voiceId.startEngageCaptureTest()   // → engageCaptureTestDone → _openMic
+            return
+        }
+        root._openMic()
+    }
+    // Bridge the engage capture-test completion to opening the STT mic.
+    Connections {
+        target: (typeof Barista !== "undefined") ? Barista.voiceId : null
+        ignoreUnknownSignals: true
+        function onEngageCaptureTestDone() {
+            if (root._state === "conversing")
+                root._openMic()
+        }
     }
     // B3: fully close the session — stop listening + speaking and clear any pending action, so a
     // dismissed (or destroyed) overlay never keeps transcribing/replying/talking in the background.
@@ -506,7 +578,10 @@ Item {
         if (!root._conv)
             return
         var who = root._settings ? root._settings.assistantName : "Coach"
-        var name = root._userName.length > 0 ? root._userName : ""
+        // [barista-fork] Phase 1 identity: address the ACTIVE user (dyeBarista wins — see _activeUserName), so a
+        // guest who said "I'm Scott" is addressed as Scott, not the owner. The [Who] context block carries the
+        // roster + honest-attribution rules.
+        var name = root._activeUserName.length > 0 ? root._activeUserName : ""
 
         // [barista-fork] Ask→approve→apply flow. The barista PROPOSES a dial change and asks; only after the
         // user approves does it apply. On Anthropic it applies via the apply_dial_change tool; on other providers
@@ -564,6 +639,23 @@ Item {
             + "  • ongoing → NO greeting at all; continue as if mid-conversation.\n"
             + "NEVER cold-greet, self-introduce, say your own name unprompted, re-introduce yourself, or open with "
             + "'how can I help'. You are a familiar presence, not a kiosk.\n"
+            + "USING NAMES — the [Who] block below names the active user and who you already know. Use their name "
+            + "naturally and warmly, but sparingly: a hello, a moment of agreement — never every sentence and never "
+            + "robotically. When someone tells you who they are ('I'm Ana', 'this is Scott', 'Ana's making this "
+            + "one'): if they're NEW to you (not in [Who] 'known'), warmly repeat the name back to confirm you heard "
+            + "it right ('Ana — nice to meet you!') and THEN call set_active_user; if they're someone you already "
+            + "know, just greet them by name ('Hey Ana!') and call set_active_user to switch. Speech mishears names, "
+            + "so confirm a NEW one before you commit it. When the active user is a guest, not the owner, honor the "
+            + "[Who] attribution rule: you know the machine's history but it's the OWNER's — never tell a guest they "
+            + "pulled shots or have a history that isn't theirs.\n"
+            + "VOICE RECOGNITION — a user message may begin with a line like '[voiceHint: heardVoice=Ana "
+            + "confidence=confident]'. That is the app's ON-DEVICE voice recognition, NOT the user's words — NEVER "
+            + "read it aloud, repeat it, or mention that you recognize voices. confidence=confident means Ana is "
+            + "speaking now and the app has ALREADY made her the active user; if that's a change from who you were "
+            + "addressing, just greet her by name naturally ('Hey Ana!') and use her history per the [Who] rules. "
+            + "confidence=maybe means you're NOT sure — gently confirm before assuming ('Ana, is that you?') and only "
+            + "call set_active_user once she says yes. A spoken correction ALWAYS wins over the voice guess: if "
+            + "someone says 'no, I'm Chris', call set_active_user with Chris. Answer the user's actual words as normal.\n"
             + "TODAY'S OCCASION — if the context block has a \"todaysOccasion\" section (a US holiday and/or one of "
             + "the user's own saved dates), warmly acknowledge it ONCE when it's natural — folded into your greeting "
             + "on a firstOfDay/firstEver hello ('Morning — and happy Thanksgiving!'), or into your sign-off when the "
@@ -1009,13 +1101,25 @@ Item {
         root._thinking = true
         if (root._voiceInput && root._voiceInput.listening) root._voiceInput.pauseMic()
         root._stampTurn()
+        // [barista-fork] Voice-ID Increment 2: prepend a compact voice hint to the MODEL text only (never to
+        // `t`, which the intercepts above match on, and never displayed). The identify already ran synchronously
+        // at onFinalText, so heardName is fresh. A CONFIDENT match already switched the active user app-side; the
+        // hint tells the model to greet them / attribute honestly. MAYBE → the model gently confirms first.
+        // One-shot: consumed here so it never bleeds into a later turn.
+        var _modelText = t
+        if (root._settings && root._settings.voiceIdEnabled && typeof Barista !== "undefined" && Barista.voiceId
+                && Barista.voiceId.heardConfidence && Barista.voiceId.heardConfidence !== "none") {
+            _modelText = "[voiceHint: heardVoice=" + Barista.voiceId.heardName
+                       + " confidence=" + Barista.voiceId.heardConfidence + "]\n" + t
+            Barista.voiceId.consumeHeard()
+        }
         // [barista-fork] User-initiated: the FIRST utterance of a primed session BEGINS the Claude
         // conversation with the user's real words as the first turn (no synthetic kickoff). Subsequent
         // turns follow up. The persona's greeting rules fold any hello into this first reply.
         if (root._primed && !root._sessionBegun) {
             root._sessionBegun = true
             root._primed = false
-            if (!root._conv.beginSession(root._primedSystemPrompt, t)) {   // busy (rare) → recover, don't wedge
+            if (!root._conv.beginSession(root._primedSystemPrompt, _modelText)) {   // busy (rare) → recover, don't wedge
                 root._sessionBegun = false
                 root._primed = true
                 root._thinking = false
@@ -1025,7 +1129,7 @@ Item {
                 root._beginSlowOpWatch()   // [barista-fork] Part B: model turn dispatched → arm the 5s cue
             }
         } else {
-            root._conv.followUp(t)
+            root._conv.followUp(_modelText)
             root._beginSlowOpWatch()       // [barista-fork] Part B: model turn dispatched → arm the 5s cue
         }
     }
@@ -1060,7 +1164,7 @@ Item {
             if (root._orch.state === "conversing") {
                 root._collapsed = false     // expand the panel
                 root._startConversation()   // warms context + primes the system prompt; waits for first utterance
-                root._openMic()             // tap-chat-and-talk: the mic opens with the panel
+                root._engageOpenMic()       // tap-chat-and-talk: the mic opens with the panel (after the engage test, if on)
             } else {   // "present"
                 root._showSettings = false
                 root._closeSession()
@@ -1074,6 +1178,10 @@ Item {
     Component.onCompleted: {
         if (root._state !== "conversing")
             return
+        // [barista-fork] Barista engaged → nudge a sleeping BT/USB speaker awake with a subtle tone so the first
+        // utterance isn't clipped while it powers up. Honors mute; no-op on the built-in speaker.
+        if (root._voice && typeof root._voice.playWakeTone === "function")
+            root._voice.playWakeTone()
         // Restore onto THIS bean's thread (an advisor visit on another page may have switched the key).
         var prof2 = (typeof ProfileManager !== "undefined") ? ProfileManager.currentProfileName : ""
         prof2 = prof2.replace(/^\*/, "").replace(/ \(modified\)$/, "")
@@ -1090,6 +1198,18 @@ Item {
     }
     // B3: if the user navigates away mid-chat, the Loader destroys us — close the mic/TTS session first.
     Component.onDestruction: root._closeSession()
+    // [barista-fork] Tablet woke from the screensaver → a BT/USB speaker may have slept during it. If a barista
+    // session is live, nudge it awake so the next utterance isn't clipped. (Engaging fresh is covered by
+    // Component.onCompleted; this covers a session that survived a sleep.)
+    Connections {
+        target: (typeof ScreensaverManager !== "undefined") ? ScreensaverManager : null
+        ignoreUnknownSignals: true
+        function onScreensaverActiveChanged() {
+            if (!ScreensaverManager.screensaverActive && root._state === "conversing"
+                && root._voice && typeof root._voice.playWakeTone === "function")
+                root._voice.playWakeTone()
+        }
+    }
     // Claude's replies → show + speak (once each).
     Connections {
         target: root._conv
@@ -1108,7 +1228,10 @@ Item {
             var clean = root._stripBlock(text)
             if (clean.length === 0)
                 return
-            root._message = clean          // show the lead-in while the tool runs (replaced by the answer)
+            // [barista-fork] Text-on-speak: hold the lead-in text until the voice is audible (onAudibleChanged
+            // reveals it). If muted (nothing will be spoken), show it now so a muted reply still displays.
+            if (!root._voice || !root._settings || !root._settings.voiceEnabled) root._message = clean
+            else root._pendingDisplayText = clean
             root._markSpokeThisTurn()      // suppress the Part B cue + stop the 5s timer
             if (root._voiceInput && root._voiceInput.listening) root._voiceInput.pauseMic()
             root._diag("interim_leadin", { chars: clean.length, speakingNow: root._voice ? root._voice.speaking : false })
@@ -1119,7 +1242,11 @@ Item {
                 return
             if (root._awaitingContext)   // N-R3-2: a preempted turn's reply during our context build → not ours
                 return
-            root._message = root._stripBlock(response)   // hide the JSON action block from the display
+            // [barista-fork] Text-on-speak: hold the answer text until the voice is audible (revealed in
+            // onAudibleChanged); show immediately only if muted (nothing will be spoken).
+            var _answerText = root._stripBlock(response)   // hide the JSON action block from the display
+            if (!root._voice || !root._settings || !root._settings.voiceEnabled) root._message = _answerText
+            else root._pendingDisplayText = _answerText
             root._thinking = false
             root._markSpokeThisTurn()
             root._cancelSlowOpWatch()   // [barista-fork] the real answer is here → stop the still-working heartbeat
@@ -1162,8 +1289,9 @@ Item {
                 root._awaitConfirm = false
             }
             // Turn done. If it will speak, `speaking` is already true → skip; onSpeakingChanged(false)
-            // reopens the mic when playback truly ends. If nothing will speak, reopen now.
-            if (root._voiceInput && root._voiceInput.listening
+            // reopens the mic when playback truly ends. If nothing will speak, reopen now — UNLESS paused
+            // (a muted reply landing during a hold-pause must not silently reopen the held mic).
+            if (root._voiceInput && root._voiceInput.listening && !root._paused
                     && (!root._voice || !root._voice.speaking))
                 root._voiceInput.resumeMic()
             // [barista-fork] The barista called end_conversation this turn (dismissRequested armed _endAfterReply,
@@ -1183,8 +1311,8 @@ Item {
             root._message = (error && error.length > 0)
                 ? error
                 : TranslationManager.translate("barista.err", "Something went wrong — tap Chat or type to try again.")
-            // Reopen the mic if a session is live (the turn failed, not the session).
-            if (root._voiceInput && root._voiceInput.listening
+            // Reopen the mic if a session is live (the turn failed, not the session) — unless the user paused.
+            if (root._voiceInput && root._voiceInput.listening && !root._paused
                     && (!root._voice || !root._voice.speaking))
                 root._voiceInput.resumeMic()
             root._resetSilence()
@@ -1299,7 +1427,10 @@ Item {
                 Layout.topMargin: Theme.spacingSmall
                 Layout.preferredWidth: Theme.scaled(150)
                 Layout.preferredHeight: Theme.scaled(150)
-                mode: (root._voice && root._voice.speaking) ? "speaking"
+                // [barista-fork] Drive the mouth off `audible` (real audio out), NOT `speaking` — otherwise the
+                // avatar starts talking during the network→prepare gap before any sound (the "avatar talks
+                // before voices are heard" complaint). `speaking` still gates the mic; only the VISUAL syncs here.
+                mode: (root._voice && root._voice.audible) ? "speaking"
                     : root._thinking ? "thinking"
                     : (root._voiceInput && root._voiceInput.listening && !root._voiceInput.paused) ? "listening"
                     : "idle"
@@ -1370,7 +1501,9 @@ Item {
                 Accessible.ignored: true
             }
 
-            // Reply input — type, or use the Chat mic to talk hands-free
+            // [barista-fork] Voice-first control bar: Chat/Stop · Pause/Resume · keyboard toggle. The typed
+            // input (field + Send) is hidden behind the keyboard icon — voice is the primary path, typing is a
+            // fallback for noisy rooms / accessibility (kept, not removed).
             RowLayout {
                 Layout.fillWidth: true
                 spacing: Theme.spacingSmall
@@ -1393,25 +1526,48 @@ Item {
                             // Barge-in: an explicit tap-to-speak takes priority — silence any greeting/TTS
                             // still playing so the assistant never talks over the user opening the mic.
                             if (root._voice) root._voice.stop()
+                            root._paused = false   // an explicit Chat tap ends any pause
                             root._voiceInput.start(); silenceTimer.restart()
                         }
                     }
                 }
 
-                StyledTextField {
-                    id: replyField
-                    Layout.fillWidth: true
-                    enabled: !root._thinking
-                    placeholderText: TranslationManager.translate("barista.reply", "Reply…")
-                    onAccepted: { root._send(text); text = "" }
-                }
+                // [barista-fork] Pause / Resume — holds the conversation without ending it. Behavior follows the
+                // pauseMode setting: "hold" just pauses the mic; "freeze" also stops any speech + the hum. Only
+                // an explicit Resume tap clears _paused (auto-resume paths are guarded on !_paused).
                 AccessibleButton {
+                    visible: (root._voiceInput && root._voiceInput.listening) || root._paused
                     subtle: true
-                    enabled: !root._thinking
-                    text: TranslationManager.translate("barista.chat.send", "Send")
-                    accessibleName: TranslationManager.translate("barista.chat.send", "Send")
-                    onClicked: { root._send(replyField.text); replyField.text = "" }
+                    primary: root._paused
+                    text: root._paused ? TranslationManager.translate("barista.mic.resume", "Resume")
+                                       : TranslationManager.translate("barista.mic.pause", "Pause")
+                    accessibleName: root._paused
+                          ? TranslationManager.translate("barista.mic.resumeAccessible", "Resume the conversation")
+                          : TranslationManager.translate("barista.mic.pauseAccessible", "Pause the conversation")
+                    onClicked: {
+                        if (!root._voiceInput) return
+                        if (!root._paused) {
+                            root._paused = true
+                            root._voiceInput.pauseMic()
+                            // "freeze" mode also silences in-progress speech + the thinking hum; "hold" leaves
+                            // any playing reply alone and just holds the mic.
+                            if (root._settings && root._settings.pauseMode === "freeze" && root._voice) {
+                                root._voice.stop()
+                                root._voice.stopThinkingLoop()
+                            }
+                        } else {
+                            root._paused = false
+                            if (root._voiceInput.listening) root._voiceInput.resumeMic()
+                            else root._voiceInput.start()
+                            root._resetSilence()
+                        }
+                    }
                 }
+
+                // [barista-fork] Voice-only: no typed input. The barista is driven entirely by voice (Chat +
+                // Pause); the text field + Send + keyboard fallback were removed at the owner's request. A
+                // trailing spacer keeps Chat/Pause left-aligned.
+                Item { Layout.fillWidth: true }
             }
         }
     }

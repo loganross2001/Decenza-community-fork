@@ -219,7 +219,13 @@ void BaristaWebTools::getLocalNews(const QString& query, Done done)
 
     QUrl url(QStringLiteral("https://news.google.com/rss/search"));
     QUrlQuery urlQuery;
-    urlQuery.addQueryItem(QStringLiteral("q"),    q);
+    // [barista-fork] RECENCY: a bare relevance query surfaces months-old articles. Google News honours a
+    // `when:Nd` operator in q — constrain to the last week so the headlines are actually current (unless the
+    // model already asked for a specific window). The pubDate in each item lets the model state the age.
+    QString qWithRecency = q;
+    if (!q.contains(QLatin1String("when:")))
+        qWithRecency += QStringLiteral(" when:7d");
+    urlQuery.addQueryItem(QStringLiteral("q"),    qWithRecency);
     urlQuery.addQueryItem(QStringLiteral("hl"),   QStringLiteral("en-US"));
     urlQuery.addQueryItem(QStringLiteral("gl"),   QStringLiteral("US"));
     urlQuery.addQueryItem(QStringLiteral("ceid"), QStringLiteral("US:en"));

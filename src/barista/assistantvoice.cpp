@@ -17,6 +17,8 @@
 #include <QBuffer>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
+#include <QTimer>
 #include <QNetworkAccessManager>
 #include <QNetworkRequest>
 #include <QNetworkReply>
@@ -24,6 +26,74 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QVariantMap>
+
+#ifdef Q_OS_ANDROID
+#include <QJniObject>
+#include <QJniEnvironment>
+#include <QCoreApplication>
+#include <QHash>
+#include <QMutex>
+
+namespace {
+// [barista-fork] Route the DecenzaAudioPlayer JNI callbacks back to the right AssistantVoice instance. Java
+// calls the static natives with the C++ `handle` (the AssistantVoice*); we validate it against this registry
+// before ever dereferencing it — a raw handle is never trusted blind. Register/unregister run in the
+// AssistantVoice ctor/dtor (main thread); the lookup runs inside a main-thread queued lambda, so a destroyed
+// instance is already gone from the map by the time any late callback lands (dtor + lambda are the same thread,
+// they can't interleave). The mutex guards the map against the JNI thread that queues the lambda.
+QMutex g_androidVoiceMutex;
+QHash<jlong, AssistantVoice*> g_androidVoiceRegistry;
+
+void androidVoiceRegister(jlong handle, AssistantVoice* v) {
+    QMutexLocker lock(&g_androidVoiceMutex);
+    g_androidVoiceRegistry.insert(handle, v);
+}
+void androidVoiceUnregister(jlong handle) {
+    QMutexLocker lock(&g_androidVoiceMutex);
+    g_androidVoiceRegistry.remove(handle);
+}
+AssistantVoice* androidVoiceLookup(jlong handle) {
+    QMutexLocker lock(&g_androidVoiceMutex);
+    return g_androidVoiceRegistry.value(handle, nullptr);
+}
+
+// Static natives — invoked by Java on the Android main Looper. Hop to the Qt main thread, then look the
+// instance up (safe: the dtor removed it on that same thread) and drive its state. `tag` (0=voice, 1=cue,
+// 2=preview) selects which player fired so a cue/preview callback never touches the barista's speaking state.
+void jniOnStarted(JNIEnv*, jclass, jlong handle, jint tag) {
+    QMetaObject::invokeMethod(qApp, [handle, tag]() {
+        if (AssistantVoice* v = androidVoiceLookup(handle))
+            v->handleAndroidPlaybackStarted(static_cast<int>(tag));
+    }, Qt::QueuedConnection);
+}
+void jniOnFinished(JNIEnv*, jclass, jlong handle, jint tag) {
+    QMetaObject::invokeMethod(qApp, [handle, tag]() {
+        if (AssistantVoice* v = androidVoiceLookup(handle))
+            v->handleAndroidPlaybackFinished(static_cast<int>(tag));
+    }, Qt::QueuedConnection);
+}
+
+// Bind the two natives to the Java class. Once, on the first AssistantVoice — mirrors registerVoiceNatives()
+// in voiceinput.cpp. Only latch `done` on success so a transient failure can be retried by the next instance.
+void registerAndroidAudioPlayerNatives() {
+    static bool done = false;
+    if (done)
+        return;
+    QJniEnvironment env;
+    JNINativeMethod methods[] = {
+        {"nativeOnStarted",  "(JI)V", reinterpret_cast<void*>(jniOnStarted)},
+        {"nativeOnFinished", "(JI)V", reinterpret_cast<void*>(jniOnFinished)},
+    };
+    if (env.registerNativeMethods("io/github/kulitorum/decenza_de1/DecenzaAudioPlayer", methods, 2))
+        done = true;
+}
+
+// [barista-fork] Player tags — must match the ints passed to the DecenzaAudioPlayer Java constructor.
+constexpr int kTagVoice = 0;
+constexpr int kTagCue = 1;
+constexpr int kTagPreview = 2;
+}  // namespace
+#endif  // Q_OS_ANDROID
 
 AssistantVoice::AssistantVoice(AssistantSettings* settings, Settings* appSettings,
                                Role role, QObject* parent)
@@ -38,6 +108,22 @@ AssistantVoice::AssistantVoice(AssistantSettings* settings, Settings* appSetting
     , m_appSettings(appSettings)
     , m_role(role) {
     m_player->setAudioOutput(m_audioOut);
+#ifdef Q_OS_ANDROID
+    // [barista-fork] On this tablet Qt's QMediaDevices only ever enumerates "Built in speaker", so
+    // QMediaPlayer/QAudioOutput can't follow the system route to an external USB-C/Bluetooth speaker — the
+    // barista kept playing out of the tablet no matter what. Play cloud TTS through Android's own MediaPlayer
+    // (tagged USAGE_MEDIA) instead — it DOES follow the route. One native player per instance, keyed by `this`
+    // so its callbacks come back to the right AssistantVoice (barista vs coaching). The QAudioOutput
+    // device-follow below is dead here, so it's compiled out.
+    registerAndroidAudioPlayerNatives();
+    const jlong androidHandle = static_cast<jlong>(reinterpret_cast<quintptr>(this));
+    androidVoiceRegister(androidHandle, this);
+    // Three native players, same handle=this, distinct tags — so the voice, the thinking-loop cue, and the
+    // voice-preview each play/stop independently and their callbacks route to the right handler.
+    m_androidPlayer  = QJniObject("io/github/kulitorum/decenza_de1/DecenzaAudioPlayer", "(JI)V", androidHandle, static_cast<jint>(kTagVoice));
+    m_androidCue     = QJniObject("io/github/kulitorum/decenza_de1/DecenzaAudioPlayer", "(JI)V", androidHandle, static_cast<jint>(kTagCue));
+    m_androidPreview = QJniObject("io/github/kulitorum/decenza_de1/DecenzaAudioPlayer", "(JI)V", androidHandle, static_cast<jint>(kTagPreview));
+#else
     // [barista-fork] Follow the CURRENT default output. A QAudioOutput pins to whatever device was default
     // when it was constructed (the tablet's own speaker) and does NOT switch when an external USB-C or
     // Bluetooth speaker connects later — so the barista kept playing out of the tablet. Bind to the live
@@ -49,6 +135,7 @@ AssistantVoice::AssistantVoice(AssistantSettings* settings, Settings* appSetting
             m_audioOut->setDevice(QMediaDevices::defaultAudioOutput());
         });
     }
+#endif
     applyVoiceFromSettings();
     if (m_settings) {
         // Re-apply the native voice when THIS role's voice-name setting changes.
@@ -76,11 +163,36 @@ AssistantVoice::AssistantVoice(AssistantSettings* settings, Settings* appSetting
             [this](QMediaPlayer::Error, const QString&) { m_pendingSynth = false; updateSpeaking(); });
 }
 
+AssistantVoice::~AssistantVoice() {
+#ifdef Q_OS_ANDROID
+    // Stop native playback and drop out of the callback registry BEFORE the object dies, so a late JNI callback
+    // can never find a dangling `this`.
+    if (m_androidPlayer.isValid())
+        m_androidPlayer.callMethod<void>("stop");
+    if (m_androidCue.isValid())
+        m_androidCue.callMethod<void>("stop");
+    if (m_androidPreview.isValid())
+        m_androidPreview.callMethod<void>("stop");
+    androidVoiceUnregister(static_cast<jlong>(reinterpret_cast<quintptr>(this)));
+#endif
+}
+
 void AssistantVoice::updateSpeaking() {
+#ifdef Q_OS_ANDROID
+    // On Android the cloud mp3 plays through the native MediaPlayer (m_androidPlaying), not m_player.
+    const bool active = (m_tts && m_tts->state() == QTextToSpeech::Speaking) || m_androidPlaying;
+#else
     const bool active = (m_tts && m_tts->state() == QTextToSpeech::Speaking)
                      || (m_player && m_player->playbackState() == QMediaPlayer::PlayingState);
+#endif
     if (active)
         m_pendingSynth = false;       // real audio started — hand off from the pending flag
+    // [barista-fork] `audible` = real audio out RIGHT NOW (== `active`, no pending hold). Purely additive: it
+    // drives the avatar's mouth so it doesn't move during the network→prepare gap. Never gates the mic.
+    if (active != m_audible) {
+        m_audible = active;
+        emit audibleChanged();
+    }
     const bool now = m_pendingSynth || active;
     if (now == m_speaking)
         return;
@@ -272,10 +384,22 @@ void AssistantVoice::synthElevenLabs(const QString& text) {
     double elSpeed = effectiveSpeed();
     if (elSpeed > 1.2) elSpeed = 1.2;
     if (elSpeed < 0.7) elSpeed = 0.7;
+    // [barista-fork] ANTI-STUTTER: eleven_turbo_v2_5 with an unset/low stability tends to stutter and repeat
+    // words mid-sentence (owner heard it "stutter in the middle of talking", esp. on numbers). Sending an
+    // explicit stability + similarity_boost pins the model to a steadier read that doesn't wander into repeats.
+    // 0.5 is the balanced value (not so high it goes monotone); similarity_boost keeps the chosen voice's timbre.
+    // Model is user-selectable in settings (speed↔quality/stutter tradeoff); default eleven_turbo_v2_5.
+    QString modelId = m_settings->elevenlabsModel();
+    if (modelId.isEmpty())
+        modelId = QStringLiteral("eleven_turbo_v2_5");
     const QJsonObject body{
         {QStringLiteral("text"), text},
-        {QStringLiteral("model_id"), QStringLiteral("eleven_turbo_v2_5")},
-        {QStringLiteral("voice_settings"), QJsonObject{{QStringLiteral("speed"), elSpeed}}},
+        {QStringLiteral("model_id"), modelId},
+        {QStringLiteral("voice_settings"), QJsonObject{
+            {QStringLiteral("speed"), elSpeed},
+            {QStringLiteral("stability"), 0.5},
+            {QStringLiteral("similarity_boost"), 0.8},
+        }},
     };
     QNetworkReply* reply = m_net->post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
     connect(reply, &QNetworkReply::finished, this, [this, reply, text, gen = m_speakGen] {
@@ -368,14 +492,20 @@ void AssistantVoice::fetchElevenlabsVoices() {
 }
 
 void AssistantVoice::playMp3(const QByteArray& audio) {
-    if (!m_player || audio.isEmpty()) {
+    if (audio.isEmpty()) {
         m_pendingSynth = false; updateSpeaking();   // no audio will play → release the pending hold
+        return;
+    }
+#ifndef Q_OS_ANDROID
+    if (!m_player) {
+        m_pendingSynth = false; updateSpeaking();
         return;
     }
     m_player->stop();
     // [barista-fork] Apply THIS role's playback volume to the cloud-TTS output. Cloud providers (OpenAI /
     // ElevenLabs) have no request-side volume, so gain is applied here on the QAudioOutput driving the mp3
-    // player. Read fresh so a moved slider takes effect on the next utterance.
+    // player. Read fresh so a moved slider takes effect on the next utterance. (Desktop only — on Android the
+    // native MediaPlayer below owns routing + volume, and Qt can't see the external device anyway.)
     if (m_audioOut) {
         // Re-bind to the live default output every utterance too (belt-and-suspenders on top of the
         // audioOutputsChanged signal, which is unreliable on some Android builds) — so a speaker connected
@@ -383,6 +513,7 @@ void AssistantVoice::playMp3(const QByteArray& audio) {
         m_audioOut->setDevice(QMediaDevices::defaultAudioOutput());
         m_audioOut->setVolume(effectiveVolume());
     }
+#endif
     // Android's media backend truncates in-memory (QBuffer) sources after a fraction of a second —
     // write the mp3 to a temp file and play that; files play reliably and to completion.
     // ALTERNATE the filename each utterance: reusing one path makes the Android backend cache the prior
@@ -391,6 +522,7 @@ void AssistantVoice::playMp3(const QByteArray& audio) {
     // Namespace the temp path by ROLE: the barista and coaching instances both cycle through the same
     // two-file rotation, so an un-namespaced path would let them clobber each other's clips — reviving the
     // Android "cut off mid-sentence" duration-cache bug across instances. A per-role prefix keeps them apart.
+    // (The desktop QMediaPlayer path plays the same local file.)
     const QString rolePrefix = (m_role == Role::Coaching) ? QStringLiteral("c") : QStringLiteral("b");
     const QString path = QDir::tempPath()
                        + QStringLiteral("/decenza_tts_%1%2.mp3").arg(rolePrefix).arg(m_ttsFileSeq++ % 2);
@@ -401,9 +533,29 @@ void AssistantVoice::playMp3(const QByteArray& audio) {
     }
     f.write(audio);
     f.close();
+#ifdef Q_OS_ANDROID
+    // Hand the file to Android's MediaPlayer (USAGE_MEDIA) — it follows the system route to the external
+    // speaker, unlike Qt. m_pendingSynth stays true (set in speak()) until the native onStarted callback flips
+    // m_androidPlaying on, so `speaking` never drops during the network→prepare gap. Java releases the prior
+    // clip + a playId guard suppresses its late callbacks, so this cleanly supersedes a barge-in.
+    m_androidPlaying = false;
+    if (m_androidPlayer.isValid()) {
+        // [barista-fork] Log the volume actually sent to the native player — so a "volume slider does nothing"
+        // report can be told apart from a Bluetooth absolute-volume no-op (value is right, BT ignored it).
+        BaristaDiagnostics::record(QStringLiteral("voice"), QStringLiteral("native_play_volume"),
+            {{QStringLiteral("vol"), QString::number(effectiveVolume(), 'f', 2)},
+             {QStringLiteral("role"), m_role == Role::Barista ? QStringLiteral("barista") : QStringLiteral("coaching")}});
+        m_androidPlayer.callMethod<void>("play", "(Ljava/lang/String;F)V",
+            QJniObject::fromString(path).object<jstring>(),
+            static_cast<jfloat>(effectiveVolume()));
+    } else {
+        m_pendingSynth = false; updateSpeaking();   // no native player → don't wedge `speaking`
+    }
+#else
     m_player->setSource(QUrl());
     m_player->setSource(QUrl::fromLocalFile(path));
     m_player->play();
+#endif
 }
 
 void AssistantVoice::stop() {
@@ -411,8 +563,14 @@ void AssistantVoice::stop() {
     m_pendingSynth = false;
     if (m_tts)
         m_tts->stop();
+#ifdef Q_OS_ANDROID
+    if (m_androidPlayer.isValid())
+        m_androidPlayer.callMethod<void>("stop");   // bumps Java's playId → its pending callbacks go quiet
+    m_androidPlaying = false;
+#else
     if (m_player)
         m_player->stop();
+#endif
     updateSpeaking();
 }
 
@@ -481,6 +639,169 @@ void AssistantVoice::playThinkingCue() {
     m_cue->play();
 }
 
+// [barista-fork] The selected thinking-earcon short-name ("hum"|"breath"|"pulse"|"drone"), or empty for "off".
+QString AssistantVoice::thinkingSoundName() const {
+    const QString s = m_settings ? m_settings->thinkingSound() : QStringLiteral("hum");
+    if (s == QLatin1String("off"))
+        return QString();
+    if (s == QLatin1String("breath") || s == QLatin1String("pulse") || s == QLatin1String("drone"))
+        return s;
+    return QStringLiteral("hum");   // default / unknown → the soft hum
+}
+
+#ifdef Q_OS_ANDROID
+// Android's MediaPlayer can't read qrc: URLs, so copy the packaged asset to a stable temp file once (per name)
+// and hand it the path. Returns empty on failure.
+QString AssistantVoice::extractThinkingAssetToFile(const QString& name) {
+    const QString dest = QDir::tempPath() + QStringLiteral("/decenza_think_%1.wav").arg(name);
+    if (QFile::exists(dest) && QFileInfo(dest).size() > 0)
+        return dest;
+    QFile src(QStringLiteral(":/sounds/think-%1.wav").arg(name));   // qrc alias for qrc:/sounds/...
+    if (!src.open(QIODevice::ReadOnly))
+        return QString();
+    QFile out(dest);
+    if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate)) { src.close(); return QString(); }
+    out.write(src.readAll());
+    out.close();
+    src.close();
+    return dest;
+}
+#endif
+
+void AssistantVoice::startThinkingLoop() {
+    // Honor the barista mute (a muted barista stays fully silent) and the "off" setting.
+    if (m_role == Role::Barista && m_settings && !m_settings->voiceEnabled())
+        return;
+    const QString name = thinkingSoundName();
+    if (name.isEmpty())            // "off"
+        return;
+    if (m_thinkingLooping)         // idempotent — already humming
+        return;
+    m_thinkingLooping = true;
+    BaristaDiagnostics::record(QStringLiteral("voice"), QStringLiteral("thinking_loop_on"), {{QStringLiteral("sound"), name}});
+#ifdef Q_OS_ANDROID
+    const QString path = extractThinkingAssetToFile(name);
+    if (!path.isEmpty() && m_androidCue.isValid()) {
+        m_androidCue.callMethod<void>("playLooping", "(Ljava/lang/String;F)V",
+            QJniObject::fromString(path).object<jstring>(), static_cast<jfloat>(0.5));
+    }
+#else
+    if (!m_thinkingLoop) {
+        m_thinkingLoop = new QSoundEffect(this);
+        m_thinkingLoop->setLoopCount(QSoundEffect::Infinite);
+        m_thinkingLoop->setVolume(0.35);
+    }
+    m_thinkingLoop->setSource(QUrl(QStringLiteral("qrc:/sounds/think-%1.wav").arg(name)));
+    m_thinkingLoop->play();
+#endif
+}
+
+void AssistantVoice::stopThinkingLoop() {
+    if (!m_thinkingLooping)
+        return;
+    m_thinkingLooping = false;
+    BaristaDiagnostics::record(QStringLiteral("voice"), QStringLiteral("thinking_loop_off"), {});
+#ifdef Q_OS_ANDROID
+    if (m_androidCue.isValid())
+        m_androidCue.callMethod<void>("stop");
+#else
+    if (m_thinkingLoop)
+        m_thinkingLoop->stop();
+#endif
+}
+
+// Audition the selected thinking sound briefly (settings picker) through the cue path so it plays out the
+// external speaker. A short UI auto-stop (a genuine audition timeout, not a guard).
+void AssistantVoice::previewThinkingSound() {
+    if (thinkingSoundName().isEmpty())
+        return;
+    // Temporarily bypass the mute gate for an explicit audition? No — auditioning while muted is confusing;
+    // startThinkingLoop already honors mute, matching previewBell's behavior of not fighting the config.
+    m_thinkingLooping = false;   // force a fresh start even if a stale flag lingers
+    startThinkingLoop();
+    QTimer::singleShot(2200, this, [this]() { stopThinkingLoop(); });
+}
+
+// [barista-fork] Wake a sleeping BT/USB speaker with a brief subtle tone so the first real utterance after the
+// app loads / the tablet wakes isn't clipped while the speaker powers up. Plays through the native cue player
+// (external-speaker route) on Android; a QSoundEffect on desktop. Honors the barista mute (a muted barista has
+// no upcoming utterance to protect, and must stay silent). Only the barista role wakes the speaker.
+void AssistantVoice::playWakeTone() {
+    if (m_role != Role::Barista)
+        return;
+    if (m_settings && !m_settings->voiceEnabled())
+        return;
+    BaristaDiagnostics::record(QStringLiteral("voice"), QStringLiteral("wake_tone"), {});
+#ifdef Q_OS_ANDROID
+    const QString dest = QDir::tempPath() + QStringLiteral("/decenza_wake.wav");
+    if (!(QFile::exists(dest) && QFileInfo(dest).size() > 0)) {
+        QFile src(QStringLiteral(":/sounds/wake-tone.wav"));   // qrc → temp (Android MediaPlayer can't read qrc:)
+        if (src.open(QIODevice::ReadOnly)) {
+            QFile out(dest);
+            if (out.open(QIODevice::WriteOnly | QIODevice::Truncate)) { out.write(src.readAll()); out.close(); }
+            src.close();
+        }
+    }
+    if (QFile::exists(dest) && m_androidCue.isValid())   // one-shot on the cue player (no hum is active at wake time)
+        m_androidCue.callMethod<void>("play", "(Ljava/lang/String;F)V",
+            QJniObject::fromString(dest).object<jstring>(), static_cast<jfloat>(0.5));
+#else
+    if (!m_wakeTone) {
+        m_wakeTone = new QSoundEffect(this);
+        m_wakeTone->setSource(QUrl(QStringLiteral("qrc:/sounds/wake-tone.wav")));
+        m_wakeTone->setVolume(0.4);
+    }
+    m_wakeTone->play();
+#endif
+}
+
+// [barista-fork] Push this role's current volume to the live clip so a moved slider is heard immediately.
+void AssistantVoice::applyLiveVolume() {
+    const double v = effectiveVolume();
+#ifdef Q_OS_ANDROID
+    if (m_androidPlayer.isValid())
+        m_androidPlayer.callMethod<void>("setVolume", "(F)V", static_cast<jfloat>(v));
+#else
+    if (m_audioOut)
+        m_audioOut->setVolume(v);
+#endif
+}
+
+void AssistantVoice::playPreviewUrl(const QString& url) {
+    if (url.isEmpty())
+        return;
+#ifdef Q_OS_ANDROID
+    if (m_androidPreview.isValid()) {
+        m_androidPreview.callMethod<void>("play", "(Ljava/lang/String;F)V",
+            QJniObject::fromString(url).object<jstring>(), static_cast<jfloat>(1.0));
+    }
+#else
+    // Desktop: the voice picker uses its own QML player (usesNativeAudio=false), so this is only a fallback.
+    if (!m_previewPlayer) {
+        m_previewOut = new QAudioOutput(this);
+        m_previewPlayer = new QMediaPlayer(this);
+        m_previewPlayer->setAudioOutput(m_previewOut);
+        connect(m_previewPlayer, &QMediaPlayer::playbackStateChanged, this, [this](QMediaPlayer::PlaybackState s) {
+            const bool p = (s == QMediaPlayer::PlayingState);
+            if (p != m_previewPlaying) { m_previewPlaying = p; emit previewPlayingChanged(); }
+        });
+    }
+    m_previewPlayer->setSource(QUrl(url));
+    m_previewPlayer->play();
+#endif
+}
+
+void AssistantVoice::stopPreviewUrl() {
+#ifdef Q_OS_ANDROID
+    if (m_androidPreview.isValid())
+        m_androidPreview.callMethod<void>("stop");
+    if (m_previewPlaying) { m_previewPlaying = false; emit previewPlayingChanged(); }
+#else
+    if (m_previewPlayer)
+        m_previewPlayer->stop();
+#endif
+}
+
 void AssistantVoice::applyVoiceFromSettings() {
     if (!m_tts || !m_settings)
         return;
@@ -494,3 +815,38 @@ void AssistantVoice::applyVoiceFromSettings() {
         }
     }
 }
+
+#ifdef Q_OS_ANDROID
+// [barista-fork] Driven (on the Qt main thread) by the DecenzaAudioPlayer JNI callbacks. `tag` selects which
+// player fired: only the VOICE tag touches speaking; CUE + PREVIEW never do.
+void AssistantVoice::handleAndroidPlaybackStarted(int tag) {
+    const QString roleStr = m_role == Role::Barista ? QStringLiteral("barista") : QStringLiteral("coaching");
+    if (tag == kTagVoice) {
+        // Real voice audio is now out — kill any thinking loop immediately (no hum-over-voice overlap).
+        stopThinkingLoop();
+        m_androidPlaying = true;
+        m_pendingSynth = false;   // real audio is now playing — hand off from the pending hold
+        BaristaDiagnostics::record(QStringLiteral("voice"), QStringLiteral("native_playback_started"),
+            {{QStringLiteral("role"), roleStr}, {QStringLiteral("tag"), tag}});
+        updateSpeaking();
+    } else if (tag == kTagPreview) {
+        if (!m_previewPlaying) { m_previewPlaying = true; emit previewPlayingChanged(); }
+        BaristaDiagnostics::record(QStringLiteral("voice"), QStringLiteral("preview_on"), {{QStringLiteral("role"), roleStr}});
+    }
+    // tag == kTagCue: the loop's one start callback — nothing to drive (loop-on is logged from startThinkingLoop()).
+}
+
+void AssistantVoice::handleAndroidPlaybackFinished(int tag) {
+    const QString roleStr = m_role == Role::Barista ? QStringLiteral("barista") : QStringLiteral("coaching");
+    if (tag == kTagVoice) {
+        m_androidPlaying = false;
+        BaristaDiagnostics::record(QStringLiteral("voice"), QStringLiteral("native_playback_finished"),
+            {{QStringLiteral("role"), roleStr}, {QStringLiteral("tag"), tag}});
+        updateSpeaking();
+    } else if (tag == kTagPreview) {
+        if (m_previewPlaying) { m_previewPlaying = false; emit previewPlayingChanged(); }
+        BaristaDiagnostics::record(QStringLiteral("voice"), QStringLiteral("preview_off"), {{QStringLiteral("role"), roleStr}});
+    }
+    // tag == kTagCue: a looping cue only "finishes" on error — treat as loop stopped, no state to unwind.
+}
+#endif

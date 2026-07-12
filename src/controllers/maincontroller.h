@@ -203,6 +203,9 @@ public:
     // Leave the recipe (pill deselects). The recipe row itself is unchanged;
     // live settings stay as they are — the user is free-styling now.
     Q_INVOKABLE void deactivateRecipe();
+    // [barista-fork] Phase 1 identity: set the active roster user (dyeBarista) — called by the barista's
+    // set_active_user tool when someone identifies themselves. The name is already the canonical roster name.
+    void setActiveBaristaUser(const QString& name);
     // Compact-JSON snapshot of the steam spec currently in effect (recipe's
     // hasMilk when one is active, plus live steam settings + pitcher +
     // milk weight). Stamped onto every saved shot and used by the composer

@@ -1446,6 +1446,14 @@ void MainController::applyActivatedRecipe(qint64 recipeId, const QVariantMap& re
     }, Qt::QueuedConnection);
 }
 
+void MainController::setActiveBaristaUser(const QString& name) {
+    // [barista-fork] Phase 1 identity: the barista's set_active_user tool resolved this to a canonical roster
+    // name (existing match or freshly created); make it the active user. dyeBarista is the roster key that
+    // scopes shot attribution + the bean best-shot, so this is the single source of truth.
+    if (m_settings && !name.trimmed().isEmpty())
+        m_settings->dye()->setDyeBarista(name.trimmed());
+}
+
 void MainController::deactivateRecipe() {
     const bool hadMilk = activeRecipeHasMilk();
     // Drop any in-flight self-write count with the recipe it belonged to —

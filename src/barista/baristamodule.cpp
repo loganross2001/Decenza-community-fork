@@ -10,7 +10,10 @@
 #include "feedbackstorage.h"
 #include "tasksstorage.h"
 #include "maintenancedocsync.h"
+#include "baristavoiceid.h"       // [barista-fork] voice-ID enrollment + probe coordinator
 #include "baristawebtools.h"      // [barista-fork] fast-path web tools (weather / stock / local news)
+#include "../core/settings.h"        // [barista-fork] app Settings → dye()->dyeBarista() for the active user
+#include "../core/settings_dye.h"
 #include "../controllers/maincontroller.h"
 #include "../controllers/profilemanager.h"   // [barista-fork] activate_recipe pre-flight (findProfileByTitle)
 #include "../history/shothistorystorage.h"
@@ -58,7 +61,9 @@ BaristaModule::BaristaModule(MainController* mainController, MachineState* machi
     // instance for the whole session; sets BaristaDiagnostics::s_instance in its ctor.
     , m_diagnostics(new BaristaDiagnostics(this))
     // [barista-fork] Independent 10-day KB backup; initialized with the assistant.db path below.
-    , m_backup(new BaristaBackup(this)) {
+    , m_backup(new BaristaBackup(this))
+    // [barista-fork] Voice-ID (Increment 1): on-device speaker enrollment + probe; voiceprints.db path below.
+    , m_voiceId(new BaristaVoiceId(this)) {
     connect(m_settings, &AssistantSettings::enabledChanged,
             this, &BaristaModule::enabledChanged);
 
@@ -77,6 +82,31 @@ BaristaModule::BaristaModule(MainController* mainController, MachineState* machi
             // [barista-fork] Start the independent KB backup now that assistant.db's path is known — a
             // startup backup runs if today's set is missing, then a 6h re-check keeps the 10-day history.
             m_backup->initialize(assistantDb);
+            // [barista-fork] Voice-ID: voiceprints.db is its OWN file beside assistant.db — deliberately NOT
+            // assistant.db (biometric data must stay off the KB backup, which VACUUMs only assistant.db).
+            m_voiceId->initialize(dir + QStringLiteral("/voiceprints.db"));
+            // Active user for enrollment = the roster active user (dyeBarista) → owner name (userName) → "".
+            AssistantSettings* bset = m_settings;
+            m_voiceId->setActiveUserProvider([appSettings, bset]() -> QString {
+                const QString dye = (appSettings && appSettings->dye())
+                                    ? appSettings->dye()->dyeBarista().trimmed() : QString();
+                if (!dye.isEmpty()) return dye;
+                return bset ? bset->userName().trimmed() : QString();
+            });
+            // [barista-fork] Increment 2: a confident voice match sets the active user via the SAME Phase-1
+            // path the set_active_user tool uses (→ dyeBarista) — voice-ID is an INPUT to identity, not new.
+            m_voiceId->setActiveUserSeam([mainController](const QString& name) {
+                if (mainController) mainController->setActiveBaristaUser(name);
+            });
+            // [barista-fork] Owner-tunable match thresholds → BaristaVoiceId (initial + live on change).
+            BaristaVoiceId* vid = m_voiceId;
+            auto applyThresholds = [vid, bset]() {
+                if (vid && bset) vid->setThresholds(bset->voiceIdConfidence(), bset->voiceIdMargin(), bset->voiceIdMaybe());
+            };
+            applyThresholds();
+            connect(m_settings, &AssistantSettings::voiceIdConfidenceChanged, m_voiceId, applyThresholds);
+            connect(m_settings, &AssistantSettings::voiceIdMarginChanged,     m_voiceId, applyThresholds);
+            connect(m_settings, &AssistantSettings::voiceIdMaybeChanged,      m_voiceId, applyThresholds);
             // [barista-fork] Now that assistant.db is initialized, kick the once-per-launch, rate-limited
             // Decent maintenance-docs check (~30-day window, owner-toggle-gated, single GET, nothing sent).
             m_docSync->maybeCheckOnStartup();
@@ -144,6 +174,11 @@ BaristaModule::BaristaModule(MainController* mainController, MachineState* machi
             MainController* mc = mainController;
             ai->setGetActiveRecipeHandler([mc]() -> QVariantMap {
                 return mc ? mc->activeRecipe() : QVariantMap{};
+            });
+            // [barista-fork] Phase 1 identity: set_active_user → set the active roster user (dyeBarista). The
+            // executor did the roster match/insert off-main and hands us the canonical name on the main thread.
+            ai->setSetActiveUserHandler([mc](const QString& name) {
+                if (mc) mc->setActiveBaristaUser(name);
             });
             ai->setDeactivateRecipeHandler([mc]() -> QVariantMap {
                 QVariantMap out;

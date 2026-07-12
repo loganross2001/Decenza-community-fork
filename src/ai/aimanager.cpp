@@ -14,6 +14,7 @@
 #include "../network/visualizeruploader.h"
 #include "../history/shothistorystorage.h"
 #include "../history/recipestorage.h"   // [barista-fork] Recipes 2.0 proactive context block
+#include "../history/baristastorage.h"  // [barista-fork] Phase 1 identity: roster for the [Who] block
 #include "../barista/baristatools.h"
 #include "../barista/feedbackstorage.h"   // [barista-fork] verbal-feedback KB (proactive context + write tool)
 #include "../barista/tasksstorage.h"      // [barista-fork] reminders + maintenance (proactive dueItems + task tools)
@@ -289,6 +290,7 @@ void AIManager::createProviders()
             BaristaTools::executeTool(m_shotHistory, m_feedbackStorage, m_tasksStorage, m_applyDialHandler,
                                       m_endConversationHandler, m_webToolsHandler,
                                       m_getActiveRecipeHandler, m_activateRecipeHandler, m_deactivateRecipeHandler,
+                                      m_setActiveUserHandler,
                                       m_lastBaristaAnchorSnapshot,
                                       name, input, std::move(done));
         });
@@ -1380,6 +1382,30 @@ static QString formatRecipesBlock(const QVector<InventoryRecipe>& inv, qint64 ac
     return out;
 }
 
+// [barista-fork] Phase 1 identity: the [Who] block tells the model who it's talking to + who it knows, and —
+// critically — that ALL the history/notes/recipes in this context belong to the OWNER of the machine, so a
+// guest never gets the owner's shots attributed to them. activeUser = the roster active user (dyeBarista); the
+// persona (QML) supplies the owner's actual name, so the NOTE references "the owner" generically here.
+static QString formatWhoBlock(const QString& activeUser, const QVector<Barista>& roster)
+{
+    QString out = QStringLiteral("\n\n[Who]\n");
+    out += QStringLiteral("activeUser: %1\n").arg(activeUser.isEmpty() ? QStringLiteral("unknown") : activeUser);
+    if (!roster.isEmpty()) {
+        QStringList names;
+        for (const Barista& b : roster)
+            if (!b.name.trimmed().isEmpty()) names << b.name.trimmed();
+        if (!names.isEmpty())
+            out += QStringLiteral("known: %1\n").arg(names.join(QStringLiteral(", ")));
+    }
+    out += QStringLiteral(
+        "NOTE: The shot history, tasting notes, recipes, dial-in history, and past advice in this context were "
+        "ALL recorded by the OWNER on this machine. If the active user IS the owner (or unknown), treat that "
+        "history as theirs normally. If the active user is a DIFFERENT guest, you still have the machine's full "
+        "history — but it's the owner's, so do NOT tell the guest they pulled shots, earned ratings, or have a "
+        "history they don't; speak of it as the machine's or the owner's. Always attribute honestly.\n");
+    return out;
+}
+
 void AIManager::requestBaristaContext(const QString& beanBrand, const QString& beanType, const QString& profileName)
 {
     if (!m_shotHistory) {
@@ -1398,10 +1424,13 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
     // [barista-fork] Recipes 2.0 proactive block: read the active recipe id on the MAIN thread (live dye
     // setting); the worker loads the recipe inventory from the shot DB and formats the [Recipes] block.
     const qint64 activeRecipeId = (m_settings && m_settings->dye()) ? m_settings->dye()->activeRecipeId() : -1;
+    // [barista-fork] Phase 1 identity: the active roster user (dyeBarista), read live on the main thread. The
+    // worker loads the roster from the shot DB and formats the [Who] block.
+    const QString activeUser = (m_settings && m_settings->dye()) ? m_settings->dye()->dyeBarista() : QString();
 
     // self is captured by value but ONLY dereferenced inside the main-thread callback (QPointer is
     // not thread-safe). See requestRecentShotContext for the same discipline.
-    QThread* thread = QThread::create([self, dbPath, feedbackDbPath, beanBrand, beanType, profileName, serial, activeRecipeId]() {
+    QThread* thread = QThread::create([self, dbPath, feedbackDbPath, beanBrand, beanType, profileName, serial, activeRecipeId, activeUser]() {
         qint64 anchorId = 0;
         bool beanFilterMissed = false;
         ShotProjection shot;
@@ -1653,10 +1682,20 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
             recipesBlock = formatRecipesBlock(inv, activeRecipeId);
         }
 
+        // [barista-fork] Phase 1 identity: the [Who] block (roster loaded off-main from the shot DB).
+        QString whoBlock;
+        {
+            QVector<Barista> roster;
+            withTempDb(dbPath, "barista_ctx_who", [&](QSqlDatabase& db) {
+                roster = BaristaStorage::loadRosterStatic(db);
+            });
+            whoBlock = formatWhoBlock(activeUser, roster);
+        }
+
         QMetaObject::invokeMethod(qApp, [self, serial, shot, anchorId, beanFilterMissed,
                                          beanBrand, beanType, profileName, beanFeedback, dueItems, docChange,
                                          occasion, dialInSessions, bestRecentShot, beanBestShot, grinderContext,
-                                         grinderCalibration, recentAdvice, fullHistory, recipesBlock]() {
+                                         grinderCalibration, recentAdvice, fullHistory, recipesBlock, whoBlock]() {
             if (!self || serial != self->m_baristaContextSerial)
                 return;   // stale — a newer request superseded this one
             self->m_lastBaristaAnchorId = (anchorId > 0 && shot.isValid()) ? anchorId : 0;
@@ -1715,12 +1754,12 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
                                + QString::fromUtf8(QJsonDocument(occasion).toJson(QJsonDocument::Indented));
 
             if (anchorId <= 0 || !shot.isValid()) {
-                emit self->baristaContextReady(QStringLiteral("recordedShots: 0") + dueSuffix + docSuffix + occasionSuffix + recipesBlock);
+                emit self->baristaContextReady(QStringLiteral("recordedShots: 0") + dueSuffix + docSuffix + occasionSuffix + recipesBlock + whoBlock);
                 return;
             }
             QJsonObject obj = self->buildUserPromptObjectForShot(shot);
             if (obj.isEmpty()) {
-                emit self->baristaContextReady(QStringLiteral("recordedShots: 0") + dueSuffix + docSuffix + occasionSuffix + recipesBlock);
+                emit self->baristaContextReady(QStringLiteral("recordedShots: 0") + dueSuffix + docSuffix + occasionSuffix + recipesBlock + whoBlock);
                 return;
             }
             self->enrichUserPromptObject(obj, shot, dialInSessions, bestRecentShot, grinderContext,
@@ -1752,6 +1791,7 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
             block += docSuffix;   // [barista-fork] a pending Decent cleaning-guide change to offer (rare, one-time)
             block += occasionSuffix;   // [barista-fork] today's holiday/personal dates for a warm greeting/goodbye
             block += recipesBlock;     // [barista-fork] Recipes 2.0 proactive block (active recipe + MRU list)
+            block += whoBlock;         // [barista-fork] Phase 1 identity: who's here + honest-attribution note
             emit self->baristaContextReady(block);
         }, Qt::QueuedConnection);
     });

@@ -79,6 +79,7 @@ public:
                             const std::function<QVariantMap()>& getActiveRecipe,
                             const std::function<void(qint64, std::function<void(QJsonObject)>)>& activateRecipe,
                             const std::function<QVariantMap()>& deactivateRecipe,
+                            const std::function<void(const QString&)>& setActiveUser,
                             const QVariantMap& anchorSnapshot,
                             const QString& name, const QJsonObject& input,
                             std::function<void(QJsonValue)> done);

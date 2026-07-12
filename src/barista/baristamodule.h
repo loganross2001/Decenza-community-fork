@@ -10,6 +10,7 @@
 #include "maintenancedocsync.h"    // ditto for Q_PROPERTY(MaintenanceDocSync*)
 #include "baristadiagnostics.h"    // ditto for Q_PROPERTY(BaristaDiagnostics*)
 #include "baristabackup.h"         // ditto for Q_PROPERTY(BaristaBackup*)
+#include "baristavoiceid.h"        // ditto for Q_PROPERTY(BaristaVoiceId*)
 
 class QQmlApplicationEngine;
 class MainController;
@@ -48,6 +49,8 @@ class BaristaModule : public QObject {
     // [barista-fork] Independent 10-day KB backup, exposed so the backup settings card can toggle it, show
     // status (last/count/dir), and trigger a manual "Back up now".
     Q_PROPERTY(BaristaBackup* backup READ backup CONSTANT)
+    // [barista-fork] Voice-ID (Phase 2, Increment 1): on-device speaker enrollment + concurrent-capture probe.
+    Q_PROPERTY(BaristaVoiceId* voiceId READ voiceId CONSTANT)
 
 public:
     // Single upstream hook: construct the module (settings + orchestrator), register the
@@ -72,6 +75,7 @@ public:
     MaintenanceDocSync* docSync() const { return m_docSync; } // [barista-fork] periodic Decent docs check
     BaristaDiagnostics* diagnostics() const { return m_diagnostics; } // [barista-fork] voice/coaching recorder
     BaristaBackup* backup() const { return m_backup; }                // [barista-fork] independent KB backup
+    BaristaVoiceId* voiceId() const { return m_voiceId; }             // [barista-fork] on-device speaker enrollment
 
 signals:
     void enabledChanged();
@@ -108,4 +112,6 @@ private:
     // [barista-fork] Independent 10-day rolling backup of the private KB (assistant.db + settings), initialized
     // with the assistant.db path once feedback/tasks storage are up.
     BaristaBackup* m_backup = nullptr;
+    // [barista-fork] Voice-ID coordinator (enrollment + probe); initialized with the voiceprints.db path.
+    BaristaVoiceId* m_voiceId = nullptr;
 };

@@ -22,12 +22,18 @@ class AssistantSettings : public QObject {
     // default; when empty AND no city is given, the tool asks the user which city.
     Q_PROPERTY(QString homeLocation READ homeLocation WRITE setHomeLocation NOTIFY homeLocationChanged)
     Q_PROPERTY(QString bellSound READ bellSound WRITE setBellSound NOTIFY bellSoundChanged)
+    // [barista-fork] The subtle "thinking" earcon that loops while the barista is working: off|hum|breath|pulse|drone.
+    Q_PROPERTY(QString thinkingSound READ thinkingSound WRITE setThinkingSound NOTIFY thinkingSoundChanged)
     Q_PROPERTY(QString bellCustomPath READ bellCustomPath WRITE setBellCustomPath NOTIFY bellCustomPathChanged)
     Q_PROPERTY(QString ttsProvider READ ttsProvider WRITE setTtsProvider NOTIFY ttsProviderChanged)
     Q_PROPERTY(QString openaiVoice READ openaiVoice WRITE setOpenaiVoice NOTIFY openaiVoiceChanged)
     Q_PROPERTY(QString openaiApiKey READ openaiApiKey WRITE setOpenaiApiKey NOTIFY openaiApiKeyChanged)
     Q_PROPERTY(QString elevenlabsApiKey READ elevenlabsApiKey WRITE setElevenlabsApiKey NOTIFY elevenlabsApiKeyChanged)
     Q_PROPERTY(QString elevenlabsVoiceId READ elevenlabsVoiceId WRITE setElevenlabsVoiceId NOTIFY elevenlabsVoiceIdChanged)
+    // [barista-fork] Which ElevenLabs model to synthesize with — user's speed↔quality/stutter tradeoff.
+    Q_PROPERTY(QString elevenlabsModel READ elevenlabsModel WRITE setElevenlabsModel NOTIFY elevenlabsModelChanged)
+    // [barista-fork] Pause button behavior: "hold" (just holds the mic) | "freeze" (stops speech + mic).
+    Q_PROPERTY(QString pauseMode READ pauseMode WRITE setPauseMode NOTIFY pauseModeChanged)
     // [barista-fork] Coaching voice — a SEPARATE voice for the live steam + espresso coaches, chosen
     // independently of the barista's conversational voice. Mirrors the barista provider + per-provider
     // voice selection above, but deliberately REUSES the shared ElevenLabs API key + saved-voices list.
@@ -48,6 +54,16 @@ class AssistantSettings : public QObject {
     Q_PROPERTY(double baristaVoiceVolume READ baristaVoiceVolume WRITE setBaristaVoiceVolume NOTIFY baristaVoiceVolumeChanged)
     Q_PROPERTY(double coachingVoiceVolume READ coachingVoiceVolume WRITE setCoachingVoiceVolume NOTIFY coachingVoiceVolumeChanged)
     Q_PROPERTY(bool webSearchEnabled READ webSearchEnabled WRITE setWebSearchEnabled NOTIFY webSearchEnabledChanged)
+    // [barista-fork] Voice-ID Increment 1: opt-in "capture test" — fire a short parallel QAudioSource capture
+    // during a live turn and log whether it works alongside STT. Off by default; validation aid only.
+    Q_PROPERTY(bool voiceIdProbe READ voiceIdProbe WRITE setVoiceIdProbe NOTIFY voiceIdProbeChanged)
+    Q_PROPERTY(bool voiceIdEngageTest READ voiceIdEngageTest WRITE setVoiceIdEngageTest NOTIFY voiceIdEngageTestChanged)
+    // [barista-fork] Voice-ID Increment 2: recognize who's speaking (needs an enrolled voiceprint). Default off.
+    Q_PROPERTY(bool voiceIdEnabled READ voiceIdEnabled WRITE setVoiceIdEnabled NOTIFY voiceIdEnabledChanged)
+    // [barista-fork] Voice-ID match tuning (owner-tunable — MFCC cosine bands can't be predicted up front).
+    Q_PROPERTY(double voiceIdConfidence READ voiceIdConfidence WRITE setVoiceIdConfidence NOTIFY voiceIdConfidenceChanged)
+    Q_PROPERTY(double voiceIdMargin READ voiceIdMargin WRITE setVoiceIdMargin NOTIFY voiceIdMarginChanged)
+    Q_PROPERTY(double voiceIdMaybe READ voiceIdMaybe WRITE setVoiceIdMaybe NOTIFY voiceIdMaybeChanged)
     Q_PROPERTY(bool avatarEnabled READ avatarEnabled WRITE setAvatarEnabled NOTIFY avatarEnabledChanged)
     Q_PROPERTY(QString avatarStyle READ avatarStyle WRITE setAvatarStyle NOTIFY avatarStyleChanged)
     // [barista-fork] Size of the avatar on the collapsed EDGE TAB (the pull-tab on the screen edge). Owner-
@@ -81,6 +97,12 @@ public:
     void setHomeLocation(const QString& location);
 
     QString bellSound() const;                    // "poof" | "ding" | ... | "off" | "custom"
+    QString thinkingSound() const;                // "off" | "hum" | "breath" | "pulse" | "drone"
+    void setThinkingSound(const QString& sound);
+    QString pauseMode() const;                    // "hold" | "freeze" (default "hold")
+    void setPauseMode(const QString& mode);
+    QString elevenlabsModel() const;              // ElevenLabs model id (default "eleven_turbo_v2_5")
+    void setElevenlabsModel(const QString& model);
     void setBellCustomPath(const QString& path);
     QString bellCustomPath() const;               // user-picked sound file (absolute path), for "custom"
     void setBellSound(const QString& sound);
@@ -144,6 +166,19 @@ public:
     bool webSearchEnabled() const;                // let the barista search the web (Anthropic; default on)
     void setWebSearchEnabled(bool e);
 
+    bool voiceIdProbe() const;                    // opt-in concurrent-capture test (default off)
+    void setVoiceIdProbe(bool on);
+    bool voiceIdEngageTest() const;               // opt-in engage capture-then-recognizer health test (default off)
+    void setVoiceIdEngageTest(bool on);
+    bool voiceIdEnabled() const;                  // recognize the speaker + set active user (default off)
+    void setVoiceIdEnabled(bool on);
+    double voiceIdConfidence() const;             // confident-match cosine threshold (default 0.72)
+    void setVoiceIdConfidence(double v);
+    double voiceIdMargin() const;                 // best must beat 2nd-best by this (default 0.06)
+    void setVoiceIdMargin(double v);
+    double voiceIdMaybe() const;                  // "maybe, confirm" cosine threshold (default 0.55)
+    void setVoiceIdMaybe(double v);
+
     bool avatarEnabled() const;                   // show the animated character face (default on)
     void setAvatarEnabled(bool e);
 
@@ -181,6 +216,9 @@ signals:
     void userNameChanged();
     void homeLocationChanged();   // [barista-fork]
     void bellSoundChanged();
+    void thinkingSoundChanged();
+    void elevenlabsModelChanged();
+    void pauseModeChanged();
     void bellCustomPathChanged();
     void ttsProviderChanged();
     void openaiVoiceChanged();
@@ -197,6 +235,12 @@ signals:
     void baristaVoiceVolumeChanged();
     void coachingVoiceVolumeChanged();
     void webSearchEnabledChanged();
+    void voiceIdProbeChanged();
+    void voiceIdEngageTestChanged();
+    void voiceIdEnabledChanged();
+    void voiceIdConfidenceChanged();
+    void voiceIdMarginChanged();
+    void voiceIdMaybeChanged();
     void avatarEnabledChanged();
     void avatarStyleChanged();
     void avatarTabSizeChanged();

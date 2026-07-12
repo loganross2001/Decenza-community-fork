@@ -243,6 +243,14 @@ add_decenza_test(tst_speechnormalize
     tst_speechnormalize.cpp
 )
 
+# --- tst_speakerembedder: [barista-fork] voice-ID MFCC embedder DSP (FFT/mel/DCT + aggregation). QtCore-only
+# (MfccEmbedder depends on nothing but QVector/QByteArray) — validates determinism + discrimination in software,
+# no device/mic. ---
+add_decenza_test(tst_speakerembedder
+    tst_speakerembedder.cpp
+    ${CMAKE_SOURCE_DIR}/src/barista/mfccembedder.cpp
+)
+
 # --- tst_settings: Settings persistence and defaults ---
 add_decenza_test(tst_settings
     tst_settings.cpp

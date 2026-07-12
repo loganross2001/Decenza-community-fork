@@ -132,6 +132,46 @@ void AssistantSettings::setBellSound(const QString& sound) {
     emit bellSoundChanged();
 }
 
+// [barista-fork] The subtle "thinking" earcon that loops while the barista processes a turn. Defaults to the
+// soft hum; "off" disables it entirely.
+QString AssistantSettings::thinkingSound() const {
+    return m_settings.value(QStringLiteral("barista/thinkingSound"), QStringLiteral("hum")).toString();
+}
+
+void AssistantSettings::setThinkingSound(const QString& sound) {
+    if (thinkingSound() == sound)
+        return;
+    m_settings.setValue(QStringLiteral("barista/thinkingSound"), sound);
+    emit thinkingSoundChanged();
+}
+
+// [barista-fork] Which ElevenLabs model to synthesize with. Default is the fast low-latency turbo model;
+// the owner can switch to eleven_multilingual_v2 (steadier / less stutter, higher latency) or flash (fastest).
+QString AssistantSettings::elevenlabsModel() const {
+    return m_settings.value(QStringLiteral("barista/elevenlabsModel"),
+                            QStringLiteral("eleven_turbo_v2_5")).toString();
+}
+
+void AssistantSettings::setElevenlabsModel(const QString& model) {
+    if (elevenlabsModel() == model)
+        return;
+    m_settings.setValue(QStringLiteral("barista/elevenlabsModel"), model);
+    emit elevenlabsModelChanged();
+}
+
+// [barista-fork] Pause button behavior: "hold" just holds the mic (barista stays ready); "freeze" also stops
+// any in-progress speech + the thinking hum until the user resumes. Default "hold".
+QString AssistantSettings::pauseMode() const {
+    return m_settings.value(QStringLiteral("barista/pauseMode"), QStringLiteral("hold")).toString();
+}
+
+void AssistantSettings::setPauseMode(const QString& mode) {
+    if (pauseMode() == mode)
+        return;
+    m_settings.setValue(QStringLiteral("barista/pauseMode"), mode);
+    emit pauseModeChanged();
+}
+
 // The user's own bell sound file (an absolute path on the device), used when bellSound == "custom".
 QString AssistantSettings::bellCustomPath() const {
     return m_settings.value(QStringLiteral("barista/bellCustomPath"), QString()).toString();
@@ -496,6 +536,69 @@ void AssistantSettings::setWebSearchEnabled(bool e) {
         return;
     m_settings.setValue(QStringLiteral("barista/webSearchEnabled"), e);
     emit webSearchEnabledChanged();
+}
+
+// [barista-fork] Voice-ID Increment 1: opt-in concurrent-capture test. Default OFF so normal users are never
+// affected; when ON, the overlay fires one short parallel capture per turn and logs whether it worked.
+bool AssistantSettings::voiceIdProbe() const {
+    return m_settings.value(QStringLiteral("barista/voiceIdProbe"), false).toBool();
+}
+
+void AssistantSettings::setVoiceIdProbe(bool on) {
+    if (voiceIdProbe() == on)
+        return;
+    m_settings.setValue(QStringLiteral("barista/voiceIdProbe"), on);
+    emit voiceIdProbeChanged();
+}
+
+bool AssistantSettings::voiceIdEngageTest() const {
+    return m_settings.value(QStringLiteral("barista/voiceIdEngageTest"), false).toBool();
+}
+
+void AssistantSettings::setVoiceIdEngageTest(bool on) {
+    if (voiceIdEngageTest() == on)
+        return;
+    m_settings.setValue(QStringLiteral("barista/voiceIdEngageTest"), on);
+    emit voiceIdEngageTestChanged();
+}
+
+// [barista-fork] Voice-ID Increment 2: recognize the speaker + set the active user from a confident match.
+// Default off; only meaningful once at least one voiceprint is enrolled.
+bool AssistantSettings::voiceIdEnabled() const {
+    return m_settings.value(QStringLiteral("barista/voiceIdEnabled"), false).toBool();
+}
+
+void AssistantSettings::setVoiceIdEnabled(bool on) {
+    if (voiceIdEnabled() == on)
+        return;
+    m_settings.setValue(QStringLiteral("barista/voiceIdEnabled"), on);
+    emit voiceIdEnabledChanged();
+}
+
+// [barista-fork] Voice-ID match tuning. Defaults mirror the BaristaVoiceId baseline constants.
+double AssistantSettings::voiceIdConfidence() const {
+    return m_settings.value(QStringLiteral("barista/voiceIdConfidence"), 0.72).toDouble();
+}
+void AssistantSettings::setVoiceIdConfidence(double v) {
+    if (qFuzzyCompare(voiceIdConfidence(), v)) return;
+    m_settings.setValue(QStringLiteral("barista/voiceIdConfidence"), v);
+    emit voiceIdConfidenceChanged();
+}
+double AssistantSettings::voiceIdMargin() const {
+    return m_settings.value(QStringLiteral("barista/voiceIdMargin"), 0.06).toDouble();
+}
+void AssistantSettings::setVoiceIdMargin(double v) {
+    if (qFuzzyCompare(voiceIdMargin(), v)) return;
+    m_settings.setValue(QStringLiteral("barista/voiceIdMargin"), v);
+    emit voiceIdMarginChanged();
+}
+double AssistantSettings::voiceIdMaybe() const {
+    return m_settings.value(QStringLiteral("barista/voiceIdMaybe"), 0.55).toDouble();
+}
+void AssistantSettings::setVoiceIdMaybe(double v) {
+    if (qFuzzyCompare(voiceIdMaybe(), v)) return;
+    m_settings.setValue(QStringLiteral("barista/voiceIdMaybe"), v);
+    emit voiceIdMaybeChanged();
 }
 
 bool AssistantSettings::avatarEnabled() const {

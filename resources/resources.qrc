@@ -9,6 +9,13 @@
         <file>sounds/frameclick2.wav</file>
         <file>sounds/frameclick3.wav</file>
         <file>sounds/frameclick4.wav</file>
+        <!-- [barista-fork] Subtle "thinking" earcons (selectable; loop while the barista is processing) -->
+        <file>sounds/think-hum.wav</file>
+        <file>sounds/think-breath.wav</file>
+        <file>sounds/think-pulse.wav</file>
+        <file>sounds/think-drone.wav</file>
+        <!-- [barista-fork] Brief subtle tone to wake a sleeping BT/USB speaker before the first utterance -->
+        <file>sounds/wake-tone.wav</file>
         <!-- Splash screens (random on startup) -->
         <file>splash/splash1.png</file>
         <file>splash/splash2.png</file>

@@ -865,6 +865,7 @@ const QHash<QString, QStringList>& readoutOptionSchema() {
         { QStringLiteral("doseWeight"),       { QStringLiteral("displayMode"), QStringLiteral("color") } },
         { QStringLiteral("milkWeight"),       { QStringLiteral("displayMode"), QStringLiteral("color") } },
         { QStringLiteral("profileName"),      { QStringLiteral("color") } },
+        { QStringLiteral("activeBarista"),    { QStringLiteral("color") } },
         // grindQuickSelect has no per-instance options: its step size is a global
         // preference (Settings.brew.grindQuickSelectStep), not a per-widget option.
     };
@@ -954,6 +955,7 @@ const QVector<WidgetCatalogEntry>& widgetCatalogTable() {
         { "scaleBattery",     1, "layoutEditor.widgetScaleBattery",  "Scale Battery",  "layoutEditor.chipScaleBat",   "Scale Bat",  "", true },
         { "waterLevel",       1, "layoutEditor.widgetWaterLevel",    "Water Level",    "layoutEditor.chipWater",      "Water",      "", true },
         { "profileName",      1, "layoutEditor.widgetProfileName",   "Profile Name",   "layoutEditor.chipProfileName","Profile",    "", true },
+        { "activeBarista",    1, "layoutEditor.widgetActiveBarista", "Active Barista", "layoutEditor.chipActiveBarista","Barista",   "", true },
         { "doseWeight",       1, "layoutEditor.widgetDoseWeight",    "Dose Weight",    "layoutEditor.chipDoseWeight", "Dose",       "", true },
         { "milkWeight",       1, "layoutEditor.widgetMilkWeight",    "Milk Weight",    "layoutEditor.chipMilkWeight", "Milk",       "", true },
         { "ratioQuickSelect", 1, "layoutEditor.widgetRatioQuickSelect", "Ratio Quick-Select", "layoutEditor.chipRatioQuick", "Ratio", "", true },

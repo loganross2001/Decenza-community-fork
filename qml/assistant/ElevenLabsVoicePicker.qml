@@ -93,15 +93,26 @@ Dialog {
         return out
     }
 
-    // Preview: play the voice's preview_url mp3. Only one plays at a time — stop the previous first.
+    // [barista-fork] True when audio must go through the native player (Android) so previews follow the system
+    // route to an external USB-C/Bluetooth speaker — Qt's QML MediaPlayer only ever reaches the built-in speaker.
+    readonly property bool _native: root._voice && root._voice.usesNativeAudio === true
+
+    // Stop whichever preview player is in use (native or the QML fallback).
+    function _stopPreview() {
+        if (_native) { if (root._voice) root._voice.stopPreviewUrl() }
+        else previewPlayer.stop()
+    }
+
+    // Preview: play the voice's preview_url mp3. Only one plays at a time — stop the previous first. On Android
+    // route through the native player (external speaker); elsewhere use the QML previewPlayer.
     function _preview(id, url) {
-        previewPlayer.stop()
+        _stopPreview()
         if (root._playingId === id || !url || url.length === 0) {
             root._playingId = ""        // tapping the playing row toggles it off
             return
         }
-        previewPlayer.source = url
-        previewPlayer.play()
+        if (_native) root._voice.playPreviewUrl(url)
+        else { previewPlayer.source = url; previewPlayer.play() }
         root._playingId = id
     }
 
@@ -125,7 +136,7 @@ Dialog {
         if (root._settings)
             root._settings.addElevenlabsVoiceWithMeta(root._savedRecord(v))
         root.voiceChosen(v["id"])
-        previewPlayer.stop()
+        _stopPreview()
         root._playingId = ""
         root.close()
     }
@@ -147,15 +158,26 @@ Dialog {
             root._voice.fetchElevenlabsVoices()
     }
     // Stop any preview when the dialog closes so there's no audio leak.
-    onClosed: { previewPlayer.stop(); root._playingId = "" }
-    Component.onDestruction: previewPlayer.stop()
+    onClosed: { _stopPreview(); root._playingId = "" }
+    Component.onDestruction: _stopPreview()
 
-    // One preview player, shared across rows (one plays at a time).
+    // One preview player, shared across rows (one plays at a time). Used on desktop; on Android the native
+    // player is used instead (see _preview / _native) so previews reach an external speaker.
     MediaPlayer {
         id: previewPlayer
         audioOutput: AudioOutput {}
         onPlaybackStateChanged: {
             if (playbackState === MediaPlayer.StoppedState)
+                root._playingId = ""
+        }
+    }
+    // [barista-fork] Native preview finished/stopped → clear the row highlight (the QML player does this via
+    // onPlaybackStateChanged above; the native path reports it through previewPlaying).
+    Connections {
+        target: root._voice
+        ignoreUnknownSignals: true
+        function onPreviewPlayingChanged() {
+            if (root._voice && !root._voice.previewPlaying)
                 root._playingId = ""
         }
     }

@@ -30,6 +30,11 @@ private slots:
     void tempBareDegree();
     void seconds();
     void secondsNotOrdinal();
+    void thousandsSeparatorStripped();
+    void thousandsMultiGroup();
+    void listCommaUntouched();
+    void dayOrdinalSpelled();
+    void ordinalOutOfRangeUntouched();
     void milliliters();
     void psiAndRpm();
     void ratioBeforeUnits();
@@ -82,7 +87,26 @@ void TstSpeechNormalize::seconds()
 { QCOMPARE(normalizeForSpeech("27s"), QString("27 seconds")); }
 
 void TstSpeechNormalize::secondsNotOrdinal()
-{ QCOMPARE(normalizeForSpeech("1st"), QString("1st")); }   // ordinal untouched
+{ QCOMPARE(normalizeForSpeech("1st"), QString("first")); }   // seconds rule doesn't fire; ordinal spelled instead
+
+void TstSpeechNormalize::thousandsSeparatorStripped()
+{ QCOMPARE(normalizeForSpeech("1,755 shots"), QString("1755 shots")); }   // comma made ElevenLabs stutter
+
+void TstSpeechNormalize::thousandsMultiGroup()
+{ QCOMPARE(normalizeForSpeech("1,234,567"), QString("1234567")); }
+
+void TstSpeechNormalize::listCommaUntouched()
+{ QCOMPARE(normalizeForSpeech("beans, water and milk"), QString("beans, water and milk")); }
+
+void TstSpeechNormalize::dayOrdinalSpelled()
+{
+    QCOMPARE(normalizeForSpeech("June 24th"), QString("June twenty-fourth"));
+    QCOMPARE(normalizeForSpeech("the 3rd pull"), QString("the third pull"));
+    QCOMPARE(normalizeForSpeech("on the 21st"), QString("on the twenty-first"));
+}
+
+void TstSpeechNormalize::ordinalOutOfRangeUntouched()
+{ QCOMPARE(normalizeForSpeech("1755th place"), QString("1755th place")); }   // >31 → left as digits
 
 void TstSpeechNormalize::milliliters()
 { QCOMPARE(normalizeForSpeech("36ml"), QString("36 milliliters")); }

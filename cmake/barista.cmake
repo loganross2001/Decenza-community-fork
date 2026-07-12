@@ -90,6 +90,20 @@ if(DECENZA_BARISTA)
         # through a std::function seam, so this stays out of the DB-only tests (it pulls in QtNetwork).
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristawebtools.h
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristawebtools.cpp
+        # [barista-fork] Voice-ID (Phase 2, Increment 1): on-device speaker enrollment + concurrent-capture
+        # probe. Gated WITH the module (only baristamodule.cpp names BaristaVoiceId). MfccEmbedder is a
+        # self-contained MFCC baseline behind the SpeakerEmbedder seam (ONNX/ECAPA can drop in later);
+        # VoiceCapture uses QAudioSource (Qt6::Multimedia, already linked); VoiceprintStore owns its OWN
+        # voiceprints.db (biometric — never in any backup/export).
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/speakerembedder.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/mfccembedder.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/mfccembedder.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/voicecapture.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/voicecapture.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/voiceprintstore.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/voiceprintstore.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristavoiceid.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristavoiceid.cpp
     )
 
     # New-assistant QML — its own resource, loaded by URL via a Loader in main.qml.

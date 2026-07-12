@@ -43,6 +43,7 @@ Rectangle {
     property string _diagExportedPath: ""
     readonly property var _diag: (typeof Barista !== "undefined") ? Barista.diagnostics : null
     readonly property var _backup: (typeof Barista !== "undefined") ? Barista.backup : null
+    readonly property var _voiceId: (typeof Barista !== "undefined") ? Barista.voiceId : null
 
     // Transparent root: this panel is embedded inside the AssistantOverlay's chromed settingsCard, so it
     // must NOT draw its own surface/border (that produced a card-in-card double outline). The host card owns
@@ -653,6 +654,36 @@ Rectangle {
                         }
                     }
 
+                    // ── VOICE MODEL ──
+                    // [barista-fork] Own card (was buried under "Saved voices") — the speed↔quality/stutter
+                    // tradeoff. Turbo is fastest but stutters more; Multilingual v2 reads steadier; Flash fastest.
+                    BaristaSectionCard {
+                        visible: root._provider === "elevenlabs"
+                        caption: TranslationManager.translate("barista.settings.elModelSection", "Voice model")
+
+                        ComboBox {
+                            id: elModelBox
+                            Layout.fillWidth: true
+                            textRole: "text"; valueRole: "value"
+                            model: [
+                                { value: "eleven_turbo_v2_5",    text: TranslationManager.translate("barista.settings.elModelTurbo", "Turbo — fastest, more stutter") },
+                                { value: "eleven_multilingual_v2", text: TranslationManager.translate("barista.settings.elModelMulti", "Multilingual v2 — steadier, slower") },
+                                { value: "eleven_flash_v2_5",    text: TranslationManager.translate("barista.settings.elModelFlash", "Flash — lowest latency") }
+                            ]
+                            Accessible.name: TranslationManager.translate("barista.settings.elModelSection", "Voice model")
+                            Component.onCompleted: {
+                                var want = root._settings ? root._settings.elevenlabsModel : "eleven_turbo_v2_5"
+                                for (var i = 0; i < model.length; ++i)
+                                    if (model[i].value === want) { currentIndex = i; break }
+                            }
+                            onActivated: {
+                                var v = model[currentIndex].value
+                                if (root._settings) root._settings.elevenlabsModel = v
+                                if (root._voice) root._voice.preview()   // audition the model on the external speaker
+                            }
+                        }
+                    }
+
                     // ── VOLUME & SPEED ──
                     BaristaSectionCard {
                         caption: TranslationManager.translate("barista.settings.sectionVolumeSpeed", "Volume & speed")
@@ -670,7 +701,12 @@ Rectangle {
                                 Layout.fillWidth: true
                                 from: 0.0; to: 1.0; stepSize: 0.05
                                 value: root._settings ? root._settings.baristaVoiceVolume : 1.0
-                                onMoved: if (root._settings) root._settings.baristaVoiceVolume = value
+                                // [barista-fork] Save the setting AND push it to the live clip so the change is
+                                // heard immediately (not just next utterance). onMoved during playback = instant.
+                                onMoved: {
+                                    if (root._settings) root._settings.baristaVoiceVolume = value
+                                    if (root._voice) root._voice.applyLiveVolume()
+                                }
                                 Accessible.name: TranslationManager.translate("barista.settings.volume", "Voice volume")
                             }
                             Text {
@@ -764,6 +800,60 @@ Rectangle {
                             }
                         }
 
+                        // [barista-fork] Thinking sound — a subtle earcon that loops while the barista is
+                        // working, so the pause after you stop talking isn't dead silence. Auditioned on change.
+                        Tr {
+                            key: "barista.settings.thinkingSound"; fallback: "Thinking sound"
+                            color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true
+                        }
+                        ComboBox {
+                            id: thinkingBox
+                            Layout.fillWidth: true
+                            // model rows carry the stored value + a translated label.
+                            textRole: "text"; valueRole: "value"
+                            model: [
+                                { value: "off",    text: TranslationManager.translate("barista.settings.thinkingOff",    "Off") },
+                                { value: "hum",    text: TranslationManager.translate("barista.settings.thinkingHum",    "Soft hum") },
+                                { value: "breath", text: TranslationManager.translate("barista.settings.thinkingBreath", "Breath") },
+                                { value: "pulse",  text: TranslationManager.translate("barista.settings.thinkingPulse",  "Gentle pulse") },
+                                { value: "drone",  text: TranslationManager.translate("barista.settings.thinkingDrone",  "Warm drone") }
+                            ]
+                            Accessible.name: TranslationManager.translate("barista.settings.thinkingSound", "Thinking sound")
+                            Component.onCompleted: {
+                                var want = root._settings ? root._settings.thinkingSound : "hum"
+                                for (var i = 0; i < model.length; ++i)
+                                    if (model[i].value === want) { currentIndex = i; break }
+                            }
+                            onActivated: {
+                                var v = model[currentIndex].value
+                                if (root._settings) root._settings.thinkingSound = v
+                                if (v !== "off" && root._voice && typeof root._voice.previewThinkingSound === "function")
+                                    root._voice.previewThinkingSound()   // audition on the external speaker
+                            }
+                        }
+
+                        // [barista-fork] Pause button behavior — flexibility in the voice-only UX.
+                        Tr {
+                            key: "barista.settings.pauseMode"; fallback: "Pause button"
+                            color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true
+                        }
+                        ComboBox {
+                            id: pauseModeBox
+                            Layout.fillWidth: true
+                            textRole: "text"; valueRole: "value"
+                            model: [
+                                { value: "hold",   text: TranslationManager.translate("barista.settings.pauseHold",   "Hold — just pauses the mic, barista stays ready") },
+                                { value: "freeze", text: TranslationManager.translate("barista.settings.pauseFreeze", "Freeze — stops everything until you resume") }
+                            ]
+                            Accessible.name: TranslationManager.translate("barista.settings.pauseMode", "Pause button")
+                            Component.onCompleted: {
+                                var want = root._settings ? root._settings.pauseMode : "hold"
+                                for (var i = 0; i < model.length; ++i)
+                                    if (model[i].value === want) { currentIndex = i; break }
+                            }
+                            onActivated: if (root._settings) root._settings.pauseMode = model[currentIndex].value
+                        }
+
                         // Mute / speak toggle.
                         RowLayout {
                             Layout.fillWidth: true
@@ -806,6 +896,230 @@ Rectangle {
                             Tr {
                                 id: trGreetAloudLabel
                                 key: "barista.settings.greetAloud"; fallback: "Speak greeting aloud"
+                                Layout.fillWidth: true
+                                color: Theme.textColor; font: Theme.bodyFont
+                                Accessible.ignored: true
+                            }
+                        }
+                    }
+
+                    // ── VOICE RECOGNITION (experimental, Increment 1: enroll + capture test) ──
+                    // [barista-fork] On-device speaker enrollment. Records ~10s of the ACTIVE user's voice and
+                    // stores a voiceprint (kept in voiceprints.db on THIS device only — never backed up).
+                    BaristaSectionCard {
+                        visible: root._voiceId !== null
+                        caption: TranslationManager.translate("barista.settings.voiceIdSection", "Voice recognition (experimental)")
+
+                        Tr {
+                            key: "barista.settings.voiceIdHint"
+                            fallback: "Record your voice so I can tell who's talking. Say \"I'm <your name>\" first, then enroll. Stays on this device — never backed up."
+                            Layout.fillWidth: true; wrapMode: Text.WordWrap
+                            color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true
+                        }
+
+                        // Enroll / recording indicator for the current active user.
+                        AccessibleButton {
+                            Layout.fillWidth: true
+                            primary: !(root._voiceId && root._voiceId.recording)
+                            enabled: root._voiceId && !root._voiceId.recording
+                                     && root._voiceId.activeUser.length > 0
+                            text: (root._voiceId && root._voiceId.activeUser.length > 0)
+                                  ? TranslationManager.translate("barista.settings.voiceIdEnroll", "Enroll %1's voice").arg(root._voiceId.activeUser)
+                                  : TranslationManager.translate("barista.settings.voiceIdNoUser", "Say who you are first, then enroll")
+                            accessibleName: text
+                            onClicked: if (root._voiceId) root._voiceId.enrollActiveUser()
+                        }
+                        AccessibleButton {
+                            Layout.fillWidth: true
+                            visible: root._voiceId && root._voiceId.recording
+                            subtle: true
+                            text: TranslationManager.translate("barista.settings.voiceIdCancel", "Stop recording")
+                            accessibleName: text
+                            onClicked: if (root._voiceId) root._voiceId.cancelEnroll()
+                        }
+                        // Status line (recording / saved / errors).
+                        Text {
+                            Layout.fillWidth: true; wrapMode: Text.WordWrap
+                            visible: root._voiceId && root._voiceId.status.length > 0
+                            text: root._voiceId ? root._voiceId.status : ""
+                            color: (root._voiceId && root._voiceId.recording) ? Theme.primaryColor : Theme.textSecondaryColor
+                            font: Theme.labelFont; Accessible.ignored: true
+                        }
+
+                        // Enrolled people, each deletable (per-person, opt-in — the definition of done for storage).
+                        Repeater {
+                            model: root._voiceId ? root._voiceId.enrolledNames : []
+                            delegate: RowLayout {
+                                required property string modelData
+                                Layout.fillWidth: true
+                                spacing: Theme.spacingSmall
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: parent.modelData
+                                    color: Theme.textColor; font: Theme.bodyFont; Accessible.ignored: true
+                                }
+                                AccessibleButton {
+                                    subtle: true
+                                    text: TranslationManager.translate("common.button.delete", "Delete")
+                                    accessibleName: TranslationManager.translate("barista.settings.voiceIdDelete", "Delete %1's voiceprint").arg(parent.modelData)
+                                    onClicked: if (root._voiceId) root._voiceId.deleteVoiceprint(parent.modelData)
+                                }
+                            }
+                        }
+
+                        // [barista-fork] Increment 2 — recognize the speaker from their voice and set the active
+                        // user automatically. Only meaningful once someone is enrolled (guarded in C++ too).
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.spacingSmall
+                            Switch {
+                                id: voiceIdEnabledSwitch
+                                enabled: root._voiceId && root._voiceId.enrolledNames.length > 0
+                                checked: root._settings ? root._settings.voiceIdEnabled : false
+                                onToggled: if (root._settings) root._settings.voiceIdEnabled = checked
+                                Accessible.role: Accessible.CheckBox
+                                Accessible.name: trVoiceIdEnabled.text
+                                Accessible.checked: checked
+                                Accessible.focusable: true
+                                Accessible.onToggleAction: toggle()
+                            }
+                            Tr {
+                                id: trVoiceIdEnabled
+                                key: "barista.settings.voiceIdEnabled"
+                                fallback: "Recognize who's speaking (needs an enrolled voice)"
+                                Layout.fillWidth: true; wrapMode: Text.WordWrap
+                                color: Theme.textColor; font: Theme.bodyFont
+                            }
+                        }
+
+                        // [barista-fork] Match tuning — MFCC cosine bands can't be predicted up front, so the
+                        // owner tunes them live from the `match` logs. Lower = more eager to switch; higher = more
+                        // cautious. Only relevant once recognition is on.
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.spacingSmall
+                            visible: root._settings && root._settings.voiceIdEnabled
+
+                            Tr {
+                                key: "barista.settings.voiceIdTuneHint"
+                                fallback: "Tuning: lower = switches more eagerly, higher = more cautious."
+                                Layout.fillWidth: true; wrapMode: Text.WordWrap
+                                color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true
+                            }
+
+                            // Confident-match threshold.
+                            Tr { key: "barista.settings.voiceIdConfidence"; fallback: "Confident match"
+                                 color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true }
+                            RowLayout {
+                                Layout.fillWidth: true; spacing: Theme.spacingSmall
+                                Slider {
+                                    id: vidConfSlider
+                                    Layout.fillWidth: true
+                                    from: 0.5; to: 0.95; stepSize: 0.01
+                                    value: root._settings ? root._settings.voiceIdConfidence : 0.72
+                                    onMoved: if (root._settings) root._settings.voiceIdConfidence = value
+                                    Accessible.name: TranslationManager.translate("barista.settings.voiceIdConfidence", "Confident match")
+                                }
+                                Text { text: vidConfSlider.value.toFixed(2); color: Theme.textSecondaryColor
+                                       font: Theme.labelFont; Accessible.ignored: true }
+                            }
+
+                            // Confidence margin (best must beat 2nd-best by this).
+                            Tr { key: "barista.settings.voiceIdMargin"; fallback: "Confidence margin"
+                                 color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true }
+                            RowLayout {
+                                Layout.fillWidth: true; spacing: Theme.spacingSmall
+                                Slider {
+                                    id: vidMarginSlider
+                                    Layout.fillWidth: true
+                                    from: 0.0; to: 0.3; stepSize: 0.01
+                                    value: root._settings ? root._settings.voiceIdMargin : 0.06
+                                    onMoved: if (root._settings) root._settings.voiceIdMargin = value
+                                    Accessible.name: TranslationManager.translate("barista.settings.voiceIdMargin", "Confidence margin")
+                                }
+                                Text { text: vidMarginSlider.value.toFixed(2); color: Theme.textSecondaryColor
+                                       font: Theme.labelFont; Accessible.ignored: true }
+                            }
+
+                            // "Maybe, confirm" threshold.
+                            Tr { key: "barista.settings.voiceIdMaybe"; fallback: "Maybe threshold"
+                                 color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true }
+                            RowLayout {
+                                Layout.fillWidth: true; spacing: Theme.spacingSmall
+                                Slider {
+                                    id: vidMaybeSlider
+                                    Layout.fillWidth: true
+                                    from: 0.4; to: 0.9; stepSize: 0.01
+                                    value: root._settings ? root._settings.voiceIdMaybe : 0.55
+                                    onMoved: if (root._settings) root._settings.voiceIdMaybe = value
+                                    Accessible.name: TranslationManager.translate("barista.settings.voiceIdMaybe", "Maybe threshold")
+                                }
+                                Text { text: vidMaybeSlider.value.toFixed(2); color: Theme.textSecondaryColor
+                                       font: Theme.labelFont; Accessible.ignored: true }
+                            }
+                        }
+
+                        // Opt-in concurrent-capture test (Increment-1 validation aid; off by default).
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.spacingSmall
+                            Switch {
+                                id: voiceIdProbeSwitch
+                                checked: root._settings ? root._settings.voiceIdProbe : false
+                                onToggled: if (root._settings) root._settings.voiceIdProbe = checked
+                                Accessible.role: Accessible.CheckBox
+                                Accessible.name: trVoiceIdProbe.text
+                                Accessible.checked: checked
+                                Accessible.focusable: true
+                                Accessible.onToggleAction: toggle()
+                            }
+                            Tr {
+                                id: trVoiceIdProbe
+                                key: "barista.settings.voiceIdProbe"; fallback: "Voice ID capture test (logs only)"
+                                Layout.fillWidth: true
+                                color: Theme.textColor; font: Theme.bodyFont
+                                Accessible.ignored: true
+                            }
+                        }
+
+                        // [barista-fork] V1 validator — a ~2s on-demand match test (no STT running here, so no
+                        // mic contention). Logs the score/margin/decision + shows it above. For tuning before the
+                        // engage-hail UX is built.
+                        AccessibleButton {
+                            subtle: true
+                            visible: root._voiceId && root._voiceId.enrolledNames.length > 0
+                            enabled: root._voiceId && !root._voiceId.recording
+                            text: TranslationManager.translate("barista.settings.voiceIdTestShort", "Test short ID (2s)")
+                            accessibleName: TranslationManager.translate("barista.settings.voiceIdTestShort", "Test short ID (2s)")
+                            onClicked: if (root._voiceId) root._voiceId.testShortIdentify()
+                        }
+                        Tr {
+                            key: "barista.settings.voiceIdTestShortHint"
+                            fallback: "Records ~2s and logs the match score — for tuning."
+                            visible: root._voiceId && root._voiceId.enrolledNames.length > 0
+                            Layout.fillWidth: true; wrapMode: Text.WordWrap
+                            color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true
+                        }
+
+                        // [barista-fork] V2 validator — the anti-probe test: fire a short capture at ENGAGE, then
+                        // open the STT mic (never concurrent). Speak a full sentence and check the transcript is
+                        // complete. Off by default (adds a ~2.5s delay at engage when on).
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.spacingSmall
+                            Switch {
+                                id: voiceIdEngageTestSwitch
+                                checked: root._settings ? root._settings.voiceIdEngageTest : false
+                                onToggled: if (root._settings) root._settings.voiceIdEngageTest = checked
+                                Accessible.role: Accessible.CheckBox
+                                Accessible.name: trVoiceIdEngageTest.text
+                                Accessible.checked: checked
+                                Accessible.focusable: true
+                                Accessible.onToggleAction: toggle()
+                            }
+                            Tr {
+                                id: trVoiceIdEngageTest
+                                key: "barista.settings.voiceIdEngageTest"; fallback: "Engage capture test (delays mic ~2.5s)"
                                 Layout.fillWidth: true
                                 color: Theme.textColor; font: Theme.bodyFont
                                 Accessible.ignored: true

@@ -54,8 +54,34 @@ inline QString smallIntWord(const QString& n) {
     return n;
 }
 
+// Spell a day-of-month ordinal 1-31 as words ("24th" -> "twenty-fourth"). Returns empty for anything
+// outside 1-31 so the caller leaves those digits untouched (larger ordinals are rare in this domain).
+inline QString dayOrdinalWord(int n) {
+    static const char* const ones[] = {
+        "", "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth",
+        "tenth", "eleventh", "twelfth", "thirteenth", "fourteenth", "fifteenth", "sixteenth",
+        "seventeenth", "eighteenth", "nineteenth" };
+    static const char* const onesCard[] = {   // for the 21-29 / 31 second word
+        "", "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth" };
+    if (n >= 1 && n <= 19) return QString::fromLatin1(ones[n]);
+    if (n == 20)           return QStringLiteral("twentieth");
+    if (n > 20 && n < 30)  return QStringLiteral("twenty-")  + QString::fromLatin1(onesCard[n - 20]);
+    if (n == 30)           return QStringLiteral("thirtieth");
+    if (n == 31)           return QStringLiteral("thirty-first");
+    return QString();
+}
+
 inline QString normalizeForSpeech(const QString& text) {
     QString out = text;
+
+    // ---- Pass 0: strip thousands separators  "1,755" -> "1755"  --------------
+    // A comma sitting between digits with a full 3-digit group after it is a thousands separator;
+    // TTS engines pause/stutter on it (owner heard the barista stumble on "1,755"). Remove ONLY that
+    // comma — zero-width lookbehind/lookahead so every separator in "1,234,567" drops independently,
+    // while a list comma ("beans, water") or a 1-2 digit group after (not a thousands sep) is left alone.
+    static const QRegularExpression thousandsRe(
+        QStringLiteral("(?<=\\d),(?=\\d{3}(?:\\D|$))"));
+    out.remove(thousandsRe);
 
     // ---- Pass 1: espresso ratios  x:y  and  x:y.z  ---------------------------
     // Match ONLY the brew-ratio shape: a single-digit integer, a colon, then a
@@ -130,6 +156,27 @@ inline QString normalizeForSpeech(const QString& text) {
         // would corrupt it and the temperature rules would never match.
         QRegularExpression re(QString::fromUtf8(r.pattern));
         out.replace(re, QString::fromUtf8(r.repl));
+    }
+
+    // ---- Pass 3: day-of-month ordinals  "24th" -> "twenty-fourth"  -----------
+    // Dates ("June 24th") make some engines stutter on the bare "th"/"st" suffix. Spell ordinals for
+    // 1-31 (covers any calendar day); anything else is left as-is. Runs LAST so it never collides with
+    // the ratio/unit passes (which require a colon or unit letter that ordinals don't have).
+    static const QRegularExpression ordinalRe(
+        QStringLiteral("\\b(\\d{1,2})(?:st|nd|rd|th)\\b"));
+    {
+        QString rebuilt;
+        qsizetype last = 0;
+        auto it = ordinalRe.globalMatch(out);
+        while (it.hasNext()) {
+            const QRegularExpressionMatch m = it.next();
+            const QString word = dayOrdinalWord(m.captured(1).toInt());
+            rebuilt += out.mid(last, m.capturedStart() - last);
+            rebuilt += word.isEmpty() ? m.captured(0) : word;   // out of 1-31 → leave untouched
+            last = m.capturedEnd();
+        }
+        rebuilt += out.mid(last);
+        out = rebuilt;
     }
 
     return out;

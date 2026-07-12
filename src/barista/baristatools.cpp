@@ -8,6 +8,7 @@
 #include "tasksstorage.h"
 #include "baristadiagnostics.h"  // [barista-fork] tool-call timeline recorder
 #include "../history/recipestorage.h"  // [barista-fork] Recipes 2.0 tools (list_recipes / activate / etc.)
+#include "../history/baristastorage.h"  // [barista-fork] Phase 1 identity: roster for set_active_user
 
 #include <QJsonDocument>
 #include <QJsonArray>
@@ -21,6 +22,40 @@
 #include <QTime>
 #include <QCoreApplication>
 #include <algorithm>
+
+namespace {
+// [barista-fork] Levenshtein edit distance (small strings — names). Used to fold a misheard-name variant onto
+// an existing roster entry so set_active_user doesn't create "Ana"/"Anna" duplicates.
+int editDistance(const QString& a, const QString& b) {
+    const int n = a.size(), m = b.size();
+    QVector<int> prev(m + 1), cur(m + 1);
+    for (int j = 0; j <= m; ++j) prev[j] = j;
+    for (int i = 1; i <= n; ++i) {
+        cur[0] = i;
+        for (int j = 1; j <= m; ++j) {
+            const int cost = (a[i - 1] == b[j - 1]) ? 0 : 1;
+            cur[j] = std::min({ prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost });
+        }
+        std::swap(prev, cur);
+    }
+    return prev[m];
+}
+
+// Return the canonical roster name matching `name`, or empty. Exact (case-insensitive) first; then a GUARDED
+// near-match (edit distance ≤ 1) only when the longer name is ≥ 4 chars — so "Ana"≈"Anna", "Jon"≈"John",
+// "Chris"≈"Kris" fold together, but genuinely distinct short names ("Sam" vs "Pam") never false-match.
+QString matchRosterName(const QVector<Barista>& roster, const QString& name) {
+    const QString n = name.trimmed();
+    if (n.isEmpty()) return QString();
+    for (const Barista& b : roster)
+        if (b.name.compare(n, Qt::CaseInsensitive) == 0) return b.name;
+    for (const Barista& b : roster) {
+        if (qMax(b.name.size(), n.size()) < 4) continue;
+        if (editDistance(b.name.toLower(), n.toLower()) <= 1) return b.name;
+    }
+    return QString();
+}
+}  // namespace
 
 // [barista-fork] The 5 client-tool JSON definitions, moved verbatim from AnthropicProvider::analyzeConversation.
 QJsonArray BaristaTools::toolDefinitions()
@@ -467,6 +502,25 @@ QJsonArray BaristaTools::toolDefinitions()
     rdeact["input_schema"] = rdeactSchema;
     tools.append(rdeact);
 
+    // [barista-fork] set_active_user — Phase 1 identity: switch who the barista is talking to when they say
+    // who they are. The model confirms a NEW name before calling (STT mishears names); a name matching the
+    // [Who] roster just switches. Sets the roster active user (dyeBarista), which scopes shot attribution.
+    QJsonObject sau;
+    sau["name"] = QString("set_active_user");
+    sau["description"] = QString(
+        "Set who you're currently talking to when they identify themselves by name ('I'm Chris', 'this is Ana', "
+        "'Ana's making this one', 'switch to Scott'). Pass their name. Speech can mishear names, so only call this "
+        "AFTER you've confirmed a NEW name with them; if the name clearly matches someone you already know (see "
+        "the [Who] block), just switch. Switching makes that person the active user.");
+    QJsonObject sauSchema;
+    sauSchema["type"] = QString("object");
+    QJsonObject sauProps;
+    sauProps["name"] = strProp("The person's name to switch to, e.g. \"Ana\" or \"Chris\".");
+    sauSchema["properties"] = sauProps;
+    sauSchema["required"] = QJsonArray{ QString("name") };
+    sau["input_schema"] = sauSchema;
+    tools.append(sau);
+
     return tools;
 }
 
@@ -483,12 +537,15 @@ QJsonArray BaristaTools::webToolDefinitions()
     QJsonObject gw;
     gw["name"] = QString("get_weather");
     gw["description"] = QString(
-        "Get the CURRENT weather for a city — fast. Use this INSTEAD of web search whenever the user asks about "
-        "the weather (\"what's the weather in Bellevue\", \"is it raining outside\", \"how hot is it\"). Extract "
-        "the city from what they said and pass it as location. If they mean HERE / the local area and name no "
-        "city, omit location and it falls back to their saved home location; if there's no home location either "
-        "it will tell you to ask which city. Returns temperature, feels-like, condition, wind, and humidity — "
-        "answer briefly from that.");
+        "Get current weather AND a multi-day forecast for a city — fast. Use this INSTEAD of web search for ANY "
+        "weather question, including forecasts: current (\"what's the weather in Bellevue\", \"is it raining\", "
+        "\"how hot is it\") AND upcoming days (\"what's the forecast\", \"weather for the next few days\", \"how's "
+        "the weekend looking\", \"will it rain tomorrow\"). NEVER web-search the weather — this tool already "
+        "returns a 4-day forecast, so web results would only be staler. Extract the city and pass it as location. "
+        "If they mean HERE / the local area and name no city, omit location and it falls back to their saved home "
+        "location; if there's no home location either it will tell you to ask which city. Returns current "
+        "temperature, feels-like, condition, wind, humidity, AND a `forecast` array of upcoming days (date, "
+        "high/low, condition, precip chance) — answer briefly from that.");
     QJsonObject gwSchema;
     gwSchema["type"] = QString("object");
     QJsonObject gwProps;
@@ -607,6 +664,7 @@ void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage*
                                const std::function<QVariantMap()>& getActiveRecipe,
                                const std::function<void(qint64, std::function<void(QJsonObject)>)>& activateRecipe,
                                const std::function<QVariantMap()>& deactivateRecipe,
+                               const std::function<void(const QString&)>& setActiveUser,
                                const QVariantMap& anchorSnapshot,
                                const QString& name, const QJsonObject& input,
                                std::function<void(QJsonValue)> done)
@@ -736,6 +794,57 @@ void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage*
     if (name == QLatin1String("deactivate_recipe")) {
         const QVariantMap res = deactivateRecipe ? deactivateRecipe() : QVariantMap{};
         done(QJsonObject::fromVariantMap(res));
+        return;
+    }
+
+    // [barista-fork] set_active_user (Phase 1 identity). Roster lives in shots.db → match/insert OFF the main
+    // thread (like the shot-read tools), then hop to the main thread to set the active user (dyeBarista) via the
+    // seam. A misheard-name variant folds onto an existing roster entry (matchRosterName); a genuinely new name
+    // creates a roster row. The model is instructed to confirm a NEW name before calling this.
+    if (name == QLatin1String("set_active_user")) {
+        if (!shotHistory || shotHistory->databasePath().isEmpty()) {
+            done(QJsonObject{{QStringLiteral("error"), QStringLiteral("user database unavailable")}});
+            return;
+        }
+        const QString rawName = input.value(QStringLiteral("name")).toString().trimmed();
+        if (rawName.isEmpty()) {
+            done(QJsonObject{{QStringLiteral("error"), QStringLiteral("set_active_user needs a name")}});
+            return;
+        }
+        const QString dbPath = shotHistory->databasePath();
+        QThread* thread = QThread::create([=]() {
+            QString canonical = rawName;
+            bool wasKnown = false, created = false;
+            const bool dbOk = withTempDb(dbPath, "barista_setuser", [&](QSqlDatabase& db) {
+                const QVector<Barista> roster = BaristaStorage::loadRosterStatic(db);
+                const QString match = matchRosterName(roster, rawName);
+                if (!match.isEmpty()) {
+                    canonical = match;
+                    wasKnown = true;
+                } else {
+                    Barista b;
+                    b.name = rawName;
+                    const qint64 now = QDateTime::currentSecsSinceEpoch();
+                    b.createdEpoch = now;
+                    b.lastUsedEpoch = now;
+                    created = (BaristaStorage::insertStatic(db, b) > 0);
+                }
+            });
+            QJsonObject result;
+            if (!dbOk) {
+                result[QStringLiteral("error")] = QStringLiteral("user database unavailable");
+            } else {
+                result[QStringLiteral("switched_to")] = canonical;
+                result[QStringLiteral("was_known")] = wasKnown;
+                if (created) result[QStringLiteral("created")] = true;
+            }
+            QMetaObject::invokeMethod(qApp, [setActiveUser, canonical, dbOk, result, done]() {
+                if (dbOk && setActiveUser) setActiveUser(canonical);   // set dyeBarista on the main thread
+                done(result);
+            }, Qt::QueuedConnection);
+        });
+        QObject::connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+        thread->start();
         return;
     }
 

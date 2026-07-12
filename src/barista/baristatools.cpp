@@ -4,6 +4,7 @@
 #include "../history/shotprojection.h"
 #include "../ai/shotsummarizer.h"
 #include "../core/dbutils.h"
+#include "../core/drinktypes.h"  // [barista-fork] natural shot descriptor (type + beans), not a stat dump
 #include "feedbackstorage.h"
 #include "tasksstorage.h"
 #include "baristadiagnostics.h"  // [barista-fork] tool-call timeline recorder
@@ -1384,6 +1385,15 @@ void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage*
                     BaristaDiagnostics::record(QStringLiteral("tool"), QStringLiteral("get_shot_detail_skipframe_softened"),
                         {{QStringLiteral("shotId"), shotId}});
                 }
+                // Speakable descriptor so the barista leads with "that lungo espresso on the
+                // Ethiopia beans", not a recitation of dose/yield/ratio/time/grind (the scalars
+                // stay in `o` for the barista's own reasoning; the persona says don't read them out).
+                const double dDose  = o.value(QStringLiteral("doseWeightG")).toDouble();
+                const double dYield = o.value(QStringLiteral("finalWeightG")).toDouble();
+                if (dDose > 0 && dYield > 0)
+                    o[QStringLiteral("descriptor")] = DrinkTypes::espressoShotDescriptor(
+                        dYield / dDose, o.value(QStringLiteral("beanBrand")).toString().trimmed(),
+                        o.value(QStringLiteral("beanType")).toString().trimmed());
                 result = o;
             });
             // DB-open failure must surface as an error, not an empty object — same rule as query_shots.
@@ -1764,6 +1774,13 @@ void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage*
                         s[QStringLiteral("bean")] = type;
                     if (const QString notes = q.value(10).toString().trimmed(); !notes.isEmpty())
                         s[QStringLiteral("notes")] = notes.left(240);
+                    // A speakable descriptor ("a normale espresso on the Kenya beans") so the
+                    // barista refers to a shot naturally instead of reciting doseG/yieldG/ratio/
+                    // durationSec/grind. Those numeric fields stay for the barista's OWN reasoning
+                    // and follow-up tools — the persona tells it not to read them aloud.
+                    if (dose > 0 && yield > 0)
+                        s[QStringLiteral("descriptor")] = DrinkTypes::espressoShotDescriptor(
+                            yield / dose, q.value(8).toString().trimmed(), q.value(9).toString().trimmed());
                     shots.append(s);
                 }
             } else {

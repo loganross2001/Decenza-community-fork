@@ -5,6 +5,7 @@
 #include "../core/settings.h"
 #include "../core/settings_ai.h"
 #include "../core/settings_dye.h"          // [barista-fork] active-bag roast/freeze state for the proactive-rec block
+#include "../core/drinktypes.h"            // [barista-fork] natural shot descriptor (type + beans), not a stat dump
 #include "../network/roastdate.h"          // [barista-fork] locale-robust roast-date → ISO for days-off-roast
 #include "../core/grinderaliases.h"
 #include "../controllers/profilemanager.h"
@@ -1766,6 +1767,30 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
             }
             self->enrichUserPromptObject(obj, shot, dialInSessions, bestRecentShot, grinderContext,
                                          recentAdvice, grinderCalibration, beanBestShot);
+            // [barista-fork] Speakable descriptor for the most-recent shot so the barista leads with
+            // "that lungo espresso on the Ethiopia beans" instead of reading back the scalar analysis.
+            // The numbers stay in the payload for the barista's own reasoning; the persona says not to
+            // recite them. (Barista-only path — enrichUserPromptObject is shared with MCP, so this rides
+            // at the call site, not in the shared builder.)
+            if (shot.doseWeightG > 0 && shot.finalWeightG > 0)
+                obj.insert(QStringLiteral("descriptor"), DrinkTypes::espressoShotDescriptor(
+                    shot.finalWeightG / shot.doseWeightG, shot.beanBrand, shot.beanType));
+            // Same for the two secondary anchor shots the barista may reference (best-recent
+            // and bean-best) so NONE of the shots it sees is a bare stat bag. Both blocks carry
+            // ratio + beanBrand + beanType (dialing_blocks.cpp).
+            auto addShotDescriptor = [](QJsonObject& parent, const QString& key) {
+                if (!parent.contains(key)) return;
+                QJsonObject s = parent.value(key).toObject();
+                const double r = s.value(QStringLiteral("ratio")).toDouble();
+                if (r > 0 && !s.contains(QStringLiteral("descriptor"))) {
+                    s.insert(QStringLiteral("descriptor"), DrinkTypes::espressoShotDescriptor(
+                        r, s.value(QStringLiteral("beanBrand")).toString().trimmed(),
+                        s.value(QStringLiteral("beanType")).toString().trimmed()));
+                    parent[key] = s;
+                }
+            };
+            addShotDescriptor(obj, QStringLiteral("bestRecentShot"));
+            addShotDescriptor(obj, QStringLiteral("beanBestShot"));
             if (!fullHistory.isEmpty())
                 obj.insert(QStringLiteral("fullHistory"), fullHistory);
             // [barista-fork] Proactive verbal-feedback retrieval: the user's own past words about how this

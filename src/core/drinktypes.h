@@ -100,4 +100,39 @@ inline double defaultTeaTempC(const QString& teaType)
     return 90;  // unknown type: middle of the road
 }
 
+// --- Espresso shot type (for natural, non-stat-dump shot talk) --------------
+// Classify a shot by its yield:dose ratio into the espresso type the barista
+// speaks in. Ranges follow the coffee convention the barista persona already
+// uses: ristretto is short (~1:1–1:1.5), normale (~1:2–1:2.5), lungo (~1:3 and
+// longer). Boundaries sit in the GAPS between ranges so a shot lands in the
+// nearest bucket. Returns "" for a non-espresso / unknown ratio (<= 0).
+// NOTE: these are the fixed CONVENTION ranges, not the user's editable ratio
+// presets — it's a speakable hint, and the persona also gives the model the
+// user's own preset dial-points and tells it to qualify near-boundary shots.
+inline QString espressoTypeFromRatio(double ratio)
+{
+    if (ratio <= 0.0) return QString();
+    if (ratio < 1.75) return QStringLiteral("ristretto");
+    if (ratio < 2.75) return QStringLiteral("normale");
+    return QStringLiteral("lungo");
+}
+
+// A short, speakable descriptor for a shot — the natural way to refer to it
+// ("a normale espresso on the Kenya beans") instead of reciting its numbers.
+// Composed as "<type> espresso on the <bean> beans"; the bean phrase prefers
+// the roaster/origin label (bean_brand, usually the origin) and falls back to
+// the varietal (bean_type). Degrades gracefully: no bean → just "<type>
+// espresso"; unknown ratio → "espresso". The words "espresso" and "beans" are
+// deliberate — they make the phrase read like speech, not a spec.
+inline QString espressoShotDescriptor(double ratio, const QString& roaster, const QString& bean)
+{
+    const QString type = espressoTypeFromRatio(ratio);
+    QString head = type.isEmpty() ? QStringLiteral("espresso")
+                                  : type + QStringLiteral(" espresso");
+    const QString beanName = !roaster.trimmed().isEmpty() ? roaster.trimmed() : bean.trimmed();
+    if (beanName.isEmpty())
+        return head;
+    return head + QStringLiteral(" on the ") + beanName + QStringLiteral(" beans");
+}
+
 } // namespace DrinkTypes

@@ -75,6 +75,40 @@ private slots:
         QCOMPARE(DrinkTypes::defaultTeaTempC("unknown"), 90.0);
         QCOMPARE(DrinkTypes::defaultTeaTempC(" Black "), 98.0);
     }
+
+    // Espresso type from ratio — the buckets the barista speaks in, with
+    // boundaries in the gaps between the ranges.
+    void espressoTypeFromRatio() {
+        QCOMPARE(DrinkTypes::espressoTypeFromRatio(1.2),  QString("ristretto"));
+        QCOMPARE(DrinkTypes::espressoTypeFromRatio(1.5),  QString("ristretto"));
+        QCOMPARE(DrinkTypes::espressoTypeFromRatio(2.0),  QString("normale"));
+        QCOMPARE(DrinkTypes::espressoTypeFromRatio(2.4),  QString("normale"));
+        QCOMPARE(DrinkTypes::espressoTypeFromRatio(3.0),  QString("lungo"));
+        QCOMPARE(DrinkTypes::espressoTypeFromRatio(2.75), QString("lungo"));   // boundary → lungo
+        QCOMPARE(DrinkTypes::espressoTypeFromRatio(2.74), QString("normale")); // just under
+        QCOMPARE(DrinkTypes::espressoTypeFromRatio(0.0),  QString());          // unknown
+        QCOMPARE(DrinkTypes::espressoTypeFromRatio(-1.0), QString());
+    }
+
+    // Speakable descriptor: "<type> espresso on the <bean> beans", degrading
+    // gracefully as bean info is missing.
+    void espressoShotDescriptor() {
+        QCOMPARE(DrinkTypes::espressoShotDescriptor(2.2, "Kenya AA", "Peaberry"),
+                 QString("normale espresso on the Kenya AA beans"));
+        QCOMPARE(DrinkTypes::espressoShotDescriptor(3.1, "Ethiopia", "Guji"),
+                 QString("lungo espresso on the Ethiopia beans"));
+        // No roaster → fall back to the varietal.
+        QCOMPARE(DrinkTypes::espressoShotDescriptor(2.2, "", "Peaberry"),
+                 QString("normale espresso on the Peaberry beans"));
+        // No bean at all → just the type.
+        QCOMPARE(DrinkTypes::espressoShotDescriptor(1.3, "", ""),
+                 QString("ristretto espresso"));
+        // Unknown ratio, no bean → bare "espresso".
+        QCOMPARE(DrinkTypes::espressoShotDescriptor(0.0, "", ""), QString("espresso"));
+        // Unknown ratio but a bean is known.
+        QCOMPARE(DrinkTypes::espressoShotDescriptor(0.0, "Onyx", ""),
+                 QString("espresso on the Onyx beans"));
+    }
 };
 
 QTEST_GUILESS_MAIN(tst_DrinkTypes)

@@ -90,6 +90,12 @@ class SettingsApp : public QObject {
     // master switch (AccessibilityManager::announceCoaching).
     Q_PROPERTY(bool steamCoachVisualEnabled READ steamCoachVisualEnabled WRITE setSteamCoachVisualEnabled NOTIFY steamCoachVisualEnabledChanged)
     Q_PROPERTY(bool steamCoachAudioEnabled READ steamCoachAudioEnabled WRITE setSteamCoachAudioEnabled NOTIFY steamCoachAudioEnabledChanged)
+    // [barista-fork] During-shot (pull) live coaching AUDIO opt-in — the real toggle for the espresso coach's
+    // spoken cues (the AI coaching voice path). Default OFF. Separate from the accessibility
+    // extractionAnnouncements pref (which now gates ONLY the non-barista fallback path).
+    Q_PROPERTY(bool espressoCoachAudioEnabled READ espressoCoachAudioEnabled WRITE setEspressoCoachAudioEnabled NOTIFY espressoCoachAudioEnabledChanged)
+    // [barista-fork] Speak a short bean-aware "game plan" before the pull (once per shot). Default OFF.
+    Q_PROPERTY(bool coachGameplanEnabled READ coachGameplanEnabled WRITE setCoachGameplanEnabled NOTIFY coachGameplanEnabledChanged)
 
 public:
     explicit SettingsApp(QObject* parent = nullptr);
@@ -195,6 +201,10 @@ public:
     void setSteamCoachVisualEnabled(bool enabled);
     bool steamCoachAudioEnabled() const;
     void setSteamCoachAudioEnabled(bool enabled);
+    bool espressoCoachAudioEnabled() const;                 // [barista-fork] pull-coaching voice opt-in
+    void setEspressoCoachAudioEnabled(bool enabled);
+    bool coachGameplanEnabled() const;                      // [barista-fork] pre-shot game plan opt-in
+    void setCoachGameplanEnabled(bool enabled);
 
     // Device identity (stable UUID for server communication)
     Q_INVOKABLE QString deviceId() const;
@@ -231,6 +241,8 @@ signals:
     void liveCoachingEnabledChanged();
     void steamCoachVisualEnabledChanged();
     void steamCoachAudioEnabledChanged();
+    void espressoCoachAudioEnabledChanged();
+    void coachGameplanEnabledChanged();
 
 private:
     mutable QSettings m_settings;

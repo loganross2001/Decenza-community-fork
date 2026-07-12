@@ -1402,7 +1402,9 @@ static QString formatWhoBlock(const QString& activeUser, const QVector<Barista>&
         "ALL recorded by the OWNER on this machine. If the active user IS the owner (or unknown), treat that "
         "history as theirs normally. If the active user is a DIFFERENT guest, you still have the machine's full "
         "history — but it's the owner's, so do NOT tell the guest they pulled shots, earned ratings, or have a "
-        "history they don't; speak of it as the machine's or the owner's. Always attribute honestly.\n");
+        "history they don't; speak of it as the machine's or the owner's. Always attribute honestly. "
+        "MAINTENANCE and REMINDERS belong to the MACHINE, not to any user — they are the same for everyone, so "
+        "never reframe them as the active user's (e.g. not \"your descale\" tied to a guest — it's the machine's).\n");
     return out;
 }
 
@@ -1836,6 +1838,7 @@ void AIManager::analyze(const QString& systemPrompt, const QString& userPrompt)
     m_analyzing = true;
     m_isConversationRequest = false;
     m_isBagExtractionRequest = false;
+    m_isCoachPhrasebookRequest = false;   // [barista-fork]
     emit analyzingChanged();
 
     // Store for logging
@@ -1844,6 +1847,36 @@ void AIManager::analyze(const QString& systemPrompt, const QString& userPrompt)
 
     logPrompt(selectedProvider(), systemPrompt, userPrompt);
     provider->analyze(systemPrompt, userPrompt);
+}
+
+// [barista-fork] Live-coaching phrasebook: ONE bracketing AI call → strict JSON of varied cue phrasings +
+// a gameplan. Mirrors extractCoffeeBagDetails (own flag+token; routed in onAnalysisComplete/Failed). Fails
+// fast (never blocks a shot) — the coaches fall back to their deterministic lines until a pool lands.
+void AIManager::requestCoachPhrasebook(const QString& requestToken, const QString& contextBlock)
+{
+    if (m_analyzing) { emit phrasebookFailed(requestToken, QStringLiteral("busy")); return; }
+    AIProvider* provider = currentProvider();
+    if (!provider || !isConfigured()) { emit phrasebookFailed(requestToken, QStringLiteral("notConfigured")); return; }
+
+    const QString systemPrompt = QStringLiteral(
+        "You write short spoken coaching cues for a home espresso machine's voice coach. Return STRICT JSON "
+        "ONLY (no prose, no markdown), shape: {\"cues\": {\"<id>\": [\"line\", ...]}, \"gameplan\": \"...\"}. "
+        "For EACH of these ids give 4-5 DISTINCT natural spoken variants (warm, brief, a coach beside them — "
+        "never robotic): no-puck, channeling, flow-fast, flow-slow, steam-stretch, steam-roll, steam-almost, "
+        "steam-done, no-coaching. Each line <=110 characters, plain spoken words, NO placeholders/%/{}, NO "
+        "numbers unless natural. 'gameplan' = ONE <=2-sentence pre-shot plan grounded in the bean/history below. "
+        "Match the app's language. Output the JSON object and nothing else.");
+
+    m_analyzing = true;
+    m_isConversationRequest = false;
+    m_isBagExtractionRequest = false;
+    m_isCoachPhrasebookRequest = true;
+    m_coachPhrasebookToken = requestToken;
+    emit analyzingChanged();
+    m_lastSystemPrompt = systemPrompt;
+    m_lastUserPrompt = QStringLiteral("[coach phrasebook]");
+    logPrompt(selectedProvider(), systemPrompt, m_lastUserPrompt);
+    provider->analyze(systemPrompt, contextBlock);
 }
 
 void AIManager::extractCoffeeBagDetails(const QString& requestToken, const QString& pageText,
@@ -2074,6 +2107,7 @@ void AIManager::analyzeConversation(const QString& systemPrompt, const QJsonArra
     m_analyzing = true;
     m_isConversationRequest = true;
     m_isBagExtractionRequest = false;
+    m_isCoachPhrasebookRequest = false;   // [barista-fork]
     // [barista-fork] Closed-loop safety net (issue #1053 regression): clear any stale tool-applied structuredNext
     // at the single choke point every conversation turn passes through, so a prior turn's apply_dial_change capture
     // (e.g. one whose turn failed, or that was superseded) can NEVER leak into this turn's finalization. Unconditional
@@ -2126,7 +2160,12 @@ void AIManager::onAnalysisComplete(const QString& response)
     emit analyzingChanged();
 
     // Emit to the appropriate listener based on request type
-    if (m_isBagExtractionRequest) {
+    if (m_isCoachPhrasebookRequest) {   // [barista-fork]
+        m_isCoachPhrasebookRequest = false;
+        const QString token = m_coachPhrasebookToken;
+        m_coachPhrasebookToken.clear();
+        emit phrasebookReady(token, response);
+    } else if (m_isBagExtractionRequest) {
         m_isBagExtractionRequest = false;
         const QString token = m_bagExtractionToken;
         m_bagExtractionToken.clear();
@@ -2163,7 +2202,12 @@ void AIManager::onAnalysisFailed(const QString& error)
     emit analyzingChanged();
 
     // Emit to the appropriate listener based on request type
-    if (m_isBagExtractionRequest) {
+    if (m_isCoachPhrasebookRequest) {   // [barista-fork]
+        m_isCoachPhrasebookRequest = false;
+        const QString token = m_coachPhrasebookToken;
+        m_coachPhrasebookToken.clear();
+        emit phrasebookFailed(token, error);
+    } else if (m_isBagExtractionRequest) {
         m_isBagExtractionRequest = false;
         const QString token = m_bagExtractionToken;
         m_bagExtractionToken.clear();

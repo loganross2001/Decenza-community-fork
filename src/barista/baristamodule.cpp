@@ -11,6 +11,7 @@
 #include "tasksstorage.h"
 #include "maintenancedocsync.h"
 #include "baristavoiceid.h"       // [barista-fork] voice-ID enrollment + probe coordinator
+#include "coachphrasebook.h"      // [barista-fork] live-coach model-generated phrasing + gameplan
 #include "baristawebtools.h"      // [barista-fork] fast-path web tools (weather / stock / local news)
 #include "../core/settings.h"        // [barista-fork] app Settings → dye()->dyeBarista() for the active user
 #include "../core/settings_dye.h"
@@ -41,6 +42,9 @@ BaristaModule::BaristaModule(MainController* mainController, MachineState* machi
     // [barista-fork] The coaching voice: a SECOND AssistantVoice reading the coaching-voice settings,
     // used by the live steam + espresso coaches (wired in main.cpp). Reuses all the same synth code.
     , m_coachingVoice(new AssistantVoice(m_settings, appSettings, AssistantVoice::Role::Coaching, this))
+    // [barista-fork] Model-generated varied phrasing + pre-shot gameplan for the live coaches (one bracketing
+    // AI call, cached in assistant.db). Initialized with the db path in the same block as feedback/tasks below.
+    , m_coachPhrasebook(new CoachPhrasebook(mainController ? mainController->aiManager() : nullptr, this))
     , m_voiceInput(new VoiceInput(this))
     , m_knowledge(new BaristaKnowledge(m_settings, mainController ? mainController->aiManager() : nullptr, this))
     , m_actions(new BaristaActions(appSettings, machineState, this))
@@ -79,6 +83,8 @@ BaristaModule::BaristaModule(MainController* mainController, MachineState* machi
             // [barista-fork] Reminders + maintenance share the SAME assistant.db file (each store's
             // ensureSchema is idempotent and touches only its own tables).
             m_tasksStorage->initialize(assistantDb);
+            // [barista-fork] Coach phrasebook persists its model-generated cue pools in assistant.db (rides the backup).
+            m_coachPhrasebook->initialize(assistantDb);
             // [barista-fork] Start the independent KB backup now that assistant.db's path is known — a
             // startup backup runs if today's set is missing, then a 6h re-check keeps the 10-day history.
             m_backup->initialize(assistantDb);

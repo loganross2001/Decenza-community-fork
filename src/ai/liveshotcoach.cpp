@@ -245,7 +245,15 @@ void LiveShotCoach::emitCue(const QString& id, const QString& text,
     // old banner's `urgent = severity === "caution"`. The extractionAnnouncements
     // gate is applied at the connection in main.cpp.
     if (willSpeak)
-        emit speakRequested(text, severity == QStringLiteral("caution"));
+        emit speakRequested(id, text, severity == QStringLiteral("caution"));
+}
+
+// [barista-fork] Record an EXTERNAL spoken line (the pre-shot game plan) against the spoken-cue governor,
+// so a live cue firing seconds later doesn't stack right on top of it. Cautions stay exempt (they check
+// this spacing but urgent cues override elsewhere). No-op if it would move the clock backwards.
+void LiveShotCoach::noteExternalSpeech(double shotTime) {
+    if (shotTime > m_lastSpokenShotTime)
+        m_lastSpokenShotTime = shotTime;
 }
 
 void LiveShotCoach::clearCue() {

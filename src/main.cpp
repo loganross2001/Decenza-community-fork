@@ -32,6 +32,7 @@
 #ifdef DECENZA_BARISTA
 #include "barista/baristamodule.h"  // [barista-fork] hook
 #include "barista/assistantvoice.h" // [barista-fork] coaching-voice routing for the live coaches
+#include "barista/coachphrasebook.h" // [barista-fork] model-generated varied cue phrasing
 #endif
 
 #ifdef Q_OS_ANDROID
@@ -1248,6 +1249,7 @@ int main(int argc, char *argv[])
     // stay null and the routing is byte-identical to upstream.
     AssistantVoice* coachingVoice = nullptr;   // the AI coaching voice (null → native fallback)
     AssistantVoice* baristaVoice = nullptr;    // the barista voice — stopped so coaching wins during shot/steam
+    CoachPhrasebook* coachPhrasebook = nullptr; // [barista-fork] model-generated varied cue phrasing (null → deterministic text)
 
     // Steam-coach voice: the coach emits speakRequested only when its own audio setting is on. Prefer the
     // AI coaching voice; else route via announceCoaching, which bypasses BOTH accessibility voice gates —
@@ -1255,34 +1257,46 @@ int main(int argc, char *argv[])
     // (see AccessibilityManager::announceCoaching). Do not reroute this through announce()/routeAnnouncement.
     QObject::connect(mainController.liveSteamCoach(), &LiveSteamCoach::speakRequested,
                      &accessibilityManager,
-                     [&accessibilityManager, &coachingVoice, &baristaVoice](const QString& text, bool interrupt) {
+                     [&accessibilityManager, &coachingVoice, &baristaVoice, &coachPhrasebook](const QString& id, const QString& text, bool interrupt) {
 #ifdef DECENZA_BARISTA
                          if (coachingVoice) {
-                             // Arbiter: coaching wins during shot/steam — silence any lingering barista
-                             // utterance so the two AI voices never overlap.
-                             if (baristaVoice) baristaVoice->stop();
-                             coachingVoice->speak(text);
+                             // [barista-fork] Arbiter: coaching wins over the barista ONLY when urgent (interrupt).
+                             // An info cue arriving while the barista is mid-sentence is DROPPED (banner still
+                             // shows) — a delayed live cue is a wrong cue, and this is the no-nag posture.
+                             if (baristaVoice && baristaVoice->speaking()) {
+                                 if (interrupt) baristaVoice->stop();
+                                 else { qDebug().noquote() << ("[BaristaDiag] coach     suppressed_barista_speaking  id=" + id); return; }
+                             }
+                             // [barista-fork] Model-generated varied phrasing (fallback to the deterministic text).
+                             const QString line = coachPhrasebook ? coachPhrasebook->lineFor(id, text) : text;
+                             coachingVoice->speak(line);
                              return;
                          }
 #endif
                          accessibilityManager.announceCoaching(text, interrupt);
                      });
 
-    // Shot-coach voice: unlike steam (which has its own audio opt-in), during-shot cues are gated on the
-    // user's extractionAnnouncements preference. Preferred path is the AI coaching voice (gated by that same
-    // preference); else the on-device announce() path — preserving upstream behaviour exactly.
+    // Shot-coach voice. [barista-fork] The BARISTA path is now gated on the dedicated pull-coaching audio
+    // toggle (espressoCoachAudioEnabled); the accessibility extractionAnnouncements pref gates ONLY the
+    // non-barista fallback path (it's an accessibility concept, default ON — contradicts the owner's opt-in).
     QObject::connect(mainController.liveShotCoach(), &LiveShotCoach::speakRequested,
                      &accessibilityManager,
-                     [&accessibilityManager, &coachingVoice, &baristaVoice](const QString& text, bool interrupt) {
-                         if (!accessibilityManager.extractionAnnouncementsEnabled())
-                             return;   // during-shot voice respects the same toggle it always did
+                     [&accessibilityManager, &coachingVoice, &baristaVoice, &coachPhrasebook, &settings](const QString& id, const QString& text, bool interrupt) {
 #ifdef DECENZA_BARISTA
                          if (coachingVoice) {
-                             if (baristaVoice) baristaVoice->stop();   // coaching wins during the pull
-                             coachingVoice->speak(text);
+                             if (!settings.app()->espressoCoachAudioEnabled())
+                                 return;   // pull-coaching voice opt-in (default off)
+                             if (baristaVoice && baristaVoice->speaking()) {
+                                 if (interrupt) baristaVoice->stop();
+                                 else { qDebug().noquote() << ("[BaristaDiag] coach     suppressed_barista_speaking  id=" + id); return; }
+                             }
+                             const QString line = coachPhrasebook ? coachPhrasebook->lineFor(id, text) : text;
+                             coachingVoice->speak(line);
                              return;
                          }
 #endif
+                         if (!accessibilityManager.extractionAnnouncementsEnabled())
+                             return;   // non-barista fallback: unchanged accessibility gate
                          accessibilityManager.announce(text, interrupt);
                      });
 
@@ -2687,6 +2701,31 @@ int main(int argc, char *argv[])
     if (baristaModule) {
         coachingVoice = baristaModule->coachingVoice();
         baristaVoice = baristaModule->voice();
+        coachPhrasebook = baristaModule->coachPhrasebook();
+    }
+
+    // [barista-fork] Live-coaching brackets, driven by machine phase (the reflex cues themselves are handled by
+    // LiveShotCoach). As a shot begins we (re)generate the model phrasing pool + gameplan for the current bean
+    // (one AI call, off the hot path, no-op if fresh); at preinfusion start we speak the pre-shot gameplan once.
+    if (coachPhrasebook) {
+        QObject::connect(&machineState, &MachineState::phaseChanged, &machineState,
+            [&machineState, &settings, coachPhrasebook, coachingVoice, &mainController]() {
+                using Phase = MachineState::Phase;
+                const Phase phase = machineState.phase();
+                if (phase == Phase::EspressoPreheating || phase == Phase::Preinfusion) {
+                    const QString bean = (settings.dye()->dyeBeanBrand() + " " + settings.dye()->dyeBeanType()).trimmed();
+                    coachPhrasebook->refresh(
+                        QStringLiteral("Bean: %1. Write a brief pre-shot plan and varied spoken coaching cues.").arg(bean.isEmpty() ? QStringLiteral("unknown") : bean),
+                        bean);
+                }
+                if (phase == Phase::Preinfusion && coachingVoice && coachPhrasebook->hasGameplan()
+                    && settings.app()->coachGameplanEnabled() && settings.app()->espressoCoachAudioEnabled()) {
+                    coachingVoice->speak(coachPhrasebook->gameplan());
+                    qDebug().noquote() << QStringLiteral("[BaristaDiag] coach     gameplan_spoken");
+                    if (mainController.liveShotCoach())
+                        mainController.liveShotCoach()->noteExternalSpeech(0.0);
+                }
+            });
     }
 #endif
 

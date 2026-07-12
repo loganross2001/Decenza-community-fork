@@ -21,6 +21,7 @@ class AssistantOrchestrator;
 class AssistantVoice;
 class FeedbackStorage;   // [barista-fork] verbal-feedback KB
 class BaristaWebTools;   // [barista-fork] fast-path web tools (weather / stock / local news)
+class CoachPhrasebook;   // [barista-fork] model-generated live-coach phrasing
 class QNetworkAccessManager;
 
 // [barista-fork] Facade for the proactive barista assistant. The ENTIRE feature hangs off this
@@ -76,6 +77,7 @@ public:
     BaristaDiagnostics* diagnostics() const { return m_diagnostics; } // [barista-fork] voice/coaching recorder
     BaristaBackup* backup() const { return m_backup; }                // [barista-fork] independent KB backup
     BaristaVoiceId* voiceId() const { return m_voiceId; }             // [barista-fork] on-device speaker enrollment
+    CoachPhrasebook* coachPhrasebook() const { return m_coachPhrasebook; } // [barista-fork] live-coach varied phrasing + gameplan
 
 signals:
     void enabledChanged();
@@ -88,6 +90,7 @@ private:
     AssistantOrchestrator* m_orchestrator = nullptr;
     AssistantVoice* m_voice = nullptr;
     AssistantVoice* m_coachingVoice = nullptr;   // [barista-fork] separate voice for the live coaches
+    CoachPhrasebook* m_coachPhrasebook = nullptr; // [barista-fork] model-generated varied cue phrasing + gameplan
     VoiceInput* m_voiceInput = nullptr;
     BaristaKnowledge* m_knowledge = nullptr;
     BaristaActions* m_actions = nullptr;

@@ -255,6 +255,10 @@ public:
     Q_INVOKABLE bool supportsUrlExtraction() const;
     Q_INVOKABLE void extractCoffeeBagDetailsFromUrl(const QString& requestToken, const QString& url,
                                                     const QString& kind = QStringLiteral("coffee"));
+    // [barista-fork] Live-coaching phrasebook: ONE bracketing AI call returning model-generated VARIED phrasings
+    // per cue id + a pre-shot gameplan (the live coaches' no-canned-strings rule). Own token + signals — never
+    // routed to the advisor/conversation. See CoachPhrasebook.
+    Q_INVOKABLE void requestCoachPhrasebook(const QString& requestToken, const QString& contextBlock);
     // Response JSON -> whitelisted blob-vocabulary fields (coffee: origin,
     // region, farm, producer, variety, elevation, process, harvest,
     // roastLevel, tastingNotes; tea adds teaType, garden, cultivar, flush,
@@ -370,6 +374,9 @@ signals:
     // requestToken = the value passed to extractCoffeeBagDetails.
     void bagDetailsExtracted(const QString& requestToken, const QVariantMap& fields);
     void bagDetailsExtractionFailed(const QString& requestToken, const QString& error);
+    // [barista-fork] Coach-phrasebook results (own signals; never the advisor path).
+    void phrasebookReady(const QString& requestToken, const QString& json);
+    void phrasebookFailed(const QString& requestToken, const QString& error);
     void testResultChanged();
     void ollamaModelsChanged();
     void conversationIndexChanged();
@@ -490,6 +497,8 @@ private:
     bool m_isConversationRequest = false;
     bool m_isBagExtractionRequest = false;
     QString m_bagExtractionToken;
+    bool m_isCoachPhrasebookRequest = false;   // [barista-fork]
+    QString m_coachPhrasebookToken;            // [barista-fork]
 
 #ifdef DECENZA_TESTING
     friend class tst_AIManager;

@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Dialogs
+import QtQuick.Effects
 import Decenza
 import "../../components"
 
@@ -645,20 +646,27 @@ KeyboardAwareContainer {
                                 Accessible.ignored: true
                             }
 
-                            // Edit affordance.
+                            // Edit affordance — a visible pill so it reads as a tappable "Edit" button (the bare
+                            // white edit icon was invisible on the light card, so editing looked absent).
                             Rectangle {
                                 Layout.alignment: Qt.AlignVCenter
                                 width: Theme.scaled(32)
                                 height: Theme.scaled(32)
                                 radius: width / 2
-                                color: editTap.isPressed ? Theme.backgroundColor : "transparent"
+                                color: editTap.isPressed ? Theme.backgroundColor : Qt.rgba(Theme.textColor.r, Theme.textColor.g, Theme.textColor.b, 0.07)
+                                border.width: 1
+                                border.color: Theme.borderColor
 
                                 Image {
+                                    id: editIcon
                                     anchors.centerIn: parent
                                     source: "qrc:/icons/edit.svg"
                                     sourceSize.width: Theme.scaled(16)
                                     sourceSize.height: Theme.scaled(16)
                                     Accessible.ignored: true
+                                    // Tint the white-stroke SVG so it's actually visible on the light card.
+                                    layer.enabled: true
+                                    layer.effect: MultiEffect { colorization: 1.0; colorizationColor: Theme.textColor }
                                 }
 
                                 AccessibleMouseArea {

@@ -151,8 +151,8 @@ private slots:
         fx.flowStopped();
         // All four milestones spoken...
         QCOMPARE(fx.speakSpy.count(), 4);
-        QCOMPARE(fx.speakSpy.at(0).at(0).toString(), QString::fromUtf8(STRETCH));
-        QCOMPARE(fx.speakSpy.at(3).at(0).toString(), QString::fromUtf8(DONE));
+        QCOMPARE(fx.speakSpy.at(0).at(1).toString(), QString::fromUtf8(STRETCH));  // arg1=text (arg0=cue id)
+        QCOMPARE(fx.speakSpy.at(3).at(1).toString(), QString::fromUtf8(DONE));
         // ...and the cue surface still updates (the banner just isn't shown —
         // that gate lives in QML on the visual setting).
         QCOMPARE(fx.cueSpy.count(), 4);
@@ -168,10 +168,10 @@ private slots:
         fx.tick(19.5);
         fx.flowStopped();
         QCOMPARE(fx.speakSpy.count(), 4);
-        QCOMPARE(fx.speakSpy.at(0).at(1).toBool(), false);  // stretch: polite
-        QCOMPARE(fx.speakSpy.at(1).at(1).toBool(), false);  // roll: polite
-        QCOMPARE(fx.speakSpy.at(2).at(1).toBool(), false);  // almost: polite
-        QCOMPARE(fx.speakSpy.at(3).at(1).toBool(), true);   // done: assertive
+        QCOMPARE(fx.speakSpy.at(0).at(2).toBool(), false);  // stretch: polite (arg2=interrupt)
+        QCOMPARE(fx.speakSpy.at(1).at(2).toBool(), false);  // roll: polite
+        QCOMPARE(fx.speakSpy.at(2).at(2).toBool(), false);  // almost: polite
+        QCOMPARE(fx.speakSpy.at(3).at(2).toBool(), true);   // done: assertive
     }
 
     void toggleBetweenOperations_takesEffectOnNextSteam() {
@@ -219,7 +219,7 @@ private slots:
         QCOMPARE(fx.cueSpy.count(), 3);
         QCOMPARE(fx.speakSpy.count(), 3);
         for (int i = 0; i < fx.speakSpy.count(); ++i)
-            QVERIFY(fx.speakSpy.at(i).at(0).toString() != QString::fromUtf8(ROLL));
+            QVERIFY(fx.speakSpy.at(i).at(1).toString() != QString::fromUtf8(ROLL));
     }
 
     void fullSweep_orderingAndOneShotLatches() {
@@ -262,8 +262,8 @@ private slots:
         fx.flowStopped();
         QCOMPARE(fx.coach.cueText(), QString::fromUtf8(DONE));
         QCOMPARE(fx.coach.cueSeverity(), QStringLiteral("positive"));
-        QCOMPARE(fx.speakSpy.last().at(0).toString(), QString::fromUtf8(DONE));
-        QCOMPARE(fx.speakSpy.last().at(1).toBool(), true);
+        QCOMPARE(fx.speakSpy.last().at(1).toString(), QString::fromUtf8(DONE));
+        QCOMPARE(fx.speakSpy.last().at(2).toBool(), true);
     }
 
     void completionFiresExactlyOnce() {
@@ -340,8 +340,8 @@ private slots:
         QCOMPARE(fx.coach.cueText(), QString::fromUtf8(NO_COACHING));
         QCOMPARE(fx.coach.cueSeverity(), QStringLiteral("info"));
         QCOMPARE(fx.speakSpy.count(), 1);  // announced once, politely
-        QCOMPARE(fx.speakSpy.at(0).at(0).toString(), QString::fromUtf8(NO_COACHING));
-        QCOMPARE(fx.speakSpy.at(0).at(1).toBool(), false);
+        QCOMPARE(fx.speakSpy.at(0).at(1).toString(), QString::fromUtf8(NO_COACHING));
+        QCOMPARE(fx.speakSpy.at(0).at(2).toBool(), false);
 
         // No milestones ever fire, and the pill persists (no re-emits, no
         // re-announcements).

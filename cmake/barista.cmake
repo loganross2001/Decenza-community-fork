@@ -104,6 +104,8 @@ if(DECENZA_BARISTA)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/voiceprintstore.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristavoiceid.h
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristavoiceid.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/coachphrasebook.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/coachphrasebook.cpp
     )
 
     # New-assistant QML — its own resource, loaded by URL via a Loader in main.qml.

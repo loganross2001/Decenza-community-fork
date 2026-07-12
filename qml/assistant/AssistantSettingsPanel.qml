@@ -699,7 +699,9 @@ Rectangle {
                             Slider {
                                 id: baristaVolumeSlider
                                 Layout.fillWidth: true
-                                from: 0.0; to: 1.0; stepSize: 0.05
+                                // [barista-fork] Fine step (0.02) + a perceptual curve applied at playback
+                                // (effectiveVolume raw^2.5) so low-end steps aren't huge jumps.
+                                from: 0.0; to: 1.0; stepSize: 0.02
                                 value: root._settings ? root._settings.baristaVoiceVolume : 1.0
                                 // [barista-fork] Save the setting AND push it to the live clip so the change is
                                 // heard immediately (not just next utterance). onMoved during playback = instant.
@@ -713,6 +715,13 @@ Rectangle {
                                 text: Math.round(baristaVolumeSlider.value * 100) + "%"
                                 color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true
                             }
+                        }
+                        // [barista-fork] Make the Android relationship explicit — the app volume isn't the only knob.
+                        Tr {
+                            key: "barista.settings.volumeHint"
+                            fallback: "This sets the app's level — it combines with the tablet's media volume and your speaker's own volume."
+                            color: Theme.textSecondaryColor; font: Theme.captionFont
+                            Layout.fillWidth: true; wrapMode: Text.WordWrap; Accessible.ignored: true
                         }
 
                         // Barista voice speed — rate multiplier (independent of coaching).
@@ -1147,6 +1156,54 @@ Rectangle {
                     width: coachingFlick.width
                     spacing: Theme.spacingMedium
 
+                    // ── LIVE COACHING (spoken cues during the pull + steam, using the coaching voice below) ──
+                    BaristaSectionCard {
+                        caption: TranslationManager.translate("barista.settings.liveCoachingSection", "Live coaching")
+
+                        Tr {
+                            key: "barista.settings.liveCoachingHint"
+                            fallback: "Spoken cues during your shot and steaming, in the coaching voice below. Default off."
+                            color: Theme.textSecondaryColor; font: Theme.labelFont; wrapMode: Text.WordWrap
+                            Layout.fillWidth: true; Accessible.ignored: true
+                        }
+                        // Coach the pull (espresso extraction cues).
+                        RowLayout {
+                            Layout.fillWidth: true; spacing: Theme.spacingSmall
+                            Switch {
+                                checked: (typeof Settings !== "undefined") ? Settings.app.espressoCoachAudioEnabled : false
+                                onToggled: if (typeof Settings !== "undefined") Settings.app.espressoCoachAudioEnabled = checked
+                                Accessible.role: Accessible.CheckBox; Accessible.checked: checked; Accessible.focusable: true
+                                Accessible.name: trCoachPull.text; Accessible.onToggleAction: toggle()
+                            }
+                            Tr { id: trCoachPull; key: "barista.settings.coachPull"; fallback: "Coach the pull"
+                                 color: Theme.textColor; font: Theme.bodyFont; Layout.fillWidth: true }
+                        }
+                        // Coach steaming (same setting the Steam page writes — one source of truth).
+                        RowLayout {
+                            Layout.fillWidth: true; spacing: Theme.spacingSmall
+                            Switch {
+                                checked: (typeof Settings !== "undefined") ? Settings.app.steamCoachAudioEnabled : false
+                                onToggled: if (typeof Settings !== "undefined") Settings.app.steamCoachAudioEnabled = checked
+                                Accessible.role: Accessible.CheckBox; Accessible.checked: checked; Accessible.focusable: true
+                                Accessible.name: trCoachSteam.text; Accessible.onToggleAction: toggle()
+                            }
+                            Tr { id: trCoachSteam; key: "barista.settings.coachSteam"; fallback: "Coach steaming"
+                                 color: Theme.textColor; font: Theme.bodyFont; Layout.fillWidth: true }
+                        }
+                        // Pre-shot game plan (bean-aware, spoken before you pull).
+                        RowLayout {
+                            Layout.fillWidth: true; spacing: Theme.spacingSmall
+                            Switch {
+                                checked: (typeof Settings !== "undefined") ? Settings.app.coachGameplanEnabled : false
+                                onToggled: if (typeof Settings !== "undefined") Settings.app.coachGameplanEnabled = checked
+                                Accessible.role: Accessible.CheckBox; Accessible.checked: checked; Accessible.focusable: true
+                                Accessible.name: trCoachPlan.text; Accessible.onToggleAction: toggle()
+                            }
+                            Tr { id: trCoachPlan; key: "barista.settings.coachGameplan"; fallback: "Pre-shot game plan"
+                                 color: Theme.textColor; font: Theme.bodyFont; Layout.fillWidth: true }
+                        }
+                    }
+
                     // ── COACHING VOICE (provider + per-provider pickers + shared saved voices) ──
                     BaristaSectionCard {
                         caption: TranslationManager.translate("barista.settings.coachingVoiceSection", "Coaching voice")
@@ -1248,9 +1305,12 @@ Rectangle {
                             Slider {
                                 id: coachingVolumeSlider
                                 Layout.fillWidth: true
-                                from: 0.0; to: 1.0; stepSize: 0.05
+                                from: 0.0; to: 1.0; stepSize: 0.02   // [barista-fork] fine step + perceptual curve (effectiveVolume)
                                 value: root._settings ? root._settings.coachingVoiceVolume : 1.0
-                                onMoved: if (root._settings) root._settings.coachingVoiceVolume = value
+                                onMoved: {
+                                    if (root._settings) root._settings.coachingVoiceVolume = value
+                                    if (root._coachingVoice) root._coachingVoice.applyLiveVolume()
+                                }
                                 Accessible.name: TranslationManager.translate("barista.settings.coachingVolume", "Coaching volume")
                             }
                             Text {

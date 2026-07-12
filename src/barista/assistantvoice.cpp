@@ -1,5 +1,6 @@
 #include "assistantvoice.h"
 
+#include <cmath>   // [barista-fork] std::pow for the perceptual volume curve
 #include "assistantsettings.h"
 #include "baristadiagnostics.h"  // [barista-fork] voice/coaching timeline recorder
 #include "speechnormalize.h"   // [barista-fork] rewrite grams/ratios/units for reliable TTS pronunciation
@@ -256,7 +257,13 @@ double AssistantVoice::effectiveSpeed() const {
 double AssistantVoice::effectiveVolume() const {
     if (!m_settings)
         return 1.0;
-    return m_role == Role::Coaching ? m_settings->coachingVoiceVolume() : m_settings->baristaVoiceVolume();
+    const double raw = m_role == Role::Coaching ? m_settings->coachingVoiceVolume()
+                                                : m_settings->baristaVoiceVolume();
+    // [barista-fork] PERCEPTUAL curve: loudness is ~logarithmic, so a LINEAR gain made low-end slider steps
+    // feel like huge jumps and high-end steps inaudible. Map slider position → gain as raw^2.5 so equal slider
+    // movement ≈ equal PERCEIVED loudness change (fine control low, smooth high). raw stays the stored 0..1.
+    const double v = raw < 0.0 ? 0.0 : (raw > 1.0 ? 1.0 : raw);
+    return std::pow(v, 2.5);
 }
 
 // Apply this role's rate + volume to the native engine right before say(). QTextToSpeech::setRate takes

@@ -21,14 +21,17 @@ BaristaActions::BaristaActions(Settings* settings, MachineState* machineState, Q
 // ── apply ──────────────────────────────────────────────────────────────────────
 QVariantMap BaristaActions::applyFromNext(const QVariantMap& next, qint64 anchorShotId) {
     QVariantMap result;
-    QStringList applied, queued;
+    // [barista-fork] Each change is VERIFIED by reading it back after the write; only a confirmed change
+    // lands in `applied`/`queued`. `failed` = the app tried but the read-back didn't confirm — the barista
+    // must report from THIS result, never from intent, so it can't claim a grind/ratio it didn't actually set.
+    QStringList applied, queued, failed;
 
     QStringList rejected;
     // Never mutate the dial while a shot is physically flowing.
     if (m_machine && m_machine->isFlowing()) {
         result["blocked"] = true;
         result["blockedReason"] = QStringLiteral("a shot is in progress");
-        result["applied"] = applied; result["queued"] = queued; result["rejected"] = rejected;
+        result["applied"] = applied; result["queued"] = queued; result["failed"] = failed; result["rejected"] = rejected;
         return result;
     }
 
@@ -43,7 +46,9 @@ QVariantMap BaristaActions::applyFromNext(const QVariantMap& next, qint64 anchor
         if (dose >= 5.0 && dose <= 30.0) {
             m_undo["doseG"] = dye->dyeBeanWeight();
             dye->setDyeBeanWeight(dose);
-            applied << QStringLiteral("dose %1 g").arg(dose, 0, 'f', 1);
+            if (qAbs(dye->dyeBeanWeight() - dose) < 0.05)          // verify the write actually landed
+                applied << QStringLiteral("dose %1 g").arg(dose, 0, 'f', 1);
+            else failed << QStringLiteral("dose");
         } else { rejected << QStringLiteral("dose"); }
     }
     const double yield = next.value("targetWeightG").toDouble();
@@ -52,7 +57,9 @@ QVariantMap BaristaActions::applyFromNext(const QVariantMap& next, qint64 anchor
             m_undo["targetWeightG_had"] = brew->hasBrewYieldOverride();
             m_undo["targetWeightG"] = brew->brewYieldOverride();
             brew->setBrewYieldOverride(yield);
-            applied << QStringLiteral("yield %1 g").arg(yield, 0, 'f', 1);
+            if (qAbs(brew->brewYieldOverride() - yield) < 0.05)
+                applied << QStringLiteral("yield %1 g").arg(yield, 0, 'f', 1);
+            else failed << QStringLiteral("yield");
         } else { rejected << QStringLiteral("yield"); }
     }
     // Ratio (e.g. 2.0 for 1:2.0): compute the yield from ratio × the (current or just-set) dose, so a
@@ -66,7 +73,9 @@ QVariantMap BaristaActions::applyFromNext(const QVariantMap& next, qint64 anchor
             m_undo["targetWeightG_had"] = brew->hasBrewYieldOverride();
             m_undo["targetWeightG"] = brew->brewYieldOverride();
             brew->setBrewYieldOverride(computedYield);
-            applied << QStringLiteral("ratio 1:%1 → yield %2 g").arg(ratio, 0, 'f', 2).arg(computedYield, 0, 'f', 1);
+            if (qAbs(brew->brewYieldOverride() - computedYield) < 0.05)
+                applied << QStringLiteral("ratio 1:%1 → yield %2 g").arg(ratio, 0, 'f', 2).arg(computedYield, 0, 'f', 1);
+            else failed << QStringLiteral("ratio");
         } else { rejected << QStringLiteral("ratio"); }
     }
     const double temp = next.value("temperatureC").toDouble();
@@ -75,7 +84,9 @@ QVariantMap BaristaActions::applyFromNext(const QVariantMap& next, qint64 anchor
             m_undo["temperatureC_had"] = brew->hasTemperatureOverride();
             m_undo["temperatureC"] = brew->temperatureOverride();
             brew->setTemperatureOverride(temp);
-            applied << QStringLiteral("%1 °C").arg(temp, 0, 'f', 1);
+            if (qAbs(brew->temperatureOverride() - temp) < 0.05)
+                applied << QStringLiteral("%1 °C").arg(temp, 0, 'f', 1);
+            else failed << QStringLiteral("temperature");
         } else { rejected << QStringLiteral("temperature"); }
     }
     // Grinder is off-machine — queue it, don't write the dial (the shot must not claim a grind the
@@ -87,11 +98,22 @@ QVariantMap BaristaActions::applyFromNext(const QVariantMap& next, qint64 anchor
         m_undo["pendingBefore_had"] = true;
         m_undo["pendingBefore"] = loadPending();
         enqueueGrind(grind, anchorShotId);
-        queued << QStringLiteral("grinder %1").arg(grind);
+        // Verify the enqueue actually persisted a pending setGrinder with this value before claiming it —
+        // otherwise the barista would say "grind queued" when nothing was written (the reported bug).
+        bool queuedOk = false;
+        for (const QVariant& item : loadPending()) {
+            const QVariantMap m = item.toMap();
+            if (m.value("type").toString() == QLatin1String("setGrinder")
+                    && m.value("status").toString() == QLatin1String("pending")
+                    && m.value("value").toString() == grind) { queuedOk = true; break; }
+        }
+        if (queuedOk) queued << QStringLiteral("grinder %1").arg(grind);
+        else failed << QStringLiteral("grinder");
     }
 
     result["applied"] = applied;
     result["queued"] = queued;
+    result["failed"] = failed;   // the barista MUST NOT claim anything in here (see the report-from-machine persona rule)
     result["rejected"] = rejected;
     result["blocked"] = false;
     return result;

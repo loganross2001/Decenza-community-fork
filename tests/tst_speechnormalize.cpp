@@ -35,6 +35,7 @@ private slots:
     void listCommaUntouched();
     void dayOrdinalSpelled();
     void ordinalOutOfRangeUntouched();
+    void shotNamesRespelled();
     void milliliters();
     void psiAndRpm();
     void ratioBeforeUnits();
@@ -107,6 +108,14 @@ void TstSpeechNormalize::dayOrdinalSpelled()
 
 void TstSpeechNormalize::ordinalOutOfRangeUntouched()
 { QCOMPARE(normalizeForSpeech("1755th place"), QString("1755th place")); }   // >31 → left as digits
+
+void TstSpeechNormalize::shotNamesRespelled()
+{
+    QCOMPARE(normalizeForSpeech("Try a Normale"), QString("Try a nor-mah-lay"));   // was said "normal-ee"
+    QCOMPARE(normalizeForSpeech("a lungo shot"),  QString("a loong-goh shot"));
+    QCOMPARE(normalizeForSpeech("RISTRETTO"),     QString("ree-stret-toh"));       // case-insensitive
+    QCOMPARE(normalizeForSpeech("normalize it"),  QString("normalize it"));        // word-boundary: no false hit
+}
 
 void TstSpeechNormalize::milliliters()
 { QCOMPARE(normalizeForSpeech("36ml"), QString("36 milliliters")); }

@@ -618,6 +618,30 @@ void SettingsApp::setSteamCoachAudioEnabled(bool enabled) {
     }
 }
 
+// [barista-fork] Pull-coaching voice opt-in (the espresso coach's spoken cues via the AI coaching voice).
+bool SettingsApp::espressoCoachAudioEnabled() const {
+    return m_settings.value("coach/espressoCoachAudioEnabled", false).toBool();
+}
+
+void SettingsApp::setEspressoCoachAudioEnabled(bool enabled) {
+    if (espressoCoachAudioEnabled() != enabled) {
+        m_settings.setValue("coach/espressoCoachAudioEnabled", enabled);
+        emit espressoCoachAudioEnabledChanged();
+    }
+}
+
+// [barista-fork] Pre-shot game plan opt-in (a short bean-aware spoken plan before the pull).
+bool SettingsApp::coachGameplanEnabled() const {
+    return m_settings.value("coach/coachGameplanEnabled", false).toBool();
+}
+
+void SettingsApp::setCoachGameplanEnabled(bool enabled) {
+    if (coachGameplanEnabled() != enabled) {
+        m_settings.setValue("coach/coachGameplanEnabled", enabled);
+        emit coachGameplanEnabledChanged();
+    }
+}
+
 // Device identity
 QString SettingsApp::deviceId() const {
     QString id = m_settings.value("device/uuid").toString();

@@ -45,6 +45,10 @@ public:
         m_translationManager = translationManager;
     }
 
+    // [barista-fork] Mark an external spoken line (the pre-shot game plan) so a live cue right after
+    // it respects the same spoken-cue spacing. Called from the barista game-plan seam.
+    void noteExternalSpeech(double shotTime);
+
     QString cueText() const { return m_cueText; }
     QString cueSeverity() const { return m_cueSeverity; }
     bool cueActive() const { return m_cueActive; }
@@ -85,7 +89,9 @@ signals:
     // announce, gated on the user's extractionAnnouncements preference — so the
     // during-shot voice respects the same toggle it always did. `interrupt` is
     // assertive (true) only for urgent "caution" cues.
-    void speakRequested(const QString& text, bool interrupt);
+    // [barista-fork] `id` is the cue identifier (no-puck/channeling/flow-fast/…) so the barista's
+    // CoachPhrasebook can swap in a model-generated variant; the fallback path ignores it.
+    void speakRequested(const QString& id, const QString& text, bool interrupt);
 
 private slots:
     void onShotSampleReceived(const ShotSample& sample);

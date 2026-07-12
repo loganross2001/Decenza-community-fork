@@ -114,7 +114,9 @@ signals:
     // Wired once (main.cpp) to AccessibilityManager::announceCoaching, which
     // bypasses the accessibility master switch — the coach's audio toggle is
     // its own opt-in. `interrupt` = assertive (only the completion cue).
-    void speakRequested(const QString& text, bool interrupt);
+    // [barista-fork] `id` (steam-stretch/steam-roll/steam-almost/steam-done) lets the CoachPhrasebook
+    // swap in a model-generated variant; the fallback path ignores it.
+    void speakRequested(const QString& id, const QString& text, bool interrupt);
 
 private slots:
     void onPhaseChanged();

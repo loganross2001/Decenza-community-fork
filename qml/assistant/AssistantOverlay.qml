@@ -192,6 +192,22 @@ Item {
             root._updateThinkingLoop()
         }
     }
+    // [barista-fork] Mic-echo guard for the COACHING voice (a separate AssistantVoice from the barista voice
+    // above). If a live coach cue plays while a chat session's mic is open, pause the recognizer so it never
+    // transcribes the coach; resume via the same safe helper the local-speak path uses (it re-checks the guards).
+    Connections {
+        target: (typeof Barista !== "undefined") ? Barista.coachingVoice : null
+        ignoreUnknownSignals: true
+        function onSpeakingChanged() {
+            if (!root._voiceInput || !root._voiceInput.listening) return
+            if (Barista.coachingVoice && Barista.coachingVoice.speaking) {
+                root._voiceInput.pauseMic()
+                root._diag("coach_mic_paused", {})
+            } else {
+                root._resumeMicAfterLocal()
+            }
+        }
+    }
     readonly property string _state: _orch ? _orch.state : "present"   // "present" | "conversing"
     // [barista-fork] A shot the barista knows about but the user hasn't discussed yet — the old close-out,
     // now pure context (drives the justPulledShot injection + the P3 undiscussed-shot pulse).
@@ -627,24 +643,28 @@ Item {
         var _canApplyTool = typeof MainController !== "undefined" && MainController.aiManager
                             && MainController.aiManager.selectedProvider === "anthropic"
         var applyInstruction = _canApplyTool
-            ? ("HOW CHANGES GET MADE — when you want to change the dial (grind, dose, yield, ratio, or temp), or the "
+            ? ("HOW CHANGES GET MADE — when you want to change the dial (grind, dose, ratio, or temp), or the "
                + "user asks for a specific value, FIRST propose it in your reply and ask for the go-ahead ('Want me to "
                + "take the grind to 4.4?'). Do NOT change anything yet. ONLY once the user clearly approves ('yes', "
-               + "'do it', 'go ahead') do you call the apply_dial_change tool with just the field(s) that change "
-               + "(grinderSetting, doseG, targetWeightG, ratio, temperatureC — grinderSetting is the off-machine dial, "
-               + "doseG grams IN, targetWeightG grams OUT, ratio e.g. 2.0 for 1:2.0). Never call it unprompted, to "
-               + "acknowledge, or to restate unchanged settings. After it runs, confirm naturally from the result — say "
-               + "it's DONE, not as a proposal ('Done — grind's at 4.4 for the next one.'). The grinder is off-machine, "
-               + "so for a grind change tell them to set it on the grinder. If the user says 'undo' or 'put it back', the "
-               + "app reverses the last change itself — you don't need a tool for that.\n")
+               + "'do it', 'go ahead') do you call the apply_dial_change tool with just the field(s) that change. "
+               + "THINK AND SET IN DOSE + RATIO, NOT YIELD — yield is just dose×ratio, so send doseG (grams IN) + ratio "
+               + "and let the app compute the yield; use the ratio NAMES when natural (Ristretto ≈1:1, Normale ≈1:2, "
+               + "Lungo ≈1:3). Fields: grinderSetting (off-machine grinder dial), doseG (grams in), ratio (e.g. 2.0 for "
+               + "1:2.0), temperatureC; only send targetWeightG if the user gives an explicit grams-out. Never call it "
+               + "unprompted, to acknowledge, or to restate unchanged settings. AFTER it runs, REPORT STRICTLY FROM THE "
+               + "RESULT: confirm ONLY what's listed under 'applied'/'queued' as done ('Done — grind's at 4.4 for the "
+               + "next one.'); if anything is under 'failed' or 'rejected', tell them it did NOT take — NEVER claim a "
+               + "change the result didn't confirm. The grinder is off-machine, so for a grind change tell them to set it "
+               + "on the grinder. If the user says 'undo' or 'put it back', the app reverses the last change itself.\n")
             : ("HOW CHANGES GET MADE — when you want to change the dial (grind, dose, yield, ratio, or temp), or the "
                + "user asks for a specific value, FIRST propose it in your reply and ask for the go-ahead ('Want me to "
                + "take the grind to 4.4?'), and append EXACTLY ONE fenced block at the very END with ONLY the field(s) "
                + "that change:\n"
                + "```json\n{\"grinderSetting\":\"4.75\",\"doseG\":18.0,\"targetWeightG\":36.0,\"ratio\":2.0,\"temperatureC\":92.0,\"expectation\":\"less sour\"}\n```\n"
-               + "grinderSetting = grinder dial (off-machine), doseG = grams IN, targetWeightG = grams OUT, ratio = brew "
-               + "ratio e.g. 2.0 for 1:2.0 (the app computes yield = doseG × ratio, so send doseG + ratio and skip "
-               + "targetWeightG for a ratio change), temperatureC = brew temp. Give REAL numbers. The app applies the "
+               + "grinderSetting = grinder dial (off-machine), doseG = grams IN, ratio = brew ratio e.g. 2.0 for 1:2.0 "
+               + "(use the ratio names when natural — Ristretto ≈1:1, Normale ≈1:2, Lungo ≈1:3), temperatureC = brew temp. "
+               + "THINK IN DOSE + RATIO, NOT YIELD — yield is just dose×ratio, so send doseG + ratio and let the app "
+               + "compute it; only send targetWeightG if the user gives an explicit grams-out. Give REAL numbers. The app applies the "
                + "proposed block ONLY after the user approves by voice ('yes'/'do it'); until then nothing changes. Do "
                + "NOT emit the block to acknowledge, to restate CURRENT settings unchanged, or in casual chat — only "
                + "when you're proposing a real change.\n")
@@ -676,7 +696,10 @@ Item {
             + "  • ongoing → NO greeting at all; continue as if mid-conversation.\n"
             + "NEVER cold-greet, self-introduce, say your own name unprompted, re-introduce yourself, or open with "
             + "'how can I help'. You are a familiar presence, not a kiosk.\n"
-            + "USING NAMES — the [Who] block below names the active user and who you already know. Use their name "
+            + "USING NAMES — the [Who] block below names the active user and who you already know. ALWAYS spell a person's "
+               + "name the way it appears in [Who] (activeUser / known), NEVER the way the transcript spells it — speech "
+               + "recognition can't tell 'Ana' from 'Anna' by sound and often picks the wrong one, so the [Who] roster "
+               + "spelling is the authority (if [Who] says Ana but the transcript says Anna, use Ana). Use their name "
             + "naturally and warmly, but sparingly: a hello, a moment of agreement — never every sentence and never "
             + "robotically. When someone tells you who they are ('I'm Ana', 'this is Scott', 'Ana's making this "
             + "one'): if they're NEW to you (not in [Who] 'known'), warmly repeat the name back to confirm you heard "

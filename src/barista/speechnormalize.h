@@ -179,6 +179,22 @@ inline QString normalizeForSpeech(const QString& text) {
         out = rebuilt;
     }
 
+    // ---- Pass 4: espresso shot-name pronunciation  ---------------------------
+    // ElevenLabs mangles the Italian ratio names (says "Normale" as "normal-ee", "Lungo" as "lun-go" hard-g).
+    // Respell them phonetically for SPOKEN output only (the on-screen text is a separate string). Word-boundary,
+    // case-insensitive; conservative — only the words the engine actually gets wrong.
+    struct SayAs { const char* word; const char* say; };
+    static const SayAs shotNames[] = {
+        { "normale",   "nor-mah-lay" },
+        { "ristretto", "ree-stret-toh" },
+        { "lungo",     "loong-goh" },
+    };
+    for (const SayAs& s : shotNames) {
+        QRegularExpression re(QStringLiteral("\\b%1\\b").arg(QLatin1String(s.word)),
+                              QRegularExpression::CaseInsensitiveOption);
+        out.replace(re, QLatin1String(s.say));
+    }
+
     return out;
 }
 

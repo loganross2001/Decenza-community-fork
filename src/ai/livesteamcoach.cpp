@@ -274,7 +274,7 @@ void LiveSteamCoach::emitCue(const QString& id, const QString& text,
     // Voice is a service concern, gated only on the dedicated audio setting —
     // not on the banner, the page, or the accessibility master switch.
     if (speak && m_audioEnabled)
-        emit speakRequested(text, interrupt);
+        emit speakRequested(id, text, interrupt);
 }
 
 void LiveSteamCoach::clearCue() {

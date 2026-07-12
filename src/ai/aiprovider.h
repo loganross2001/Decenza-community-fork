@@ -30,6 +30,7 @@ public:
     struct RequestOptions {
         bool webSearch = false;
         bool clientTools = false;   // enable the registered client-side tools (see setClientTools) for this turn
+        int timeoutMs = 0;          // [barista-fork] per-turn network transfer timeout; 0 → ANALYSIS_TIMEOUT_MS
     };
 
     explicit AIProvider(QNetworkAccessManager* networkManager, QObject* parent = nullptr);
@@ -257,6 +258,8 @@ private:
     std::function<void(const QString&, const QJsonObject&, std::function<void(QJsonValue)>)> m_toolExecutor;
     int m_toolRounds = 0;
     static constexpr int MAX_TOOL_ROUNDS = 4;
+    int m_currentTimeoutMs = 0;   // [barista-fork] this turn's transfer timeout (RequestOptions.timeoutMs; 0 → default)
+    qint64 m_requestSentMs = 0;   // [barista-fork] request-sent stamp for reply-latency instrumentation
 
     // Wrap the first user message's content in a structured block carrying
     // cache_control: ephemeral when its content is currently a plain string.

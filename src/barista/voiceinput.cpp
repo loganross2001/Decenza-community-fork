@@ -184,8 +184,13 @@ void VoiceInput::handleFinal(const QString& text) {
         if (QDateTime::currentMSecsSinceEpoch() < m_ignoreFinalUntilMs) {
             // [barista-fork][diag] Dropped inside the post-TTS echo window (self-hearing guard).
             BaristaDiagnostics::record(QStringLiteral("stt"), QStringLiteral("final_dropped_echo_window"),
-                {{QStringLiteral("heard"), text.trimmed().left(80)}});
+                {{QStringLiteral("heard"), text.trimmed().left(80)},
+                 {QStringLiteral("action"), QStringLiteral("restart")}});
             setPartial(QString());
+            // [barista-fork] The recogniser's single-utterance session ENDED when this result fired. Since we're
+            // dropping it (not starting a turn), nobody else restarts it → dead mic. Restart to keep listening.
+            // (Bounded: the echo window is ~400ms, so at most a couple of tail drops before it elapses.)
+            startRecogniser();
             return;   // NOTE: don't touch m_errorStreak — this isn't a genuine user result
         }
         m_ignoreFinalUntilMs = 0;   // window elapsed → back to normal
@@ -197,9 +202,15 @@ void VoiceInput::handleFinal(const QString& text) {
         BaristaDiagnostics::record(QStringLiteral("stt"), QStringLiteral("final_result"),
             {{QStringLiteral("heard"), t.left(120)}});
         emit finalText(t);
+        // Do NOT auto-restart here. The overlay pauses the mic while the assistant thinks/speaks and calls
+        // resumeMic() when the turn is done — restarting into that pending stop is what triggers ERROR_CLIENT (5).
+    } else {
+        // [barista-fork] Empty final (recogniser gave up with no words): the single-utterance session ENDED but
+        // no turn starts, so nothing ever calls resumeMic() → dead mic. Restart to keep listening (no finalText,
+        // so no turn is dispatched — this is the "listening continues" case, unlike a real result).
+        BaristaDiagnostics::record(QStringLiteral("stt"), QStringLiteral("final_empty_restart"));
+        startRecogniser();
     }
-    // Do NOT auto-restart here. The overlay pauses the mic while the assistant thinks/speaks and calls
-    // resumeMic() when the turn is done — restarting into that pending stop is what triggers ERROR_CLIENT (5).
 }
 
 void VoiceInput::handlePartial(const QString& text) {
@@ -211,6 +222,9 @@ void VoiceInput::handleError(int code) {
     // pragmatic privacy posture, retry with ONLINE recognition rather than failing silently.
     if ((code == 12 || code == 13) && m_preferOffline) {
         m_preferOffline = false;
+        // [barista-fork][diag] recogniser errors were previously INVISIBLE (nothing logged) — record every path.
+        BaristaDiagnostics::record(QStringLiteral("stt"), QStringLiteral("error"),
+            {{QStringLiteral("code"), code}, {QStringLiteral("action"), QStringLiteral("offline_retry")}});
         startRecogniser();
         return;
     }
@@ -221,11 +235,18 @@ void VoiceInput::handleError(int code) {
     // errors with no real result in between can exhaust it and end the session.
     if (code == 5 || code == 6 || code == 7 || code == 8) {
         if (++m_errorStreak <= kMaxTransientRestarts) {
+            BaristaDiagnostics::record(QStringLiteral("stt"), QStringLiteral("error"),
+                {{QStringLiteral("code"), code}, {QStringLiteral("streak"), m_errorStreak},
+                 {QStringLiteral("action"), QStringLiteral("restart")}});
             startRecogniser();
             return;
         }
     }
-    // Fatal, or too many in a row — surface it loudly and end the session.
+    // Fatal, or too many in a row — surface it loudly and end the session. (The overlay's onError turns this
+    // into a visible message + a distinct mic-off earcon so a mic death isn't silent.)
+    BaristaDiagnostics::record(QStringLiteral("stt"), QStringLiteral("error"),
+        {{QStringLiteral("code"), code}, {QStringLiteral("streak"), m_errorStreak},
+         {QStringLiteral("action"), QStringLiteral("fatal")}});
     emit error(QStringLiteral("code %1").arg(code));
     stop();
 }

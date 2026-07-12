@@ -52,7 +52,7 @@ FocusScope {
     }
 
     function selectBarista(barista) {
-        Settings.dye.setDyeBarista(barista.name || "")
+        Settings.dye.dyeBarista = barista.name || ""   // [barista-fork] property assign; setDyeBarista() isn't Q_INVOKABLE (silent TypeError)
         if (baristaStorage && barista.id > 0)
             baristaStorage.requestTouchLastUsed(barista.id)
     }

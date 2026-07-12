@@ -23,18 +23,28 @@ Item {
     // Voice-input session: 20s of silence auto-closes the mic (resets on any speech / reply / activity).
     Timer {
         id: silenceTimer
-        interval: 20000
+        // [barista-fork] Longer window (60s) while actively conversing off-screensaver so a pause for latte prep
+        // doesn't silently kill the mic (that's what ate "that's it for now" — the mic auto-closed unheard). The
+        // screensaver keeps the short 20s window for burn-in safety.
+        interval: root._screensaverActive ? 20000 : 60000
         repeat: false
         onTriggered: {
             if (root._voiceInput) root._voiceInput.stop()
+            root._diag("mic_autoclose_silence", { screensaver: root._screensaverActive })   // was invisible before
             // [barista-fork] Screensaver burn-in safety: a panel left open over the screensaver must not
             // sit lit if the user walked away. On silence-timeout during the screensaver, collapse back to
             // the faint drifting avatar (keep the session primed + recoverable via _tapDock — do NOT dismiss,
-            // and do NOT wake the machine). Off-screensaver behavior is unchanged: the mic stops, the panel
-            // stays for reading/typing.
+            // and do NOT wake the machine).
             if (root._screensaverActive && root._state === "conversing") {
                 root._showSettings = false   // don't leave a stuck settings flag hiding everything when collapsed
                 root._collapsed = true
+            } else if (root._state === "conversing") {
+                // [barista-fork] Off-screensaver: a silent mic-death was previously invisible, so a later
+                // "that's it for now" hit a dead mic and looked like a hang. Make the close UNMISTAKABLE — a soft
+                // non-verbal cue + a visible tap-to-resume (the Chat button reads "Chat" again now the mic stopped).
+                if (root._voice && typeof root._voice.playThinkingCue === "function") root._voice.playThinkingCue()
+                root._message = TranslationManager.translate("barista.mic.closed",
+                    "Mic paused — tap Chat when you want to keep going.")
             }
         }
     }
@@ -246,10 +256,35 @@ Item {
     // speak it from onSpeakingChanged once the lead-in finishes. Cleared on teardown so it never leaks a turn.
     property string _pendingSpeech: ""
 
+    // [barista-fork] The pre-tool lead-in text spoken this turn (set in onInterimReceived, cleared each turn in
+    // _send + on teardown). The post-tool answer is checked against it so the barista never says the same thing
+    // twice ("repeats its entire part of the discussion"). See _answerDupOfLeadin.
+    property string _leadinSpokenText: ""
+
     // [barista-fork] Safe passthrough to the diagnostic recorder (no-op if the module/recorder is absent).
     function _diag(event, detail) {
         if (typeof Barista !== "undefined" && Barista.diagnostics)
             Barista.diagnostics.mark("overlay", event, detail || ({}))
+    }
+
+    // [barista-fork] Repeat guard. Lowercase word-tokens; true when a SUBSTANTIAL lead-in (≥60 chars) already
+    // contains ≥70% of the answer's tokens — i.e. the answer just restates what was already spoken. High
+    // threshold so an answer that adds genuinely new info (e.g. weather numbers) still speaks.
+    function _tokens(s) {
+        return String(s || "").toLowerCase().replace(/[^a-z0-9 ]/g, " ")
+                     .split(/\s+/).filter(function(w) { return w.length > 0 })
+    }
+    function _answerDupOfLeadin(answer) {
+        var lead = root._leadinSpokenText
+        if (!lead || lead.length < 60) return false
+        var a = root._tokens(answer)
+        if (a.length === 0) return false
+        var lset = {}
+        var l = root._tokens(lead)
+        for (var i = 0; i < l.length; ++i) lset[l[i]] = true
+        var hit = 0
+        for (var j = 0; j < a.length; ++j) if (lset[a[j]]) hit++
+        return (hit / a.length) >= 0.7
     }
 
     // Strip markdown/code so cloud voices don't read asterisks, hashes, or JSON aloud.
@@ -492,6 +527,8 @@ Item {
     function _endSessionNow() {
         root._endAfterReply = false
         root._pendingSpeech = ""   // [barista-fork] never let a held answer speak into a torn-down session
+        root._leadinSpokenText = ""
+        root._diag("session_end_now", {})   // [barista-fork] closure was previously inferable only by silence
         if (root._orch && typeof root._orch.dismiss === "function")
             root._orch.dismiss()
     }
@@ -908,7 +945,13 @@ Item {
                 + "same reply. Vary it every time so it never sounds scripted ('let me pull that up', 'one sec, "
                 + "checking', 'hmm, let me find out', 'give me a moment on that'). Make it a brief STATEMENT, not a "
                 + "question, and never ask permission. Do this ONLY when a real lookup is actually coming — for "
-                + "anything you already know, just answer straight away with no lead-in."
+                + "anything you already know, just answer straight away with no lead-in. "
+                + "CRITICAL — NO DOUBLE-TALK: that pre-tool acknowledgment is spoken aloud to the user the instant "
+                + "you write it, so it must be ONLY a few words of acknowledgment — never the answer, never data, "
+                + "numbers, names, or findings. AFTER the tool result comes back, do NOT repeat or rephrase your "
+                + "acknowledgment — the user already heard it; continue with ONLY the new information (if the "
+                + "lookup failed, say just that, briefly). And don't silently re-run a lookup that already failed "
+                + "unless the user asks again."
 
         // dataBlock is the pre-formatted, combined context (dial-in + bean profile + profile guidance).
         var block = (dataBlock && dataBlock.length > 0) ? dataBlock : "recordedShots: 0"
@@ -995,37 +1038,39 @@ Item {
         // [barista-fork] Stuck-flag guard: a new user utterance means the conversation is continuing, so any
         // pending self-dismiss from a prior turn is void — clear it so it can never collapse this later turn.
         root._endAfterReply = false
+        root._leadinSpokenText = ""   // [barista-fork] fresh turn → no stale lead-in for the repeat guard
         var hasActions = (typeof Barista !== "undefined" && Barista.actions)
-        // [barista-fork] Non-Anthropic standalone farewell — mirror the undo/grind early intercepts. Providers
-        // without the end_conversation tool can't self-dismiss via the model, so the app handles a CLEAR, whole-
-        // string goodbye here: speak a short local sign-off and end the session, no model round-trip. Kept
-        // conservative (exact === match against the normalized utterance, like _isUndo) so a mid-chat "thanks"
-        // that's followed by more never trips it. Gated to non-Anthropic; on Anthropic the model owns the call.
+        // [barista-fork] CLEAR whole-string farewell ("that's it for now", "bye", …). Conservative exact match
+        // (like _isUndo) so a mid-chat "thanks" that's followed by more never trips it.
         var _sendIsAnthropic = typeof MainController !== "undefined" && MainController.aiManager
                                && MainController.aiManager.selectedProvider === "anthropic"
-        if (!_sendIsAnthropic) {
-            var _f = t.toLowerCase().replace(/[^a-z0-9'\s]/g, " ").replace(/\s+/g, " ").trim()
-            var _isFarewell = _f === "bye" || _f === "bye bye" || _f === "goodbye"
-                              || _f === "see you" || _f === "see ya" || _f === "see you later"
-                              || _f === "that's all" || _f === "thats all"
-                              || _f === "that'll be all" || _f === "thatll be all"
-                              || _f === "that's it" || _f === "thats it"
-                              || _f === "that's it for now" || _f === "thats it for now"
-                              || _f === "i'm done" || _f === "im done" || _f === "all done"
-                              || _f === "ok thanks" || _f === "okay thanks"
-                              || _f === "thanks that's all" || _f === "thanks thats all"
-                              || _f === "got it thanks" || _f === "ok got it thanks" || _f === "okay got it thanks"
-            if (_isFarewell) {
+        var _f = t.toLowerCase().replace(/[^a-z0-9'\s]/g, " ").replace(/\s+/g, " ").trim()
+        var _isFarewell = _f === "bye" || _f === "bye bye" || _f === "goodbye"
+                          || _f === "see you" || _f === "see ya" || _f === "see you later"
+                          || _f === "that's all" || _f === "thats all"
+                          || _f === "that'll be all" || _f === "thatll be all"
+                          || _f === "that's it" || _f === "thats it"
+                          || _f === "that's it for now" || _f === "thats it for now"
+                          || _f === "i'm done" || _f === "im done" || _f === "all done"
+                          || _f === "ok thanks" || _f === "okay thanks"
+                          || _f === "thanks that's all" || _f === "thanks thats all"
+                          || _f === "got it thanks" || _f === "ok got it thanks" || _f === "okay got it thanks"
+        if (_isFarewell) {
+            if (_sendIsAnthropic) {
+                // [barista-fork] The "that's it for now" HANG fix: let the model speak its OWN natural sign-off
+                // (owner's no-canned-strings rule), but ARM the session close so it ends after that reply even if
+                // the model forgets to call end_conversation. Armed after the clear above; onResponseReceived /
+                // onSpeakingChanged close the session once the sign-off finishes. Fall through to the model turn.
+                root._endAfterReply = true
+            } else {
+                // Non-Anthropic providers can't self-dismiss via a tool → handle the goodbye locally (no round-trip).
                 var byeMsg = TranslationManager.translate("barista.bye", "Anytime — enjoy!")
                 root._message = byeMsg
                 if (root._orch && typeof root._orch.markExchangeCompleted === "function")
                     root._orch.markExchangeCompleted()
                 root._speakSanitised(byeMsg)
-                // End after the sign-off: if it will speak, onSpeakingChanged(false) ends it; if muted/off, end now.
-                if (root._voice && root._voice.speaking)
-                    root._endAfterReply = true
-                else
-                    root._endSessionNow()
+                if (root._voice && root._voice.speaking) root._endAfterReply = true
+                else root._endSessionNow()
                 return
             }
         }
@@ -1232,6 +1277,7 @@ Item {
             // reveals it). If muted (nothing will be spoken), show it now so a muted reply still displays.
             if (!root._voice || !root._settings || !root._settings.voiceEnabled) root._message = clean
             else root._pendingDisplayText = clean
+            root._leadinSpokenText = clean  // [barista-fork] remember it — the post-tool answer must not repeat it
             root._markSpokeThisTurn()      // suppress the Part B cue + stop the 5s timer
             if (root._voiceInput && root._voiceInput.listening) root._voiceInput.pauseMic()
             root._diag("interim_leadin", { chars: clean.length, speakingNow: root._voice ? root._voice.speaking : false })
@@ -1245,8 +1291,18 @@ Item {
             // [barista-fork] Text-on-speak: hold the answer text until the voice is audible (revealed in
             // onAudibleChanged); show immediately only if muted (nothing will be spoken).
             var _answerText = root._stripBlock(response)   // hide the JSON action block from the display
-            if (!root._voice || !root._settings || !root._settings.voiceEnabled) root._message = _answerText
-            else root._pendingDisplayText = _answerText
+            // [barista-fork] Repeat guard: if this post-tool answer just restates the already-spoken lead-in,
+            // don't speak it twice. Show the (fuller) text directly and skip the TTS below.
+            var _dupLeadin = root._answerDupOfLeadin(_answerText)
+            if (_dupLeadin) {
+                root._message = _answerText
+                root._pendingDisplayText = ""
+                root._diag("answer_skipped_duplicate_of_leadin", { chars: _answerText.length, leadinChars: root._leadinSpokenText.length })
+            } else if (!root._voice || !root._settings || !root._settings.voiceEnabled) {
+                root._message = _answerText
+            } else {
+                root._pendingDisplayText = _answerText
+            }
             root._thinking = false
             root._markSpokeThisTurn()
             root._cancelSlowOpWatch()   // [barista-fork] the real answer is here → stop the still-working heartbeat
@@ -1261,7 +1317,10 @@ Item {
             root._diag("response_received", { chars: (response || "").length, speakingNow: root._voice ? root._voice.speaking : false, endAfter: root._endAfterReply })
             // [barista-fork] Don't cut off a still-playing lead-in: if the barista is mid-sentence on its
             // pre-tool lead-in, hold the answer and speak it when that finishes (onSpeakingChanged drains it).
-            if (root._voice && root._voice.speaking) {
+            // Skip the TTS entirely if the answer just duplicates the lead-in (already spoken + shown above).
+            if (_dupLeadin) {
+                // no-op: the lead-in already said this; text is displayed, nothing more to speak.
+            } else if (root._voice && root._voice.speaking) {
                 root._pendingSpeech = response
                 root._diag("response_deferred_until_leadin_done", { chars: (response || "").length })
             } else {
@@ -1311,6 +1370,12 @@ Item {
             root._message = (error && error.length > 0)
                 ? error
                 : TranslationManager.translate("barista.err", "Something went wrong — tap Chat or type to try again.")
+            // [barista-fork] The user asked to end (e.g. "that's it for now") but the closing turn errored/timed
+            // out → honor the intent and close instead of hanging open with the flag armed.
+            if (root._endAfterReply) {
+                root._endSessionNow()
+                return
+            }
             // Reopen the mic if a session is live (the turn failed, not the session) — unless the user paused.
             if (root._voiceInput && root._voiceInput.listening && !root._paused
                     && (!root._voice || !root._voice.speaking))

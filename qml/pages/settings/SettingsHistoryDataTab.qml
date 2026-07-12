@@ -690,7 +690,7 @@ KeyboardAwareContainer {
                                                 ? ", " + TranslationManager.translate("barista.selected", "selected")
                                                 : "")
                             accessibleItem: personRow
-                            onAccessibleClicked: Settings.dye.setDyeBarista(personRow.modelData.name || "")
+                            onAccessibleClicked: Settings.dye.dyeBarista = personRow.modelData.name || ""   // [barista-fork] property assign; setDyeBarista() isn't Q_INVOKABLE (silent TypeError)
                             onAccessibleLongPressed: peopleEditDialog.openForEdit(personRow.modelData)
                         }
                     }

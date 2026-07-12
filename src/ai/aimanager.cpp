@@ -2100,7 +2100,10 @@ void AIManager::analyzeConversation(const QString& systemPrompt, const QJsonArra
     m_lastUserPrompt = QString("[Conversation with %1 messages]").arg(apiMessages.size());
 
     logPrompt(selectedProvider(), systemPrompt, m_lastUserPrompt);
-    provider->analyzeConversation(systemPrompt, apiMessages, AIProvider::RequestOptions{webSearch, clientTools});
+    // [barista-fork] Interactive conversation turns get a ~30s per-request timeout (vs the 60s deep-analysis
+    // default) so a stalled request fails+recovers fast instead of a long freeze. transferTimeout is per-request
+    // inactivity, so each tool-round leg gets its own 30s — a healthy leg completes in seconds.
+    provider->analyzeConversation(systemPrompt, apiMessages, AIProvider::RequestOptions{webSearch, clientTools, 30000});
 }
 
 void AIManager::refreshOllamaModels()

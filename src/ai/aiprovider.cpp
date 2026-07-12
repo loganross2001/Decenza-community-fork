@@ -1,4 +1,6 @@
 #include "aiprovider.h"
+#include <QDateTime>
+#include <QDebug>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
@@ -8,6 +10,16 @@
 #include <QVariant>
 #include <QVector>
 #include <memory>
+
+namespace {
+// [barista-fork] AI-turn instrumentation. Emitted via the "[BaristaDiag]" qDebug tag (which lands in debug.log)
+// rather than BaristaDiagnostics::record — the standalone AI test targets compile aiprovider.cpp WITHOUT the
+// barista diagnostics object, so a direct call breaks their link. Greppable in debug.log for tool-vs-model timing.
+inline void aiDiag(const QString& event, const QString& detail = QString()) {
+    qDebug().noquote() << (QStringLiteral("[BaristaDiag] ai ") + event
+                           + (detail.isEmpty() ? QString() : (QLatin1Char(' ') + detail)));
+}
+}  // namespace
 
 // ============================================================================
 // AIProvider base class
@@ -579,10 +591,19 @@ void AnthropicProvider::sendRequest(const QJsonObject& requestBody)
     // The 1-hour TTL tier is GA — no beta header required. Cache writes
     // cost 2x base input (vs 1.25x for 5-min); reads stay at 0.1x.
     // Break-even is ~2 reads per write, easily met for any iterative dial-in.
-    req.setTransferTimeout(ANALYSIS_TIMEOUT_MS);
+    // [barista-fork] Interactive barista turns pass a shorter timeout (RequestOptions.timeoutMs, ~30s) so a
+    // stalled request fails+recovers fast; deep-analysis/advisor leave it 0 → the 60s default. transferTimeout
+    // is an inactivity abort, which for this non-streaming POST is effectively a total cap — safe. Applies to
+    // every tool-round re-POST of this turn too, since m_currentTimeoutMs persists across the turn.
+    const int reqTimeout = m_currentTimeoutMs > 0 ? m_currentTimeoutMs : ANALYSIS_TIMEOUT_MS;
+    req.setTransferTimeout(reqTimeout);
 
     m_retryFn = [this, requestBody]() { sendRequest(requestBody); };
     m_pendingRequestBody = requestBody;   // [barista-fork] basis for a pause_turn continuation
+
+    // [barista-fork][diag] request timing — split tool-time vs model-time when a turn feels "stuck".
+    m_requestSentMs = QDateTime::currentMSecsSinceEpoch();
+    aiDiag(QStringLiteral("request_sent"), QStringLiteral("round=%1 timeoutMs=%2").arg(m_toolRounds).arg(reqTimeout));
 
     QByteArray body = QJsonDocument(requestBody).toJson();
     QNetworkReply* reply = m_networkManager->post(req, body);
@@ -676,6 +697,7 @@ void AnthropicProvider::analyzeConversation(const QString& systemPrompt, const Q
     }
 
     setStatus(Status::Busy);
+    m_currentTimeoutMs = options.timeoutMs;   // [barista-fork] this turn's transfer timeout (used in sendRequest)
     m_retryCount = 0;
     m_continuations = 0;          // [barista-fork]
     m_accumulatedText.clear();    // [barista-fork]
@@ -814,6 +836,10 @@ void AnthropicProvider::onAnalysisReply(QNetworkReply* reply)
     }
 
     const QString stopReason = root["stop_reason"].toString();
+    // [barista-fork][diag] model reply latency + stop_reason — the other half of the tool-vs-model split.
+    if (m_requestSentMs != 0)
+        aiDiag(QStringLiteral("reply"), QStringLiteral("ms=%1 stop_reason=%2 round=%3")
+               .arg(QDateTime::currentMSecsSinceEpoch() - m_requestSentMs).arg(stopReason).arg(m_toolRounds));
     const QJsonArray content = root["content"].toArray();
     if (content.isEmpty()) {
         // [barista-fork] An empty terminal response is a GENUINE failure ONLY if this turn produced nothing
@@ -881,9 +907,15 @@ void AnthropicProvider::onAnalysisReply(QNetworkReply* reply)
             auto results = std::make_shared<QJsonArray>();
             for (const QJsonObject& block : toolUses) {
                 const QString id = block["id"].toString();
-                m_toolExecutor(block["name"].toString(), block["input"].toObject(),
-                    [this, gen, id, pending, results, content](QJsonValue result) {
+                const QString toolName = block["name"].toString();
+                const qint64 toolT0 = QDateTime::currentMSecsSinceEpoch();
+                m_toolExecutor(toolName, block["input"].toObject(),
+                    [this, gen, id, toolName, toolT0, pending, results, content](QJsonValue result) {
                         if (gen != m_reqGen) return;   // a newer turn started — drop this stale result
+                        // [barista-fork][diag] tool completion timing — split tool-vs-model time on a "stuck" turn.
+                        aiDiag(QStringLiteral("tool_done"), QStringLiteral("name=%1 ms=%2 is_error=%3")
+                               .arg(toolName).arg(QDateTime::currentMSecsSinceEpoch() - toolT0)
+                               .arg(result.isObject() && result.toObject().contains(QStringLiteral("error")) ? 1 : 0));
                         // Anthropic wants tool_result.content as a string; JSON-stringify arrays/objects.
                         QString contentStr;
                         if (result.isString())      contentStr = result.toString();

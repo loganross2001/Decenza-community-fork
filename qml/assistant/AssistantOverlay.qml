@@ -31,6 +31,9 @@ Item {
         onTriggered: {
             if (root._voiceInput) root._voiceInput.stop()
             root._diag("mic_autoclose_silence", { screensaver: root._screensaverActive })   // was invisible before
+            // [barista-fork] Clear the grind-ask chip on auto-close so a panel re-opened much later doesn't lead
+            // with a contextless "change the grind?" button (the owner's "came back later, stale button").
+            if (root._pendingGrind) { root._pendingGrind = null; root._diag("grind_chip_cleared", { reason: "timeout" }) }
             // [barista-fork] Screensaver burn-in safety: a panel left open over the screensaver must not
             // sit lit if the user walked away. On silence-timeout during the screensaver, collapse back to
             // the faint drifting avatar (keep the session primed + recoverable via _tapDock — do NOT dismiss,
@@ -85,16 +88,18 @@ Item {
             // the visual "thinking beat" going; the loop covers the silence from the moment the user stops.
         }
     }
-    // [barista-fork] Reactive control of the thinking-earcon loop: it should hum whenever a model turn is in
-    // flight and NOTHING is audible yet (fills the model round-trip silence), and stop the instant real audio
-    // starts (or the barista/coach voice speaks a lead-in). Called on turn start + whenever `audible`/speech
-    // flips. C++ startThinkingLoop honors the barista mute + the "off" setting + is idempotent.
+    // [barista-fork] Reactive control of the cue loop, which doubles as the SPEAKER KEEPALIVE: run it whenever a
+    // turn is in flight OR a speak is pending-but-not-yet-audible (`speaking && !audible` = the synth/prepare gap
+    // that was clipping the first words on a sleepy BT speaker), and stop the instant real audio is `audible`
+    // (handled event-based in C++ handleAndroidPlaybackStarted). Called on turn start + whenever audible/speech
+    // flips + on any speak dispatch. C++ startThinkingLoop honors mute + loops a sub-perceptible keepalive when
+    // the earcon is "off" + is idempotent.
     function _updateThinkingLoop() {
         if (!root._voice)
             return
         var coachBusy = (typeof Barista !== "undefined" && Barista.coachingVoice && Barista.coachingVoice.speaking)
-        var want = root._thinking && root._state === "conversing"
-                   && !root._voice.audible && !root._voice.speaking && !coachBusy
+        var want = root._state === "conversing" && !root._voice.audible && !root._paused && !coachBusy
+                   && (root._thinking || root._voice.speaking)
         if (want) root._voice.startThinkingLoop()
         else root._voice.stopThinkingLoop()
     }
@@ -154,6 +159,7 @@ Item {
             if (root._voice && root._voice.audible && root._pendingDisplayText.length > 0) {
                 root._message = root._pendingDisplayText
                 root._pendingDisplayText = ""
+                root._diag("display_reveal", { source: "audible" })
             }
         }
         function onSpeakingChanged() {
@@ -172,6 +178,15 @@ Item {
                 root._diag("speak_deferred_now", { chars: deferred.length })
                 root._speakSanitised(deferred)
                 return
+            }
+            // [barista-fork] Never-audible reveal fallback: this speak ended without ever becoming audible (a
+            // barge-in stop, a cloud error with no native engine, or a reply that sanitised to empty). Reveal
+            // the held text now instead of leaving it to ambush a LATER utterance's audible rise (the "old text
+            // shows with a new response" bug). Sits after the deferral drain, before the end-session check.
+            if (root._voice && !root._voice.speaking && !root._voice.audible && root._pendingDisplayText.length > 0) {
+                root._message = root._pendingDisplayText
+                root._pendingDisplayText = ""
+                root._diag("display_reveal", { source: "speakEndFallback" })
             }
             // [barista-fork] The barista signed off and asked to end the session → collapse only NOW that the
             // sign-off finished speaking (never cut it off). Checked BEFORE the listening guard so a text-only
@@ -309,6 +324,9 @@ Item {
         var clean = (t || "").replace(/```[\s\S]*?```/g, " ").replace(/[*_#`>]/g, "")
                               .replace(/^\s*[-•]\s+/gm, "").replace(/\s+/g, " ").trim()
         root._voice.speak(clean)
+        // [barista-fork] Start the cue-loop keepalive so the BT speaker is awake before this speak becomes
+        // audible (covers local confirmations + the deferred answer, which aren't in a _thinking window).
+        root._updateThinkingLoop()
     }
     // Strip the trailing structuredNext fenced block from the DISPLAYED message (keep the prose).
     function _stripBlock(t) {
@@ -338,6 +356,7 @@ Item {
             else
                 msg = TranslationManager.translate("barista.act.nothing", "Nothing to change there.")
         }
+        root._pendingDisplayText = ""   // [barista-fork] local confirm shows immediately → no held text to reveal over it
         root._message = msg
         root._speakSanitised(msg)
         root._pendingNext = null
@@ -357,6 +376,7 @@ Item {
         var ok = Barista.actions.undoLastAutoApply()
         var msg = ok ? TranslationManager.translate("barista.act.undone", "Okay — I put it back.")
                      : TranslationManager.translate("barista.act.nothingUndo", "There's nothing to undo.")
+        root._pendingDisplayText = ""   // [barista-fork] local confirm shows immediately
         root._message = msg
         root._speakSanitised(msg)
         root._resumeMicAfterLocal()
@@ -525,6 +545,7 @@ Item {
         root._pendingNext = null
         root._awaitConfirm = false
         root._pendingGrind = null
+        root._pendingDisplayText = ""   // [barista-fork] no held text survives into the next session's first audible
         root._awaitingContext = false   // BL-1: a late context build must not open a turn while dormant
         root._thinking = false
         root._primed = false
@@ -562,6 +583,7 @@ Item {
             return
         }
         root._message = ""
+        root._pendingDisplayText = ""   // [barista-fork] fresh session → no held text from a prior one
         root._thinking = true
         root._awaitingContext = true
         root._closeOutRated = false
@@ -648,8 +670,8 @@ Item {
                + "take the grind to 4.4?'). Do NOT change anything yet. ONLY once the user clearly approves ('yes', "
                + "'do it', 'go ahead') do you call the apply_dial_change tool with just the field(s) that change. "
                + "THINK AND SET IN DOSE + RATIO, NOT YIELD — yield is just dose×ratio, so send doseG (grams IN) + ratio "
-               + "and let the app compute the yield; use the ratio NAMES when natural (Ristretto ≈1:1, Normale ≈1:2, "
-               + "Lungo ≈1:3). Fields: grinderSetting (off-machine grinder dial), doseG (grams in), ratio (e.g. 2.0 for "
+               + "and let the app compute the yield; name the shot type per SHOT TYPES above (the `ratio` field is still "
+               + "the number). Fields: grinderSetting (off-machine grinder dial), doseG (grams in), ratio (e.g. 2.0 for "
                + "1:2.0), temperatureC; only send targetWeightG if the user gives an explicit grams-out. Never call it "
                + "unprompted, to acknowledge, or to restate unchanged settings. AFTER it runs, REPORT STRICTLY FROM THE "
                + "RESULT: confirm ONLY what's listed under 'applied'/'queued' as done ('Done — grind's at 4.4 for the "
@@ -662,7 +684,7 @@ Item {
                + "that change:\n"
                + "```json\n{\"grinderSetting\":\"4.75\",\"doseG\":18.0,\"targetWeightG\":36.0,\"ratio\":2.0,\"temperatureC\":92.0,\"expectation\":\"less sour\"}\n```\n"
                + "grinderSetting = grinder dial (off-machine), doseG = grams IN, ratio = brew ratio e.g. 2.0 for 1:2.0 "
-               + "(use the ratio names when natural — Ristretto ≈1:1, Normale ≈1:2, Lungo ≈1:3), temperatureC = brew temp. "
+               + "(name the shot type per SHOT TYPES above; the ratio field is still the number), temperatureC = brew temp. "
                + "THINK IN DOSE + RATIO, NOT YIELD — yield is just dose×ratio, so send doseG + ratio and let the app "
                + "compute it; only send targetWeightG if the user gives an explicit grams-out. Give REAL numbers. The app applies the "
                + "proposed block ONLY after the user approves by voice ('yes'/'do it'); until then nothing changes. Do "
@@ -738,6 +760,14 @@ Item {
             + "grind change, rule out: days off roast or a recent freeze→thaw (a bag under ~5 days runs fast and "
             + "unstable — don't chase it finer), dose consistency vs the last shots, and — if taste won't respond to "
             + "grind or ratio — water. Expect to grind finer as a bag ages. Adapt to their replies.\n"
+            + "SHOT TYPES — talk about espresso by TYPE, not raw ratios. The types are RANGES, not points: "
+            + "ristretto (short, ~1:1–1:1.5), normale (~1:2–1:2.5), lungo (~1:3 and longer). This user's own preset "
+            + "dial-points: ristretto 1:" + Settings.brew.ratioPreset1.toFixed(1) + ", normale 1:" + Settings.brew.ratioPreset2.toFixed(1)
+            + ", lungo 1:" + Settings.brew.ratioPreset3.toFixed(1) + ". LEAD with the type name whenever you describe, propose, "
+            + "or confirm a shot ('let's make it a normale', 'that's pulling as a lungo'). Give a ratio NUMBER only when "
+            + "fine-tuning WITHIN a type ('a normale, around 1:2.3') or when the user asks for the number. They're ranges "
+            + "and bean-dependent, so never force a ratio into the wrong bucket or fake precision — between types, name the "
+            + "nearest and qualify it ('a long normale, about 1:2.7'). When you APPLY a change, the tool still takes the numeric ratio.\n"
             + "JUST-PULLED SHOT: if sessionContext.justPulledShot is present, a shot finished a few minutes ago and "
             + "you already know it — do NOT announce it or ask 'how did it taste?' out of nowhere. Wait for the user. "
             + "When the user describes the taste ('that was sour', 'bit thin', 'perfect') OR gives a rating ('I'd "
@@ -768,6 +798,8 @@ Item {
             + "  • just-pulled, sour: \"Sour and thin — under-extracted. Want me to take the grind to 4.4? Milk could "
             + "use a couple more seconds of stretch too.\" (silent log; apply only once they say yes)\n"
             + "  • user approves: \"Done — grind's at 4.4 for the next one.\" (after apply_dial_change)\n"
+            + "  • shot type (lead with the name): \"Want to stretch it to a lungo, around 1:2.9? Might open up that "
+            + "florals.\" — not \"want to go to 1:2.9?\"\n"
             + "  • earlierToday: \"Back for round two — Ethiopian's a nice afternoon call. You were at 5.0 last time, "
             + "ran slow — want to go 5.2?\""
 
@@ -1062,6 +1094,9 @@ Item {
         // pending self-dismiss from a prior turn is void — clear it so it can never collapse this later turn.
         root._endAfterReply = false
         root._leadinSpokenText = ""   // [barista-fork] fresh turn → no stale lead-in for the repeat guard
+        // [barista-fork] New turn supersedes any held display text (a prior turn whose audio never started must
+        // not linger or ambush this turn's reveal). _message is cleared on the model path below (shows "…").
+        root._pendingDisplayText = ""
         var hasActions = (typeof Barista !== "undefined" && Barista.actions)
         // [barista-fork] CLEAR whole-string farewell ("that's it for now", "bye", …). Conservative exact match
         // (like _isUndo) so a mid-chat "thanks" that's followed by more never trips it.
@@ -1117,6 +1152,9 @@ Item {
             var g = Barista.actions.parseConfirmation(t)   // 1 yes / 0 no / -1 neither
             if (g === 1) { root._resolveGrind(true); return }
             if (g === 0) { root._resolveGrind(false); return }
+            // [barista-fork] Neither yes nor no — the user moved on. Drop the CHIP so it can't linger contextlessly
+            // (the queue record + unconfirmedGrindSetting context stay, so the model can re-raise in its own words).
+            if (root._pendingGrind) { root._pendingGrind = null; root._diag("grind_chip_cleared", { reason: "newUtterance" }) }
         }
         // Apply-on-confirm for a pending recommendation ("OK" → apply; "no" → skip).
         if (hasActions && root._awaitConfirm && root._pendingNext) {
@@ -1166,6 +1204,7 @@ Item {
                 }
             }
         }
+        root._message = ""   // [barista-fork] model turn dispatched → drop the prior reply so "…" shows, never stale text
         root._thinking = true
         if (root._voiceInput && root._voiceInput.listening) root._voiceInput.pauseMic()
         root._stampTurn()

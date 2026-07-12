@@ -4,6 +4,7 @@
 #include "../core/settings_dye.h"
 #include "../core/settings_brew.h"
 #include "../machine/machinestate.h"
+#include "baristadiagnostics.h"   // [barista-fork] audit apply_from_next
 
 #include <QSettings>
 #include <QJsonDocument>
@@ -51,30 +52,42 @@ QVariantMap BaristaActions::applyFromNext(const QVariantMap& next, qint64 anchor
             else failed << QStringLiteral("dose");
         } else { rejected << QStringLiteral("dose"); }
     }
+    const double lastRatioBefore = brew ? brew->lastUsedRatio() : 0.0;   // [barista-fork] for the diag + undo
     const double yield = next.value("targetWeightG").toDouble();
     if (brew && yield > 0) {
         if (yield >= 10.0 && yield <= 120.0) {
             m_undo["targetWeightG_had"] = brew->hasBrewYieldOverride();
             m_undo["targetWeightG"] = brew->brewYieldOverride();
             brew->setBrewYieldOverride(yield);
+            // [barista-fork] Also sync lastUsedRatio (mirrors BrewDialog): the idle bean auto-capture recomputes
+            // the yield from lastUsedRatio on the next weigh-in, so leaving it stale would silently revert this.
+            const double curDose = dye ? dye->dyeBeanWeight() : 0.0;
+            if (curDose > 0) {
+                m_undo["lastUsedRatio_had"] = true;
+                m_undo["lastUsedRatio"] = lastRatioBefore;
+                brew->setLastUsedRatio(yield / curDose);
+            }
             if (qAbs(brew->brewYieldOverride() - yield) < 0.05)
                 applied << QStringLiteral("yield %1 g").arg(yield, 0, 'f', 1);
             else failed << QStringLiteral("yield");
         } else { rejected << QStringLiteral("yield"); }
     }
-    // Ratio (e.g. 2.0 for 1:2.0): compute the yield from ratio × the (current or just-set) dose, so a
-    // "make it 1:2.5" request applies without the model doing the arithmetic. An explicit targetWeightG
-    // wins; ratio only fills in when no yield was given.
+    // Ratio (e.g. 2.0 for 1:2.0): apply it the SAME way the ratio quick-select does — set lastUsedRatio AND the
+    // yield override (= ratio × dose, with an 18 g dose fallback like the pill/dialogs), so the ratio pill and
+    // Brew Settings reflect it AND the next weigh-in doesn't revert it. An explicit targetWeightG wins.
     const double ratio = next.value("ratio").toDouble();
     if (brew && dye && ratio >= 1.0 && ratio <= 5.0 && yield <= 0) {
-        const double baseDose = dye->dyeBeanWeight();   // reflects the dose just applied above, if any
+        const double baseDose = dye->dyeBeanWeight() > 0 ? dye->dyeBeanWeight() : 18.0;   // pill/dialog fallback
         const double computedYield = baseDose * ratio;
-        if (baseDose > 0 && computedYield >= 10.0 && computedYield <= 120.0) {
+        if (computedYield >= 10.0 && computedYield <= 120.0) {
             m_undo["targetWeightG_had"] = brew->hasBrewYieldOverride();
             m_undo["targetWeightG"] = brew->brewYieldOverride();
+            m_undo["lastUsedRatio_had"] = true;
+            m_undo["lastUsedRatio"] = lastRatioBefore;
+            brew->setLastUsedRatio(ratio);
             brew->setBrewYieldOverride(computedYield);
-            if (qAbs(brew->brewYieldOverride() - computedYield) < 0.05)
-                applied << QStringLiteral("ratio 1:%1 → yield %2 g").arg(ratio, 0, 'f', 2).arg(computedYield, 0, 'f', 1);
+            if (qAbs(brew->lastUsedRatio() - ratio) < 0.01 && qAbs(brew->brewYieldOverride() - computedYield) < 0.05)
+                applied << QStringLiteral("ratio 1:%1").arg(ratio, 0, 'f', 2);
             else failed << QStringLiteral("ratio");
         } else { rejected << QStringLiteral("ratio"); }
     }
@@ -116,6 +129,17 @@ QVariantMap BaristaActions::applyFromNext(const QVariantMap& next, qint64 anchor
     result["failed"] = failed;   // the barista MUST NOT claim anything in here (see the report-from-machine persona rule)
     result["rejected"] = rejected;
     result["blocked"] = false;
+    // [barista-fork] Make the apply auditable (was invisible): dose used, ratio, and the lastUsedRatio move so a
+    // "pill didn't update" report can be told apart from a rejection or a stale-ratio revert.
+    BaristaDiagnostics::record(QStringLiteral("actions"), QStringLiteral("apply_from_next"),
+        {{QStringLiteral("ratio"), ratio},
+         {QStringLiteral("yield"), yield},
+         {QStringLiteral("dose"), dye ? dye->dyeBeanWeight() : 0.0},
+         {QStringLiteral("lastRatioBefore"), lastRatioBefore},
+         {QStringLiteral("lastRatioAfter"), brew ? brew->lastUsedRatio() : 0.0},
+         {QStringLiteral("applied"), applied.join(QLatin1Char(','))},
+         {QStringLiteral("failed"), failed.join(QLatin1Char(','))},
+         {QStringLiteral("rejected"), rejected.join(QLatin1Char(','))}});
     return result;
 }
 
@@ -137,6 +161,8 @@ void BaristaActions::undoLast() {
         else
             brew->setBrewYieldOverride(0);   // S3: clear the override we created (0 = no override)
     }
+    if (brew && m_undo.value("lastUsedRatio_had").toBool())   // [barista-fork] restore the pre-apply ratio
+        brew->setLastUsedRatio(m_undo.value("lastUsedRatio").toDouble());
     // Restore the off-machine grind queue to its pre-enqueue state (reverses the supersede+append).
     if (m_undo.value("pendingBefore_had").toBool())
         savePending(m_undo.value("pendingBefore").toList());

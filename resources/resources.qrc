@@ -16,6 +16,8 @@
         <file>sounds/think-drone.wav</file>
         <!-- [barista-fork] Brief subtle tone to wake a sleeping BT/USB speaker before the first utterance -->
         <file>sounds/wake-tone.wav</file>
+        <!-- [barista-fork] Sub-perceptible keepalive loop: keeps the BT speaker awake through the synth/prepare gap -->
+        <file>sounds/keepalive.wav</file>
         <!-- Splash screens (random on startup) -->
         <file>splash/splash1.png</file>
         <file>splash/splash2.png</file>

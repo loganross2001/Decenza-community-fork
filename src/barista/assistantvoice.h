@@ -152,7 +152,7 @@ private:
     // "off". On Android the qrc asset is extracted to a temp file once (the native MediaPlayer can't read qrc:).
     QString thinkingSoundName() const;
 #ifdef Q_OS_ANDROID
-    QString extractThinkingAssetToFile(const QString& name);   // qrc:/sounds/think-<name>.wav → temp path (cached)
+    QString extractSoundAssetToFile(const QString& fileName);   // qrc:/sounds/<fileName> → temp path (cached)
 #endif
 
     QTextToSpeech* m_tts = nullptr;

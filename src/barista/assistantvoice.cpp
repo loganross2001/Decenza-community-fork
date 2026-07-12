@@ -260,10 +260,11 @@ double AssistantVoice::effectiveVolume() const {
     const double raw = m_role == Role::Coaching ? m_settings->coachingVoiceVolume()
                                                 : m_settings->baristaVoiceVolume();
     // [barista-fork] PERCEPTUAL curve: loudness is ~logarithmic, so a LINEAR gain made low-end slider steps
-    // feel like huge jumps and high-end steps inaudible. Map slider position → gain as raw^2.5 so equal slider
-    // movement ≈ equal PERCEIVED loudness change (fine control low, smooth high). raw stays the stored 0..1.
+    // feel like huge jumps and high-end steps inaudible. Map slider position → gain as raw^2 so equal slider
+    // movement ≈ equal PERCEIVED loudness change. (raw^2.5 was too aggressive — 0.21 → ~0.02 = ~2% actual, too
+    // quiet at the low end; raw^2 gives 0.21 → ~0.044, a usable low end while still smoother than linear.)
     const double v = raw < 0.0 ? 0.0 : (raw > 1.0 ? 1.0 : raw);
-    return std::pow(v, 2.5);
+    return v * v;
 }
 
 // Apply this role's rate + volume to the native engine right before say(). QTextToSpeech::setRate takes
@@ -657,13 +658,13 @@ QString AssistantVoice::thinkingSoundName() const {
 }
 
 #ifdef Q_OS_ANDROID
-// Android's MediaPlayer can't read qrc: URLs, so copy the packaged asset to a stable temp file once (per name)
-// and hand it the path. Returns empty on failure.
-QString AssistantVoice::extractThinkingAssetToFile(const QString& name) {
-    const QString dest = QDir::tempPath() + QStringLiteral("/decenza_think_%1.wav").arg(name);
+// Android's MediaPlayer can't read qrc: URLs, so copy the packaged sound asset (e.g. "think-hum.wav" or
+// "keepalive.wav") to a stable temp file once and hand it the path. Returns empty on failure.
+QString AssistantVoice::extractSoundAssetToFile(const QString& fileName) {
+    const QString dest = QDir::tempPath() + QStringLiteral("/decenza_snd_") + fileName;
     if (QFile::exists(dest) && QFileInfo(dest).size() > 0)
         return dest;
-    QFile src(QStringLiteral(":/sounds/think-%1.wav").arg(name));   // qrc alias for qrc:/sounds/...
+    QFile src(QStringLiteral(":/sounds/") + fileName);   // qrc alias for qrc:/sounds/...
     if (!src.open(QIODevice::ReadOnly))
         return QString();
     QFile out(dest);
@@ -676,29 +677,37 @@ QString AssistantVoice::extractThinkingAssetToFile(const QString& name) {
 #endif
 
 void AssistantVoice::startThinkingLoop() {
-    // Honor the barista mute (a muted barista stays fully silent) and the "off" setting.
+    // Honor the barista mute (a muted barista stays fully silent).
     if (m_role == Role::Barista && m_settings && !m_settings->voiceEnabled())
         return;
-    const QString name = thinkingSoundName();
-    if (name.isEmpty())            // "off"
+    if (m_thinkingLooping)         // idempotent — already looping
         return;
-    if (m_thinkingLooping)         // idempotent — already humming
-        return;
+    // [barista-fork] The cue player also serves as a SPEAKER KEEPALIVE: it runs through the model-thinking AND
+    // the synth/prepare gap before speech, so the BT speaker never gates off and clips the first words (stopped
+    // in handleAndroidPlaybackStarted the instant real audio starts). When the earcon is "off", we still loop a
+    // sub-perceptible keepalive.wav (true silence lets the A2DP sink sleep) so "off" users get the wake benefit.
+    const QString name = thinkingSoundName();   // empty => "off"
+    const bool keepaliveOnly = name.isEmpty();
+    const QString soundLabel = keepaliveOnly ? QStringLiteral("keepalive") : name;
+    const QString fileName   = keepaliveOnly ? QStringLiteral("keepalive.wav")
+                                             : QStringLiteral("think-%1.wav").arg(name);
     m_thinkingLooping = true;
-    BaristaDiagnostics::record(QStringLiteral("voice"), QStringLiteral("thinking_loop_on"), {{QStringLiteral("sound"), name}});
+    BaristaDiagnostics::record(QStringLiteral("voice"), QStringLiteral("thinking_loop_on"), {{QStringLiteral("sound"), soundLabel}});
 #ifdef Q_OS_ANDROID
-    const QString path = extractThinkingAssetToFile(name);
+    const QString path = extractSoundAssetToFile(fileName);
+    // keepalive.wav is already authored at ~-42 dBFS → play near unity (still inaudible); the hums play at 0.5.
+    const float gain = keepaliveOnly ? 1.0f : 0.5f;
     if (!path.isEmpty() && m_androidCue.isValid()) {
         m_androidCue.callMethod<void>("playLooping", "(Ljava/lang/String;F)V",
-            QJniObject::fromString(path).object<jstring>(), static_cast<jfloat>(0.5));
+            QJniObject::fromString(path).object<jstring>(), static_cast<jfloat>(gain));
     }
 #else
     if (!m_thinkingLoop) {
         m_thinkingLoop = new QSoundEffect(this);
         m_thinkingLoop->setLoopCount(QSoundEffect::Infinite);
-        m_thinkingLoop->setVolume(0.35);
     }
-    m_thinkingLoop->setSource(QUrl(QStringLiteral("qrc:/sounds/think-%1.wav").arg(name)));
+    m_thinkingLoop->setVolume(keepaliveOnly ? 1.0 : 0.35);
+    m_thinkingLoop->setSource(QUrl(QStringLiteral("qrc:/sounds/") + fileName));
     m_thinkingLoop->play();
 #endif
 }
@@ -737,6 +746,8 @@ void AssistantVoice::playWakeTone() {
     if (m_role != Role::Barista)
         return;
     if (m_settings && !m_settings->voiceEnabled())
+        return;
+    if (m_thinkingLooping)   // [barista-fork] the cue loop already keeps the speaker awake → no wake tone needed
         return;
     BaristaDiagnostics::record(QStringLiteral("voice"), QStringLiteral("wake_tone"), {});
 #ifdef Q_OS_ANDROID

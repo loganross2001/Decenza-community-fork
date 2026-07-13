@@ -232,24 +232,25 @@ QJsonArray BaristaTools::toolDefinitions()
 
     // [barista-fork] apply_dial_change (WRITE) — apply an agreed next-shot dial change. This is the
     // approve-then-apply seam: the barista PROPOSES a change and asks; only once the user clearly approves
-    // ("yes" / "do it" / "go ahead") does it call this. dose/yield/temperature are written to the next-shot
-    // dial immediately; grinderSetting (off-machine) is queued and confirmed at the next shot. The executor
-    // range-checks every value (a hallucinated 200 °C never reaches the machine) and reports back what was
-    // applied/queued/rejected so the barista can confirm accurately.
+    // ("yes" / "do it" / "go ahead") does it call this. ALL fields — dose, yield, temperature, AND grinder —
+    // are set immediately (owner decision 2026-07-13: grind is direct-set, no off-machine queue/confirm-later).
+    // The NUMERIC fields (dose/yield/ratio/temp) are range-checked (a hallucinated 200 °C never reaches the
+    // machine); the grinder setting is grinder-specific free text, so it is applied as given (same as before —
+    // the retired queue didn't validate it either). The executor reports applied/rejected so the barista confirms accurately.
     QJsonObject ad;
     ad["name"] = QString("apply_dial_change");
     ad["description"] = QString(
         "Apply an agreed change to the NEXT shot's dial-in. Call this ONLY after you have proposed the change "
         "and the user has clearly approved it (\"yes\", \"do it\", \"go ahead\") — NEVER unprompted, and never "
         "just to acknowledge or to restate unchanged settings. Include ONLY the field(s) that actually change. "
-        "dose, yield, and temperature are set on the machine's next-shot dial right away; the grinder setting is "
-        "off-machine, so it is queued and you'll remind the user to set it at the next shot. The result tells you "
-        "exactly what was applied, queued, or rejected (out of range) — confirm to the user from that, naturally "
-        "(\"Done — grind's at 4.4 for the next one\").");
+        "ALL fields including the grinder setting are applied right away — do NOT tell the user a grind is merely "
+        "'queued' or ask them to set it later; it is set now (they still physically dial their grinder, but the "
+        "app has recorded it). The result tells you exactly what was applied or rejected (out of range) — confirm "
+        "to the user from that, naturally (\"Done — grind's at 4.4 for the next one\").");
     QJsonObject adSchema;
     adSchema["type"] = QString("object");
     QJsonObject adProps;
-    adProps["grinderSetting"] = strProp("New grinder dial setting (off-machine; queued for the next shot). Optional.");
+    adProps["grinderSetting"] = strProp("New grinder dial setting — applied immediately (the user still physically dials it). Optional.");
     QJsonObject doseP;  doseP["type"] = QString("number"); doseP["description"] = QString("New dose IN, grams (5-30). Optional.");
     QJsonObject yieldP; yieldP["type"] = QString("number"); yieldP["description"] = QString("New yield OUT, grams (10-120). Optional.");
     QJsonObject ratioP; ratioP["type"] = QString("number"); ratioP["description"] = QString("Brew ratio, e.g. 2.0 for 1:2.0 (yield is computed from dose x ratio when no explicit yield is given). Optional.");

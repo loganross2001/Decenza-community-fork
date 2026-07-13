@@ -596,10 +596,10 @@ Item {
         root._awaitConfirm = false
         root._endAfterReply = false     // [barista-fork] a fresh engage never inherits a prior session's end-request
         root._pendingSpeech = ""        // [barista-fork] nor a held answer from a prior session
-        // Pre-shot (no undiscussed shot to talk about), surface any off-machine grind the user agreed to
-        // but didn't confirm — so the barista can ask early whether it actually got set.
-        root._pendingGrind = (!root._hasUndiscussedShot && typeof Barista !== "undefined" && Barista.actions)
-                             ? Barista.actions.outstandingGrind() : null
+        // Grind is now DIRECT-SET on verbal approval (owner decision 2026-07-13 — "just set it, no button"),
+        // so there is no off-machine grind to confirm and the approve chip never surfaces. Kept null here
+        // (rather than deleting the chip) so the resolve/verbal-yes plumbing stays inert but intact.
+        root._pendingGrind = null
         // (1) Load THIS bean's persisted conversation so the AI recalls its own prior guidance (pick up
         // where we left off, even after long gaps). (2) Assemble the FULL advisor-grade dialing context
         // (dial-in sessions, best shot, bean best, grinder context, closed-loop advice) → baristaContextReady.
@@ -674,10 +674,11 @@ Item {
                + "the number). Fields: grinderSetting (off-machine grinder dial), doseG (grams in), ratio (e.g. 2.0 for "
                + "1:2.0), temperatureC; only send targetWeightG if the user gives an explicit grams-out. Never call it "
                + "unprompted, to acknowledge, or to restate unchanged settings. AFTER it runs, REPORT STRICTLY FROM THE "
-               + "RESULT: confirm ONLY what's listed under 'applied'/'queued' as done ('Done — grind's at 4.4 for the "
+               + "RESULT: confirm ONLY what's listed under 'applied' as done ('Done — grind's at 4.4 for the "
                + "next one.'); if anything is under 'failed' or 'rejected', tell them it did NOT take — NEVER claim a "
-               + "change the result didn't confirm. The grinder is off-machine, so for a grind change tell them to set it "
-               + "on the grinder. If the user says 'undo' or 'put it back', the app reverses the last change itself.\n")
+               + "change the result didn't confirm. A grind change is APPLIED right away like the rest — do NOT say it's "
+               + "'queued' or tell them to go set it later; just confirm it's done (they'll dial their grinder as usual). "
+               + "If the user says 'undo' or 'put it back', the app reverses the last change itself.\n")
             : ("HOW CHANGES GET MADE — when you want to change the dial (grind, dose, yield, ratio, or temp), or the "
                + "user asks for a specific value, FIRST propose it in your reply and ask for the go-ahead ('Want me to "
                + "take the grind to 4.4?'), and append EXACTLY ONE fenced block at the very END with ONLY the field(s) "

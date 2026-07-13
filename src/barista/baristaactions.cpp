@@ -102,26 +102,22 @@ QVariantMap BaristaActions::applyFromNext(const QVariantMap& next, qint64 anchor
             else failed << QStringLiteral("temperature");
         } else { rejected << QStringLiteral("temperature"); }
     }
-    // Grinder is off-machine — queue it, don't write the dial (the shot must not claim a grind the
-    // user never physically set). Resolved to Settings.dye.dyeGrinderSetting on confirmation.
-    // Undo snapshots the WHOLE pending queue BEFORE enqueuing (grind lives in the queue, not the dial —
-    // undoLast() restores the pre-enqueue list, cleanly reversing the supersede/append enqueueGrind does).
+    // Grinder: DIRECT-SET (owner decision 2026-07-13 — "just set it, no button"). A grind the user
+    // approved out loud is written straight to Settings.dye.dyeGrinderSetting, exactly like every other
+    // field — no off-machine pending queue, no later confirmation chip. Accepted tradeoff: the shot
+    // records the approved grind even if the user hasn't physically re-dialed the grinder yet. Verify
+    // the write landed (read-back) before claiming it, so the barista can't report a grind it didn't set.
+    // (void anchorShotId — the queue that used it is gone; kept in the signature for the fenced-block path.)
+    Q_UNUSED(anchorShotId);
     const QString grind = next.value("grinderSetting").toString().trimmed();
     if (dye && !grind.isEmpty()) {
-        m_undo["pendingBefore_had"] = true;
-        m_undo["pendingBefore"] = loadPending();
-        enqueueGrind(grind, anchorShotId);
-        // Verify the enqueue actually persisted a pending setGrinder with this value before claiming it —
-        // otherwise the barista would say "grind queued" when nothing was written (the reported bug).
-        bool queuedOk = false;
-        for (const QVariant& item : loadPending()) {
-            const QVariantMap m = item.toMap();
-            if (m.value("type").toString() == QLatin1String("setGrinder")
-                    && m.value("status").toString() == QLatin1String("pending")
-                    && m.value("value").toString() == grind) { queuedOk = true; break; }
-        }
-        if (queuedOk) queued << QStringLiteral("grinder %1").arg(grind);
-        else failed << QStringLiteral("grinder");
+        m_undo["grinderSetting_had"] = true;
+        m_undo["grinderSetting"] = dye->dyeGrinderSetting();
+        dye->setDyeGrinderSetting(grind);
+        if (dye->dyeGrinderSetting().trimmed() == grind)
+            applied << QStringLiteral("grinder %1").arg(grind);
+        else
+            failed << QStringLiteral("grinder");
     }
 
     result["applied"] = applied;
@@ -138,6 +134,7 @@ QVariantMap BaristaActions::applyFromNext(const QVariantMap& next, qint64 anchor
          {QStringLiteral("lastRatioBefore"), lastRatioBefore},
          {QStringLiteral("lastRatioAfter"), brew ? brew->lastUsedRatio() : 0.0},
          {QStringLiteral("applied"), applied.join(QLatin1Char(','))},
+         {QStringLiteral("queued"), queued.join(QLatin1Char(','))},
          {QStringLiteral("failed"), failed.join(QLatin1Char(','))},
          {QStringLiteral("rejected"), rejected.join(QLatin1Char(','))}});
     return result;
@@ -163,15 +160,15 @@ void BaristaActions::undoLast() {
     }
     if (brew && m_undo.value("lastUsedRatio_had").toBool())   // [barista-fork] restore the pre-apply ratio
         brew->setLastUsedRatio(m_undo.value("lastUsedRatio").toDouble());
-    // Restore the off-machine grind queue to its pre-enqueue state (reverses the supersede+append).
-    if (m_undo.value("pendingBefore_had").toBool())
-        savePending(m_undo.value("pendingBefore").toList());
+    // Restore the pre-apply grind setting (direct-set undo; the off-machine queue is retired).
+    if (dye && m_undo.value("grinderSetting_had").toBool())
+        dye->setDyeGrinderSetting(m_undo.value("grinderSetting").toString());
     m_undo.clear();
 }
 
 bool BaristaActions::undoLastAutoApply() {
     if (m_undo.isEmpty()) return false;
-    undoLast();   // one-level snapshot restore (dose/yield/temp override + the queued grind)
+    undoLast();   // one-level snapshot restore (dose/yield/temp override + the prior grind setting)
     return true;
 }
 

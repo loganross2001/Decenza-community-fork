@@ -16,6 +16,12 @@
 namespace {
 constexpr qint64 kFreshSecs = 7LL * 24 * 3600;   // regenerate weekly (or on bean change)
 
+// [barista-fork] Bump this whenever the phrasebook GENERATION PROMPT changes (AIManager::requestCoachPhrasebook).
+// A cached pool tagged with an older version is discarded on load, so the new prompt's wording takes effect
+// immediately (the coach falls back to its deterministic lines until the next refresh regenerates the pool).
+// v2 (2026-07-14): professional-and-concrete guard-rail added to the cue-generation prompt.
+constexpr int kPromptVersion = 2;
+
 // Reject a model line that leaked a placeholder / is empty / too long for a spoken cue.
 bool badLine(const QString& s) {
     return s.trimmed().isEmpty() || s.size() > 120
@@ -151,6 +157,15 @@ void CoachPhrasebook::load() {
     if (!doc.isObject())
         return;
     const QJsonObject obj = doc.object();
+    // [barista-fork] Discard a pool generated under an OLDER prompt version — leaving the pools empty means
+    // the coach speaks its (current) deterministic fallback lines until the next refresh regenerates the pool
+    // under the current prompt, so a prompt/wording change takes effect immediately on upgrade.
+    if (obj.value(QStringLiteral("promptVersion")).toInt(0) != kPromptVersion) {
+        BaristaDiagnostics::record(QStringLiteral("coach"), QStringLiteral("pool_discarded_stale_prompt"),
+            {{QStringLiteral("was"), obj.value(QStringLiteral("promptVersion")).toInt(0)},
+             {QStringLiteral("now"), kPromptVersion}});
+        return;
+    }
     m_pools.clear();
     const QJsonObject cues = obj.value(QStringLiteral("cues")).toObject();
     for (auto it = cues.begin(); it != cues.end(); ++it) {
@@ -178,6 +193,7 @@ void CoachPhrasebook::save() {
     QJsonObject obj;
     obj.insert(QStringLiteral("cues"), cues);
     obj.insert(QStringLiteral("gameplan"), m_gameplan);
+    obj.insert(QStringLiteral("promptVersion"), kPromptVersion);   // tag the wording generation
     const QString json = QString::fromUtf8(QJsonDocument(obj).toJson(QJsonDocument::Compact));
     const qint64 gen = m_generatedAt;
     const QString bean = m_bean;

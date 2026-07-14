@@ -1985,7 +1985,15 @@ void AIManager::requestCoachPhrasebook(const QString& requestToken, const QStrin
         "For EACH of these ids give 4-5 DISTINCT natural spoken variants (warm, brief, a coach beside them — "
         "never robotic): no-puck, channeling, flow-fast, flow-slow, steam-stretch, steam-roll, steam-almost, "
         "steam-done, no-coaching. Each line <=110 characters, plain spoken words, NO placeholders/%/{}, NO "
-        "numbers unless natural. 'gameplan' = ONE <=2-sentence pre-shot plan grounded in the bean/history below. "
+        "numbers unless natural. "
+        "PROFESSIONAL AND CONCRETE — this is a barista instructor, fully professional: every line NAMES the "
+        "specific equipment and action — the steam wand, the wand tip, the milk, the pitcher, the puck, the "
+        "flow, the shot — in plain technical barista terms. Warm but unambiguous. NEVER use vague, open-ended, "
+        "or double-meaning phrasing that could be misread out of context: no bare 'almost there', 'a little "
+        "longer', 'keep going', 'nice and slow', 'hold it', 'go deeper', or 'get ready' without stating get "
+        "ready TO WHAT. Always say WHAT to do to WHICH part (e.g. 'ease the wand deeper to spin the milk', not "
+        "'go deeper'; 'steam's nearly done, ready to shut it off', not 'almost there'). "
+        "'gameplan' = ONE <=2-sentence pre-shot plan grounded in the bean/history below. "
         "Match the app's language. Output the JSON object and nothing else.");
 
     m_analyzing = true;

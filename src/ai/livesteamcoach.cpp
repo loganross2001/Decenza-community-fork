@@ -204,7 +204,7 @@ void LiveSteamCoach::evaluate() {
         m_firedStretch = true;
         emitCue(QStringLiteral("steam-stretch"),
                 tr_("steamCoach.cue.stretch",
-                    "Steaming — keep the tip near the surface to stretch"),
+                    "Adding air — keep the steam wand tip just under the milk surface"),
                 QStringLiteral("info"), /*speak=*/true);
         return;
     }
@@ -237,7 +237,7 @@ void LiveSteamCoach::evaluate() {
             || elapsed >= ALMOST_FRACTION * timeout)) {
         m_firedAlmost = true;
         emitCue(QStringLiteral("steam-almost"),
-                tr_("steamCoach.cue.almost", "Almost there — get ready"),
+                tr_("steamCoach.cue.almost", "Steam's nearly done — get ready to shut it off"),
                 QStringLiteral("info"), /*speak=*/true);
         return;
     }
@@ -248,7 +248,7 @@ void LiveSteamCoach::evaluate() {
         && elapsed >= ROLL_FRACTION * timeout) {
         m_firedRoll = true;
         emitCue(QStringLiteral("steam-roll"),
-                tr_("steamCoach.cue.roll", "Submerge the tip — roll and texture"),
+                tr_("steamCoach.cue.roll", "Lower the steam wand to spin the milk into a smooth whirlpool"),
                 QStringLiteral("info"), /*speak=*/true);
         return;
     }

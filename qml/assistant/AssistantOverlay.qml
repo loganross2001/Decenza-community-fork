@@ -1806,6 +1806,71 @@ Item {
                 // trailing spacer keeps Chat/Pause left-aligned.
                 Item { Layout.fillWidth: true }
             }
+
+            // [barista-fork] Card footer — uses the larger card to put voice + volume one tap away.
+            // VOICE FAVORITES: quick-switch among your first three saved ElevenLabs voices (active highlighted).
+            // Manage the list in barista → gear → Voice → Saved voices; these mirror its first three.
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: Theme.spacingSmall
+                visible: root._settings && root._settings.ttsProvider === "elevenlabs"
+                         && root._settings.elevenlabsVoices.length > 0
+                Repeater {
+                    model: root._settings ? Math.min(3, root._settings.elevenlabsVoices.length) : 0
+                    delegate: AccessibleButton {
+                        required property int index
+                        readonly property var _fav: root._settings.elevenlabsVoices[index]
+                        Layout.fillWidth: true
+                        primary: !!root._settings && root._settings.elevenlabsVoiceId === (_fav ? _fav.id : "")
+                        subtle: !primary
+                        readonly property string _favLabel: (_fav && _fav.name && String(_fav.name).length > 0)
+                              ? String(_fav.name)
+                              : TranslationManager.translate("barista.voiceFav.slot", "Voice %1").arg(index + 1)
+                        text: _favLabel
+                        // Distinct per-voice a11y label + active state, so a screen reader can tell the
+                        // three favorites apart and hear which one is selected.
+                        accessibleName: primary
+                              ? TranslationManager.translate("barista.voiceFav.current", "%1, current voice").arg(_favLabel)
+                              : TranslationManager.translate("barista.voiceFav.switchTo", "Switch to %1").arg(_favLabel)
+                        onClicked: {
+                            if (!root._settings || !_fav) return
+                            if (root._voice) root._voice.stop()          // barge-in: supersede any in-flight speech
+                            root._settings.elevenlabsVoiceId = _fav.id   // swap the active voice on the fly
+                            if (root._voice) root._voice.preview()       // audition it immediately
+                        }
+                    }
+                }
+            }
+
+            // VOLUME knob — the barista voice playback gain (0..1), applied live so a drag is heard immediately.
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: Theme.spacingSmall
+                Text {
+                    text: TranslationManager.translate("barista.volume", "Volume")
+                    color: Theme.textSecondaryColor
+                    font: Theme.labelFont
+                    Accessible.ignored: true
+                }
+                Slider {
+                    id: cardVolumeSlider
+                    Layout.fillWidth: true
+                    from: 0.0; to: 1.0; stepSize: 0.02
+                    value: root._settings ? root._settings.baristaVoiceVolume : 1.0
+                    onMoved: {
+                        if (root._settings) root._settings.baristaVoiceVolume = value
+                        if (root._voice) root._voice.applyLiveVolume()   // instant, even mid-utterance
+                    }
+                    Accessible.name: TranslationManager.translate("barista.volume", "Volume")
+                }
+                Text {
+                    text: Math.round(cardVolumeSlider.value * 100) + "%"
+                    color: Theme.textSecondaryColor
+                    font: Theme.labelFont
+                    Layout.preferredWidth: Theme.scaled(38)
+                    horizontalAlignment: Text.AlignRight
+                }
+            }
         }
     }
 

@@ -97,6 +97,10 @@ Page {
     // Center zone scales (user-configurable sizing)
     property real centerStatusScale: layoutConfig.scales ? (layoutConfig.scales.centerStatus || 1.0) : 1.0
     property real centerTopScale: layoutConfig.scales ? (layoutConfig.scales.centerTop || 1.0) : 1.0
+    // Center-zone horizontal alignment (per-zone "alignment" option; "center" default). Lets the action
+    // buttons be right-justified against a right-side panel (or left / center).
+    property string centerTopAlignment: (layoutConfig.zoneOptions && layoutConfig.zoneOptions.centerTop)
+                                        ? (layoutConfig.zoneOptions.centerTop.alignment || "center") : "center"
     property real centerMiddleScale: layoutConfig.scales ? (layoutConfig.scales.centerMiddle || 1.0) : 1.0
 
     // Per-zone item size ("compact" | "large"); bars grow to fit large items.
@@ -618,6 +622,7 @@ Page {
             zoneName: "centerTop"
             items: idlePage.centerTopItems
             zoneScale: idlePage.centerTopScale
+            alignment: idlePage.centerTopAlignment
         }
 
         // Inline preset rows (for center-zone action buttons)

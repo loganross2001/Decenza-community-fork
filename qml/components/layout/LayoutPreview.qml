@@ -125,6 +125,7 @@ Item {
                     zoneName: "centerTop"
                     items: previewRoot._items("centerTop")
                     zoneScale: previewRoot._scale("centerTop")
+                    alignment: previewRoot._opt("centerTop", "alignment", "center")
                 }
                 LayoutCenterZone {
                     Layout.fillWidth: true

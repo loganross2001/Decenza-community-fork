@@ -1221,17 +1221,15 @@ ApplicationWindow {
             ProfileInfoPage {}
         }
 
-        // Status bar (inside pageStack so it's included in the CRT shader FBO)
+        // Status bar (inside pageStack so it's included in the CRT shader FBO). It is a CHILD of pageStack,
+        // which already reflows by the barista panel's reservedWidth — so the status bar (and all its top
+        // widgets: clock, sleep, etc.) reflow WITH it automatically. Do NOT add a second rightMargin here or
+        // it double-shifts the whole top bar left.
         StatusBar {
             id: statusBar
             anchors.top: parent.top
             anchors.left: parent.left
             anchors.right: parent.right
-            // [barista-fork] Reflow with pageStack when the barista panel reserves the right strip, so
-            // status widgets stay visible in the left area instead of hiding under the panel.
-            anchors.rightMargin: (baristaOverlay.visible && baristaOverlay.item)
-                                 ? baristaOverlay.item.reservedWidth : 0
-            Behavior on anchors.rightMargin { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
             height: Theme.statusBarHeight
             z: 600
             visible: !root.screensaverActive

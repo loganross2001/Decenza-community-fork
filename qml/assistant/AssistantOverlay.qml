@@ -161,6 +161,10 @@ Item {
                 root._pendingDisplayText = ""
                 root._diag("display_reveal", { source: "audible" })
             }
+            // [barista-fork] Read-along scroll: start pacing the text when the voice becomes audible (callLater so
+            // the just-revealed text has laid out and implicitHeight is current); stop when it goes quiet.
+            if (root._voice && root._voice.audible) Qt.callLater(root._startSpeechScroll)
+            else root._stopSpeechScroll()
         }
         function onSpeakingChanged() {
             root._diag("speaking_changed", { speaking: root._voice ? root._voice.speaking : false, endAfter: root._endAfterReply })
@@ -168,6 +172,12 @@ Item {
             // 5s cue timer + clear the cue (belt-and-suspenders alongside _markSpokeThisTurn on the speak call).
             if (root._voice && root._voice.speaking)
                 root._markSpokeThisTurn()
+            // [barista-fork] Close-out safety net: the fallback timer is armed at goodbye DETECTION, so its 9s
+            // must otherwise cover the whole model round-trip + TTS synthesis + speech. Re-arm it the moment the
+            // sign-off actually STARTS speaking, so the budget is 9s of SPEECH (a verbose sign-off after slow
+            // cloud latency isn't cut off), while a genuinely stuck speaking flag still force-closes 9s later.
+            if (root._voice && root._voice.speaking && root._endAfterReply)
+                dismissFallbackTimer.restart()
             // [barista-fork] The lead-in just finished and a post-tool answer was held back → speak it NOW,
             // so the answer never cut off the lead-in. Checked BEFORE the end-session/mic logic (a sign-off
             // answer must still speak). Speaking flips speaking→true again; the next speaking_off resumes
@@ -569,6 +579,7 @@ Item {
         root._primedSystemPrompt = ""
         root._queuedFirstUtterance = ""   // drop any un-replayed tap-and-talk utterance on teardown
         root._endAfterReply = false       // [barista-fork] stuck-flag guard: a torn-down session can't self-dismiss later
+        dismissFallbackTimer.stop()       // [barista-fork] and cancel any pending close-out safety timer
         // SF-1: clear web search so it can't leak onto a later advisor turn on the same conversation key.
         if (root._conv) { root._conv.webSearchEnabled = false; root._conv.toolsEnabled = false; root._conv.verbatimPairs = 2 }
     }
@@ -579,12 +590,56 @@ Item {
     // land only after the sign-off finished speaking (or right after a muted/text reply renders).
     function _endSessionNow() {
         root._endAfterReply = false
+        dismissFallbackTimer.stop()   // [barista-fork] we're closing now — cancel the safety-net timer
         root._pendingSpeech = ""   // [barista-fork] never let a held answer speak into a torn-down session
         root._leadinSpokenText = ""
         root._diag("session_end_now", {})   // [barista-fork] closure was previously inferable only by silence
         if (root._orch && typeof root._orch.dismiss === "function")
             root._orch.dismiss()
     }
+
+    // [barista-fork] ROCK-SOLID CLOSE-OUT SAFETY NET. The normal goodbye path arms _endAfterReply and closes
+    // once the sign-off finishes speaking (onSpeakingChanged). But if the sign-off never speaks or the
+    // speaking→false transition never arrives (TTS error, empty/muted reply, a stuck speaking flag, a reply
+    // that hangs mid-turn), _endAfterReply stays armed forever and the barista "won't close" (the reported
+    // bug). This timer guarantees the session ends within a few seconds of the goodbye regardless. It is a UI
+    // auto-dismiss timer (allowed), armed alongside _endAfterReply and cancelled the instant a real close
+    // happens or a new utterance arrives.
+    Timer {
+        id: dismissFallbackTimer
+        interval: 9000
+        repeat: false
+        onTriggered: {
+            if (root._endAfterReply) {
+                root._diag("dismiss_fallback_fired", {})
+                root._endSessionNow()
+            }
+        }
+    }
+
+    // [barista-fork] Read-along auto-scroll: as the barista speaks a reply longer than the box, glide the text
+    // from top to bottom so the user reads along instead of hand-scrolling. The native TTS exposes no word/
+    // sentence progress, so this is PACED by an estimate of the speech length (≈ chars × ms/char), started when
+    // the voice becomes audible and stopped when it stops or the user drags to scroll themselves. Approximate,
+    // not word-synced (true sync needs the streaming-voice rework).
+    NumberAnimation {
+        id: speechScroll
+        target: msgFlick
+        property: "contentY"
+        easing.type: Easing.Linear
+    }
+    function _startSpeechScroll() {
+        if (typeof msgFlick === "undefined" || typeof msgText === "undefined") return
+        var maxY = Math.max(0, msgText.implicitHeight - msgFlick.height)
+        if (maxY <= 1) return   // fits in the box → nothing to scroll
+        speechScroll.stop()
+        speechScroll.from = msgFlick.contentY
+        speechScroll.to = maxY
+        // ~60ms/char ≈ natural speaking pace; floor so very short overflow still eases rather than jumps.
+        speechScroll.duration = Math.max(1500, root._message.length * 60)
+        speechScroll.start()
+    }
+    function _stopSpeechScroll() { speechScroll.stop() }
 
     // Kick off a conversation. First pull the user's REAL dial-in history for this bean so the
     // assistant KNOWS it (and can suggest), instead of asking. ask() fires once the history arrives.
@@ -611,6 +666,7 @@ Item {
         root._queuedFirstUtterance = ""
         root._awaitConfirm = false
         root._endAfterReply = false     // [barista-fork] a fresh engage never inherits a prior session's end-request
+        dismissFallbackTimer.stop()     // [barista-fork] nor a stale close-out timer from a prior session
         root._pendingSpeech = ""        // [barista-fork] nor a held answer from a prior session
         // Grind is now DIRECT-SET on verbal approval (owner decision 2026-07-13 — "just set it, no button"),
         // so there is no off-machine grind to confirm and the approve chip never surfaces. Kept null here
@@ -1121,6 +1177,7 @@ Item {
         // [barista-fork] Stuck-flag guard: a new user utterance means the conversation is continuing, so any
         // pending self-dismiss from a prior turn is void — clear it so it can never collapse this later turn.
         root._endAfterReply = false
+        dismissFallbackTimer.stop()   // [barista-fork] a new turn cancels any pending close-out safety timer
         root._leadinSpokenText = ""   // [barista-fork] fresh turn → no stale lead-in for the repeat guard
         // [barista-fork] New turn supersedes any held display text (a prior turn whose audio never started must
         // not linger or ambush this turn's reveal). _message is cleared on the model path below (shows "…").
@@ -1148,6 +1205,7 @@ Item {
                 // the model forgets to call end_conversation. Armed after the clear above; onResponseReceived /
                 // onSpeakingChanged close the session once the sign-off finishes. Fall through to the model turn.
                 root._endAfterReply = true
+                dismissFallbackTimer.restart()   // [barista-fork] safety net: close even if the sign-off never speaks
             } else {
                 // Non-Anthropic providers can't self-dismiss via a tool → handle the goodbye locally (no round-trip).
                 var byeMsg = TranslationManager.translate("barista.bye", "Anytime — enjoy!")
@@ -1155,7 +1213,7 @@ Item {
                 if (root._orch && typeof root._orch.markExchangeCompleted === "function")
                     root._orch.markExchangeCompleted()
                 root._speakSanitised(byeMsg)
-                if (root._voice && root._voice.speaking) root._endAfterReply = true
+                if (root._voice && root._voice.speaking) { root._endAfterReply = true; dismissFallbackTimer.restart() }
                 else root._endSessionNow()
                 return
             }
@@ -1284,8 +1342,10 @@ Item {
         // onResponseReceived / onSpeakingChanged then ends the session once the sign-off finishes (never cut off).
         // If we're not actually in a live conversation, ignore it (a stray late emit must not dismiss nothing).
         function onDismissRequested() {
-            if (root._state === "conversing")
+            if (root._state === "conversing") {
                 root._endAfterReply = true
+                dismissFallbackTimer.restart()   // [barista-fork] guarantee the close even if the sign-off never speaks
+            }
         }
     }
 
@@ -1505,6 +1565,10 @@ Item {
         anchors.top: parent.top
         anchors.bottom: parent.bottom
         anchors.margins: Theme.spacingMedium
+        // Nearly full-height panel (small top/bottom margin) — more presence, and it covers the top bar's
+        // right edge so nothing (e.g. the Sleep button) pokes out above or below the card.
+        anchors.topMargin: Theme.spacingSmall
+        anchors.bottomMargin: Theme.spacingSmall
         width: root._panelWidth   // driven by the panelWidthMode setting (narrow/medium/wide)
         radius: Theme.cardRadius
         color: Theme.surfaceColor
@@ -1537,44 +1601,48 @@ Item {
             anchors.margins: Theme.spacingLarge
             spacing: Theme.spacingMedium
 
-            // Header: name · gear · dismiss
-            RowLayout {
+            // Header — the NAME gets its own line (kept at full size), and the controls (gear / collapse /
+            // dismiss) sit on a SEPARATE right-aligned line below it, so the tiny icons never overlap the name.
+            ColumnLayout {
                 Layout.fillWidth: true
-                spacing: Theme.scaled(6)
+                spacing: Theme.scaled(2)
                 Text {
                     text: root._settings ? root._settings.assistantName
                                          : TranslationManager.translate("barista.title", "Coach")
                     Layout.fillWidth: true
+                    elide: Text.ElideRight   // safety for an unusually long name; normal names show in full
                     color: Theme.textColor
                     font: Theme.subtitleFont
                     Accessible.ignored: true
                 }
-                // Gear → open the assistant settings panel (voice provider, ElevenLabs key + saved voices,
-                // names, bell). Uses the settings SVG (no unicode-glyph icons, per CLAUDE.md). Lives inside
-                // `card`, which only shows while conversing && !_showSettings && !_collapsed, so it self-hides
-                // once settings open. `icon.color` pins the header controls to full-contrast textColor:
-                // the `subtle` default is primaryContrastColor, which is invisible on a LIGHT surface card
-                // (and dims to 40% alpha when disabled). textColor always reads on the card. No-op on dark themes.
-                AccessibleButton {
-                    subtle: true
-                    icon.source: "qrc:/icons/settings.svg"
-                    icon.color: Theme.textColor
-                    accessibleName: TranslationManager.translate("barista.settings.open", "Assistant settings")
-                    onClicked: root._showSettings = true
-                }
-                AccessibleButton {
-                    subtle: true
-                    text: "→"   // collapse to a thin edge tab, freeing the whole screen
-                    icon.color: Theme.textColor
-                    accessibleName: TranslationManager.translate("barista.collapse", "Collapse assistant")
-                    onClicked: { root._showSettings = false; root._collapsed = true }
-                }
-                AccessibleButton {
-                    subtle: true
-                    text: "×"
-                    icon.color: Theme.textColor
-                    accessibleName: TranslationManager.translate("common.accessibility.dismissDialog", "Dismiss")
-                    onClicked: if (root._orch) root._orch.dismiss()
+                // Controls on their own line. `icon.color` pins them to full-contrast textColor: the `subtle`
+                // default is primaryContrastColor, invisible on a LIGHT surface card (and 40% alpha when
+                // disabled). Gear opens settings; → collapses to the edge tab; × dismisses.
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.scaled(6)
+                    Item { Layout.fillWidth: true }   // push the controls to the right
+                    AccessibleButton {
+                        subtle: true
+                        icon.source: "qrc:/icons/settings.svg"
+                        icon.color: Theme.textColor
+                        accessibleName: TranslationManager.translate("barista.settings.open", "Assistant settings")
+                        onClicked: root._showSettings = true
+                    }
+                    AccessibleButton {
+                        subtle: true
+                        text: "→"   // collapse to a thin edge tab, freeing the whole screen
+                        icon.color: Theme.textColor
+                        accessibleName: TranslationManager.translate("barista.collapse", "Collapse assistant")
+                        onClicked: { root._showSettings = false; root._collapsed = true }
+                    }
+                    AccessibleButton {
+                        subtle: true
+                        text: "×"
+                        icon.color: Theme.textColor
+                        accessibleName: TranslationManager.translate("common.accessibility.dismissDialog", "Dismiss")
+                        onClicked: if (root._orch) root._orch.dismiss()
+                    }
                 }
             }
 
@@ -1585,8 +1653,11 @@ Item {
                 visible: root._settings && root._settings.avatarEnabled
                 Layout.alignment: Qt.AlignHCenter
                 Layout.topMargin: Theme.spacingSmall
-                Layout.preferredWidth: Theme.scaled(150)
-                Layout.preferredHeight: Theme.scaled(150)
+                // ~2x bigger for presence when the card opens, capped so it never overflows a narrow panel
+                // (and floored so it can never compute negative on a very small panel).
+                Layout.preferredWidth: Math.max(Theme.scaled(48),
+                                                Math.min(Theme.scaled(300), root._panelWidth - Theme.spacingLarge * 2))
+                Layout.preferredHeight: Layout.preferredWidth
                 // [barista-fork] Drive the mouth off `audible` (real audio out), NOT `speaking` — otherwise the
                 // avatar starts talking during the network→prepare gap before any sound (the "avatar talks
                 // before voices are heard" complaint). `speaking` still gates the mic; only the VISUAL syncs here.
@@ -1615,6 +1686,9 @@ Item {
                 contentHeight: msgText.implicitHeight
                 boundsBehavior: Flickable.StopAtBounds
                 flickableDirection: Flickable.VerticalFlick
+                // [barista-fork] User grabbed the text to scroll themselves → cancel the read-along auto-scroll
+                // so it doesn't fight them.
+                onDraggingChanged: if (dragging) root._stopSpeechScroll()
                 // Visible, draggable vertical scrollbar (Job 3 consistent-scrolling pattern).
                 ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 

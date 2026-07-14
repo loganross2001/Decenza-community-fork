@@ -61,10 +61,10 @@ AssistantVoice* androidVoiceLookup(jlong handle) {
 // Static natives — invoked by Java on the Android main Looper. Hop to the Qt main thread, then look the
 // instance up (safe: the dtor removed it on that same thread) and drive its state. `tag` (0=voice, 1=cue,
 // 2=preview) selects which player fired so a cue/preview callback never touches the barista's speaking state.
-void jniOnStarted(JNIEnv*, jclass, jlong handle, jint tag) {
-    QMetaObject::invokeMethod(qApp, [handle, tag]() {
+void jniOnStarted(JNIEnv*, jclass, jlong handle, jint tag, jint durationMs) {
+    QMetaObject::invokeMethod(qApp, [handle, tag, durationMs]() {
         if (AssistantVoice* v = androidVoiceLookup(handle))
-            v->handleAndroidPlaybackStarted(static_cast<int>(tag));
+            v->handleAndroidPlaybackStarted(static_cast<int>(tag), static_cast<int>(durationMs));
     }, Qt::QueuedConnection);
 }
 void jniOnFinished(JNIEnv*, jclass, jlong handle, jint tag) {
@@ -82,7 +82,7 @@ void registerAndroidAudioPlayerNatives() {
         return;
     QJniEnvironment env;
     JNINativeMethod methods[] = {
-        {"nativeOnStarted",  "(JI)V", reinterpret_cast<void*>(jniOnStarted)},
+        {"nativeOnStarted",  "(JII)V", reinterpret_cast<void*>(jniOnStarted)},
         {"nativeOnFinished", "(JI)V", reinterpret_cast<void*>(jniOnFinished)},
     };
     if (env.registerNativeMethods("io/github/kulitorum/decenza_de1/DecenzaAudioPlayer", methods, 2))
@@ -569,6 +569,7 @@ void AssistantVoice::playMp3(const QByteArray& audio) {
 void AssistantVoice::stop() {
     ++m_speakGen;              // discard any in-flight synth reply
     m_pendingSynth = false;
+    setPlaybackDurationMs(0);  // [barista-fork] clear so a barged-into clip's length can't scroll the next utterance
     if (m_tts)
         m_tts->stop();
 #ifdef Q_OS_ANDROID
@@ -837,15 +838,19 @@ void AssistantVoice::applyVoiceFromSettings() {
 #ifdef Q_OS_ANDROID
 // [barista-fork] Driven (on the Qt main thread) by the DecenzaAudioPlayer JNI callbacks. `tag` selects which
 // player fired: only the VOICE tag touches speaking; CUE + PREVIEW never do.
-void AssistantVoice::handleAndroidPlaybackStarted(int tag) {
+void AssistantVoice::handleAndroidPlaybackStarted(int tag, int durationMs) {
     const QString roleStr = m_role == Role::Barista ? QStringLiteral("barista") : QStringLiteral("coaching");
     if (tag == kTagVoice) {
         // Real voice audio is now out — kill any thinking loop immediately (no hum-over-voice overlap).
         stopThinkingLoop();
         m_androidPlaying = true;
         m_pendingSynth = false;   // real audio is now playing — hand off from the pending hold
+        // [barista-fork] Publish the clip's real duration so the UI can time the read-along text scroll to the
+        // actual speech length instead of a character-count estimate. -1 = looping / unknown → UI falls back.
+        setPlaybackDurationMs(durationMs);
         BaristaDiagnostics::record(QStringLiteral("voice"), QStringLiteral("native_playback_started"),
-            {{QStringLiteral("role"), roleStr}, {QStringLiteral("tag"), tag}});
+            {{QStringLiteral("role"), roleStr}, {QStringLiteral("tag"), tag},
+             {QStringLiteral("durationMs"), durationMs}});
         updateSpeaking();
     } else if (tag == kTagPreview) {
         if (!m_previewPlaying) { m_previewPlaying = true; emit previewPlayingChanged(); }
@@ -858,6 +863,7 @@ void AssistantVoice::handleAndroidPlaybackFinished(int tag) {
     const QString roleStr = m_role == Role::Barista ? QStringLiteral("barista") : QStringLiteral("coaching");
     if (tag == kTagVoice) {
         m_androidPlaying = false;
+        setPlaybackDurationMs(0);   // clip done — clear so the next utterance's scroll doesn't reuse a stale length
         BaristaDiagnostics::record(QStringLiteral("voice"), QStringLiteral("native_playback_finished"),
             {{QStringLiteral("role"), roleStr}, {QStringLiteral("tag"), tag}});
         updateSpeaking();

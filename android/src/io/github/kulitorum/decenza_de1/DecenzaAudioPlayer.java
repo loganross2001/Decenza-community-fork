@@ -69,7 +69,11 @@ public class DecenzaAudioPlayer {
                             if (myId != playId) return;   // superseded by a newer play()/stop()
                             try { p.start(); } catch (Exception e) { Log.w(TAG, "start failed", e); }
                             playing = true;
-                            nativeOnStarted(handle, tag);
+                            // [barista-fork] Report the clip's real duration (ms) so the UI can time-sync the
+                            // read-along text scroll to the actual speech. -1 for a looping earcon / unknown.
+                            int durMs;
+                            try { durMs = p.isLooping() ? -1 : p.getDuration(); } catch (Exception e) { durMs = -1; }
+                            nativeOnStarted(handle, tag, durMs);
                         }
                     });
                     m.setOnCompletionListener(new MediaPlayer.OnCompletionListener() {
@@ -139,6 +143,6 @@ public class DecenzaAudioPlayer {
     }
 
     // Implemented in C++ (assistantvoice.cpp) and bound via QJniEnvironment::registerNativeMethods.
-    private static native void nativeOnStarted(long handle, int tag);
+    private static native void nativeOnStarted(long handle, int tag, int durationMs);
     private static native void nativeOnFinished(long handle, int tag);
 }

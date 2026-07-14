@@ -635,8 +635,11 @@ Item {
         speechScroll.stop()
         speechScroll.from = msgFlick.contentY
         speechScroll.to = maxY
-        // ~60ms/char ≈ natural speaking pace; floor so very short overflow still eases rather than jumps.
-        speechScroll.duration = Math.max(1500, root._message.length * 60)
+        // Prefer the native player's REAL clip duration so the scroll finishes exactly when the speech does
+        // (Android). Fall back to a character-count estimate (~60ms/char ≈ natural pace) when it's unknown
+        // (0 = non-native TTS / not yet reported); floor so very short overflow still eases rather than jumps.
+        var realMs = (root._voice && root._voice.playbackDurationMs > 0) ? root._voice.playbackDurationMs : 0
+        speechScroll.duration = realMs > 0 ? realMs : Math.max(1500, root._message.length * 60)
         speechScroll.start()
     }
     function _stopSpeechScroll() { speechScroll.stop() }
@@ -1652,11 +1655,11 @@ Item {
                 id: avatar
                 visible: root._settings && root._settings.avatarEnabled
                 Layout.alignment: Qt.AlignHCenter
-                Layout.topMargin: Theme.spacingSmall
-                // ~2x bigger for presence when the card opens, capped so it never overflows a narrow panel
-                // (and floored so it can never compute negative on a very small panel).
+                Layout.topMargin: 0
+                // Sits up top under the header, sized for presence WITHOUT dominating the card — the message
+                // text is the focus. Capped to the panel width; floored so it can't compute negative.
                 Layout.preferredWidth: Math.max(Theme.scaled(48),
-                                                Math.min(Theme.scaled(300), root._panelWidth - Theme.spacingLarge * 2))
+                                                Math.min(Theme.scaled(170), root._panelWidth - Theme.spacingLarge * 2))
                 Layout.preferredHeight: Layout.preferredWidth
                 // [barista-fork] Drive the mouth off `audible` (real audio out), NOT `speaking` — otherwise the
                 // avatar starts talking during the network→prepare gap before any sound (the "avatar talks
@@ -1826,7 +1829,15 @@ Item {
                         readonly property string _favLabel: (_fav && _fav.name && String(_fav.name).length > 0)
                               ? String(_fav.name)
                               : TranslationManager.translate("barista.voiceFav.slot", "Voice %1").arg(index + 1)
-                        text: _favLabel
+                        // Short display label so three long voice names don't overflow/overlap in the narrow
+                        // row: take the name part before a separator, then cap length. Full name stays in the
+                        // accessibleName (AccessibleButton doesn't elide its own text).
+                        readonly property string _favShort: {
+                            var s = String(_favLabel).split(/ [-(–—,]/)[0].trim()
+                            if (s.length === 0) s = String(_favLabel)
+                            return s.length > 12 ? s.substring(0, 11) + "…" : s
+                        }
+                        text: _favShort
                         // Distinct per-voice a11y label + active state, so a screen reader can tell the
                         // three favorites apart and hear which one is selected.
                         accessibleName: primary

@@ -37,6 +37,10 @@ class AssistantVoice : public QObject {
     Q_PROPERTY(bool usesNativeAudio READ usesNativeAudio CONSTANT)
     // [barista-fork] True while a GET /v1/voices fetch is in flight — drives a spinner in the picker pop-up.
     Q_PROPERTY(bool fetchingVoices READ fetchingVoices NOTIFY fetchingVoicesChanged)
+    // [barista-fork] The currently-speaking clip's real duration in ms (0 = unknown / not speaking / non-native
+    // TTS). Published from the native player's onPrepared so the read-along text scroll can be timed to the
+    // actual speech length instead of a character-count estimate. The UI falls back to its estimate when 0.
+    Q_PROPERTY(int playbackDurationMs READ playbackDurationMs NOTIFY playbackDurationMsChanged)
 
 public:
     // [barista-fork] Which voice profile this instance reads from AssistantSettings. Barista = the
@@ -63,6 +67,7 @@ public:
 #endif
     }
     bool fetchingVoices() const { return m_fetchingVoices; }
+    int playbackDurationMs() const { return m_playbackDurationMs; }
 
     // [barista-fork] Fetch the ACCOUNT's ElevenLabs voices (GET /v1/voices with the shared xi-api-key) so the
     // owner picks from a refined pop-up instead of typing cryptic voice ids. Async, non-blocking, re-entry
@@ -110,7 +115,7 @@ public:
     // playback actually starts / finishes. `tag` identifies which player (0=voice, 1=cue, 2=preview) so a cue
     // or preview callback never touches the barista's speaking state. Public only so the free JNI trampolines
     // can reach them; not part of the QML/Q_INVOKABLE surface.
-    void handleAndroidPlaybackStarted(int tag);
+    void handleAndroidPlaybackStarted(int tag, int durationMs);
     void handleAndroidPlaybackFinished(int tag);
 #endif
 
@@ -125,8 +130,19 @@ signals:
     void elevenlabsVoicesFetched(const QVariantList& voices);
     // [barista-fork] Emitted on any fetch failure (empty key / network error / non-200), with a human reason.
     void voicesFetchFailed(const QString& reason);
+    // [barista-fork] The currently-speaking clip's real duration changed (see playbackDurationMs).
+    void playbackDurationMsChanged();
 
 private:
+    // [barista-fork] Set + notify the speaking clip's real duration (ms); no-op if unchanged. -1 (looping /
+    // unknown) is stored as 0 so QML sees a single "no real duration → use estimate" sentinel.
+    void setPlaybackDurationMs(int ms) {
+        const int v = ms > 0 ? ms : 0;
+        if (v == m_playbackDurationMs) return;
+        m_playbackDurationMs = v;
+        emit playbackDurationMsChanged();
+    }
+
     // [barista-fork] Role-effective settings reads — resolve to the barista OR the coaching getters
     // depending on m_role, so all the synth code below stays role-agnostic.
     QString effectiveProvider() const;
@@ -180,6 +196,7 @@ private:
     bool m_previewPlaying = false;   // [barista-fork] a voice-preview sample is playing
     bool m_thinkingLooping = false;  // [barista-fork] the thinking earcon loop is currently running
     bool m_fetchingVoices = false;   // re-entry guard for fetchElevenlabsVoices()
+    int m_playbackDurationMs = 0;    // [barista-fork] speaking clip's real duration for read-along scroll sync
     // [barista-fork] cloud TTS (QMediaPlayer) only reports Playing once the network POST completes; this
     // holds `speaking` true across that gap so the mic stays paused. m_speakGen discards a stale/late reply.
     bool m_pendingSynth = false;

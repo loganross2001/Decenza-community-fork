@@ -865,7 +865,7 @@ private slots:
             QCOMPARE(q.value(0).toInt(), 0);  // existing rows default to 0
             QVERIFY(q.exec("SELECT version FROM schema_version"));
             QVERIFY(q.next());
-            QCOMPARE(q.value(0).toInt(), 31);  // chain runs on to the latest (recipe-owned grind = fork mig 31)
+            QCOMPARE(q.value(0).toInt(), 32);  // chain runs on to the latest (recipe-owned grind = fork mig 31)
         });
     }
 
@@ -1146,7 +1146,7 @@ private slots:
             QSqlQuery q(db);
             QVERIFY(q.exec("SELECT version FROM schema_version"));
             QVERIFY(q.next());
-            QCOMPARE(q.value(0).toInt(), 31);  // chain runs on to the latest (recipe-owned grind = fork mig 31)
+            QCOMPARE(q.value(0).toInt(), 32);  // chain runs on to the latest (recipe-owned grind = fork mig 31)
         });
     }
 
@@ -1179,7 +1179,7 @@ private slots:
             QSqlQuery q(db);
             QVERIFY(q.exec("SELECT version FROM schema_version"));
             QVERIFY(q.next());
-            QCOMPARE(q.value(0).toInt(), 31);  // chain runs on to the latest (recipe-owned grind = fork mig 31)
+            QCOMPARE(q.value(0).toInt(), 32);  // chain runs on to the latest (recipe-owned grind = fork mig 31)
             // The repaired table is writable — insertRecipeStatic binds
             // rpm_pinned unconditionally, so it would fail wholesale if the
             // ALTER hadn't landed.
@@ -1224,7 +1224,7 @@ private slots:
             QSqlQuery q(db);
             QVERIFY(q.exec("SELECT version FROM schema_version"));
             QVERIFY(q.next());
-            QCOMPARE(q.value(0).toInt(), 31);
+            QCOMPARE(q.value(0).toInt(), 32);
         });
     }
 

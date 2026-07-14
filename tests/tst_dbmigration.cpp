@@ -199,7 +199,7 @@ private slots:
             QVERIFY(hasTable(db, "shot_phases"));
             QVERIFY(hasTable(db, "schema_version"));
             QVERIFY(hasTable(db, "recipes"));  // migration 25 (add-recipes)
-            QCOMPARE(getSchemaVersion(db), 31);
+            QCOMPARE(getSchemaVersion(db), 32);
         });
     }
 
@@ -278,7 +278,7 @@ private slots:
         initAndClose(path, storage);
 
         withRawDb(path, "v1_verify", [](QSqlDatabase& db) {
-            QCOMPARE(getSchemaVersion(db), 31);
+            QCOMPARE(getSchemaVersion(db), 32);
             QVERIFY(hasColumn(db, "shots", "temperature_override"));
             QVERIFY(hasColumn(db, "shots", "yield_override"));
             QVERIFY(hasColumn(db, "shots", "beverage_type"));
@@ -397,7 +397,7 @@ private slots:
         withRawDb(path, "v9_verify", [](QSqlDatabase& db) {
             QVERIFY(hasColumn(db, "shots", "profile_kb_id"));
             QVERIFY(hasIndex(db, "idx_shots_profile_kb_id"));
-            QCOMPARE(getSchemaVersion(db), 31);
+            QCOMPARE(getSchemaVersion(db), 32);
         });
     }
 
@@ -411,7 +411,7 @@ private slots:
         { ShotHistoryStorage s; initAndClose(path, s); }
 
         withRawDb(path, "idempotent", [](QSqlDatabase& db) {
-            QCOMPARE(getSchemaVersion(db), 31);
+            QCOMPARE(getSchemaVersion(db), 32);
         });
     }
 
@@ -443,13 +443,88 @@ private slots:
         { ShotHistoryStorage s; initAndClose(path, s); }  // runs migration 31
 
         withRawDb(path, "v30_verify31", [&](QSqlDatabase& db) {
-            QCOMPARE(getSchemaVersion(db), 31);
+            QCOMPARE(getSchemaVersion(db), 32);
             QSqlQuery q(db);
             QVERIFY(q.exec(QString("SELECT grind_pinned, rpm_pinned FROM recipes "
                                    "WHERE id = %1").arg(recipeId)));
             QVERIFY(q.next());
             QCOMPARE(q.value(0).toString(), QString("18"));
             QCOMPARE(q.value(1).toLongLong(), (qint64)1200);
+        });
+    }
+
+    // v30 -> v31 (recipe-relative-temp-offset): the schema step adds
+    // recipes.temp_offset_c with NULL (= unconverted) on pre-31 rows — the
+    // data pass is deferred to MainController (it needs the profile catalog),
+    // so the migration itself must leave the marker in place.
+    void v30ToV31AddsTempOffsetColumn() {
+        QString path = freshDbPath();
+        { ShotHistoryStorage s; initAndClose(path, s); }  // full chain -> latest
+
+        qint64 recipeId = 0;
+        withRawDb(path, "v30_seed", [&](QSqlDatabase& db) {
+            // Rewind to 30 and drop the column, simulating a DB that upgraded
+            // to 30 before this migration shipped, with a legacy absolute.
+            QSqlQuery q(db);
+            QVERIFY(q.exec("DELETE FROM schema_version"));
+            QVERIFY(q.exec("INSERT INTO schema_version (version) VALUES (30)"));
+            QVERIFY(q.exec("ALTER TABLE recipes DROP COLUMN temp_offset_c"));
+            QVERIFY(q.exec("INSERT INTO recipes (name, profile_title, temp_override_c) "
+                           "VALUES ('Legacy', 'P', 87.0)"));
+            recipeId = q.lastInsertId().toLongLong();
+        });
+        QVERIFY(recipeId > 0);
+
+        { ShotHistoryStorage s; initAndClose(path, s); }  // runs migration 31
+
+        withRawDb(path, "v30_verify31", [&](QSqlDatabase& db) {
+            QCOMPARE(getSchemaVersion(db), 32);
+            QSqlQuery q(db);
+            QVERIFY(q.exec(QString("SELECT temp_offset_c, temp_override_c FROM recipes "
+                                   "WHERE id = %1").arg(recipeId)));
+            QVERIFY(q.next());
+            QVERIFY(q.value(0).isNull());              // unconverted marker intact
+            QCOMPARE(q.value(1).toDouble(), 87.0);     // legacy absolute untouched
+        });
+    }
+
+    // [barista-fork] THE fielded upstream-merge upgrade path (2026-07-14 merge). A shipped fork device sits at
+    // schema_version 31 = recipe-owned grind (the fork's +1 offset; upstream had grind at 30). The upstream
+    // merge renumbered upstream's temp_offset_c migration 31 -> 32, so such a device must advance 31 -> 32,
+    // GAIN the temp_offset_c column, and KEEP its grind-owned data. This encodes exactly that (the thing a
+    // green compile + non-DB tests can't prove).
+    void fieldedV31RecipeGrindUpgradesToV32TempOffset() {
+        QString path = freshDbPath();
+        { ShotHistoryStorage s; initAndClose(path, s); }   // full chain -> latest (32), recipes has every column
+
+        qint64 recipeId = 0;
+        withRawDb(path, "v31_seed", [&](QSqlDatabase& db) {
+            // Rewind to 31 (grind-owned done) and drop temp_offset_c, simulating a fielded fork device that
+            // ran migration 31 but predates the temp_offset (32) migration.
+            QSqlQuery q(db);
+            QVERIFY(q.exec("DELETE FROM schema_version"));
+            QVERIFY(q.exec("INSERT INTO schema_version (version) VALUES (31)"));
+            QVERIFY(q.exec("ALTER TABLE recipes DROP COLUMN temp_offset_c"));
+            // A recipe carrying grind-owned data (the state migration 31 produces).
+            QVERIFY(q.exec("INSERT INTO recipes (name, profile_title, grind_pinned, rpm_pinned) "
+                           "VALUES ('Fielded', 'P', '22', 1500)"));
+            recipeId = q.lastInsertId().toLongLong();
+        });
+        QVERIFY(recipeId > 0);
+
+        { ShotHistoryStorage s; initAndClose(path, s); }   // must run ONLY migration 32
+
+        withRawDb(path, "v31_verify32", [&](QSqlDatabase& db) {
+            QCOMPARE(getSchemaVersion(db), 32);                       // advanced 31 -> 32
+            QSqlQuery q(db);
+            // temp_offset_c column now EXISTS (a SELECT on it succeeds), and is NULL (unconverted) on this row.
+            QVERIFY2(q.exec(QString("SELECT temp_offset_c, grind_pinned, rpm_pinned FROM recipes "
+                                    "WHERE id = %1").arg(recipeId)),
+                     "temp_offset_c column missing after v31->v32 upgrade");
+            QVERIFY(q.next());
+            QVERIFY(q.value(0).isNull());                            // temp_offset_c added, unconverted
+            QCOMPARE(q.value(1).toString(), QString("22"));          // grind-owned data intact
+            QCOMPARE(q.value(2).toLongLong(), (qint64)1500);         // rpm intact
         });
     }
 
@@ -468,7 +543,7 @@ private slots:
         QCoreApplication::processEvents();
 
         withRawDb(path, "empty_verify", [](QSqlDatabase& db) {
-            QCOMPARE(getSchemaVersion(db), 31);
+            QCOMPARE(getSchemaVersion(db), 32);
         });
     }
 
@@ -490,7 +565,7 @@ private slots:
         QCoreApplication::processEvents();
 
         withRawDb(path, "null_verify", [](QSqlDatabase& db) {
-            QCOMPARE(getSchemaVersion(db), 31);
+            QCOMPARE(getSchemaVersion(db), 32);
             QSqlQuery q(db);
             // grinder_brand was dropped in migration 23; grinder_setting (the
             // surviving per-shot dial-in) exercises the same NULL-tolerance path.
@@ -670,7 +745,7 @@ private slots:
                 }
             }
         });
-        QCOMPARE(versionFound, 31);  // latest after full chain (recipe-owned grind = fork mig 31)
+        QCOMPARE(versionFound, 32);  // latest after full chain (recipe-owned grind = fork mig 31)
         QVERIFY2(!hasEnjoymentSource,
                  "enjoyment_source column must be absent after migration 16");
     }
@@ -773,7 +848,7 @@ private slots:
             }
         });
 
-        QCOMPARE(versionFound, 31);  // latest after full chain (recipe-owned grind = fork mig 31)
+        QCOMPARE(versionFound, 32);  // latest after full chain (recipe-owned grind = fork mig 31)
         QVERIFY2(columnGone, "enjoyment_source column must be dropped");
         QCOMPARE(enjoy1, 50);
         QCOMPARE(enjoy2, 50);
@@ -1110,7 +1185,7 @@ private slots:
         { ShotHistoryStorage s; initAndClose(path, s); }
 
         withRawDb(path, "v21_verify", [](QSqlDatabase& db) {
-            QCOMPARE(getSchemaVersion(db), 31);
+            QCOMPARE(getSchemaVersion(db), 32);
             QVERIFY(hasColumn(db, "coffee_bags", "yield_override_g"));
             QVERIFY(!hasColumn(db, "coffee_bags", "yield_target_g"));
             QSqlQuery q(db);
@@ -1144,7 +1219,7 @@ private slots:
         { ShotHistoryStorage s; initAndClose(path, s); }
 
         withRawDb(path, "v28_verify", [](QSqlDatabase& db) {
-            QCOMPARE(getSchemaVersion(db), 31);
+            QCOMPARE(getSchemaVersion(db), 32);
             QVERIFY(hasColumn(db, "recipes", "drink_type"));
             QVERIFY(hasColumn(db, "coffee_bags", "kind"));
             QSqlQuery q(db);
@@ -1224,7 +1299,7 @@ private slots:
         { ShotHistoryStorage s; initAndClose(path, s); }
 
         withRawDb(path, "v20_after_retry", [&](QSqlDatabase& db) {
-            QCOMPARE(getSchemaVersion(db), 31);
+            QCOMPARE(getSchemaVersion(db), 32);
             // The retry ran the WHOLE deferred chain, not just migration 20:
             // migration 21's rename landed too (post-condition column present).
             QVERIFY(hasColumn(db, "coffee_bags", "yield_override_g"));
@@ -1270,7 +1345,7 @@ private slots:
         { ShotHistoryStorage s; initAndClose(path, s); }
 
         withRawDb(path, "v21_after_retry", [](QSqlDatabase& db) {
-            QCOMPARE(getSchemaVersion(db), 31);
+            QCOMPARE(getSchemaVersion(db), 32);
             QVERIFY(hasColumn(db, "coffee_bags", "yield_override_g"));
             QVERIFY(!hasColumn(db, "coffee_bags", "yield_target_g"));
             QSqlQuery q(db);
@@ -1337,7 +1412,7 @@ private slots:
         };
 
         { ShotHistoryStorage s; initAndClose(path, s); }
-        withRawDb(path, "v22_ver", [](QSqlDatabase& db) { QCOMPARE(getSchemaVersion(db), 31); });
+        withRawDb(path, "v22_ver", [](QSqlDatabase& db) { QCOMPARE(getSchemaVersion(db), 32); });
         QCOMPARE(packageCount(), 1);             // default package created from current settings
         { ShotHistoryStorage s; initAndClose(path, s); }
         QCOMPARE(packageCount(), 1);             // gate prevented a duplicate on re-init

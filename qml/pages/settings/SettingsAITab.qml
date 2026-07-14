@@ -778,6 +778,411 @@ KeyboardAwareContainer {
                     font.pixelSize: Theme.scaled(12)
                 }
 
+                // ─── Remote Access (mobile connectors) subsection ───
+                Item { height: Theme.scaled(8) }
+
+                Tr {
+                    key: "settings.ai.remoteMcp.title"
+                    fallback: "Remote Access (Mobile Connectors)"
+                    color: Theme.textColor
+                    font.pixelSize: Theme.scaled(14)
+                    font.bold: true
+                }
+
+                Tr {
+                    key: "settings.ai.remoteMcp.description"
+                    fallback: "Reach this MCP server from Claude or ChatGPT mobile apps over the public internet, through a reverse proxy or tunnel you run. The connector URL below carries a secret token — treat it like a password."
+                    color: Theme.textSecondaryColor
+                    font.pixelSize: Theme.scaled(12)
+                    wrapMode: Text.WordWrap
+                    Layout.fillWidth: true
+                }
+
+                // Enable remote access toggle (requires the MCP server itself to be on)
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.scaled(12)
+                    enabled: Settings.mcp.mcpEnabled
+                    opacity: Settings.mcp.mcpEnabled ? 1.0 : 0.5
+
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: Theme.scaled(4)
+
+                        Tr {
+                            key: "settings.ai.remoteMcp.enable"
+                            fallback: "Enable Remote Access"
+                            color: Theme.textColor
+                            font.pixelSize: Theme.scaled(13)
+                            font.bold: true
+                        }
+                        Tr {
+                            key: "settings.ai.remoteMcp.enableHint"
+                            fallback: "Off by default. Serves only the tokenized MCP route — no other web pages are exposed."
+                            color: Theme.textSecondaryColor
+                            font.pixelSize: Theme.scaled(11)
+                            wrapMode: Text.WordWrap
+                            Layout.fillWidth: true
+                        }
+                    }
+
+                    StyledSwitch {
+                        checked: Settings.mcp.remoteMcpEnabled
+                        accessibleName: TranslationManager.translate("settings.ai.remoteMcp.enableAccessible", "Enable remote MCP access for mobile connectors")
+                        onCheckedChanged: Settings.mcp.remoteMcpEnabled = checked
+                    }
+                }
+
+                // Remote-access configuration (visible only when enabled)
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.scaled(10)
+                    visible: Settings.mcp.mcpEnabled && Settings.mcp.remoteMcpEnabled
+
+                    // Reachability mode selector
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: Theme.scaled(6)
+
+                        Tr {
+                            key: "settings.ai.remoteMcp.modeLabel"
+                            fallback: "How is it reachable?"
+                            color: Theme.textColor
+                            font.pixelSize: Theme.scaled(13)
+                            font.bold: true
+                        }
+
+                        Repeater {
+                            model: [
+                                {
+                                    mode: "custom",
+                                    label: TranslationManager.translate("settings.ai.remoteMcp.mode.custom", "Custom URL (bring your own)"),
+                                    detail: TranslationManager.translate("settings.ai.remoteMcp.mode.customDesc", "You run a reverse proxy / tunnel that forwards to this device."),
+                                    enabled: true
+                                },
+                                {
+                                    mode: "tailscale",
+                                    label: TranslationManager.translate("settings.ai.remoteMcp.mode.tailscale", "Tailscale (built-in)"),
+                                    detail: RemoteMcpAccess.tunnelAvailable
+                                        ? TranslationManager.translate("settings.ai.remoteMcp.mode.tailscaleDesc", "Join your tailnet and expose a public Funnel URL — no other setup.")
+                                        : TranslationManager.translate("settings.ai.remoteMcp.mode.tailscaleUnavailable", "Not included in this build."),
+                                    enabled: RemoteMcpAccess.tunnelAvailable
+                                }
+                            ]
+                            delegate: Rectangle {
+                                id: modeDelegate
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: modeCol.implicitHeight + Theme.scaled(16)
+                                radius: Theme.scaled(6)
+                                opacity: modelData.enabled ? 1.0 : 0.5
+                                color: Settings.mcp.remoteMcpMode === modelData.mode ? Qt.rgba(Theme.primaryColor.r, Theme.primaryColor.g, Theme.primaryColor.b, 0.15) : "transparent"
+                                border.color: Settings.mcp.remoteMcpMode === modelData.mode ? Theme.primaryColor : Theme.borderColor
+                                border.width: 1
+                                Accessible.ignored: true
+
+                                ColumnLayout {
+                                    id: modeCol
+                                    anchors.left: parent.left
+                                    anchors.right: parent.right
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    anchors.margins: Theme.scaled(12)
+                                    spacing: Theme.scaled(2)
+                                    Text {
+                                        text: modelData.label
+                                        color: Theme.textColor
+                                        font.pixelSize: Theme.scaled(13)
+                                        font.bold: true
+                                        Accessible.ignored: true
+                                    }
+                                    Text {
+                                        text: modelData.detail
+                                        color: Theme.textSecondaryColor
+                                        font.pixelSize: Theme.scaled(11)
+                                        wrapMode: Text.WordWrap
+                                        Layout.fillWidth: true
+                                        Accessible.ignored: true
+                                    }
+                                }
+                                AccessibleMouseArea {
+                                    anchors.fill: parent
+                                    enabled: modelData.enabled
+                                    accessibleName: modelData.label + ". " + modelData.detail
+                                    accessibleItem: modeDelegate
+                                    onAccessibleClicked: if (modelData.enabled) Settings.mcp.remoteMcpMode = modelData.mode
+                                }
+                            }
+                        }
+                    }
+
+                    // Public base URL (Mode C — bring your own)
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: Theme.scaled(4)
+                        visible: Settings.mcp.remoteMcpMode === "custom"
+
+                        Tr {
+                            key: "settings.ai.remoteMcp.baseUrlLabel"
+                            fallback: "Public base URL"
+                            color: Theme.textColor
+                            font.pixelSize: Theme.scaled(13)
+                            font.bold: true
+                        }
+                        Text {
+                            // Not a Tr: the %1 port needs .arg() substitution,
+                            // which Tr does not perform (mirrors the status line).
+                            text: TranslationManager.translate("settings.ai.remoteMcp.baseUrlHint",
+                                "The https:// address your proxy/tunnel exposes, forwarding to this tablet on port %1. Example: https://decenza.your-tailnet.ts.net")
+                                .arg(Settings.mcp.remoteMcpPort)
+                            color: Theme.textSecondaryColor
+                            font.pixelSize: Theme.scaled(11)
+                            wrapMode: Text.WordWrap
+                            Layout.fillWidth: true
+                        }
+                        StyledTextField {
+                            id: remoteMcpBaseUrlField
+                            Layout.fillWidth: true
+                            placeholder: "https://decenza.your-tailnet.ts.net"
+                            text: Settings.mcp.remoteMcpCustomBaseUrl
+                            inputMethodHints: Qt.ImhNoPredictiveText | Qt.ImhNoAutoUppercase | Qt.ImhUrlCharactersOnly
+                            onTextChanged: Settings.mcp.remoteMcpCustomBaseUrl = text
+                        }
+                        Text {
+                            // Shown whenever no usable connector URL composes —
+                            // blank field or a non-https/invalid base URL — so an
+                            // "active" listener is never left without an
+                            // explanation of why there's no URL to copy.
+                            visible: RemoteMcpAccess.connectorUrl.length === 0
+                            text: TranslationManager.translate("settings.ai.remoteMcp.baseUrlInvalid", "Enter a full https:// URL to get your connector URL.")
+                            color: Theme.errorColor
+                            font.pixelSize: Theme.scaled(11)
+                            wrapMode: Text.WordWrap
+                            Layout.fillWidth: true
+                        }
+                    }
+
+                    // Tailscale login (Mode A) — shown while the embedded node is
+                    // waiting for the user to authorize it.
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: Theme.scaled(8)
+                        visible: Settings.mcp.remoteMcpMode === "tailscale"
+                            && RemoteMcpAccess.loginUrl.length > 0
+
+                        Tr {
+                            key: "settings.ai.remoteMcp.tailscaleLoginLabel"
+                            fallback: "Sign in to Tailscale"
+                            color: Theme.textColor
+                            font.pixelSize: Theme.scaled(13)
+                            font.bold: true
+                        }
+                        Tr {
+                            key: "settings.ai.remoteMcp.tailscaleLoginHint"
+                            fallback: "Open this link (or scan the code) to authorize this device on your tailnet. You may also need to approve Funnel for it in the Tailscale admin console."
+                            color: Theme.textSecondaryColor
+                            font.pixelSize: Theme.scaled(11)
+                            wrapMode: Text.WordWrap
+                            Layout.fillWidth: true
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.scaled(8)
+                            Text {
+                                Layout.fillWidth: true
+                                text: RemoteMcpAccess.loginUrl
+                                color: Theme.accentColor
+                                font.pixelSize: Theme.scaled(12)
+                                wrapMode: Text.WrapAnywhere
+                                Accessible.role: Accessible.Link
+                                Accessible.name: TranslationManager.translate("settings.ai.remoteMcp.tailscaleLoginAccessible", "Open Tailscale login page")
+                                Accessible.focusable: true
+                                MouseArea {
+                                    id: tsLoginArea
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: Qt.openUrlExternally(RemoteMcpAccess.loginUrl)
+                                }
+                                Accessible.onPressAction: tsLoginArea.clicked(null)
+                            }
+                            AccessibleButton {
+                                text: TranslationManager.translate("common.button.copy", "Copy")
+                                accessibleName: TranslationManager.translate("settings.ai.remoteMcp.tailscaleLoginCopy", "Copy Tailscale login URL")
+                                onClicked: MainController.copyToClipboard(RemoteMcpAccess.loginUrl)
+                            }
+                        }
+                        Rectangle {
+                            Layout.alignment: Qt.AlignHCenter
+                            width: Theme.scaled(180)
+                            height: Theme.scaled(180)
+                            color: "#ffffff"
+                            radius: Theme.scaled(8)
+                            Accessible.role: Accessible.Graphic
+                            Accessible.name: TranslationManager.translate("settings.ai.remoteMcp.tailscaleLoginQr", "QR code of the Tailscale login URL")
+                            QrCode {
+                                anchors.fill: parent
+                                anchors.margins: Theme.scaled(8)
+                                value: RemoteMcpAccess.loginUrl
+                                Accessible.ignored: true
+                            }
+                        }
+                    }
+
+                    // Connector URL + QR + copy (visible once a valid URL composes)
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: Theme.scaled(8)
+                        visible: RemoteMcpAccess.connectorUrl.length > 0
+
+                        Tr {
+                            key: "settings.ai.remoteMcp.connectorUrlLabel"
+                            fallback: "Connector URL"
+                            color: Theme.textColor
+                            font.pixelSize: Theme.scaled(13)
+                            font.bold: true
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.scaled(8)
+
+                            Text {
+                                Layout.fillWidth: true
+                                text: RemoteMcpAccess.connectorUrl
+                                color: Theme.accentColor
+                                font.pixelSize: Theme.scaled(12)
+                                wrapMode: Text.WrapAnywhere
+                                Accessible.role: Accessible.StaticText
+                                Accessible.name: TranslationManager.translate("settings.ai.remoteMcp.connectorUrlAccessible", "Connector URL. Copy this into your AI app's custom connector settings.")
+                            }
+
+                            AccessibleButton {
+                                text: TranslationManager.translate("common.button.copy", "Copy")
+                                accessibleName: TranslationManager.translate("settings.ai.remoteMcp.copyAccessible", "Copy connector URL to clipboard")
+                                onClicked: {
+                                    MainController.copyToClipboard(RemoteMcpAccess.connectorUrl)
+                                    AccessibilityManager.announce(TranslationManager.translate("settings.ai.remoteMcp.copied", "Connector URL copied"))
+                                }
+                            }
+                        }
+
+                        // QR code for configuring the connector on claude.ai
+                        Rectangle {
+                            Layout.alignment: Qt.AlignHCenter
+                            width: Theme.scaled(180)
+                            height: Theme.scaled(180)
+                            color: "#ffffff"
+                            radius: Theme.scaled(8)
+                            Accessible.role: Accessible.Graphic
+                            Accessible.name: TranslationManager.translate("settings.ai.remoteMcp.qrAccessible", "QR code of the connector URL. Use the Copy button if you cannot scan it.")
+
+                            QrCode {
+                                anchors.fill: parent
+                                anchors.margins: Theme.scaled(8)
+                                value: RemoteMcpAccess.connectorUrl
+                                Accessible.ignored: true
+                            }
+                        }
+
+                        Tr {
+                            key: "settings.ai.remoteMcp.setupGuidance"
+                            fallback: "Add this as a custom connector in Claude, then paste the URL above (leave the OAuth fields blank). Mobile Claude apps sync connectors automatically."
+                            color: Theme.textSecondaryColor
+                            font.pixelSize: Theme.scaled(11)
+                            wrapMode: Text.WordWrap
+                            Layout.fillWidth: true
+                        }
+                        Text {
+                            text: TranslationManager.translate("settings.ai.remoteMcp.openClaudeConnectors", "Open Connectors on claude.ai ↗")
+                            color: Theme.accentColor
+                            font.pixelSize: Theme.scaled(12)
+                            font.underline: true
+                            wrapMode: Text.WordWrap
+                            Layout.fillWidth: true
+                            Accessible.role: Accessible.Link
+                            Accessible.name: TranslationManager.translate("settings.ai.remoteMcp.openClaudeConnectorsAccessible", "Open the Connectors settings page on claude.ai in your browser")
+                            Accessible.focusable: true
+                            MouseArea {
+                                id: claudeConnectorsArea
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: Qt.openUrlExternally("https://claude.ai/settings/connectors")
+                            }
+                            Accessible.onPressAction: claudeConnectorsArea.clicked(null)
+                        }
+                    }
+
+                    // Status line
+                    Text {
+                        Layout.fillWidth: true
+                        text: {
+                            switch (RemoteMcpAccess.statusString) {
+                            case "active":
+                                return Settings.mcp.remoteMcpMode === "tailscale"
+                                    ? TranslationManager.translate("settings.ai.remoteMcp.status.activeTailscale", "Active — public Funnel URL ready")
+                                    : TranslationManager.translate("settings.ai.remoteMcp.status.active", "Active — listening on port %1").arg(RemoteMcpAccess.listenPort)
+                            case "starting":
+                                return TranslationManager.translate("settings.ai.remoteMcp.status.starting", "Starting…")
+                            case "reconnecting":
+                                return TranslationManager.translate("settings.ai.remoteMcp.status.reconnecting", "Reconnecting…")
+                            case "error":
+                                return TranslationManager.translate("settings.ai.remoteMcp.status.error", "Error: %1").arg(RemoteMcpAccess.statusDetail)
+                            default:
+                                return TranslationManager.translate("settings.ai.remoteMcp.status.off", "Off")
+                            }
+                        }
+                        color: RemoteMcpAccess.statusString === "error" ? Theme.errorColor
+                             : RemoteMcpAccess.statusString === "active" ? Theme.successColor
+                             : Theme.textSecondaryColor
+                        font.pixelSize: Theme.scaled(12)
+                        font.bold: RemoteMcpAccess.statusString === "active"
+                        wrapMode: Text.WordWrap
+                    }
+
+                    // One-time Tailscale setup — opens a step-by-step popup. Hidden
+                    // once the connector is active (setup is done), so it doesn't
+                    // linger after everything is working.
+                    AccessibleButton {
+                        visible: Settings.mcp.remoteMcpMode === "tailscale"
+                            && RemoteMcpAccess.statusString !== "active"
+                        text: TranslationManager.translate("settings.ai.remoteMcp.tailscaleSetupButton", "Set up Tailscale Funnel (one-time)…")
+                        accessibleName: TranslationManager.translate("settings.ai.remoteMcp.tailscaleSetupAccessible", "Open Tailscale Funnel setup instructions")
+                        warning: RemoteMcpAccess.statusString === "error"
+                        onClicked: tailscaleSetupDialog.open()
+                    }
+
+                    // Rotate token (revokes the current URL)
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: Theme.scaled(12)
+
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.scaled(2)
+                            Tr {
+                                key: "settings.ai.remoteMcp.rotateLabel"
+                                fallback: "Rotate token"
+                                color: Theme.textColor
+                                font.pixelSize: Theme.scaled(13)
+                                font.bold: true
+                            }
+                            Tr {
+                                key: "settings.ai.remoteMcp.rotateHint"
+                                fallback: "Generates a new URL and immediately disconnects anything using the old one. Update the connector on claude.ai afterwards."
+                                color: Theme.textSecondaryColor
+                                font.pixelSize: Theme.scaled(11)
+                                wrapMode: Text.WordWrap
+                                Layout.fillWidth: true
+                            }
+                        }
+
+                        AccessibleButton {
+                            text: TranslationManager.translate("settings.ai.remoteMcp.rotateButton", "Rotate")
+                            accessibleName: TranslationManager.translate("settings.ai.remoteMcp.rotateAccessible", "Rotate remote access token")
+                            destructive: true
+                            onClicked: rotateTokenDialog.open()
+                        }
+                    }
+                }
+
 
                 // ─── Discuss Shot subsection ───
                 Item { height: Theme.scaled(4) }
@@ -889,6 +1294,214 @@ KeyboardAwareContainer {
 
     // Discuss Shot app selector
     // MCP Help Dialog
+    // Confirm rotating the remote-access token (revokes the current URL).
+    Dialog {
+        id: rotateTokenDialog
+        parent: Overlay.overlay
+        anchors.centerIn: parent
+        width: Math.min(parent ? parent.width - Theme.scaled(32) : Theme.scaled(360), Theme.scaled(420))
+        modal: true
+        closePolicy: Dialog.CloseOnEscape | Dialog.CloseOnPressOutside
+
+        onOpened: AccessibilityManager.announce(rotateTokenTitle.text)
+
+        background: Rectangle {
+            color: Theme.surfaceColor
+            radius: Theme.scaled(12)
+            border.color: Theme.borderColor
+            border.width: 1
+        }
+
+        contentItem: ColumnLayout {
+            spacing: Theme.scaled(12)
+
+            Text {
+                id: rotateTokenTitle
+                Layout.fillWidth: true
+                text: TranslationManager.translate("settings.ai.remoteMcp.rotateConfirmTitle", "Rotate remote access token?")
+                color: Theme.textColor
+                font.family: Theme.subtitleFont.family
+                font.pixelSize: Theme.subtitleFont.pixelSize
+                font.bold: true
+                wrapMode: Text.WordWrap
+            }
+            Text {
+                Layout.fillWidth: true
+                text: TranslationManager.translate("settings.ai.remoteMcp.rotateConfirmBody", "The current connector URL will stop working immediately and any connected AI app will be disconnected. You will need to update the connector on claude.ai with the new URL.")
+                color: Theme.textSecondaryColor
+                font.pixelSize: Theme.scaled(12)
+                wrapMode: Text.WordWrap
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: Theme.scaled(8)
+                Item { Layout.fillWidth: true }
+                AccessibleButton {
+                    text: TranslationManager.translate("common.button.cancel", "Cancel")
+                    accessibleName: TranslationManager.translate("common.button.cancel", "Cancel")
+                    onClicked: rotateTokenDialog.close()
+                }
+                AccessibleButton {
+                    text: TranslationManager.translate("settings.ai.remoteMcp.rotateButton", "Rotate")
+                    accessibleName: TranslationManager.translate("settings.ai.remoteMcp.rotateAccessible", "Rotate remote access token")
+                    destructive: true
+                    onClicked: {
+                        RemoteMcpAccess.rotateToken()
+                        rotateTokenDialog.close()
+                        AccessibilityManager.announce(TranslationManager.translate("settings.ai.remoteMcp.rotated", "Token rotated. New connector URL generated."))
+                    }
+                }
+            }
+        }
+    }
+
+    // Step-by-step Tailscale Funnel setup instructions.
+    Dialog {
+        id: tailscaleSetupDialog
+        parent: Overlay.overlay
+        anchors.centerIn: parent
+        width: Math.min(parent ? parent.width - Theme.scaled(32) : Theme.scaled(480), Theme.scaled(520))
+        modal: true
+        closePolicy: Dialog.CloseOnEscape | Dialog.CloseOnPressOutside
+
+        readonly property string aclSnippet:
+            '"nodeAttrs": [\n  { "target": ["autogroup:member"], "attr": ["funnel"] },\n],'
+
+        onOpened: AccessibilityManager.announce(tsSetupTitle.text)
+
+        background: Rectangle {
+            color: Theme.surfaceColor
+            radius: Theme.scaled(12)
+            border.color: Theme.borderColor
+            border.width: 1
+        }
+
+        contentItem: Flickable {
+            implicitHeight: Math.min(tsSetupCol.implicitHeight,
+                tailscaleSetupDialog.parent ? tailscaleSetupDialog.parent.height - Theme.scaled(120) : Theme.scaled(560))
+            contentHeight: tsSetupCol.implicitHeight
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+
+            ColumnLayout {
+                id: tsSetupCol
+                width: parent.width
+                spacing: Theme.scaled(12)
+
+                Text {
+                    id: tsSetupTitle
+                    Layout.fillWidth: true
+                    text: TranslationManager.translate("settings.ai.remoteMcp.setup.title", "Set up Tailscale Funnel")
+                    color: Theme.textColor
+                    font.family: Theme.subtitleFont.family
+                    font.pixelSize: Theme.subtitleFont.pixelSize
+                    font.bold: true
+                    wrapMode: Text.WordWrap
+                }
+                Text {
+                    Layout.fillWidth: true
+                    text: TranslationManager.translate("settings.ai.remoteMcp.setup.intro", "A one-time setup on your Tailscale account lets Decenza expose a public URL for AI connectors. Do both steps in the Tailscale admin console — then come back, Decenza connects automatically (no restart).")
+                    color: Theme.textSecondaryColor
+                    font.pixelSize: Theme.scaled(12)
+                    wrapMode: Text.WordWrap
+                }
+
+                // Step 1 — HTTPS certificates
+                Tr {
+                    key: "settings.ai.remoteMcp.setup.step1"
+                    fallback: "1.  Enable HTTPS certificates"
+                    color: Theme.textColor
+                    font.pixelSize: Theme.scaled(13)
+                    font.bold: true
+                }
+                Text {
+                    Layout.fillWidth: true
+                    text: TranslationManager.translate("settings.ai.remoteMcp.setup.step1body", "On the DNS page, scroll to the bottom and turn on “HTTPS Certificates”.")
+                    color: Theme.textSecondaryColor
+                    font.pixelSize: Theme.scaled(12)
+                    wrapMode: Text.WordWrap
+                }
+                AccessibleButton {
+                    text: TranslationManager.translate("settings.ai.remoteMcp.setup.openDns", "Open DNS settings ↗")
+                    accessibleName: TranslationManager.translate("settings.ai.remoteMcp.setup.openDnsAccessible", "Open Tailscale DNS settings in browser")
+                    onClicked: Qt.openUrlExternally("https://login.tailscale.com/admin/dns")
+                }
+
+                // Step 2 — Funnel node attribute
+                Tr {
+                    key: "settings.ai.remoteMcp.setup.step2"
+                    fallback: "2.  Allow Funnel for this device"
+                    color: Theme.textColor
+                    font.pixelSize: Theme.scaled(13)
+                    font.bold: true
+                }
+                Text {
+                    Layout.fillWidth: true
+                    text: TranslationManager.translate("settings.ai.remoteMcp.setup.step2body", "Open Access controls and click “JSON editor” at the top. On the right, open the “Funnel” panel and click “Add Funnel to policy”, then Save (the red button). No typing needed.")
+                    color: Theme.textSecondaryColor
+                    font.pixelSize: Theme.scaled(12)
+                    wrapMode: Text.WordWrap
+                }
+                Text {
+                    Layout.fillWidth: true
+                    text: TranslationManager.translate("settings.ai.remoteMcp.setup.step2fallback", "Don’t see it? Paste this rule after the first “{” in the JSON editor instead, then Save:")
+                    color: Theme.textSecondaryColor
+                    font.pixelSize: Theme.scaled(11)
+                    font.italic: true
+                    wrapMode: Text.WordWrap
+                }
+                Rectangle {
+                    Layout.fillWidth: true
+                    color: Theme.backgroundColor
+                    border.color: Theme.borderColor
+                    border.width: 1
+                    radius: Theme.scaled(6)
+                    Layout.preferredHeight: tsSnippetText.implicitHeight + Theme.scaled(16)
+                    Text {
+                        id: tsSnippetText
+                        anchors.fill: parent
+                        anchors.margins: Theme.scaled(8)
+                        text: tailscaleSetupDialog.aclSnippet
+                        color: Theme.textColor
+                        font.family: "monospace"
+                        font.pixelSize: Theme.scaled(11)
+                        wrapMode: Text.WrapAnywhere
+                        Accessible.name: TranslationManager.translate("settings.ai.remoteMcp.setup.snippetAccessible", "Tailscale ACL rule to grant Funnel")
+                    }
+                }
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.scaled(8)
+                    AccessibleButton {
+                        text: TranslationManager.translate("settings.ai.remoteMcp.setup.copyRule", "Copy rule")
+                        accessibleName: TranslationManager.translate("settings.ai.remoteMcp.setup.copyRuleAccessible", "Copy the Tailscale Funnel ACL rule to clipboard")
+                        onClicked: {
+                            MainController.copyToClipboard(tailscaleSetupDialog.aclSnippet)
+                            AccessibilityManager.announce(TranslationManager.translate("settings.ai.remoteMcp.setup.copied", "Rule copied"))
+                        }
+                    }
+                    AccessibleButton {
+                        text: TranslationManager.translate("settings.ai.remoteMcp.setup.openAcls", "Open Access controls ↗")
+                        accessibleName: TranslationManager.translate("settings.ai.remoteMcp.setup.openAclsAccessible", "Open Tailscale access controls in browser")
+                        onClicked: Qt.openUrlExternally("https://login.tailscale.com/admin/acls")
+                    }
+                }
+
+                Item { Layout.fillHeight: true; Layout.minimumHeight: Theme.scaled(4) }
+                RowLayout {
+                    Layout.fillWidth: true
+                    Item { Layout.fillWidth: true }
+                    AccessibleButton {
+                        text: TranslationManager.translate("common.button.done", "Done")
+                        accessibleName: TranslationManager.translate("common.button.done", "Done")
+                        primary: true
+                        onClicked: tailscaleSetupDialog.close()
+                    }
+                }
+            }
+        }
+    }
+
     Dialog {
         id: mcpHelpDialog
         parent: Overlay.overlay

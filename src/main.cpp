@@ -9,6 +9,8 @@
 #include <QTimer>
 #include <QEventLoop>
 #include <QGuiApplication>
+#include <QFont>
+#include <QFontDatabase>
 #include <QAccessible>
 #include <QCoreApplication>
 #include <QDebug>
@@ -113,6 +115,7 @@
 #include "history/shothistoryexporter.h"
 #include "history/shotprojection.h"
 #include "mcp/mcpserver.h"
+#include "mcp/mcpremoteaccess.h"
 #include "network/librarysharing.h"
 #include "network/relayclient.h"
 #include "core/documentformatter.h"
@@ -375,6 +378,41 @@ int main(int argc, char *argv[])
 #endif
 
     QApplication app(argc, argv);
+
+    // --- Bundled UI font (issue #1469) -------------------------------------
+    // Decenza ships its own Roboto so text glyph metrics are deterministic
+    // across platforms, OEMs, and OS versions instead of inheriting each
+    // device's system font — differing system-font metrics were causing text
+    // to overflow/clip on some devices but not others. Roboto matches Android's
+    // historical default, so the look is essentially unchanged there. Registered
+    // before the QML engine loads so all QML UI inherits it. QML elements that
+    // set an explicit font.family (e.g. Theme.monoFontFamily) still override
+    // this default.
+    {
+        const QStringList fontFiles = {
+            QStringLiteral(":/fonts/Roboto-Regular.ttf"),
+            QStringLiteral(":/fonts/Roboto-Medium.ttf"),
+            QStringLiteral(":/fonts/Roboto-Bold.ttf"),
+            QStringLiteral(":/fonts/Roboto-Light.ttf"),
+        };
+        QString bundledFamily;
+        for (const QString& path : fontFiles) {
+            const int id = QFontDatabase::addApplicationFont(path);
+            if (id < 0) {
+                qWarning() << "[Font] Failed to register bundled font:" << path;
+                continue;
+            }
+            const QStringList families = QFontDatabase::applicationFontFamilies(id);
+            if (bundledFamily.isEmpty() && !families.isEmpty())
+                bundledFamily = families.first();
+        }
+        if (!bundledFamily.isEmpty()) {
+            app.setFont(QFont(bundledFamily));
+            qDebug() << "[Font] Bundled application font set:" << bundledFamily;
+        } else {
+            qWarning() << "[Font] No bundled font registered (bundled font resource missing from build) — falling back to platform default";
+        }
+    }
 
 #ifdef Q_OS_MACOS
     // Workaround for macOS crash in Apple Color Emoji bitmap rendering.
@@ -1112,6 +1150,16 @@ int main(int argc, char *argv[])
     mcpServer.setTranslationManager(&translationManager);
     mcpServer.setBatteryManager(&batteryManager);
     mainController.shotServer()->setMcpServer(&mcpServer);
+
+    // Remote MCP connector: a dedicated tokenized listener (separate from
+    // ShotServer) that makes the MCP server reachable from Claude/ChatGPT
+    // mobile custom connectors. Defaults off; started on demand from Settings.
+    McpRemoteAccess remoteMcpAccess;
+    remoteMcpAccess.setMcpServer(&mcpServer);
+    remoteMcpAccess.setSettings(settings.mcp());
+    // Expose live remote-access status + connector/login URLs to the web
+    // settings page (Settings.mcp holds the persisted config).
+    mainController.shotServer()->setRemoteMcpAccess(&remoteMcpAccess);
     // Note: registerAllTools() is deferred until after AccessibilityManager is created (below)
 
     // Relay client for Pocket app remote control via AWS WebSocket
@@ -1305,6 +1353,9 @@ int main(int argc, char *argv[])
     mcpServer.registerAllTools();
     mcpServer.registerAllResources();
     mcpServer.connectSseNotifications();
+
+    // Start the remote connector listener now if it was left enabled.
+    remoteMcpAccess.refresh();
 
     // Crash reporter for sending crash reports to api.decenza.coffee
     CrashReporter crashReporter;
@@ -2576,6 +2627,7 @@ int main(int argc, char *argv[])
     context->setContextProperty("CrashReporter", &crashReporter);
     context->setContextProperty("WidgetLibrary", &widgetLibrary);
     context->setContextProperty("McpServer", &mcpServer);
+    context->setContextProperty("RemoteMcpAccess", &remoteMcpAccess);
     context->setContextProperty("LibrarySharing", &librarySharing);
     context->setContextProperty("ShotHistoryExporter", &shotHistoryExporter);
 #ifndef Q_OS_IOS

@@ -1568,6 +1568,35 @@ bool ShotHistoryStorage::runMigrations()
         }
     }
 
+    // Migration 32: recipes.temp_offset_c (recipe-relative-temp-offset, upstream #1498). A recipe's
+    // temperature becomes a SIGNED DELTA against its profile instead of the absolute temp_override_c, so a
+    // profile temperature edit moves the recipe with the profile and can never manufacture a phantom offset.
+    // [barista-fork] Renumbered upstream's 31 -> 32: the fork's +1 migration offset (documented) already
+    // holds 31 with recipe-owned grind, so upstream's temp_offset_c advances one slot. A fork device at v31
+    // (grind-owned done) runs THIS to get the column; a device at v30 runs 31 then 32.
+    // Schema-only here: the new column's NULL default IS the "unconverted" marker, and the data pass
+    // (RecipeStorage::convertLegacyTempOffsetsStatic) runs deferred from MainController once the profile
+    // catalog — the conversion anchor — is available. temp_override_c stays in place, dead: it is the
+    // conversion input and the staging column for legacy-source imports. Fresh DBs get temp_offset_c from
+    // ensureTableStatic's CREATE TABLE (the hasColumn guard makes both paths converge). Idempotent,
+    // gated ">= 31 && < 32".
+    if (currentVersion >= 31 && currentVersion < 32) {
+        qDebug() << "ShotHistoryStorage: Running migration to version 32 (recipe temp offset)";
+
+        if (!hasColumn("recipes", "temp_offset_c")
+            && !query.exec ("ALTER TABLE recipes ADD COLUMN temp_offset_c REAL"))
+            qWarning() << "ShotHistoryStorage: migration 32 add recipes.temp_offset_c failed -"
+                       << query.lastError().text();
+
+        if (hasColumn("recipes", "temp_offset_c")) {
+            query.exec ("DELETE FROM schema_version");
+            query.exec ("INSERT INTO schema_version (version) VALUES (32)");
+            currentVersion = 32;
+        } else {
+            qWarning() << "ShotHistoryStorage: migration 32 incomplete - will retry next launch";
+        }
+    }
+
     // [barista-fork] Version-independent fork-schema repair. A shot DB written by a
     // DIFFERENT Decenza build (e.g. an upstream v2.0.0 database pulled in via
     // device-to-device import) carries a schema_version NUMBER that may sit at or

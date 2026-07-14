@@ -16,8 +16,12 @@
 #include <QRegularExpression>
 
 // Test Settings property round-trip and signal emission.
-// Settings uses QSettings("DecentEspresso", "DE1Qt") which reads/writes to
-// the system settings store. Tests save originals in init() and restore in
+// Under DECENZA_TESTING, Settings and every settings_<domain>.cpp construct
+// their QSettings from Settings::testQSettingsPath() — an isolated per-process
+// temp file, NOT the real ("DecentEspresso", "DE1Qt") store the shipped app
+// reads/writes. Raw QSettings seeding in these tests must use the same
+// isolated path (never the real store) or the seeded data lands somewhere
+// nothing reads. Tests still save originals in init() and restore in
 // cleanup() (guaranteed to run even if assertions fail mid-test).
 
 // File-scope helper: the ordered list of "type" values in a getZoneItems()
@@ -126,7 +130,7 @@ private slots:
         m_origMilkAutoCapture = m_settings.brew()->milkAutoCaptureEnabled();
         // Weight-timed scaling is now driven by a GLOBAL seconds-per-gram rate.
         m_origSteamSecPerGram = m_settings.brew()->steamSecondsPerGram();
-        { QSettings raw("DecentEspresso", "DE1Qt");
+        { QSettings raw(Settings::testQSettingsPath(), QSettings::IniFormat);
           m_origVesselPresets = raw.value("water/vesselPresets").toByteArray();
           m_origPitcherPresets = raw.value("steam/pitcherPresets").toByteArray(); }
         m_origActiveRecipeId = m_settings.dye()->activeRecipeId();
@@ -152,7 +156,7 @@ private slots:
         m_settings.app()->setTemperatureUnit(m_origTemperatureUnit);
         m_settings.brew()->setMilkAutoCaptureEnabled(m_origMilkAutoCapture);
         m_settings.brew()->setSteamSecondsPerGram(m_origSteamSecPerGram);
-        { QSettings raw("DecentEspresso", "DE1Qt");
+        { QSettings raw(Settings::testQSettingsPath(), QSettings::IniFormat);
           raw.setValue("water/vesselPresets", m_origVesselPresets);
           raw.setValue("steam/pitcherPresets", m_origPitcherPresets);
           raw.sync(); }
@@ -216,7 +220,7 @@ private slots:
         // ran (a stale cache would have returned false).
         m_settings.visualizer()->setVisualizerAutoUpdate(false);
         QVERIFY(!m_settings.visualizer()->visualizerAutoUpdate());
-        QSettings raw("DecentEspresso", "DE1Qt");
+        QSettings raw(Settings::testQSettingsPath(), QSettings::IniFormat);
         raw.remove("visualizer/autoUpdate");
         raw.sync();
         Settings fresh;
@@ -503,7 +507,7 @@ private slots:
 
     void temperatureUnitDefaultIsCelsius() {
         // On fresh state (key absent) the getter default must be "celsius".
-        { QSettings raw("DecentEspresso", "DE1Qt");
+        { QSettings raw(Settings::testQSettingsPath(), QSettings::IniFormat);
           raw.remove("display/temperatureUnit");
           raw.sync(); }
         QCOMPARE(m_settings.app()->temperatureUnit(), QString("celsius"));
@@ -521,7 +525,7 @@ private slots:
         legacy["mode"] = "weight";
         legacy["flowRate"] = 40;
         QJsonArray arr; arr.append(legacy);
-        { QSettings raw("DecentEspresso", "DE1Qt");
+        { QSettings raw(Settings::testQSettingsPath(), QSettings::IniFormat);
           raw.setValue("water/vesselPresets", QJsonDocument(arr).toJson());
           raw.sync(); }
 
@@ -635,13 +639,146 @@ private slots:
     }
 
     void effectiveSteamDurationSecFallsBackWhenUncalibrated() {
-        // Weight-timing on but no calibration recorded: scaledSteamTime() yields 0
-        // (calibMilkG <= 0), so the base duration must be used, not 0.
+        // Weight-timing on but no global rate recorded: scaledSteamTime() yields 0
+        // (steamSecondsPerGram <= 0), so the base duration must be used, not 0. Set
+        // the rate to 0 explicitly so the test exercises the uncalibrated gate rather
+        // than relying on the ambient store value.
         m_settings.brew()->setMilkAutoCaptureEnabled(true);
+        m_settings.brew()->setSteamSecondsPerGram(0.0);
         m_settings.brew()->addSteamPitcherPreset("Cortado", 20, 150, 135.0);
         const int idx = static_cast<int>(m_settings.brew()->steamPitcherPresets().size()) - 1;
 
         QCOMPARE(m_settings.brew()->effectiveSteamDurationSec(idx, 300.0), 20);
+    }
+
+    void steamSecondsPerGramClampsNegativeToZero() {
+        // A negative rate is nonsensical; the setter must clamp it to 0 (uncalibrated).
+        m_settings.brew()->setSteamSecondsPerGram(-1.0);
+        QCOMPARE(m_settings.brew()->steamSecondsPerGram(), 0.0);
+    }
+
+    void steamSecondsPerGramEmitsOnChangeOnly() {
+        // NOTIFY fires once on a real change and stays silent on a no-op re-set.
+        m_settings.brew()->setSteamSecondsPerGram(0.10);
+        QSignalSpy spy(m_settings.brew(), &SettingsBrew::steamSecondsPerGramChanged);
+        m_settings.brew()->setSteamSecondsPerGram(0.20);   // change -> 1 emit
+        QCOMPARE(spy.count(), 1);
+        m_settings.brew()->setSteamSecondsPerGram(0.20);   // no-op -> no further emit
+        QCOMPARE(spy.count(), 1);
+    }
+
+    void calibrateSteamFromReferenceSetsRateAndEnables() {
+        // The happy path: rate = timeSec / milkG, and weight-timing is turned on as the
+        // explicit calibrate opt-in.
+        m_settings.brew()->setMilkAutoCaptureEnabled(false);
+        m_settings.brew()->setSteamSecondsPerGram(0.0);
+        m_settings.brew()->calibrateSteamFromReference(200.0, 30.0);  // 0.15 s/g
+        QCOMPARE(m_settings.brew()->steamSecondsPerGram(), 0.15);
+        QVERIFY(m_settings.brew()->milkAutoCaptureEnabled());
+    }
+
+    void calibrateSteamFromReferenceGuardsNonPositive() {
+        // With either argument non-positive the call is a no-op — no divide-by-zero
+        // rate, and (critically) it must NOT enable weight-timing off a bad calibration.
+        m_settings.brew()->setMilkAutoCaptureEnabled(false);
+        m_settings.brew()->setSteamSecondsPerGram(0.0);
+        m_settings.brew()->calibrateSteamFromReference(0.0, 30.0);    // no milk
+        m_settings.brew()->calibrateSteamFromReference(200.0, 0.0);   // no time
+        QCOMPARE(m_settings.brew()->steamSecondsPerGram(), 0.0);
+        QVERIFY(!m_settings.brew()->milkAutoCaptureEnabled());
+    }
+
+    void steamSecondsPerGramRoundTrip() {
+        // The global rate must survive an export -> import cycle (it's the whole
+        // weight-timed-steam calibration — losing it on a device migration would
+        // silently disable the feature).
+        m_settings.brew()->setSteamSecondsPerGram(0.22);
+        QJsonObject bundle = SettingsSerializer::exportToJson(&m_settings, false);
+
+        m_settings.brew()->setSteamSecondsPerGram(0.99);   // mutate to prove import overwrites
+        QTest::ignoreMessage(QtWarningMsg,
+            QRegularExpression(QStringLiteral("SettingsSerializer: importFromJson replacing .* favorites")));
+        QVERIFY(SettingsSerializer::importFromJson(&m_settings, bundle));
+
+        QCOMPARE(m_settings.brew()->steamSecondsPerGram(), 0.22);
+    }
+
+    void steamRateMigrationSeedsFromLegacyPreset() {
+        // The one-time ctor migration seeds the global rate from the FIRST legacy
+        // preset carrying both (calibMilkG, duration). Snapshot the run-once sentinel
+        // because cleanup() doesn't restore it.
+        bool origMigrated;
+        { QSettings raw(Settings::testQSettingsPath(), QSettings::IniFormat);
+          origMigrated = raw.value("steam/steamRateMigrated", false).toBool(); }
+
+        QJsonArray arr;
+        { QJsonObject p; p["name"] = "Small"; p["duration"] = 30; p["flow"] = 150; p["calibMilkG"] = 200; arr.append(p); }
+        { QJsonObject p; p["name"] = "Large"; p["duration"] = 40; p["flow"] = 150; p["calibMilkG"] = 100; arr.append(p); }
+        { QSettings raw(Settings::testQSettingsPath(), QSettings::IniFormat);
+          raw.setValue("steam/pitcherPresets", QJsonDocument(arr).toJson());
+          raw.remove("steam/steamSecondsPerGram");             // uncalibrated global rate
+          raw.setValue("steam/steamRateMigrated", false);      // allow the one-time seed to run
+          raw.sync(); }
+
+        // A fresh Settings runs the migration in SettingsBrew's ctor. First preset wins:
+        // 30/200 = 0.15, not the second's 40/100 = 0.40.
+        Settings fresh;
+        QCOMPARE(fresh.brew()->steamSecondsPerGram(), 0.15);
+
+        { QSettings raw(Settings::testQSettingsPath(), QSettings::IniFormat);
+          raw.setValue("steam/steamRateMigrated", origMigrated);
+          raw.sync(); }
+        // cleanup() restores steam/pitcherPresets + steamSecondsPerGram.
+    }
+
+    void steamRateMigrationSentinelPreventsReseed() {
+        // A calibrated legacy preset is present, but the sentinel says migration already
+        // ran and the user deliberately left the rate at 0 (via the ± control). The ctor
+        // must NOT re-seed — this is why the gate is the sentinel, not "rate <= 0".
+        bool origMigrated;
+        { QSettings raw(Settings::testQSettingsPath(), QSettings::IniFormat);
+          origMigrated = raw.value("steam/steamRateMigrated", false).toBool(); }
+
+        QJsonArray arr;
+        { QJsonObject p; p["name"] = "Small"; p["duration"] = 30; p["flow"] = 150; p["calibMilkG"] = 200; arr.append(p); }
+        { QSettings raw(Settings::testQSettingsPath(), QSettings::IniFormat);
+          raw.setValue("steam/pitcherPresets", QJsonDocument(arr).toJson());
+          raw.setValue("steam/steamSecondsPerGram", 0.0);      // deliberately uncalibrated
+          raw.setValue("steam/steamRateMigrated", true);       // already migrated
+          raw.sync(); }
+
+        Settings fresh;
+        QCOMPARE(fresh.brew()->steamSecondsPerGram(), 0.0);
+
+        { QSettings raw(Settings::testQSettingsPath(), QSettings::IniFormat);
+          raw.setValue("steam/steamRateMigrated", origMigrated);
+          raw.sync(); }
+    }
+
+    void steamRateImportReseedsFromLegacyBackup() {
+        // A pre-migration backup carries per-pitcher calibMilkG but NO steamSecondsPerGram
+        // key. Import must re-derive the global rate from the restored presets, so
+        // weight-timed steaming survives a cross-version restore instead of coming back
+        // dead (auto-capture ON, rate 0). Guards the reseed branch in importFromJson.
+        QJsonObject bundle = SettingsSerializer::exportToJson(&m_settings, false);
+        QJsonObject steam = bundle["steam"].toObject();
+        // Deterministic single legacy preset; strip the global-rate key to mimic an old
+        // backup, and mark weight-timing ON as a pre-PR calibrated backup would.
+        QJsonArray presets;
+        { QJsonObject p; p["name"] = "Legacy"; p["duration"] = 30; p["flow"] = 150; p["temperature"] = 135; p["calibMilkG"] = 200; presets.append(p); }
+        steam["pitcherPresets"] = presets;
+        steam["milkAutoCaptureEnabled"] = true;
+        steam.remove("steamSecondsPerGram");
+        bundle["steam"] = steam;
+
+        m_settings.brew()->setSteamSecondsPerGram(0.0);   // clear so the reseed is observable
+
+        QTest::ignoreMessage(QtWarningMsg,
+            QRegularExpression(QStringLiteral("SettingsSerializer: importFromJson replacing .* favorites")));
+        QVERIFY(SettingsSerializer::importFromJson(&m_settings, bundle));
+
+        // duration / calibMilkG = 30 / 200 = 0.15.
+        QCOMPARE(m_settings.brew()->steamSecondsPerGram(), 0.15);
     }
 
     void steamPitcherLegacyTemperatureFallsBackToGlobal() {
@@ -653,7 +790,7 @@ private slots:
         legacy["duration"] = 30;
         legacy["flow"] = 150;
         QJsonArray arr; arr.append(legacy);
-        { QSettings raw("DecentEspresso", "DE1Qt");
+        { QSettings raw(Settings::testQSettingsPath(), QSettings::IniFormat);
           raw.setValue("steam/pitcherPresets", QJsonDocument(arr).toJson());
           raw.sync(); }
 
@@ -1483,7 +1620,7 @@ private slots:
         // Pre-seed: knownScales has an entry, primary points to it, but the
         // legacy keys are stale/empty (simulates the divergence). Write
         // directly to QSettings so the heal sees the pre-state on next ctor.
-        QSettings raw("DecentEspresso", "DE1Qt");
+        QSettings raw(Settings::testQSettingsPath(), QSettings::IniFormat);
         raw.remove("knownScales/scales");
         raw.beginWriteArray("knownScales/scales");
         raw.setArrayIndex(0);
@@ -1538,12 +1675,21 @@ private slots:
         QCOMPARE(dye->stepGrinderSetting("Turin", "DF83V", "20", 0.5), QString("20.5"));
         // Below the dial floor → "" (caller falls back / skips the row).
         QCOMPARE(dye->stepGrinderSetting("Turin", "DF83V", "1", -5.0), QString());
+        // Exactly 0 is a VALID dial position, not below the floor (the guard is
+        // stepped < 0, not <= 0) → returns "0", not "".
+        QCOMPARE(dye->stepGrinderSetting("Turin", "DF83V", "2", -2.0), QString("0"));
         // Sub-0.5 step precision is honored, not truncated to a single decimal
         // (the widget's grindQuickSelectStep goes to 2 decimals). Trailing zeros
         // stripped: 20.50 → "20.5".
         QCOMPARE(dye->stepGrinderSetting("Turin", "DF83V", "20", 0.25, 2), QString("20.25"));
         QCOMPARE(dye->stepGrinderSetting("Turin", "DF83V", "20", 0.05, 2), QString("20.05"));
         QCOMPARE(dye->stepGrinderSetting("Turin", "DF83V", "20", 0.5, 2),  QString("20.5"));
+        // decimals = 0 rounds to an integer label (20.25 → "20"); the decimals
+        // arg is qBound(0, .., 3), so out-of-range values clamp rather than
+        // producing garbage-length labels: -1 → 0 decimals, 9 → 3 decimals.
+        QCOMPARE(dye->stepGrinderSetting("Turin", "DF83V", "20", 0.25, 0),  QString("20"));
+        QCOMPARE(dye->stepGrinderSetting("Turin", "DF83V", "20", 0.25, -1), QString("20"));
+        QCOMPARE(dye->stepGrinderSetting("Turin", "DF83V", "20", 0.125, 9), QString("20.125"));
     }
 
     void stepGrinderSetting_compound() {
@@ -1552,8 +1698,11 @@ private slots:
         // cohort the hand-rolled regex missed entirely (fell through to history).
         QCOMPARE(dye->stepGrinderSetting("Eureka", "Mignon Specialita", "1+4", 1.0), QString("1+5"));
         QCOMPARE(dye->stepGrinderSetting("Eureka", "Mignon Specialita", "1+4", -2.0), QString("1+2"));
-        // Rev carry: 1+98 (=198) + 5 = 203 → 2+3.
+        // Rev carry UP: 1+98 (=198) + 5 = 203 → 2+3.
         QCOMPARE(dye->stepGrinderSetting("Eureka", "Mignon Specialita", "1+98", 5.0), QString("2+3"));
+        // Rev borrow DOWN across a revolution: 2+3 (=203) - 5 = 198 → 1+98. The
+        // mirror of the carry case above — exercises floor() on the way down.
+        QCOMPARE(dye->stepGrinderSetting("Eureka", "Mignon Specialita", "2+3", -5.0), QString("1+98"));
         // Below floor → "".
         QCOMPARE(dye->stepGrinderSetting("Eureka", "Mignon Specialita", "0+2", -5.0), QString());
         // A compound grinder whose setting is recorded as a plain number keeps
@@ -1567,11 +1716,25 @@ private slots:
         QCOMPARE(m_settings.dye()->stepGrinderSetting("Acme", "NotReal", "20", 2.0), QString());
     }
 
+    void stepGrinderSetting_unparseableRegistryValueFallsBack() {
+        SettingsDye* dye = m_settings.dye();
+        // A registry grinder whose current setting can't be parsed as a dial
+        // number (a word, or empty/whitespace) returns "" — the caller then uses
+        // its JS letter / history fallback rather than the catalog. Exercises the
+        // parseGrinderSetting == nullopt branch that the happy-path tests skip.
+        QCOMPARE(dye->stepGrinderSetting("Turin", "DF83V", "fine", 2.0), QString());
+        QCOMPARE(dye->stepGrinderSetting("Turin", "DF83V", "", 2.0), QString());
+        QCOMPARE(dye->stepGrinderSetting("Turin", "DF83V", "   ", 2.0), QString());
+    }
+
     void isKnownRpmGrinder_catalogConfirmedOnly() {
         SettingsDye* dye = m_settings.dye();
         QVERIFY(dye->isKnownRpmGrinder("Turin", "DF83V"));                 // variableRpm true
         QVERIFY(!dye->isKnownRpmGrinder("Eureka", "Mignon Specialita"));   // variableRpm false
         QVERIFY(!dye->isKnownRpmGrinder("Acme", "NotReal"));               // unknown → false (NOT unknown→true)
+        // variableRpm is orthogonal to notation: a Compound grinder can still be
+        // RPM-capable (Mignon Turbo), so notation must not gate the flag.
+        QVERIFY(dye->isKnownRpmGrinder("Eureka", "Mignon Turbo"));         // Compound + variableRpm true
     }
 
 };

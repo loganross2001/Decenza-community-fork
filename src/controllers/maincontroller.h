@@ -75,6 +75,25 @@ class MainController : public QObject {
     // deactivation. QML reads name/steam fields from here; the id itself
     // lives in Settings.dye.activeRecipeId.
     Q_PROPERTY(QVariantMap activeRecipe READ activeRecipe NOTIFY activeRecipeChanged)
+
+    // Recipe-aware brew baseline (recipe-baseline-not-override, #1485). When a
+    // recipe is active, ITS own yield/temp are the baseline, not overrides of the
+    // profile — so a recipe's designed values must not read as overrides on any
+    // live readout. These fold the recipe-vs-profile choice into one source of
+    // truth a read-only widget can ask instead of re-deriving it inline and
+    // drifting — currently the temperature readout (TemperatureItem) and custom
+    // brew widgets (CustomItem). (Brew Settings and the Shot Plan have their own
+    // richer, per-instance baselines — a seeded/mutable dialog and injected
+    // recipeBaseline* props — so they intentionally do not read these.)
+    // The baselines fall back to the profile when no recipe is active (or the
+    // recipe pins no value for that field); the *IsRealOverride flags are true
+    // only for a per-brew deviation FROM that baseline. All four re-evaluate on
+    // brewBaselineChanged (recipe activation/edit, brew-override edits, profile
+    // switch, or a target-weight sync).
+    Q_PROPERTY(double activeBaselineTemperatureC READ activeBaselineTemperatureC NOTIFY brewBaselineChanged)
+    Q_PROPERTY(double activeBaselineYieldG READ activeBaselineYieldG NOTIFY brewBaselineChanged)
+    Q_PROPERTY(bool temperatureIsRealOverride READ temperatureIsRealOverride NOTIFY brewBaselineChanged)
+    Q_PROPERTY(bool yieldIsRealOverride READ yieldIsRealOverride NOTIFY brewBaselineChanged)
     // The recipe the user has SELECTED in a pill row — set synchronously the
     // instant activateRecipe() is called, so the two-tap "select then start"
     // gesture (tap once to select, tap the selected pill again to pull the
@@ -159,6 +178,10 @@ public:
     EquipmentStorage* equipmentStorage() const { return m_equipmentStorage; }
     RecipeStorage* recipeStorage() const { return m_recipeStorage; }
     QVariantMap activeRecipe() const { return m_activeRecipe; }
+    double activeBaselineTemperatureC() const;
+    double activeBaselineYieldG() const;
+    bool temperatureIsRealOverride() const;
+    bool yieldIsRealOverride() const;
     qint64 selectedRecipeId() const { return m_recipeSelection.selected(); }
     UnifiedBeanSearchModel* beanSearch() const { return m_beanSearch; }
     ShotImporter* shotImporter() const { return m_shotImporter; }
@@ -323,6 +346,7 @@ signals:
     // pill taps, MCP recipe_activate, and the web /activate route.
     void recipeActivated(qint64 recipeId, bool success);
     void activeRecipeChanged();
+    void brewBaselineChanged();
     void selectedRecipeIdChanged();
 
     // Recipes-first layout upgrade offer (recipes-idle-layout-upgrade):
@@ -493,6 +517,15 @@ private:
     // Outstanding write-through stamps whose recipeUpdated echo should not
     // trigger a cache re-read (mirrors SettingsDye::m_pendingSelfWrites).
     int m_pendingRecipeSelfWrites = 0;
+    // Set true immediately before the edit-triggered re-read of the ACTIVE
+    // recipe (the recipeUpdated → requestRecipe hop), so the recipeReady
+    // handler mirrors the refreshed grind/rpm back onto the live dial
+    // (Settings.dye). The Shot Plan widget binds to the dial, not the recipe
+    // cache, so an edit of the active recipe's grind (wizard/MCP/web) must
+    // re-push it or the plan goes stale until re-activation (the Flow-3 refresh
+    // bug). Left false on startup restore, relink refresh, and QML editor
+    // prefill reads — none of which should re-apply values to the live session.
+    bool m_refreshDialFromRecipeEdit = false;
     // Pure state machine behind selectedRecipeId + the deferred recipe-shot
     // start. MainController only wires it to Qt signals and the device; the
     // policy (lead/converge/rollback, arm/fire) lives in the header-only model
@@ -522,6 +555,11 @@ private:
     // Wire the deactivation watchers + write-through stamps (called once
     // from the constructor after storages exist).
     void setupRecipeConnections();
+    // Migration 31's deferred data pass (recipe-relative-temp-offset): snapshot
+    // the profile catalog's title→temperature map on the main thread and hand
+    // it to RecipeStorage to convert legacy absolute temps into offsets. Run
+    // at startup and re-run after imports that can land legacy-source rows.
+    void requestRecipeTempOffsetConversion();
     UnifiedBeanSearchModel* m_beanSearch = nullptr;
     ShotImporter* m_shotImporter = nullptr;
     ProfileConverter* m_profileConverter = nullptr;

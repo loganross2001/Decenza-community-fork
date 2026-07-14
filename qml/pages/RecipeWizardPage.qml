@@ -34,6 +34,17 @@ Page {
     property var prefill: ({})
     property real promoteShotId: 0
 
+    // Intercept the Android system back button / Escape key (Main.qml pops
+    // the page directly otherwise): step back like the bottom-bar arrow, so
+    // leaving the wizard always funnels through the unsaved-changes guard.
+    focus: true
+    Keys.onReleased: function(event) {
+        if (event.key === Qt.Key_Back || event.key === Qt.Key_Escape) {
+            event.accepted = true
+            goBackOneStep()
+        }
+    }
+
     // --- step machine ----------------------------------------------------
     // "drink" | "bean" | "profile" | "details" | "summary". Creation walks
     // them in order; edit/clone/promote start at "summary". A step opened
@@ -76,7 +87,7 @@ Page {
         }
         switch (currentStep) {
         case "drink":
-            root.goBack()
+            requestExit()
             break
         case "bean":
             _enterStep("drink")
@@ -98,12 +109,12 @@ Page {
             break
         case "summary":
             if (_enteredAtSummary)
-                root.goBack()
+                requestExit()
             else
                 _enterStep("details")
             break
         default:
-            root.goBack()
+            requestExit()
         }
     }
 
@@ -145,7 +156,11 @@ Page {
     property string fProfileJson: ""
     property real fProfileTempC: 0
     property real fTempDeltaC: 0
-    property real fLoadedTempOverrideC: 0
+    // The stored offset as loaded, preserved verbatim when the profile's own
+    // temperature can't be resolved (uninstalled profile): the tea save path
+    // needs the profile temp to convert its absolute UI back to an offset,
+    // and without it the loaded offset must ride through untouched.
+    property real fLoadedTempOffsetC: 0
     property bool _submitting: false
     // The hard bag link (recipes-bag-links-ui-polish): the SPECIFIC bag this
     // recipe is made with — selection on the bag step links exactly that
@@ -197,11 +212,12 @@ Page {
         coffeeName: fCoffee,
         doseG: parseFloat(doseField.text) || 0,
         yieldG: parseFloat(yieldField.text) || 0,
-        tempOverrideC: isTeaDrink
-            ? (fTeaTempC > 0 && Math.abs(fTeaTempC - fProfileTempC) > 0.05 ? fTeaTempC : 0)
-            : (fProfileTempC > 0
-                ? (Math.abs(fTempDeltaC) > 0.05 ? fProfileTempC + fTempDeltaC : 0)
-                : fLoadedTempOverrideC),
+        tempOffsetC: isTeaDrink
+            ? (fProfileTempC > 0
+                ? (fTeaTempC > 0 && Math.abs(fTeaTempC - fProfileTempC) > 0.05
+                    ? fTeaTempC - fProfileTempC : 0)
+                : fLoadedTempOffsetC)
+            : (Math.abs(fTempDeltaC) > 0.05 ? fTempDeltaC : 0),
         grindPinned: (!activeTemplate.grind) ? "" : grindField.text.trim(),
         steamJson: buildSteamJson(),
         hotWaterJson: buildHotWaterJson()
@@ -253,8 +269,10 @@ Page {
             applyRecipeMap(prefill)
             nameField.forceActiveFocus()
             nameField.selectAll()
+            captureBaseline()
         } else {
             currentStep = "drink"
+            captureBaseline()
         }
     }
 
@@ -271,17 +289,20 @@ Page {
         fEquipmentId = r.equipmentId || 0
         doseField.text = r.doseG > 0 ? Number(r.doseG).toFixed(1) : ""
         yieldField.text = r.yieldG > 0 ? Number(r.yieldG).toFixed(1) : ""
-        fLoadedTempOverrideC = r.tempOverrideC || 0
+        fLoadedTempOffsetC = r.tempOffsetC || 0
         refreshProfileTemp()
-        fTempDeltaC = (r.tempOverrideC > 0 && fProfileTempC > 0)
-            ? r.tempOverrideC - fProfileTempC : 0
-        // Tea stores its brew temperature ABSOLUTE in tempOverrideC, and the
-        // save path reads it only from fTeaTempC — seed it here or an
+        // The stored offset loads verbatim — no open-time subtraction against
+        // the profile temp, so a profile temperature edit can never manufacture
+        // a phantom offset here (recipe-relative-temp-offset).
+        fTempDeltaC = r.tempOffsetC || 0
+        // Tea EDITS its brew temperature ABSOLUTE (fTeaTempC) but stores the
+        // same offset — seed the absolute as profileTemp + offset here or an
         // edit/clone/promote (which all load through this function and open on
         // the summary, never through applyDetailsPrefill) would save 0 and
-        // silently discard the stored temperature.
+        // silently discard the stored temperature. Unresolvable profile → 0;
+        // the save path then preserves fLoadedTempOffsetC instead.
         fTeaTempC = (r.drinkType && String(r.drinkType).indexOf("tea") === 0
-                     && r.tempOverrideC > 0) ? r.tempOverrideC : 0
+                     && fProfileTempC > 0) ? fProfileTempC + (r.tempOffsetC || 0) : 0
         grindField.text = r.grindPinned || ""
         rpmField.text = (r.rpmPinned || 0) > 0 ? String(r.rpmPinned) : ""
         applySteamJson(r.steamJson || "")
@@ -421,7 +442,10 @@ Page {
             equipmentId: shot.equipmentId || 0,
             doseG: shot.doseWeightG || 0,
             yieldG: shot.targetWeightG || 0,
-            tempOverrideC: shot.temperatureOverrideC || 0,
+            // The shot's temperature override is a frozen ABSOLUTE; converted
+            // to the recipe's offset below, once applyRecipeMap has resolved
+            // the shot's profile temperature.
+            tempOffsetC: 0,
             // The shot's own recorded dial — the exact grind that produced the
             // shot being promoted — is the recipe's default (grind lives on
             // the recipe; there is no inherit-from-bag encoding to fall back
@@ -434,25 +458,78 @@ Page {
             createdFromShotId: promoteShotId
         })
         applyRecipeMap(prefill)
+        // Promote-from-shot conversion (recipe-relative-temp-offset): offset =
+        // the shot's absolute override − the SHOT's profile snapshot
+        // temperature — the profile as it was when the shot was pulled, which
+        // is what the override was relative to. Same anchor as the C++
+        // promote path (RecipePromotion::fieldsFromShotRecord), so the two
+        // surfaces cannot disagree; the installed profile's current
+        // temperature is only the fallback for a snapshot-less shot.
+        // Unresolvable both ways → no pin.
+        if ((shot.temperatureOverrideC || 0) > 0) {
+            var promoteAnchor = 0
+            if (shot.profileJson && String(shot.profileJson).length > 0) {
+                try {
+                    promoteAnchor = Number(JSON.parse(shot.profileJson).espresso_temperature) || 0
+                } catch (e) {
+                    console.warn("RecipeWizard: shot profile snapshot JSON unparsable:", e)
+                }
+            }
+            if (promoteAnchor <= 0)
+                promoteAnchor = fProfileTempC
+            if (promoteAnchor > 0) {
+                var promoteOffset = shot.temperatureOverrideC - promoteAnchor
+                if (Math.abs(promoteOffset) < 0.05)
+                    promoteOffset = 0
+                if (isTeaDrink)
+                    fTeaTempC = shot.temperatureOverrideC
+                else
+                    fTempDeltaC = promoteOffset
+            }
+        }
         var bean = ((shot.beanBrand || "") + " " + (shot.beanType || "")).trim()
         nameField.text = bean !== "" ? bean : (shot.profileName || "")
         nameField.selectAll()
+        captureBaseline()
     }
 
     // Resolve the selected profile's base temperature (for the offset
     // control) and target yield (for the summary hero's plan line).
     property real fProfileYieldG: 0
+    // The selected profile's frame temperatures, for the summary hero's plan
+    // line — the card renders ITS profile's temps, never the loaded one
+    // (recipe-relative-temp-offset).
+    property var fProfileStepTemps: []
     function refreshProfileTemp() {
         fProfileTempC = 0
         fProfileYieldG = 0
+        fProfileStepTemps = []
         if (fProfileTitle === "")
             return
+        var d = null
         var fn = ProfileManager.findProfileByTitle(fProfileTitle)
         if (fn && fn !== "") {
-            var d = ProfileManager.getProfileByFilename(fn)
-            fProfileTempC = d.espresso_temperature || 0
-            fProfileYieldG = d.target_weight || 0
+            d = ProfileManager.getProfileByFilename(fn)
+        } else if (fProfileJson !== "") {
+            // Embedded fallback for a renamed/uninstalled profile — the same
+            // ladder the recipe cards use.
+            try { d = JSON.parse(fProfileJson) } catch (e) {
+                console.warn("RecipeWizard: embedded profile JSON unparsable:", e)
+                d = null
+            }
         }
+        if (!d)
+            return
+        fProfileTempC = Number(d.espresso_temperature) || 0
+        fProfileYieldG = Number(d.target_weight) || 0
+        var temps = []
+        var steps = d.steps || []
+        for (var i = 0; i < steps.length; ++i) {
+            var stTemp = steps[i] ? Number(steps[i].temperature) : 0
+            if (stTemp > 0)
+                temps.push(stTemp)
+        }
+        fProfileStepTemps = temps
     }
 
     // Re-resolve the linked bag's details (grind default, roast level, tea
@@ -464,21 +541,13 @@ Page {
             MainController.bagStorage.requestInventory()
     }
 
-    function save() {
-        Qt.inputMethod.commit()  // IME: flush the in-progress word first
-        errorMessage = ""
-        var name = nameField.text.trim()
-        if (name === "") {
-            errorMessage = TranslationManager.translate("recipes.wizard.errorNoName", "A recipe needs a name")
-            return
-        }
-        if (!MainController.recipeStorage.isSaveValid(name, fProfileTitle, buildHotWaterJson())) {
-            errorMessage = TranslationManager.translate("recipes.wizard.errorNoProfile",
-                "A recipe needs a profile (unless it is a hot-water drink)")
-            return
-        }
+    // The exact map save() persists (plus a create-only requestToken) — also
+    // the dirty check's comparison basis, so "unsaved changes" means
+    // precisely "save() would store something different from what was
+    // loaded".
+    function buildSaveMap() {
         var map = {
-            name: name,
+            name: nameField.text.trim(),
             drinkType: fDrinkType !== "" ? fDrinkType : deriveDrinkType(),
             profileTitle: fProfileTitle,
             profileJson: fProfileJson,
@@ -489,15 +558,18 @@ Page {
             equipmentId: fEquipmentId,
             doseG: parseFloat(doseField.text) || 0,
             yieldG: parseFloat(yieldField.text) || 0,
-            // Offset semantics (like the shot plan): 0° = no override. When the
-            // profile's base temp is unknown (profile not installed) we can't
-            // recompute the absolute — preserve the loaded override verbatim.
-            // Tea details edit the ABSOLUTE temp instead (fTeaTempC below).
-            tempOverrideC: isTeaDrink
-                ? (fTeaTempC > 0 && Math.abs(fTeaTempC - fProfileTempC) > 0.05 ? fTeaTempC : 0)
-                : (fProfileTempC > 0
-                    ? (Math.abs(fTempDeltaC) > 0.05 ? fProfileTempC + fTempDeltaC : 0)
-                    : fLoadedTempOverrideC),
+            // The offset IS the stored value (recipe-relative-temp-offset):
+            // the stepper edits it verbatim, 0 = brew at the profile's own
+            // temperature. Tea details edit the ABSOLUTE temp instead
+            // (fTeaTempC) and convert here at the boundary; an unresolvable
+            // profile preserves the loaded offset verbatim (the absolute UI
+            // could never display it, so it must not be able to destroy it).
+            tempOffsetC: isTeaDrink
+                ? (fProfileTempC > 0
+                    ? (fTeaTempC > 0 && Math.abs(fTeaTempC - fProfileTempC) > 0.05
+                        ? fTeaTempC - fProfileTempC : 0)
+                    : fLoadedTempOffsetC)
+                : (Math.abs(fTempDeltaC) > 0.05 ? fTempDeltaC : 0),
             // Grind always lives on the recipe (fix-recipe-grind-integrity):
             // whatever is on the field saves as the recipe's own value. Tea
             // recipes never store grind (nothing to grind).
@@ -512,6 +584,28 @@ Page {
             map.createdFromShotId = prefill.createdFromShotId
         if (prefill && prefill.clonedFromRecipeId)
             map.clonedFromRecipeId = prefill.clonedFromRecipeId
+        return map
+    }
+
+    function save() {
+        // Re-entry guard: a second tap while the async create/update is in
+        // flight would submit twice (create mode would duplicate the recipe —
+        // the token guard silently discards the first reply).
+        if (_submitting)
+            return
+        Qt.inputMethod.commit()  // IME: flush the in-progress word first
+        errorMessage = ""
+        var name = nameField.text.trim()
+        if (name === "") {
+            errorMessage = TranslationManager.translate("recipes.wizard.errorNoName", "A recipe needs a name")
+            return
+        }
+        if (!MainController.recipeStorage.isSaveValid(name, fProfileTitle, buildHotWaterJson())) {
+            errorMessage = TranslationManager.translate("recipes.wizard.errorNoProfile",
+                "A recipe needs a profile (unless it is a hot-water drink)")
+            return
+        }
+        var map = buildSaveMap()
         _submitting = true
         if (mode === "edit" && editRecipeId > 0) {
             MainController.recipeStorage.requestUpdateRecipe(editRecipeId, map)
@@ -525,6 +619,54 @@ Page {
         }
     }
     property string _createToken: ""
+
+    // --- unsaved-changes guard ----------------------------------------------
+    // Snapshot of buildSaveMap() at load time; "dirty" is a comparison
+    // against it, so every field, block toggle, and picker choice is covered
+    // without per-control bookkeeping. Captured once the entry state is fully
+    // in hand (after applyRecipeMap / prefillFromShot / a blank start).
+    property string _baselineJson: ""
+    function captureBaseline() {
+        _baselineJson = JSON.stringify(buildSaveMap())
+    }
+    function hasUnsavedChanges() {
+        // No baseline yet (an edit/promote load still in flight): anything
+        // typed this early would be overwritten by applyRecipeMap when the
+        // reply lands anyway — never block the exit.
+        if (_baselineJson === "")
+            return false
+        Qt.inputMethod.commit()  // IME: flush the in-progress word first
+        return JSON.stringify(buildSaveMap()) !== _baselineJson
+    }
+
+    // Every cancel/back path out of the wizard funnels through here (the
+    // save-success pops and the deleted-recipe bail are deliberately not
+    // intercepted): with unsaved changes the exit dialog intercepts
+    // (Discard / Save); otherwise leave directly. The early creation-walk
+    // steps exit silently when nothing saveable exists yet (abandoning a
+    // couple of taps must not nag); from the details/summary steps — where
+    // typed content lives — any unsaved change prompts, even an unsaveable
+    // one (e.g. the name cleared for a retype): Discard plus a disabled
+    // Save beats a silent discard.
+    function requestExit() {
+        var earlyWalk = !_enteredAtSummary
+            && currentStep !== "summary" && currentStep !== "details"
+        if (hasUnsavedChanges() && (canSave || !earlyWalk))
+            exitDialog.open()
+        else
+            root.goBack()
+    }
+
+    // A failed save must be SEEN: the pinned error label exists only on the
+    // summary and details steps, but the exit dialog's Save can fire from a
+    // walk step (backing out of a create). Land on the summary, where the
+    // error, the name field, and Save sit together.
+    function showSaveError() {
+        if (currentStep !== "summary" && currentStep !== "details") {
+            _fromSummary = false
+            _enterStep("summary")
+        }
+    }
 
     // --- wizard step actions -----------------------------------------------
 
@@ -551,7 +693,7 @@ Page {
             // only when it still fits the new filter set (checked lazily by
             // the profile step; clearing here keeps the walk honest).
             if (type === "tea_hotwater")
-                { fProfileTitle = ""; fProfileJson = ""; fProfileTempC = 0; fProfileYieldG = 0 }
+                { fProfileTitle = ""; fProfileJson = ""; fProfileTempC = 0; fProfileYieldG = 0; fProfileStepTemps = [] }
             // Per-drink-type equipment default (last recipe of this type).
             MainController.recipeStorage.requestLastEquipmentForDrinkType(type)
         }
@@ -616,6 +758,14 @@ Page {
             yieldField.text = Number(detail.target_weight).toFixed(1)
         fProfileTempC = detail.espresso_temperature || 0
         fProfileYieldG = detail.target_weight || 0
+        var pickedTemps = []
+        var pickedSteps = detail.steps || []
+        for (var psi = 0; psi < pickedSteps.length; ++psi) {
+            var psTemp = pickedSteps[psi] ? Number(pickedSteps[psi].temperature) : 0
+            if (psTemp > 0)
+                pickedTemps.push(psTemp)
+        }
+        fProfileStepTemps = pickedTemps
         // Tea temp is resolved entirely by applyDetailsPrefill (bag vendor
         // temp with the type-match correction, then profile default, then
         // history overwrite) — pre-seeding it here would make that whole
@@ -698,7 +848,9 @@ Page {
             parts.push(dose.toFixed(1) + "g → " + yieldG.toFixed(1) + "g")
         else if (dose > 0)
             parts.push(dose.toFixed(1) + "g")
-        if (isTeaDrink && fTeaTempC > 0)
+        if (isHotWaterTea && fVesselTemperatureC > 0)
+            parts.push(Math.round(fVesselTemperatureC) + "°C")   // the vessel IS the temperature source
+        else if (isTeaDrink && fTeaTempC > 0)
             parts.push(Math.round(fTeaTempC) + "°C")
         else if (Math.abs(fTempDeltaC) > 0.05)
             parts.push((fTempDeltaC > 0 ? "+" : "")
@@ -1046,6 +1198,7 @@ Page {
                 return
             if (Object.keys(recipe).length > 0) {
                 wizardPage.applyRecipeMap(recipe)
+                wizardPage.captureBaseline()
             } else {
                 // The recipe was deleted between opening the list and the load
                 // landing — don't leave a blank "edit" form the user fills in
@@ -1064,22 +1217,26 @@ Page {
             if (wizardPage.mode !== "edit" && wizardPage._submitting) {
                 wizardPage._submitting = false
                 wizardPage._createToken = ""
-                if (recipeId > 0)
+                if (recipeId > 0) {
                     pageStack.pop()
-                else
+                } else {
                     wizardPage.errorMessage =
                         TranslationManager.translate("recipes.wizard.errorSave", "Could not save the recipe")
+                    wizardPage.showSaveError()
+                }
             }
         }
         function onRecipeUpdated(recipeId, success) {
             if (wizardPage.mode === "edit" && recipeId === wizardPage.editRecipeId
                 && wizardPage._submitting) {
                 wizardPage._submitting = false
-                if (success)
+                if (success) {
                     pageStack.pop()
-                else
+                } else {
                     wizardPage.errorMessage =
                         TranslationManager.translate("recipes.wizard.errorSave", "Could not save the recipe")
+                    wizardPage.showSaveError()
+                }
             }
         }
         function onLastEquipmentForDrinkTypeReady(drinkType, equipmentId) {
@@ -1914,9 +2071,16 @@ Page {
                         spacing: Theme.spacingMedium
                         Label {
                             Layout.fillWidth: true
-                            text: TranslationManager.translate("recipes.wizard.detailsOptional",
-                                  "Everything here is optional — it's prefilled and ready to save. "
-                                  + "Tap a section to adjust it, then Continue.")
+                            // Edit/clone/promote (entered at the summary):
+                            // this step commits directly — never send the
+                            // user hunting for a second Save press.
+                            text: wizardPage._enteredAtSummary
+                                ? TranslationManager.translate("recipes.wizard.detailsOptionalEdit",
+                                      "Everything here is optional. "
+                                      + "Tap a section to adjust it, then Save.")
+                                : TranslationManager.translate("recipes.wizard.detailsOptionalReview",
+                                      "Everything here is optional — it's prefilled and ready to save. "
+                                      + "Tap a section to adjust it, then Review.")
                             font: Theme.captionFont
                             color: Theme.textSecondaryColor
                             wrapMode: Text.WordWrap
@@ -1924,12 +2088,45 @@ Page {
                             Accessible.name: text
                         }
                         AccessibleButton {
+                            visible: wizardPage._enteredAtSummary
+                            Layout.alignment: Qt.AlignVCenter
+                            text: TranslationManager.translate("common.cancel", "Cancel")
+                            accessibleName: TranslationManager.translate("recipes.composer.accessible.cancel", "Cancel recipe editing")
+                            onClicked: wizardPage.requestExit()
+                        }
+                        AccessibleButton {
+                            visible: wizardPage._enteredAtSummary
                             Layout.alignment: Qt.AlignVCenter
                             primary: true
-                            text: TranslationManager.translate("recipes.wizard.continue", "Continue")
-                            accessibleName: TranslationManager.translate("recipes.wizard.accessible.continue", "Continue to the summary")
+                            enabled: wizardPage.canSave
+                            text: TranslationManager.translate("common.save", "Save")
+                            accessibleName: TranslationManager.translate("recipes.composer.accessible.save", "Save the recipe")
+                            onClicked: wizardPage.save()
+                        }
+                        AccessibleButton {
+                            visible: !wizardPage._enteredAtSummary
+                            Layout.alignment: Qt.AlignVCenter
+                            primary: true
+                            // "Review", not "Continue": the next stop is the
+                            // named, WYSIWYG summary with the Save button —
+                            // a label that reads like a commit loses saves.
+                            text: TranslationManager.translate("recipes.wizard.review", "Review")
+                            accessibleName: TranslationManager.translate("recipes.wizard.accessible.review", "Review the recipe before saving")
                             onClicked: { wizardPage._fromSummary = false; wizardPage.currentStep = "summary" }
                         }
+                    }
+
+                    // Pinned with the header (matching the summary step) so a
+                    // save failure from the details step is never hidden.
+                    Label {
+                        visible: wizardPage.errorMessage !== ""
+                        Layout.fillWidth: true
+                        text: wizardPage.errorMessage
+                        font: Theme.bodyFont
+                        color: Theme.errorColor
+                        wrapMode: Text.WordWrap
+                        Accessible.role: Accessible.StaticText
+                        Accessible.name: text
                     }
 
                     Flickable {
@@ -2023,7 +2220,18 @@ Page {
                                     }
                                 }
                                 NumberField {
-                                    visible: wizardPage.isTeaDrink
+                                    // Portafilter tea only: this edits an ABSOLUTE steep
+                                    // temperature that converts to the stored offset against
+                                    // the profile. Hot-water tea has no profile — its
+                                    // temperature belongs to the water vessel (recipe-model:
+                                    // the vessel is the single source of amount/temperature/
+                                    // flow; a separate field here stored a value activation
+                                    // never used). Disabled when the profile can't be
+                                    // resolved: without an anchor the save path preserves the
+                                    // stored offset untouched, so the field must not accept
+                                    // input it would silently discard.
+                                    visible: wizardPage.isTeaDrink && !wizardPage.isHotWaterTea
+                                    enabled: wizardPage.fProfileTempC > 0
                                     Layout.preferredWidth: Theme.scaled(120)
                                     label: TranslationManager.translate("recipes.wizard.teaTemp", "Temp (°C)")
                                     text: wizardPage.fTeaTempC > 0 ? String(Math.round(wizardPage.fTeaTempC)) : ""
@@ -2256,7 +2464,7 @@ Page {
                             Layout.alignment: Qt.AlignBottom
                             text: TranslationManager.translate("common.cancel", "Cancel")
                             accessibleName: TranslationManager.translate("recipes.composer.accessible.cancel", "Cancel recipe editing")
-                            onClicked: pageStack.pop()
+                            onClicked: wizardPage.requestExit()
                         }
                         AccessibleButton {
                             Layout.alignment: Qt.AlignBottom
@@ -2277,6 +2485,8 @@ Page {
                         font: Theme.bodyFont
                         color: Theme.errorColor
                         wrapMode: Text.WordWrap
+                        Accessible.role: Accessible.StaticText
+                        Accessible.name: text
                     }
 
                     Flickable {
@@ -2299,6 +2509,7 @@ Page {
                             active: false
                             profileTempC: wizardPage.fProfileTempC
                             profileYieldG: wizardPage.fProfileYieldG
+                            profileStepTemps: wizardPage.fProfileStepTemps
                             imageKey: wizardPage.fBeanBaseId !== ""
                                 ? wizardPage.fBeanBaseId
                                 : (wizardPage.fBagId > 0 ? "bag-" + wizardPage.fBagId : "")
@@ -2615,6 +2826,17 @@ Page {
                 }
             }
         }
+    }
+
+    // Unsaved-changes intercept (requestExit): leaving with edits offers
+    // Save / Discard — closing the dialog (Esc / tap outside) keeps editing.
+    UnsavedChangesDialog {
+        id: exitDialog
+        itemType: "recipe"
+        showSaveAs: false
+        canSave: wizardPage.canSave
+        onDiscardClicked: root.goBack()
+        onSaveClicked: wizardPage.save()
     }
 
     BottomBar {

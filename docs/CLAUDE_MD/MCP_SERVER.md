@@ -18,7 +18,8 @@ Add an MCP (Model Context Protocol) server to Decenza so AI assistants (Claude D
 ```
 src/mcp/
   mcpserver.h/cpp           — Session management, JSON-RPC dispatch, SSE
-  mcpsession.h/cpp          — Per-client state (capabilities, SSE socket, subscriptions)
+  mcpremoteaccess.h/cpp     — Remote connector: tokenized loopback/LAN listener (see "Remote Access")
+  mcpsession.h/cpp          — Per-client state (capabilities, SSE socket, subscriptions, remote flag)
   mcptoolregistry.h/cpp     — Tool definitions registry + dispatch
   mcpresourceregistry.h/cpp — Resource definitions registry
   mcptools_machine.cpp      — Machine control + state tools
@@ -86,7 +87,7 @@ Each tool has a `category` that determines the minimum access level required:
 
 | Category | Min Access Level | Tools |
 |----------|-----------------|-------|
-| `read` | 0 (Monitor) | machine_get_state, app_get_info, machine_get_telemetry, shots_list, shots_get_detail, shots_get_debug_log, shots_compare, profiles_list, profiles_get_active, profiles_get_detail, profiles_get_params, profiles_get_auto_load, settings_get, dialing_get_context, dialing_get_grinder_calibration, bag_list, equipment_list, recipe_list, recipe_get, steam_pitcher_list, water_vessel_list |
+| `read` | 0 (Monitor) | machine_get_state, app_get_info, machine_get_telemetry, shots_list, shots_get_detail, shots_get_debug_log, shots_compare, profiles_list, profiles_get_active, profiles_get_detail, profiles_get_params, profiles_get_auto_load, settings_get, dialing_get_context, dialing_get_grinder_calibration, ai_conversations_list, ai_conversation_get, bag_list, equipment_list, recipe_list, recipe_get, steam_pitcher_list, water_vessel_list |
 | `control` | 1 (Control) | machine_wake, machine_sleep, machine_start_espresso, machine_start_steam, machine_start_hot_water, machine_start_flush, machine_stop, machine_skip_frame, shots_update, shots_upload_to_visualizer, backup_now, mqtt_connect, mqtt_disconnect, mqtt_publish_discovery, devices_connect_de1, devices_disconnect_scale, devices_reset_scale_priority, bag_select, equipment_select, steam_pitcher_select, water_vessel_select, bag_extract_details  |
 | `settings` | 2 (Full) | profiles_set_active, profiles_edit_params, profiles_save, profiles_delete, profiles_create, profiles_rename, shots_delete, settings_set, reset_saw_learning, clear_flow_calibration, apply_theme, bag_create, bag_update, equipment_update, recipe_create, recipe_update, recipe_create_from_shot, recipe_clone, recipe_archive, steam_pitcher_add, steam_pitcher_update, steam_pitcher_delete, water_vessel_add, water_vessel_update, water_vessel_delete |
 
@@ -147,6 +148,80 @@ For operations where the user is at their desk interacting with the AI remotely 
 
 This avoids holding HTTP connections and works naturally with the conversational AI flow. The `confirmed` parameter is declared in each tool's `inputSchema` so the AI knows to include it.
 
+## Remote Access (Mobile Connectors)
+
+The LAN transport above only works for clients that can reach the tablet's LAN
+IP (Claude Desktop via `mcp-remote`, MCP Inspector, curl). **Claude and ChatGPT
+mobile "custom connectors" dial the MCP endpoint from the vendor's cloud
+backend, not from the phone**, so the endpoint must be reachable on the public
+internet over HTTPS. `McpRemoteAccess` (`src/mcp/mcpremoteaccess.{h,cpp}`)
+provides that. Added by the `add-remote-mcp-connector` change; **opt-in,
+defaults off**.
+
+### Capability-URL authentication
+
+A remote request is authorized by an unguessable path segment:
+
+```
+https://<host>/mcp/<token>        token = 128-bit CSPRNG, base64url (22 chars)
+```
+
+- Wrong or missing token → **bare `404`** (no body — indistinguishable from "no
+  server here"). Comparison is constant-time; failed attempts are rate-limited
+  per source (defense-in-depth + log hygiene; the attempted path is never
+  echoed to the log).
+- **Rotation is revocation.** Settings → *Rotate token* generates a new URL and
+  immediately drops every live remote connection, so the old URL dies at once.
+  The user must then update the connector on claude.ai.
+- claude.ai custom connectors treat OAuth as optional — a server that never
+  returns a `401` challenge connects unauthenticated. So there is **no OAuth**;
+  the single principal is whoever holds the capability URL. Trade-off (token in
+  URL lands in logs/proxies) is accepted for this single-owner threat model and
+  bounded by the access-level + confirmation gates below.
+
+### Isolated surface
+
+The connector terminates at a **dedicated listener owned by `McpRemoteAccess`**,
+separate from ShotServer. It serves **only** `POST/GET/DELETE /mcp/<token>` and
+returns a bare `404` for everything else — ShotServer's web editor, REST API,
+and data-migration endpoints are never exposed publicly, and a future ShotServer
+route can't leak into the remote surface. Matching requests are forwarded
+in-process to the same `McpServer::handleHttpRequest` dispatch the LAN path uses,
+with the session flagged remote (`McpSession::isRemote()` — informational; for
+status UI/logging only).
+
+### Access control is unchanged
+
+`mcpAccessLevel` and `mcpConfirmationLevel` apply to remote sessions **exactly**
+as to LAN sessions — same tool-dispatch gates, same in-app confirmation dialog
+for machine-start operations. There are no remote-only bypasses. Remote sessions
+count toward the same session and rate limits.
+
+### Reachability modes (Settings → AI → MCP → Remote Access)
+
+| Mode | Status | How it reaches the public internet |
+|---|---|---|
+| **Custom URL (BYO)** | **Shipped (Phase 1)** | The user runs a reverse proxy / tunnel on any box (Tailscale Funnel, cloudflared named tunnel, nginx, …) that forwards to the tablet's LAN IP + the remote port. The listener binds a routable interface so an off-box proxy can reach it. |
+| Embedded Tailscale (tsnet + Funnel) | Planned | gomobile-embedded `tsnet` joins the user's tailnet and `ListenFunnel()`s a stable `https://<node>.<tailnet>.ts.net` URL; forwards to a loopback listener. Needs a Go toolchain / AAR + CI work. |
+| Embedded ngrok | Deferred | `ngrok-java` agent SDK; pending an interstitial-compatibility spike. |
+
+### Settings (in `SettingsMcp`, addressed as `Settings.mcp.*`)
+
+`remoteMcpEnabled` (default false), `remoteMcpMode` (`custom`|`tailscale`|
+`ngrok`), `remoteMcpPort` (default 8890), `remoteMcpCustomBaseUrl`, and the
+`remoteMcpToken` (128-bit, generated lazily on first read, stored in QSettings
+alongside the existing `mcpApiKey`). `RemoteMcpAccess` is a QML context property
+exposing `status`/`statusString`/`statusDetail`/`connectorUrl`/`listenPort` and
+the `refresh()` / `rotateToken()` invokables.
+
+### Limitations
+
+- No wake-from-doze: the tunnel/listener lives in the app process. Decenza
+  tablets are typically plugged in and screen-on, so this is a corner case, but
+  if Android kills connectivity the connector fails closed (vendor backend gets
+  a timeout). No FCM wake-up is possible without a relay.
+- Depends on the tunnel vendor's TLS/edge for the public hop.
+
 ## Tools (Full Set)
 
 ### Machine Control
@@ -202,7 +277,7 @@ The grinder is a first-class, switchable **equipment package** (the active bag p
 The `de1://dialing` resource's grinder block also exposes `packageId`, `rpmAdjustable`, and `rpm`.
 
 ### Recipes (add-recipes)
-A recipe is the whole drink: profile + bean link + equipment + dose/yield/temp + the recipe's own grind + steam block. Grind always lives on the recipe (fix-recipe-grind-integrity): responses expose it as `grind: {value, rpm}` (the key is omitted when the recipe has no grind) with no inherited/pinned mode — nothing resolves from the bag. A create that links a bag but *omits* `grindPinned` adopts the bag's current dial at save time (an explicitly empty string stores no grind). Mutations run through the app's RecipeStorage so the UI refreshes like a local edit; `recipe_activate` uses MainController's single activation path (identical to the idle pill tap).
+A recipe is the whole drink: profile + bean link + equipment + dose/yield/temp + the recipe's own grind + steam block. The temperature field is `tempOffsetC` — a SIGNED delta in °C against the recipe's profile (present only when non-zero; 0/omitted = brew at the profile's temperature). There is no absolute recipe-temperature field: the old `temperatureOverrideC` was removed in recipe-relative-temp-offset, and a create/update sending it is rejected with an error naming the replacement (never silently dropped — an absolute written into the delta field would corrupt the temperature). Grind always lives on the recipe (fix-recipe-grind-integrity): responses expose it as `grind: {value, rpm}` (the key is omitted when the recipe has no grind) with no inherited/pinned mode — nothing resolves from the bag. A create that links a bag but *omits* `grindPinned` adopts the bag's current dial at save time (an explicitly empty string stores no grind). Mutations run through the app's RecipeStorage so the UI refreshes like a local edit; `recipe_activate` uses MainController's single activation path (identical to the idle pill tap).
 | Tool | Description | Category |
 |------|-------------|----------|
 | `recipe_list` | List recipes (MRU order, `isActive` marks the machine's current setup; `includeArchived=true` adds archived ones). Each recipe carries `drinkType` (stored, or derived for legacy rows). | read |
@@ -290,6 +365,8 @@ The MCP enables an external AI (e.g. Claude Desktop) to act as a dial-in advisor
 |------|-------------|----------|
 | `dialing_get_context` | Get full dial-in context bundle: current profile recipe + profile knowledge (includes espresso system prompt, dial-in reference tables, and profile-specific KB) + recent shot summary (via `ShotSummarizer`) + dial-in history (last N shots with same profile family) + bean metadata + grinder context (observed settings range and step size). This is the primary read tool for dial-in — a single call gives the AI everything it needs to analyze a shot and suggest changes. The cross-profile grinder calibration table is **not** in this bundle — see `dialing_get_grinder_calibration` (#1164). | read |
 | `dialing_get_grinder_calibration` | On-demand cross-profile grinder calibration: per-user recommended grinder setting (rgs) for every KB espresso profile, derived from all-time shot history on the same grinder model + burrs. Returns `fineAnchor` / `coarseAnchor`, `conversionKey`, `calibratedUgsRange`, and a `profiles[]` array (each with `ugs`, `rgs`, `source` ∈ history/derived/extrapolated). Split out of `dialing_get_context` (#1164) because it is a ~33-row table that only matters when the user is weighing a profile switch and is a stable physical property of the grinder — so the AI fetches it once on demand instead of re-receiving it every conversational turn. Returns `{available:false, reason}` when fewer than 2 qualifying anchor profiles exist. Same shared `DialingBlocks::buildGrinderCalibrationBlock()` builder the one-shot in-app advisor / `ai_advisor_invoke` still use inline. | read |
+| `ai_conversations_list` | List saved multi-shot AI dialing conversations (in-app advisor + `ai_advisor_invoke` turns both land here), most recently active first. Up to `AIManager::MAX_CONVERSATIONS` (5) are retained, oldest evicted. Each entry: `key`, `label`, `beanBrand`/`beanType`/`profileName`, `messageCount`, `lastUpdated`; `corrupted: true` is added (omitted otherwise) when the entry's stored transcript failed to parse, in which case `messageCount` is unreliable. Same underlying index as the web UI's `/ai-conversations` page. | read |
+| `ai_conversation_get` | Get the full transcript for one conversation `key` from `ai_conversations_list`: top-level `key` echo, a `metadata` object (`beanBrand`/`beanType`/`profileName`/`lastUpdated`), `systemPrompt`, and `messages[]` — every turn in order (`role`, `content`, optional `shotId`, optional `structuredNext` on assistant turns that made a concrete recommendation). Same QSettings data as the web UI's JSON download, returned as structured JSON. Useful for collecting real conversation transcripts to validate prompt changes (issue #639). | read |
 | ~~`dialing_suggest_change`~~ | **Removed.** Was a no-op stub that returned `"suggestion_displayed"` without actually displaying anything or changing settings. The AI mistakenly treated it as applying changes (e.g., grind size). Use `settings_set` to change grind (`dyeGrinderSetting`), dose (`dyeBeanWeight`), yield (`targetWeight`), temperature (`espressoTemperature`), etc. | — |
 | ~~`dialing_apply_change`~~ | **Removed.** Was a convenience wrapper that duplicated `settings_set` + `profiles_set_active`. Caused the advanced-profile-corruption bug due to duplicated code paths. Use `settings_set` for temp/weight/DYE changes and `profiles_set_active` for profile switches. | — |
 
@@ -585,7 +662,7 @@ The `dialing_get_context` tool requires `ShotHistoryStorage::getRecentShotsByKbI
 5. **Rate limiting**: Max 60 `control` + `settings` category calls/minute per session (per `RateLimitPerMinute` constant in `mcpserver.h`). Only successful calls count against the limit. Exceeded → JSON-RPC error `-32000` with message "Rate limit exceeded"
 6. **Session expiry**: 30-minute inactivity timeout (per `SessionTimeoutMinutes`), cleaned during session creation
 7. **SSE limits**: Max 4 concurrent MCP SSE connections
-8. **Session limits**: Max 8 total MCP sessions. New connections beyond the limit receive JSON-RPC error `-32000` with message "Too many sessions"
+8. **Session limits**: Max 8 concurrent **stateful** sessions (per `MaxSessions`). A session is *stateful* only while it holds a live SSE stream — the transport that needs retained server state for push (`McpSession::isStateful()`); the cap is measured by `statefulSessionCount()`, not the total session count. **Ephemeral** POST-only sessions do **not** count. This matters because the cloud MCP connectors — ChatGPT (`client="openai-mcp"`) and claude.ai (`client="Anthropic/ClaudeAI"`) — re-run `initialize` on nearly every request and never hold an SSE stream open (ChatGPT opens one momentarily per exchange; claude.ai is pure POST), so before this rule a short burst from either connector, and especially both together, would fill the pool and reject every other client with `-32000 "Too many sessions"`. Counting only stateful sessions (themselves bounded by the 4-SSE cap) means such per-request re-initializing clients can never exhaust the pool. Ephemeral sessions are released by the orphan sweep (idle bound well below the 30-minute stateful timeout), which never reaps a session holding a pending machine-start confirmation. Because ephemeral sessions are no longer bounded by `MaxSessions` and `initialize` is not rate-limited, a separate absolute backstop `MaxTotalSessions` (128) bounds total retained sessions against a tight-loop `initialize` spammer: when the pool is full, `createSession()` **evicts** the least-recently-active ephemeral session (never a stateful one, never one holding a pending confirmation) rather than rejecting — so churn can never deny service to another client, and an evicted client simply re-initializes (its in-flight async responses are decoupled from the session object). A genuine persistent subscriber (LAN `mcp-remote` / Claude Desktop) holds its SSE open and keeps full stateful behavior.
 9. **Uninitialized sessions**: Tool/resource calls before `initialize` handshake return JSON-RPC error `-32600` (Invalid Request) with message "Session not initialized"
 
 ## Discuss Shot Feature

@@ -282,7 +282,7 @@ The MCP server SHALL register a recipe tool family (`mcptools_recipes.cpp`): `re
 - **THEN** an independent recipe exists and the source recipe is unchanged
 
 ### Requirement: Recipe fields follow the data conventions
-Recipe tool responses and inputs SHALL use the house conventions: unit-suffixed field names (`doseG`, `yieldG`, `milkWeightG`, `temperatureC`), ISO 8601 timestamps with timezone, human-readable enum strings, and grind expressed explicitly as an object `{"mode": "inherited"|"pinned", "value": <string>}` plus the resolved effective value, so a client never guesses where grind lives. Inherited grind SHALL resolve from the recipe's linked bag. Recipe responses SHALL expose the linked bag (`bagId` plus its display identity) and a human-readable staleness indication when the linked bag is no longer in inventory; `recipe_create` and `recipe_update` SHALL accept `bagId`. The optional hot-water block SHALL be accepted on create/update and returned on read via a tool schema that mirrors the steam block's pass-through handling — the same block the recipe stores, with each field's unit documented in its schema description (as the steam block does for `flow`), and with an `order` of `before` (long black) or `after` (Americano).
+Recipe tool responses and inputs SHALL use the house conventions: unit-suffixed field names (`doseG`, `yieldG`, `milkWeightG`, `tempOffsetC`), ISO 8601 timestamps with timezone, human-readable enum strings, and grind expressed explicitly as an object `{"mode": "inherited"|"pinned", "value": <string>}` plus the resolved effective value, so a client never guesses where grind lives. Inherited grind SHALL resolve from the recipe's linked bag. Recipe responses SHALL expose the linked bag (`bagId` plus its display identity) and a human-readable staleness indication when the linked bag is no longer in inventory; `recipe_create` and `recipe_update` SHALL accept `bagId`. The optional hot-water block SHALL be accepted on create/update and returned on read via a tool schema that mirrors the steam block's pass-through handling — the same block the recipe stores, with each field's unit documented in its schema description (as the steam block does for `flow`), and with an `order` of `before` (long black) or `after` (Americano).
 
 #### Scenario: Grind representation
 - **WHEN** `recipe_get` returns a recipe that inherits grind from its linked bag
@@ -295,6 +295,10 @@ Recipe tool responses and inputs SHALL use the house conventions: unit-suffixed 
 #### Scenario: Hot-water block round-trips over MCP
 - **WHEN** an MCP client calls `recipe_create` (or `recipe_update`) with a hot-water block and later calls `recipe_get`
 - **THEN** the block is accepted against the tool schema, persisted, and returned unchanged (including its `order`)
+
+#### Scenario: Temperature is the offset field
+- **WHEN** a recipe holding a −3° temperature offset is returned by any recipe tool
+- **THEN** the response carries `tempOffsetC: -3` (a signed delta in °C against the recipe's profile) and no absolute recipe-temperature field
 
 ### Requirement: Recipe tools carry drink type and accept profile-less hot-water recipes
 The recipe tool family SHALL expose `drinkType` (human-readable string per the data conventions) on `recipe_list` and `recipe_get`, and accept it on `recipe_create`/`recipe_update` (derived from blocks when omitted; re-derived on update only when blocks change and the caller did not set it). Derivation SHALL resolve an installed profile's `beverage_type` from the profile catalog — recipes referencing installed profiles embed no profile JSON, and without the catalog a tea profile would derive as espresso. `recipe_create` and `recipe_update` SHALL accept a recipe with no profile when the payload carries a hot-water block with `hasWater` true, and SHALL reject a profile-less payload without one. `recipe_activate` on a profile-less recipe SHALL follow the shared profile-less activation path.
@@ -335,4 +339,216 @@ The MCP server SHALL provide `bag_extract_details` (control tier): runs the exac
 #### Scenario: Stage-2 diagnosis on a JS-rendered shop
 - **WHEN** an MCP client calls `bag_extract_details` for a bag whose page is a JS-rendered SPA
 - **THEN** the response shows stage 2, the stage-1 emptyPage error, and the extracted fields including imageUrl when present
+
+### Requirement: Capability-URL Authorization for Remote Access
+
+When remote MCP is enabled, the remote surface SHALL authorize
+requests solely by an unguessable capability token carried as a URL
+path segment (`/mcp/<token>`), where the token is a 128-bit
+cryptographically random value generated on-device. Token comparison
+SHALL be constant-time. Requests with a missing or non-matching token
+SHALL receive a bare HTTP `404` that does not reveal that an MCP
+server exists.
+
+#### Scenario: Valid token
+- **WHEN** a client POSTs a JSON-RPC request to `/mcp/<token>` with the current token
+- **THEN** the request is dispatched to the MCP server and handled normally
+
+#### Scenario: Wrong token
+- **WHEN** a client POSTs to `/mcp/<other>` where `<other>` is not the current token
+- **THEN** the server returns `404` with no MCP-identifying headers or body
+
+#### Scenario: Missing token
+- **WHEN** a client POSTs to `/mcp` on the remote surface
+- **THEN** the server returns `404`
+
+### Requirement: Token Rotation as Revocation
+
+The settings UI SHALL provide a rotate-token action. Rotation SHALL
+generate a fresh token, immediately close all active remote MCP
+sessions, and cause requests bearing the previous token to receive
+`404`. The UI SHALL display the new connector URL and QR code after
+rotation.
+
+#### Scenario: User rotates the token
+- **WHEN** the user confirms the rotate-token action
+- **THEN** a request using the old token returns `404` within one second and active remote sessions are terminated
+
+#### Scenario: New URL shown
+- **WHEN** rotation completes
+- **THEN** the settings UI displays the connector URL containing the new token, with copy and QR affordances
+
+### Requirement: Isolated Remote Surface
+
+The remote reachability path SHALL terminate at a dedicated listener
+that serves only the tokenized MCP route (`POST`, `GET`, `DELETE` on
+`/mcp/<token>`). All other paths and methods on the remote surface
+SHALL return `404`. No other ShotServer route (web layout editor,
+REST endpoints, data-migration API) SHALL be reachable through the
+remote surface.
+
+#### Scenario: Non-MCP route via tunnel
+- **WHEN** a request arrives on the remote surface for any other path (e.g. `/layout`, `/api/shots`)
+- **THEN** the server returns `404`
+
+#### Scenario: LAN surface unchanged
+- **WHEN** a LAN client uses the existing local `/mcp` endpoint
+- **THEN** behavior is unchanged by remote mode being enabled or disabled
+
+### Requirement: Remote Sessions Honor Existing MCP Gates
+
+Remote MCP sessions SHALL be subject to the same `mcpAccessLevel`
+filtering, `mcpConfirmationLevel` confirmation flows (including the
+in-app dialog for machine-start operations), session limits, and
+rate limits as LAN sessions.
+
+#### Scenario: Access level enforced remotely
+- **WHEN** `mcpAccessLevel` is Monitor Only and a remote client calls a control-category tool
+- **THEN** the call is rejected identically to the LAN behavior
+
+#### Scenario: In-app confirmation over the tunnel
+- **WHEN** `mcpConfirmationLevel` requires confirmation and a remote client calls `machine_start_espresso`
+- **THEN** the on-device confirmation dialog is shown and the held response resolves per the user's choice or the dialog timeout
+
+### Requirement: Failed-Token Rate Limiting
+
+The remote surface SHALL rate-limit requests that fail token
+validation, per source, and SHALL log failures without echoing the
+attempted path.
+
+#### Scenario: Repeated bad tokens
+- **WHEN** a source exceeds the failed-token limit
+- **THEN** further requests from that source are dropped or delayed for the limit window
+
+### Requirement: Reachability Mode — Embedded Tailscale Funnel
+
+In Tailscale mode, the app SHALL run an embedded tsnet node
+(userspace, no system VPN interface) that joins the user's tailnet
+and exposes the remote surface via Tailscale Funnel at a stable
+`https://<node>.<tailnet>.ts.net` URL with a certificate managed by
+Tailscale. Setup SHALL surface the tsnet login URL (link and QR) and
+any required Funnel-approval URL. Disabling remote MCP SHALL bring
+the tsnet listener down; an explicit forget action SHALL wipe the
+tsnet node state.
+
+#### Scenario: First-time Tailscale setup
+- **WHEN** the user selects Tailscale mode and enables remote MCP with no prior tsnet state
+- **THEN** the UI shows the tailnet login URL as link and QR and reports status until the node is authorized and Funnel is active
+
+#### Scenario: Funnel active
+- **WHEN** the tsnet node is authorized and Funnel is enabled
+- **THEN** the UI displays the stable connector URL `https://<node>.<tailnet>.ts.net/mcp/<token>` and requests to it reach the remote surface
+
+#### Scenario: Network change
+- **WHEN** the device changes networks while Tailscale mode is active
+- **THEN** the tsnet node reconnects automatically and the connector URL remains unchanged
+
+#### Scenario: Forget tailnet
+- **WHEN** the user invokes the forget action
+- **THEN** the tsnet state directory is wiped and re-enabling requires a fresh tailnet login
+
+### Requirement: Reachability Mode — Bring-Your-Own URL
+
+In custom-URL mode, the user SHALL provide an `https://` base URL
+that they have arranged to forward to the device's remote listener.
+The UI SHALL compose and display the full connector URL
+(`<base>/mcp/<token>`) with copy and QR affordances. The app SHALL
+NOT attempt to manage the user's tunnel.
+
+#### Scenario: Custom URL configured
+- **WHEN** the user enters `https://coffee.example.ts.net` as the base URL
+- **THEN** the UI displays connector URL `https://coffee.example.ts.net/mcp/<token>` with copy and QR
+
+#### Scenario: Non-HTTPS rejected
+- **WHEN** the user enters an `http://` base URL
+- **THEN** the value is rejected with a validation message
+
+### Requirement: Remote Access Status Visibility
+
+The settings UI SHALL show the live state of the remote surface
+(`off`, `starting`, `active`, `reconnecting`, `error`) and SHALL NOT
+display the connector URL as usable while the underlying tunnel is
+down.
+
+#### Scenario: Tunnel drops
+- **WHEN** the active tunnel disconnects
+- **THEN** the status changes from `active` to `reconnecting` (or `error`) and the UI reflects that the URL is currently unreachable
+
+### Requirement: Remote MCP Disable Semantics
+
+Disabling remote MCP SHALL stop all tunnels, close the remote
+listener, and terminate remote sessions. The capability token SHALL
+be retained so re-enabling does not invalidate an already-configured
+connector.
+
+#### Scenario: Toggle off
+- **WHEN** the user disables remote MCP
+- **THEN** in-flight remote sessions are closed, the remote listener stops, and the public URL ceases to resolve to the app
+
+#### Scenario: Re-enable
+- **WHEN** the user re-enables remote MCP in the same mode
+- **THEN** the previous connector URL (same host, same token) works again without reconfiguring claude.ai
+
+### Requirement: Stateful Sessions Are Established Only by an SSE Stream
+
+The MCP server SHALL treat a session as **stateful** only once the client establishes a Server-Sent Events (SSE) stream for that session (a `GET /mcp` that succeeds and is retained for notifications). A session created solely by a `POST` `initialize` handshake, with no subsequent SSE stream, SHALL be treated as **ephemeral** and SHALL NOT retain durable server-side state beyond what is needed to answer the requests on its own connection.
+
+Access-level, confirmation-level, origin, protocol-version, and rate-limit gating SHALL apply identically to ephemeral and stateful sessions; this requirement changes only session retention, not the security surface.
+
+#### Scenario: POST-only client is served without a durable session
+
+- **WHEN** a client sends `initialize` followed by tool calls over `POST` and never opens an SSE stream
+- **THEN** the server answers every request successfully
+- **AND** the server does not retain a durable session slot for that client once its in-flight requests are complete
+
+#### Scenario: SSE subscriber keeps a durable session
+
+- **WHEN** a client completes `initialize` and then opens an SSE stream via `GET /mcp` for that session
+- **THEN** the server retains the session, its negotiated capabilities, and its resource subscriptions for the lifetime of the SSE stream
+- **AND** resource-change notifications continue to be pushed to that client
+
+### Requirement: Concurrency Limit Counts Only Stateful Sessions
+
+The `MaxSessions` concurrency limit SHALL count only stateful (SSE-backed) sessions. Ephemeral POST-only sessions SHALL NOT be counted against `MaxSessions`, and their presence SHALL NOT cause a `-32000 "Too many sessions"` rejection of any client.
+
+#### Scenario: Repeated re-initializing client cannot exhaust the pool
+
+- **WHEN** a client re-runs `initialize` on every request without ever echoing the `Mcp-Session-Id` header or opening an SSE stream (the observed ChatGPT `openai-mcp` connector behavior)
+- **THEN** the server continues to answer that client's requests
+- **AND** no request from any other client is rejected with `-32000 "Too many sessions"` as a result of that churn
+
+#### Scenario: Stateful sessions still bounded
+
+- **WHEN** the number of concurrent SSE-backed sessions reaches `MaxSessions`
+- **THEN** a further attempt to establish a new stateful (SSE) session is refused
+- **AND** the refusal does not disturb existing stateful sessions or ephemeral request handling
+
+### Requirement: Total Session Pool Is Bounded Against Churn Without Rejecting Clients
+
+Because ephemeral sessions are no longer bounded by the stateful concurrency limit and the `initialize` handshake is not rate-limited, the server SHALL enforce an absolute backstop on the total number of retained sessions to bound memory. When creating a session would exceed that backstop, the server SHALL evict the least-recently-active ephemeral session (never a stateful session, and never one holding a pending in-app confirmation) rather than rejecting the new session. A burst of per-request re-initialization SHALL NOT cause any client's request to be rejected.
+
+#### Scenario: Tight-loop initialize is bounded by eviction, not rejection
+
+- **WHEN** a client POSTs `initialize` in a tight loop without echoing a session header, driving the total session count to the backstop
+- **THEN** the total retained session count stays bounded at the backstop
+- **AND** each new `initialize` still succeeds, the server having evicted the least-recently-active ephemeral session to make room
+
+#### Scenario: Eviction never targets a stateful or confirming session
+
+- **WHEN** the pool reaches the backstop while some sessions hold a live SSE stream or a pending in-app confirmation
+- **THEN** eviction skips those sessions and removes only an ephemeral, non-confirming one
+
+### Requirement: Ephemeral Sessions Are Reaped Well Before the Stateful Timeout
+
+Ephemeral (non-SSE) session state SHALL be released by a reaping pass bounded well below the idle-session timeout used for stateful sessions, so that per-request re-initializing clients do not accumulate durable state up to the full stateful timeout. A session with an in-flight request or a pending in-app confirmation SHALL NOT be reaped.
+
+#### Scenario: Ephemeral state does not linger to the stateful timeout
+
+- **WHEN** an ephemeral session has been idle past the ephemeral-reaping bound but well short of the stateful idle-session timeout
+- **THEN** the server has released that session's state
+
+#### Scenario: In-flight or confirming ephemeral session is not reaped
+
+- **WHEN** an ephemeral session has a tool call still executing or a pending in-app confirmation
+- **THEN** the server does not release that session's state until the request completes and any confirmation resolves
 

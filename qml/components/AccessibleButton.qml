@@ -34,7 +34,12 @@ Button {
     leftPadding: Theme.scaled(20)
     rightPadding: Theme.scaled(20)
 
-    // Icon styling — set icon.source to show an icon before the text
+    // Icon styling — set icon.source to show an icon before the text.
+    // tintIcon: recolor a monochrome SVG icon to icon.color. [barista-fork] Defaults TRUE — the fork's
+    // icons are theme-following line icons (e.g. the barista header gear/settings, invisible otherwise on a
+    // light surface). Set tintIcon: false to keep a MULTICOLOR icon/emoji's native colors (upstream's opt-out,
+    // preserved). Only ever tints icon-bearing buttons; text-only buttons never get the colorization layer.
+    property bool tintIcon: true
     icon.width: Theme.scaled(16)
     icon.height: Theme.scaled(16)
     icon.color: {
@@ -68,9 +73,12 @@ Button {
                 opacity: root.enabled ? 1.0 : 0.5
                 // Tint the icon with icon.color so it follows the theme like the text label does
                 // (the line-icon SVGs are hardcoded stroke="white", which is invisible on light
-                // surfaces — this is why an icon-only button could render blank). Scoped to
-                // icon-bearing buttons: text-only buttons have no source, so the layer stays off.
-                layer.enabled: root.icon.source.toString() !== ""
+                // surfaces — this is why an icon-only button could render blank).
+                // [merge 2026-07-14] Tint an icon-bearing button when tintIcon (default TRUE) — the fork's
+                // theme-following line icons stay visible on light surfaces, AND a caller can still opt a
+                // multicolor icon OUT with tintIcon: false (upstream's intent, restored). Text-only buttons
+                // (no source) never get the layer regardless.
+                layer.enabled: root.icon.source.toString() !== "" && root.tintIcon
                 layer.effect: MultiEffect {
                     colorization: 1.0
                     colorizationColor: root.icon.color

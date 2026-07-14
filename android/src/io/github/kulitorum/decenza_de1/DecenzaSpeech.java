@@ -2,7 +2,9 @@ package io.github.kulitorum.decenza_de1;
 
 import android.content.Context;
 import android.content.Intent;
+import android.media.AudioDeviceInfo;
 import android.media.AudioManager;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -23,6 +25,9 @@ public class DecenzaSpeech {
     public static native void nativeOnFinal(String text);
     public static native void nativeOnPartial(String text);
     public static native void nativeOnError(int code);
+    // [barista-fork] One-line device-audio-route snapshot → the barista diagnostics log (stt/mic_route),
+    // so a Bluetooth "lost first words" report can be confirmed and the built-in-mic override verified.
+    public static native void nativeMicDiag(String info);
 
     // [barista-fork] We used to mute STREAM_MUSIC/NOTIFICATION/SYSTEM around each listen to hide the
     // SpeechRecognizer's start/stop earcon. That was removed: muting media/system streams was too broad
@@ -52,12 +57,63 @@ public class DecenzaSpeech {
         } catch (Exception ignored) {}
     }
 
+    // [barista-fork] Bluetooth "loses the first few seconds" fix. When a Bluetooth headset is connected,
+    // Android routes the recogniser's mic to the Bluetooth SCO link; bringing SCO up AFTER our A2DP TTS
+    // eats the user's opening ~1-2s. We keep TTS on A2DP (USAGE_MEDIA, full quality) and force the STT
+    // capture onto the BUILT-IN mic via setCommunicationDevice(TYPE_BUILTIN_MIC). Whether the system
+    // recogniser honours this is device/version-specific, so we LOG the route + whether the override took
+    // (stt/mic_route) — the next session's log tells us. API 31+ only; no-op otherwise. Never throws into
+    // the listen path.
+    private static void preferBuiltInMicForBluetooth(Context ctx) {
+        try {
+            if (audio == null)
+                audio = (AudioManager) ctx.getApplicationContext().getSystemService(Context.AUDIO_SERVICE);
+            if (audio == null) return;
+            StringBuilder sb = new StringBuilder();
+            sb.append("sco=").append(audio.isBluetoothScoOn());
+            if (Build.VERSION.SDK_INT < 31) { nativeMicDiag(sb.append(" api<31").toString()); return; }
+
+            AudioDeviceInfo builtin = null;
+            boolean btInput = false;
+            sb.append(" inputs=");
+            for (AudioDeviceInfo d : audio.getDevices(AudioManager.GET_DEVICES_INPUTS)) {
+                sb.append(d.getType()).append(",");
+                if (d.getType() == AudioDeviceInfo.TYPE_BUILTIN_MIC) builtin = d;
+                if (d.getType() == AudioDeviceInfo.TYPE_BLUETOOTH_SCO) btInput = true;
+            }
+            AudioDeviceInfo commDev = audio.getCommunicationDevice();
+            sb.append(" commDev=").append(commDev != null ? commDev.getType() : -1);
+            // Output route — so the log can confirm the barista's TTS (USAGE_MEDIA) STAYS on Bluetooth A2DP
+            // and the input-mic override didn't drag it onto the built-in speaker (the owner's key UX risk).
+            sb.append(" a2dp=").append(audio.isBluetoothA2dpOn());
+            sb.append(" outs=");
+            for (AudioDeviceInfo d : audio.getDevices(AudioManager.GET_DEVICES_OUTPUTS))
+                sb.append(d.getType()).append(",");
+            // setCommunicationDevice only accepts devices from getAvailableCommunicationDevices() — an
+            // OUTPUT-anchored list that usually EXCLUDES TYPE_BUILTIN_MIC, so this likely returns false and
+            // changes nothing (forceBuiltin=false in the log). It's a harmless best-effort try: if a given
+            // Samsung build DOES accept the built-in mic it fixes the route; if not, the log tells us to move
+            // to the own-AudioRecord (EXTRA_AUDIO_SOURCE) approach. Only attempted when a BT mic is present.
+            if (btInput && builtin != null) {
+                boolean ok = audio.setCommunicationDevice(builtin);
+                sb.append(" forceBuiltin=").append(ok);
+            } else {
+                sb.append(" forceBuiltin=skip");
+            }
+            nativeMicDiag(sb.toString());
+        } catch (Throwable t) {
+            try { nativeMicDiag("mic_route_error " + t.getClass().getSimpleName()); } catch (Throwable ignored) {}
+        }
+    }
+
     public static void start(final Context ctx, final boolean preferOffline) {
         main.post(new Runnable() {
             @Override public void run() {
                 try {
                     // Heal any stream left muted by an earlier build; no muting is done anymore.
                     recoverMutedStreams(ctx);
+                    // Keep the mic off Bluetooth SCO (built-in mic) so the first words aren't lost.
+                    preferBuiltInMicForBluetooth(ctx);
                     if (recognizer == null) {
                         recognizer = SpeechRecognizer.createSpeechRecognizer(ctx);
                         recognizer.setRecognitionListener(listener);
@@ -85,6 +141,11 @@ public class DecenzaSpeech {
                 if (recognizer != null) {
                     try { recognizer.cancel(); } catch (Exception ignored) {}
                 }
+                // Release the built-in-mic override so normal (non-barista) audio routing resumes.
+                try {
+                    if (audio != null && Build.VERSION.SDK_INT >= 31)
+                        audio.clearCommunicationDevice();
+                } catch (Exception ignored) {}
             }
         });
     }

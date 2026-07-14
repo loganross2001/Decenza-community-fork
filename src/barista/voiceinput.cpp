@@ -54,6 +54,16 @@ void nativeOnError(JNIEnv*, jclass, jint code) {
         if (auto* v = s_active.data()) v->handleError(c);
     }, Qt::QueuedConnection);
 }
+// [barista-fork] Device audio-route snapshot from DecenzaSpeech (Bluetooth mic diagnosis) → the barista
+// diagnostics log. Hops to the qApp thread like the other callbacks; BaristaDiagnostics::record is itself
+// mutex-guarded. No VoiceInput dependency (pure recorder call).
+void nativeMicDiag(JNIEnv* env, jclass, jstring infoJ) {
+    const QString info = jstringToQString(env, infoJ);
+    QMetaObject::invokeMethod(qApp, [info] {
+        BaristaDiagnostics::record(QStringLiteral("stt"), QStringLiteral("mic_route"),
+            {{QStringLiteral("info"), info}});
+    }, Qt::QueuedConnection);
+}
 
 void registerVoiceNatives() {
     static bool registered = false;
@@ -64,8 +74,9 @@ void registerVoiceNatives() {
         {"nativeOnFinal",   "(Ljava/lang/String;)V", reinterpret_cast<void*>(nativeOnFinal)},
         {"nativeOnPartial", "(Ljava/lang/String;)V", reinterpret_cast<void*>(nativeOnPartial)},
         {"nativeOnError",   "(I)V",                  reinterpret_cast<void*>(nativeOnError)},
+        {"nativeMicDiag",   "(Ljava/lang/String;)V", reinterpret_cast<void*>(nativeMicDiag)},
     };
-    if (!env.registerNativeMethods(kSpeechClass, methods, 3))
+    if (!env.registerNativeMethods(kSpeechClass, methods, 4))
         qWarning() << "VoiceInput: failed to register DecenzaSpeech native methods";
 }
 } // namespace

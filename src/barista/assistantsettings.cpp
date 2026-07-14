@@ -635,6 +635,18 @@ void AssistantSettings::setAvatarTabSize(const QString& s) {
     emit avatarTabSizeChanged();
 }
 
+QString AssistantSettings::panelWidthMode() const {
+    // Width of the expanded right-side panel; "medium" ≈ the previous floating-card proportion.
+    return m_settings.value(QStringLiteral("barista/panelWidthMode"), QStringLiteral("medium")).toString();
+}
+
+void AssistantSettings::setPanelWidthMode(const QString& s) {
+    if (panelWidthMode() == s)
+        return;
+    m_settings.setValue(QStringLiteral("barista/panelWidthMode"), s);
+    emit panelWidthModeChanged();
+}
+
 // [barista-fork] Recency of the barista relationship — the heart of the user-initiated model. One ISO
 // timestamp, stamped on every completed exchange; read (never as a timer) at engage-time to decide whether
 // a greeting is even warranted. Mirrors the consumeProactiveNudge persistence pattern.

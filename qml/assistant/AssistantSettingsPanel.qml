@@ -357,6 +357,29 @@ Rectangle {
                             }
                             onActivated: if (root._settings) root._settings.avatarTabSize = currentValue
                         }
+
+                        // Panel width — how much of the screen the expanded barista reserves on the right
+                        // (the machine UI reflows into the remaining left area).
+                        Tr {
+                            key: "barista.settings.panelWidth"; fallback: "Panel width"
+                            color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true
+                        }
+                        ComboBox {
+                            id: panelWidthBox
+                            Layout.fillWidth: true
+                            textRole: "label"; valueRole: "value"
+                            model: [
+                                { value: "narrow", label: TranslationManager.translate("barista.settings.panelWidth.narrow", "Narrow") },
+                                { value: "medium", label: TranslationManager.translate("barista.settings.panelWidth.medium", "Medium") },
+                                { value: "wide",   label: TranslationManager.translate("barista.settings.panelWidth.wide", "Wide") }
+                            ]
+                            Accessible.name: TranslationManager.translate("barista.settings.panelWidth", "Panel width")
+                            Component.onCompleted: {
+                                var i = indexOfValue(root._settings ? root._settings.panelWidthMode : "medium")
+                                if (i >= 0) currentIndex = i
+                            }
+                            onActivated: if (root._settings) root._settings.panelWidthMode = currentValue
+                        }
                     }
 
                     // [barista-fork] Diagnostics — the always-on voice/coaching timeline recorder. Lets the

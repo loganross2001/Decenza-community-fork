@@ -1083,6 +1083,12 @@ ApplicationWindow {
     StackView {
         id: pageStack
         anchors.fill: parent
+        // [barista-fork] Reserve the right strip when the barista panel is expanded, so the machine UI
+        // reflows into the remaining left area instead of hiding under the panel. 0 when the barista is
+        // collapsed to its edge tab or suppressed. Animated so the reflow glides rather than jumps.
+        anchors.rightMargin: (baristaOverlay.visible && baristaOverlay.item)
+                             ? baristaOverlay.item.reservedWidth : 0
+        Behavior on anchors.rightMargin { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
         focus: true
         initialItem: idlePage
 
@@ -1221,6 +1227,11 @@ ApplicationWindow {
             anchors.top: parent.top
             anchors.left: parent.left
             anchors.right: parent.right
+            // [barista-fork] Reflow with pageStack when the barista panel reserves the right strip, so
+            // status widgets stay visible in the left area instead of hiding under the panel.
+            anchors.rightMargin: (baristaOverlay.visible && baristaOverlay.item)
+                                 ? baristaOverlay.item.reservedWidth : 0
+            Behavior on anchors.rightMargin { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
             height: Theme.statusBarHeight
             z: 600
             visible: !root.screensaverActive

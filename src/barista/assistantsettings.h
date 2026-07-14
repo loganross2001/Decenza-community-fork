@@ -69,6 +69,9 @@ class AssistantSettings : public QObject {
     // [barista-fork] Size of the avatar on the collapsed EDGE TAB (the pull-tab on the screen edge). Owner-
     // chosen; the tab hugs the avatar so this drives both. "small" | "medium" | "large" (default "medium").
     Q_PROPERTY(QString avatarTabSize READ avatarTabSize WRITE setAvatarTabSize NOTIFY avatarTabSizeChanged)
+    // Width of the expanded right-side barista panel (reserves screen space; the machine UI reflows left).
+    // "narrow" | "medium" | "wide" (default "medium").
+    Q_PROPERTY(QString panelWidthMode READ panelWidthMode WRITE setPanelWidthMode NOTIFY panelWidthModeChanged)
     Q_PROPERTY(QString proactivityLevel READ proactivityLevel WRITE setProactivityLevel NOTIFY proactivityLevelChanged)
 
 public:
@@ -188,6 +191,9 @@ public:
     QString avatarTabSize() const;                // edge-tab avatar size: "small" | "medium" | "large" (default "medium")
     void setAvatarTabSize(const QString& s);
 
+    QString panelWidthMode() const;               // right-panel width: "narrow" | "medium" | "wide" (default "medium")
+    void setPanelWidthMode(const QString& s);
+
     QString proactivityLevel() const;             // "off" | "greetings" | "full" (default "full")
     void setProactivityLevel(const QString& level);
 
@@ -244,6 +250,7 @@ signals:
     void avatarEnabledChanged();
     void avatarStyleChanged();
     void avatarTabSizeChanged();
+    void panelWidthModeChanged();
     void proactivityLevelChanged();
 
 private:

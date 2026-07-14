@@ -260,6 +260,22 @@ Item {
     property bool _paused: false
     property bool _showSettings: false
     property bool _collapsed: false     // panel minimised to a thin edge tab (frees the whole screen)
+
+    // --- Right-side panel geometry (owner: barista is a reserved right panel, machine UI reflows left) ---
+    // Width fraction of the whole screen, from the panelWidthMode setting (narrow/medium/wide).
+    readonly property real _panelFraction: {
+        var m = root._settings ? root._settings.panelWidthMode : "medium"
+        if (m === "narrow") return 0.30
+        if (m === "wide")   return 0.52
+        return 0.42   // medium ≈ the previous floating-card proportion
+    }
+    // The panel's own width (capped so it never eats the whole screen on a wide display).
+    readonly property real _panelWidth: Math.min(Theme.scaled(560), width * _panelFraction)
+    // True while a full panel (conversation OR settings) is expanded on the right — NOT the edge tab.
+    readonly property bool _panelExpanded: !_collapsed && (_state === "conversing" || _showSettings)
+    // Space the main app UI (pageStack in main.qml) must leave clear on the right. The panel is flush to
+    // the right edge; reserve its width plus the small gutter so content never slides under it. 0 = collapsed.
+    readonly property real reservedWidth: _panelExpanded ? (_panelWidth + Theme.spacingMedium) : 0
     property var _pendingNext: null     // structuredNext recommendation awaiting apply/skip
     // [barista-fork] User-initiated model: the context is PRIMED (system prompt assembled) but the Claude
     // session is NOT begun until the user's first real utterance. No synthetic kickoff, no machine-first turn.
@@ -1489,7 +1505,7 @@ Item {
         anchors.top: parent.top
         anchors.bottom: parent.bottom
         anchors.margins: Theme.spacingMedium
-        width: Math.min(Theme.scaled(440), parent.width * 0.42)
+        width: root._panelWidth   // driven by the panelWidthMode setting (narrow/medium/wide)
         radius: Theme.cardRadius
         color: Theme.surfaceColor
         border.width: 1
@@ -1529,29 +1545,34 @@ Item {
                     text: root._settings ? root._settings.assistantName
                                          : TranslationManager.translate("barista.title", "Coach")
                     Layout.fillWidth: true
-                    color: Theme.textSecondaryColor
-                    font: Theme.labelFont
+                    color: Theme.textColor
+                    font: Theme.subtitleFont
                     Accessible.ignored: true
                 }
                 // Gear → open the assistant settings panel (voice provider, ElevenLabs key + saved voices,
                 // names, bell). Uses the settings SVG (no unicode-glyph icons, per CLAUDE.md). Lives inside
                 // `card`, which only shows while conversing && !_showSettings && !_collapsed, so it self-hides
-                // once settings open.
+                // once settings open. `icon.color` pins the header controls to full-contrast textColor:
+                // the `subtle` default is primaryContrastColor, which is invisible on a LIGHT surface card
+                // (and dims to 40% alpha when disabled). textColor always reads on the card. No-op on dark themes.
                 AccessibleButton {
                     subtle: true
                     icon.source: "qrc:/icons/settings.svg"
+                    icon.color: Theme.textColor
                     accessibleName: TranslationManager.translate("barista.settings.open", "Assistant settings")
                     onClicked: root._showSettings = true
                 }
                 AccessibleButton {
                     subtle: true
                     text: "→"   // collapse to a thin edge tab, freeing the whole screen
+                    icon.color: Theme.textColor
                     accessibleName: TranslationManager.translate("barista.collapse", "Collapse assistant")
                     onClicked: { root._showSettings = false; root._collapsed = true }
                 }
                 AccessibleButton {
                     subtle: true
                     text: "×"
+                    icon.color: Theme.textColor
                     accessibleName: TranslationManager.translate("common.accessibility.dismissDialog", "Dismiss")
                     onClicked: if (root._orch) root._orch.dismiss()
                 }
@@ -1602,7 +1623,10 @@ Item {
                     width: msgFlick.width
                     verticalAlignment: Text.AlignTop
                     wrapMode: Text.WordWrap
-                    color: avatar.visible ? Theme.textSecondaryColor : Theme.textColor
+                    // Always full-contrast primary text (was dimmed to textSecondaryColor whenever the
+                    // avatar showed — i.e. almost always — which made the barista's own words hard to read).
+                    // Font sizing is left as it was (avatar-hidden path keeps its larger subtitle font).
+                    color: Theme.textColor
                     font: avatar.visible ? Theme.bodyFont : Theme.subtitleFont
                     text: (root._thinking && root._message.length === 0)
                           ? TranslationManager.translate("barista.thinking", "…")
@@ -1722,9 +1746,9 @@ Item {
         anchors.top: parent.top
         anchors.bottom: parent.bottom
         anchors.margins: Theme.spacingMedium
-        // [barista-fork] Wider than the conversation card: the tabbed settings (Voice · Coaching ·
-        // Maintenance) need room to read as a first-class settings screen, not a cramped popover.
-        width: Math.min(Theme.scaled(520), parent.width * 0.5)
+        // Same width as the conversation panel (driven by panelWidthMode) so the reserved right strip is
+        // consistent whether chatting or in settings; the tabbed settings content scrolls within it.
+        width: root._panelWidth
         radius: Theme.cardRadius
         color: Theme.surfaceColor
         border.width: 1

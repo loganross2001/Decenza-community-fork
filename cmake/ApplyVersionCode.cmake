@@ -1,6 +1,12 @@
-# Read current version code (no increment — CI bumps versioncode.txt before configure)
-file(READ "${VERSION_CODE_FILE}" VERSION_CODE)
-string(STRIP "${VERSION_CODE}" VERSION_CODE)
+# Read current version code (no increment — CI bumps versioncode.txt before configure).
+# [barista-fork] A non-empty LOCAL_VERSION_CODE_OVERRIDE (local dev builds; see CMakeLists LOCAL_DEV_BUILD)
+# wins over the file, so the clock-derived dev versionCode flows into version_code.cpp AND the manifest.
+if(DEFINED LOCAL_VERSION_CODE_OVERRIDE AND NOT "${LOCAL_VERSION_CODE_OVERRIDE}" STREQUAL "")
+    set(VERSION_CODE "${LOCAL_VERSION_CODE_OVERRIDE}")
+else()
+    file(READ "${VERSION_CODE_FILE}" VERSION_CODE)
+    string(STRIP "${VERSION_CODE}" VERSION_CODE)
+endif()
 
 # Generate version_code.cpp so the build number is compiled into the binary.
 # This is a .cpp file (not a header) so Ninja/MSBuild properly detect the change

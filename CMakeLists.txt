@@ -14,6 +14,24 @@ set(VERSION_CODE_CPP "${CMAKE_BINARY_DIR}/version_code.cpp")
 file(READ "${VERSION_CODE_FILE}" CURRENT_VERSION_CODE)
 string(STRIP "${CURRENT_VERSION_CODE}" CURRENT_VERSION_CODE)
 
+# [barista-fork] LOCAL DEV BUILDS ONLY — auto-incrementing, clock-derived Android versionCode.
+# The private daily APK must install over the last one, which Android only allows if versionCode is
+# higher. Rather than hand-edit versioncode.txt every build (tedious, and it churns a tracked file in
+# every upstream merge), derive the code from the wall clock: minutes since 2020-01-01 UTC. In 2026 that
+# is ~3.4M — far above the manual codes (~3600) so a dev build cleanly upgrades the last one, and far
+# below Android's 2,100,000,000 ceiling (it won't reach it for millennia). Enabled ONLY via
+# build.sh --dev (-DLOCAL_DEV_BUILD=ON); CI and real releases never pass it, so they keep using
+# versioncode.txt verbatim. The value is also threaded into the build-time apply_version_code target
+# below (via LOCAL_VERSION_CODE_OVERRIDE) so version_code.cpp + AndroidManifest.xml agree with it.
+option(LOCAL_DEV_BUILD "Auto-derive the Android versionCode from the clock (local dev only)" OFF)
+set(LOCAL_VERSION_CODE_OVERRIDE "")
+if(LOCAL_DEV_BUILD)
+    string(TIMESTAMP _dev_now_epoch "%s" UTC)
+    math(EXPR LOCAL_VERSION_CODE_OVERRIDE "(${_dev_now_epoch} - 1577836800) / 60")
+    set(CURRENT_VERSION_CODE "${LOCAL_VERSION_CODE_OVERRIDE}")
+    message(STATUS "LOCAL_DEV_BUILD: clock-derived Android versionCode = ${CURRENT_VERSION_CODE}")
+endif()
+
 # Configure version.h from template (stable values: VERSION_STRING, VERSION_MAJOR, etc.)
 configure_file(
     "${CMAKE_SOURCE_DIR}/src/version.h.in"
@@ -970,6 +988,7 @@ endif()
 add_custom_target(apply_version_code ALL
     COMMAND ${CMAKE_COMMAND}
         -DVERSION_CODE_FILE=${VERSION_CODE_FILE}
+        -DLOCAL_VERSION_CODE_OVERRIDE=${LOCAL_VERSION_CODE_OVERRIDE}
         -DMANIFEST_FILE=${CMAKE_SOURCE_DIR}/android/AndroidManifest.xml
         -DMANIFEST_TEMPLATE=${CMAKE_SOURCE_DIR}/android/AndroidManifest.xml.in
         -DVERSION_STRING=${PROJECT_VERSION}

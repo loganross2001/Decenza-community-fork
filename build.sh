@@ -7,6 +7,7 @@
 TARGET="OSX"
 BUILD_TYPE="Release"
 CLEAN=false
+DEV=false
 OS=$(uname)
 
 # Usage information
@@ -16,6 +17,8 @@ usage() {
     echo "  --target <OSX|ANDROID>     Target platform (default: OSX)"
     echo "  --debug                    Build in Debug mode (default: Release)"
     echo "  --clean                    Remove build directory before building"
+    echo "  --dev                      Local dev build: auto-derive an ever-increasing Android"
+    echo "                             versionCode from the clock (no versioncode.txt edit needed)"
     echo "  --help                     Show this help message"
     exit 1
 }
@@ -33,7 +36,10 @@ while [[ "$#" -gt 0 ]]; do
         --clean)
             CLEAN=true
             ;;
-        --help) 
+        --dev)
+            DEV=true
+            ;;
+        --help)
             usage 
             ;;
         *) 
@@ -112,6 +118,18 @@ if [[ "$OS" == "Darwin" ]]; then
     # Initialize EXTRA_CMAKE_ARGS if not set
     if [ -z "$EXTRA_CMAKE_ARGS" ]; then
         EXTRA_CMAKE_ARGS=""
+    fi
+
+    # [barista-fork] --dev: derive an ever-increasing Android versionCode from the clock at configure time
+    # (CMakeLists LOCAL_DEV_BUILD) so the private APK always installs over the last one without hand-editing
+    # versioncode.txt. Re-run configure (build.sh does this every invocation) → fresh code each build.
+    if [ "$DEV" = true ]; then
+        EXTRA_CMAKE_ARGS="$EXTRA_CMAKE_ARGS -DLOCAL_DEV_BUILD=ON"
+        echo "Notice: --dev set → clock-derived Android versionCode (versioncode.txt left untouched)"
+    else
+        # Pass OFF explicitly so a prior --dev build in the same build dir doesn't leave the cached
+        # LOCAL_DEV_BUILD stuck ON for a later plain build.
+        EXTRA_CMAKE_ARGS="$EXTRA_CMAKE_ARGS -DLOCAL_DEV_BUILD=OFF"
     fi
 
     if [ -z "$QT_CMAKE" ]; then

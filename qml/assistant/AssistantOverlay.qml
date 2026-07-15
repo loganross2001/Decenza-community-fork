@@ -1662,10 +1662,13 @@ Item {
                 Layout.alignment: Qt.AlignHCenter
                 Layout.topMargin: 0
                 // Sits up top under the header, sized for presence WITHOUT dominating the card — the message
-                // text is the focus. Capped to the panel width; floored so it can't compute negative.
+                // text is the focus and must keep at least ~3 lines (msgFlick.Layout.minimumHeight). Capped to
+                // the panel width; floored so it can't compute negative. maximumHeight = the size so a vertical
+                // layout never stretches it, and lets the layout yield this space to the text on a short card.
                 Layout.preferredWidth: Math.max(Theme.scaled(48),
-                                                Math.min(Theme.scaled(170), root._panelWidth - Theme.spacingLarge * 2))
+                                                Math.min(Theme.scaled(132), root._panelWidth - Theme.spacingLarge * 2))
                 Layout.preferredHeight: Layout.preferredWidth
+                Layout.maximumHeight: Layout.preferredWidth
                 // [barista-fork] Drive the mouth off `audible` (real audio out), NOT `speaking` — otherwise the
                 // avatar starts talking during the network→prepare gap before any sound (the "avatar talks
                 // before voices are heard" complaint). `speaking` still gates the mic; only the VISUAL syncs here.
@@ -1685,10 +1688,17 @@ Item {
             // overflowed its box and rendered ON TOP OF the chip/input below it (the "text writing over
             // itself"). Bound + clip it in a Flickable; reset to the top on each new answer so it reads
             // top-first, and the user can drag to scroll a long reply.
+            // [barista-fork] Keep at least ~3 lines of the barista's message visible while the read-along
+            // scroll runs — a 1.5-line window scrolling is distracting. FontMetrics tracks whichever font
+            // msgText uses (body when the avatar shows, subtitle otherwise). This is a Layout MINIMUM, so the
+            // text box grows to fill spare height and only floors at 3 lines when the card is tight (the layout
+            // then yields the avatar's space, which is why the avatar caps its own maximumHeight).
+            FontMetrics { id: msgMetrics; font: msgText.font }
             Flickable {
                 id: msgFlick
                 Layout.fillWidth: true
                 Layout.fillHeight: true
+                Layout.minimumHeight: Math.ceil(msgMetrics.height * 3) + Theme.scaled(2)
                 clip: true
                 contentWidth: width
                 contentHeight: msgText.implicitHeight

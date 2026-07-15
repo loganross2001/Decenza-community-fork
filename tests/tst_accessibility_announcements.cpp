@@ -1,4 +1,5 @@
 #include <QtTest>
+#include "core/settings.h"
 #include <QSignalSpy>
 #include <QSettings>
 #include <QTemporaryDir>
@@ -79,7 +80,7 @@ class tst_AccessibilityAnnouncements : public QObject {
     Q_OBJECT
 
 private:
-    QSettings m_realSettings{QStringLiteral("DecentEspresso"), QStringLiteral("DE1Qt")};
+    QSettings m_realSettings{Settings::testQSettingsPath(), QSettings::IniFormat};
     QVariant m_origEnabled;
     QVariant m_origTtsEnabled;
     QVariant m_origTickEnabled;
@@ -90,7 +91,7 @@ private:
     QVariant m_origExtractionMode;
 
 private slots:
-    void init() {
+    void init() { QTest::failOnWarning();
         // Snapshot every key AccessibilityManager::saveSettings() touches so
         // setEnabled / setTtsEnabled writes during a test don't permanently
         // mutate the developer's real preferences.

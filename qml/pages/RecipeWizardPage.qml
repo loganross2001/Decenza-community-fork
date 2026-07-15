@@ -25,7 +25,7 @@ import "../components"
 Page {
     id: wizardPage
     objectName: "recipeWizardPage"
-    background: Rectangle { color: Theme.backgroundColor }
+    background: ThemedPageBackground {}
 
     // "create" | "edit". Edit loads the row; create starts from `prefill`
     // (possibly empty) or `promoteShotId`. Same contract as the old composer.
@@ -529,7 +529,11 @@ Page {
             if (stTemp > 0)
                 temps.push(stTemp)
         }
-        fProfileStepTemps = temps
+        // See RecipesPage.refreshProfileNumbers: a resolved profile whose
+        // steps carry no explicit per-step temperature must still yield a
+        // non-empty array, or the summary hero falls through to rendering
+        // the loaded profile instead of its own.
+        fProfileStepTemps = temps.length > 0 ? temps : (fProfileTempC > 0 ? [fProfileTempC] : [])
     }
 
     // Re-resolve the linked bag's details (grind default, roast level, tea
@@ -765,7 +769,9 @@ Page {
             if (psTemp > 0)
                 pickedTemps.push(psTemp)
         }
-        fProfileStepTemps = pickedTemps
+        // See RecipesPage.refreshProfileNumbers: don't leave this empty
+        // when the profile resolved but its steps carry no per-step temp.
+        fProfileStepTemps = pickedTemps.length > 0 ? pickedTemps : (fProfileTempC > 0 ? [fProfileTempC] : [])
         // Tea temp is resolved entirely by applyDetailsPrefill (bag vendor
         // temp with the type-match correction, then profile default, then
         // history overwrite) — pre-seeding it here would make that whole
@@ -1328,7 +1334,7 @@ Page {
             Layout.fillWidth: true
             implicitHeight: Theme.scaled(44)
             radius: Theme.scaled(8)
-            color: Theme.surfaceColor
+            color: Theme.cardBackgroundColor
             border.color: Theme.borderColor
             border.width: 1
             RowLayout {
@@ -1398,7 +1404,7 @@ Page {
         Layout.alignment: Qt.AlignTop
         implicitHeight: cardColumn.implicitHeight + 2 * Theme.spacingMedium
         radius: Theme.cardRadius
-        color: Theme.surfaceColor
+        color: Theme.cardBackgroundColor
         border.color: Theme.borderColor
         border.width: 1
         ColumnLayout {
@@ -1470,7 +1476,7 @@ Page {
         Layout.alignment: Qt.AlignTop
         implicitHeight: summaryRowColumn.implicitHeight + 2 * Theme.spacingMedium
         radius: Theme.cardRadius
-        color: Theme.surfaceColor
+        color: Theme.cardBackgroundColor
         border.color: Theme.borderColor
         border.width: 1
         ColumnLayout {
@@ -1550,7 +1556,7 @@ Page {
                     delegate: Rectangle {
                         visible: modelData.value !== "" && wizardPage.currentStep !== modelData.step
                         radius: height / 2
-                        color: Theme.surfaceColor
+                        color: Theme.cardBackgroundColor
                         border.color: Theme.borderColor
                         border.width: 1
                         implicitHeight: Theme.scaled(34)
@@ -1598,7 +1604,7 @@ Page {
                             model: ["espresso", "latte", "filter", "americano", "long_black", "tea"]
                             delegate: Rectangle {
                                 radius: Theme.cardRadius
-                                color: Theme.surfaceColor
+                                color: Theme.cardBackgroundColor
                                 border.color: wizardPage.fDrinkType === modelData
                                     ? Theme.primaryColor : Theme.borderColor
                                 border.width: wizardPage.fDrinkType === modelData ? 2 : 1
@@ -1723,7 +1729,7 @@ Page {
                                     width: Theme.scaled(170)
                                     height: Theme.scaled(190)
                                     radius: Theme.cardRadius
-                                    color: isGhost ? "transparent" : Theme.surfaceColor
+                                    color: isGhost ? "transparent" : Theme.cardBackgroundColor
                                     border.color: isSelected ? Theme.primaryColor : "transparent"
                                     border.width: isSelected ? 2 : 0
 
@@ -1927,7 +1933,7 @@ Page {
                                             width: profileGrid.tileWidth
                                             height: Theme.scaled(124)
                                             radius: Theme.cardRadius
-                                            color: Theme.surfaceColor
+                                            color: Theme.cardBackgroundColor
                                             border.color: wizardPage.fProfileTitle === row.title
                                                 ? Theme.primaryColor : Theme.borderColor
                                             border.width: wizardPage.fProfileTitle === row.title ? 2 : 1

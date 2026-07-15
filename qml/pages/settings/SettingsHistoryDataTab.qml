@@ -53,7 +53,7 @@ KeyboardAwareContainer {
             objectName: "shotHistory"
             Layout.preferredWidth: Theme.scaled(300)
             Layout.fillHeight: true
-            color: Theme.surfaceColor
+            color: Theme.cardBackgroundColor
             radius: Theme.cardRadius
 
             ColumnLayout {
@@ -264,7 +264,7 @@ KeyboardAwareContainer {
             objectName: "dailyBackup"
             Layout.preferredWidth: Theme.scaled(280)
             Layout.fillHeight: true
-            color: Theme.surfaceColor
+            color: Theme.cardBackgroundColor
             radius: Theme.cardRadius
 
             ColumnLayout {
@@ -728,7 +728,7 @@ KeyboardAwareContainer {
             objectName: "enableServer"
             Layout.fillWidth: true
             Layout.fillHeight: true
-            color: Theme.surfaceColor
+            color: Theme.cardBackgroundColor
             radius: Theme.cardRadius
 
             ColumnLayout {
@@ -957,7 +957,7 @@ KeyboardAwareContainer {
             objectName: "exportShotsCard"
             Layout.fillWidth: true
             Layout.preferredHeight: exportShotsLayout.implicitHeight + Theme.scaled(30)
-            color: Theme.surfaceColor
+            color: Theme.cardBackgroundColor
             radius: Theme.cardRadius
 
             ColumnLayout {

@@ -12,7 +12,7 @@ Page {
     // Exposed so the global Brew Settings dialog (main.qml) can source the live
     // empty-scale virtual zero while this is the current page.
     readonly property real scaleVirtualZero: beanCapture.virtualZero
-    background: Rectangle { color: Theme.backgroundColor }
+    background: ThemedPageBackground {}
 
     // True when the app is allowed to start machine operations on-screen.
     // The hardware Group Head Controller (GHC), when present and active, takes
@@ -1175,7 +1175,17 @@ Page {
         anchors.bottom: parent.bottom
         // Auto-grow to fit large item-size; standard bar height otherwise.
         height: Math.max(Theme.bottomBarHeight, blZone.implicitHeight, brZone.implicitHeight)
-        color: Theme.bottomBarColor
+        // When a custom background image is active, use the same neutral surface
+        // scrim as StatusBar and the shared BottomBar so every bar reads
+        // consistently and the wallpaper shows through; otherwise keep the
+        // standard bottom-bar hue.
+        color: Settings.theme.backgroundImagePath.length > 0
+               ? Theme.scrimColor(Theme.surfaceColor)
+               : Theme.bottomBarColor
+        // opacity < 1 forces the scrim through the alpha pass; without it this
+        // bar renders opaque and the wallpaper can't show through. See
+        // docs/CLAUDE_MD/QML_GOTCHAS.md "Translucent element renders opaque".
+        opacity: Settings.theme.backgroundImagePath.length > 0 ? 0.99 : 1.0
 
         RowLayout {
             anchors.fill: parent

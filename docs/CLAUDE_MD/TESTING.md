@@ -15,8 +15,8 @@ cmake -G Ninja -DCMAKE_PREFIX_PATH=~/Qt/6.11.1/macos -DCMAKE_BUILD_TYPE=Debug ..
 # Release build — tests off by default, opt-in with:
 cmake -DBUILD_TESTS=ON -G Ninja -DCMAKE_PREFIX_PATH=~/Qt/6.11.1/macos -DCMAKE_BUILD_TYPE=Release ..
 
-# Run all tests
-ctest --output-on-failure
+# Run all tests — in parallel (the suite is parallel-safe; see below)
+ctest --output-on-failure -j$(nproc) --repeat until-pass:3   # macOS: -j$(sysctl -n hw.ncpu)
 
 # Run a specific test
 ./tests/tst_sav
@@ -24,6 +24,14 @@ ctest --output-on-failure
 ```
 
 Override with `-DBUILD_TESTS=OFF` (Debug) or `-DBUILD_TESTS=ON` (Release) as needed.
+
+### Parallel runs
+
+Always run with `-j` — the full suite drops from ~140 s to ~30 s. It is parallel-safe: every settings class isolates its `QSettings` under `DECENZA_TESTING` via `Settings::testQSettingsPath()` (a PID-scoped `IniFormat` temp file, see `settings.h`), so no two test processes share an on-disk store and the suite never mutates the developer's real `("DecentEspresso", "DE1Qt")` preferences.
+
+When seeding raw pre-construction settings state in a test, write through the **same** isolated store — `QSettings(Settings::testQSettingsPath(), QSettings::IniFormat)` — never `QSettings("DecentEspresso", "DE1Qt")` directly, or the seed lands in a scope nothing reads (and pollutes the real store).
+
+`--repeat until-pass:3` covers two clock-cadence tests — `tst_settling` (feeds samples at real `qWait` intervals and asserts plateau detection over time windows) and `tst_decentscalewifi` — that can occasionally miss a timing window under heavy CPU contention when many tests run at once. The retry re-runs only a failed test; a genuine regression fails all three attempts. In Qt Creator's CTest settings you can add the same flag, or just re-run a lone flaky result.
 
 ### CI
 
@@ -215,6 +223,8 @@ Run this after any changes to `src/mcp/`, `src/controllers/profilemanager.cpp`, 
 ## Handling Warnings
 
 **Every `qWarning()` emitted during a test run must either be fixed at the source or explicitly marked as expected.** A noisy test suite hides real regressions: once you get used to seeing 50 WARN lines in green output, the 51st one — which is actually a new bug — blends in. Treat warnings as failures-in-waiting.
+
+**This is enforced, not just convention.** Every test class calls `QTest::failOnWarning()` in its `init()`, so an *unexpected* `qWarning`/`qCritical` during a test function **fails that test** — even under `ctest -j` or Qt Creator's CTest runner, which otherwise hide passing-test stderr. Warnings marked expected via `QTest::ignoreMessage()` are consumed before the check and do **not** fail. **New test classes must add `void init() { QTest::failOnWarning(); }`** (or prepend the call to an existing `init()`); without it the class silently opts out of the guard. Do **not** rely on `QT_FATAL_WARNINGS` — it aborts on `ignoreMessage()`-expected warnings too.
 
 There are three legitimate outcomes for any warning fired during a test:
 

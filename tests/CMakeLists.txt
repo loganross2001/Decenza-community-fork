@@ -10,7 +10,13 @@ function(add_decenza_test name)
     add_executable(${name} ${ARGN})
     set_target_properties(${name} PROPERTIES AUTOMOC_PATH_PREFIX OFF)
     target_compile_definitions(${name} PRIVATE DECENZA_TESTING)
+    # Link the shared decenza_testlib so the base sources (settings, BLE,
+    # profile, machine, …) are compiled once, not recompiled into every target.
+    # Per-process QSettings isolation is handled in the settings classes
+    # themselves via Settings::testQSettingsPath() (a PID-scoped IniFormat store)
+    # under DECENZA_TESTING — that is what makes `ctest -j` safe.
     target_link_libraries(${name} PRIVATE
+        decenza_testlib
         Qt6::Test Qt6::Core Qt6::Bluetooth Qt6::Sql Qt6::Network Qt6::Gui
     )
     target_include_directories(${name} PRIVATE
@@ -78,9 +84,35 @@ set(CODEC_SOURCES
 )
 
 # --- tst_binarycodec: BLE codec encode/decode tests (minimal deps) ---
+
+# ---------------------------------------------------------------------------
+# decenza_testlib: the base-Qt sources that most test binaries share, compiled
+# ONCE here instead of recompiled into each of ~30 targets (CORE alone was
+# compiled 29×). Test targets link this instead of listing the bundle vars.
+# Built with DECENZA_TESTING so the friend-class seams match, and AUTOMOC on so
+# Q_OBJECT sources (de1device, machinestate, de1transport.h, …) are moc'd once.
+# ---------------------------------------------------------------------------
+add_library(decenza_testlib STATIC
+    ${MACHINE_SOURCES}
+    ${BLE_SOURCES}
+    ${PROFILE_SOURCES}
+    ${CORE_SOURCES}
+    ${CONTROLLER_SOURCES}
+    ${SIMULATOR_SOURCES}
+    ${CMAKE_SOURCE_DIR}/src/ble/de1transport.h
+)
+set_target_properties(decenza_testlib PROPERTIES AUTOMOC ON AUTOMOC_PATH_PREFIX OFF)
+target_compile_definitions(decenza_testlib PUBLIC DECENZA_TESTING)
+target_link_libraries(decenza_testlib PUBLIC
+    Qt6::Core Qt6::Bluetooth Qt6::Sql Qt6::Network Qt6::Gui
+)
+target_include_directories(decenza_testlib PUBLIC
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
 add_decenza_test(tst_binarycodec
     tst_binarycodec.cpp
-    ${CODEC_SOURCES}
 )
 
 # --- tst_aborted_shot_classifier: header-only "did the shot start?" classifier (issue #899) ---
@@ -138,8 +170,6 @@ add_decenza_test(tst_firmwareassetcachehelpers
 # --- tst_profile: Profile JSON/TCL parsing, frame generation, BLE encoding ---
 add_decenza_test(tst_profile
     tst_profile.cpp
-    ${PROFILE_SOURCES}
-    ${CODEC_SOURCES}
 )
 
 # --- tst_visualizershotparse: JSON->ShotRecord recovery parser (string-encoded
@@ -156,35 +186,23 @@ target_compile_definitions(tst_visualizershotparse PRIVATE
 # --- tst_temperaturedisplay: adaptive temp-override display formatter ---
 add_decenza_test(tst_temperaturedisplay
     tst_temperaturedisplay.cpp
-    ${CMAKE_SOURCE_DIR}/src/profile/temperaturedisplay.cpp
 )
 
 # --- tst_profileframe: ProfileFrame JSON/TCL/flags tests (minimal deps) ---
 add_decenza_test(tst_profileframe
     tst_profileframe.cpp
-    ${CMAKE_SOURCE_DIR}/src/profile/profileframe.cpp
-    ${CODEC_SOURCES}
 )
 
 # --- tst_autoflowcal: window-level flow cal classification (#739 regression) ---
 add_decenza_test(tst_autoflowcal
     tst_autoflowcal.cpp
     ${CMAKE_SOURCE_DIR}/src/controllers/autoflowcalclassifier.cpp
-    ${CMAKE_SOURCE_DIR}/src/profile/profileframe.cpp
-    ${CODEC_SOURCES}
 )
 
 # --- tst_machinestate: Phase transitions, volume reset, signals ---
 add_decenza_test(tst_machinestate
     tst_machinestate.cpp
     mocks/MockScaleDevice.h
-    ${CMAKE_SOURCE_DIR}/src/ble/de1transport.h
-    ${MACHINE_SOURCES}
-    ${BLE_SOURCES}
-    ${PROFILE_SOURCES}
-    ${CORE_SOURCES}
-    ${CONTROLLER_SOURCES}
-    ${SIMULATOR_SOURCES}
 )
 
 # --- tst_livesteamcoach: during-steam coaching milestones, gating, completion ---
@@ -193,33 +211,18 @@ add_decenza_test(tst_livesteamcoach
     ${CMAKE_SOURCE_DIR}/src/ai/livesteamcoach.cpp
     ${CMAKE_SOURCE_DIR}/src/barista/baristadiagnostics.cpp  # [barista-fork] livesteamcoach.cpp calls BaristaDiagnostics::record
     ${CMAKE_SOURCE_DIR}/src/core/translationmanager.cpp
-    ${CMAKE_SOURCE_DIR}/src/ble/de1transport.h
-    ${MACHINE_SOURCES}
-    ${BLE_SOURCES}
-    ${PROFILE_SOURCES}
-    ${CORE_SOURCES}
-    ${CONTROLLER_SOURCES}
-    ${SIMULATOR_SOURCES}
 )
 
 # --- tst_machinestatussnapshot: widget snapshot schema + temp coalescing ---
 add_decenza_test(tst_machinestatussnapshot
     tst_machinestatussnapshot.cpp
     mocks/MockScaleDevice.h
-    ${CMAKE_SOURCE_DIR}/src/ble/de1transport.h
     ${CMAKE_SOURCE_DIR}/src/widget/machinestatussnapshot.cpp
-    ${MACHINE_SOURCES}
-    ${BLE_SOURCES}
-    ${PROFILE_SOURCES}
-    ${CORE_SOURCES}
-    ${CONTROLLER_SOURCES}
-    ${SIMULATOR_SOURCES}
 )
 
 # --- tst_recipeparams: RecipeParams serialization, validation, clamping ---
 add_decenza_test(tst_recipeparams
     tst_recipeparams.cpp
-    ${CMAKE_SOURCE_DIR}/src/profile/recipeparams.cpp
 )
 
 # --- tst_shotprojection: ShotProjection::coerce() (QVariant → gadget) ---
@@ -254,14 +257,12 @@ add_decenza_test(tst_speakerembedder
 # --- tst_settings: Settings persistence and defaults ---
 add_decenza_test(tst_settings
     tst_settings.cpp
-    ${CORE_SOURCES}
     ${CMAKE_SOURCE_DIR}/src/core/settingsserializer.cpp
 )
 
 # --- tst_saw_settings: per-(profile, scale) SAW learning + batch + bootstrap ---
 add_decenza_test(tst_saw_settings
     tst_saw_settings.cpp
-    ${CORE_SOURCES}
 )
 
 # --- tst_beanbaseclient: Bean Base API client (debounce, rate limit, cache, parse) ---
@@ -270,21 +271,17 @@ add_decenza_test(tst_beanbaseclient
     ${CMAKE_SOURCE_DIR}/src/network/beanbaseclient.cpp
     ${CMAKE_SOURCE_DIR}/src/mcp/mcptools_beansearch.cpp
     ${CMAKE_SOURCE_DIR}/src/mcp/mcptoolregistry.h
-    ${CORE_SOURCES}
 )
 
 # --- tst_autowakewindow: scheduled stay-awake window predicate (#1203) ---
 add_decenza_test(tst_autowakewindow
     tst_autowakewindow.cpp
     ${CMAKE_SOURCE_DIR}/src/core/autowakemanager.cpp
-    ${CORE_SOURCES}
 )
 
 # --- tst_tclimport: TCL profile import round-trip against de1app profiles ---
 add_decenza_test(tst_tclimport
     tst_tclimport.cpp
-    ${PROFILE_SOURCES}
-    ${CODEC_SOURCES}
 )
 target_compile_definitions(tst_tclimport PRIVATE
     DE1APP_PROFILES_PATH="${CMAKE_CURRENT_SOURCE_DIR}/data/de1app_profiles"
@@ -293,8 +290,6 @@ target_compile_definitions(tst_tclimport PRIVATE
 # --- tst_recipegenerator: Frame generation vs de1app stock profiles ---
 add_decenza_test(tst_recipegenerator
     tst_recipegenerator.cpp
-    ${PROFILE_SOURCES}
-    ${CODEC_SOURCES}
 )
 
 # --- tst_shotanalysis: ShotAnalysis quality heuristics ---
@@ -329,9 +324,6 @@ add_decenza_test(tst_shotsummarizer
     ${CMAKE_SOURCE_DIR}/src/models/shotdatamodel.cpp
     ${CMAKE_SOURCE_DIR}/src/rendering/fastlinerenderer.cpp
     ${CMAKE_SOURCE_DIR}/src/network/visualizeruploader.cpp
-    ${PROFILE_SOURCES}
-    ${CORE_SOURCES}
-    ${CODEC_SOURCES}
     ${CMAKE_BINARY_DIR}/version_code.cpp
     ${TST_SHOTSUMMARIZER_AI_RESOURCES}
 )
@@ -369,12 +361,7 @@ add_decenza_test(tst_aimanager
     ${CMAKE_SOURCE_DIR}/src/history/shothistorystorage_internal.cpp
     ${CMAKE_SOURCE_DIR}/src/history/shothistorystorage_serialize.cpp
     ${CMAKE_SOURCE_DIR}/src/history/shothistorystorage_queries.cpp
-    ${CMAKE_SOURCE_DIR}/src/history/coffeebagstorage.cpp
-    ${CMAKE_SOURCE_DIR}/src/history/equipmentstorage.cpp
     ${CMAKE_SOURCE_DIR}/src/history/recipestorage.cpp
-    ${PROFILE_SOURCES}
-    ${CORE_SOURCES}
-    ${CODEC_SOURCES}
     ${CMAKE_BINARY_DIR}/version_code.cpp
     ${TST_AIMANAGER_AI_RESOURCES}
 )
@@ -420,81 +407,43 @@ endif()
 add_decenza_test(tst_shotsettings
     tst_shotsettings.cpp
     mocks/MockTransport.h
-    ${CMAKE_SOURCE_DIR}/src/ble/de1transport.h
-    ${BLE_SOURCES}
-    ${PROFILE_SOURCES}
-    ${CORE_SOURCES}
-    ${CONTROLLER_SOURCES}
-    ${SIMULATOR_SOURCES}
 )
 
 # --- tst_mmrwrite: DE1Device::writeMMR per-register dedup (issue #783) ---
 add_decenza_test(tst_mmrwrite
     tst_mmrwrite.cpp
     mocks/MockTransport.h
-    ${CMAKE_SOURCE_DIR}/src/ble/de1transport.h
-    ${BLE_SOURCES}
-    ${PROFILE_SOURCES}
-    ${CORE_SOURCES}
-    ${CONTROLLER_SOURCES}
-    ${SIMULATOR_SOURCES}
 )
 
 # --- tst_de1device_headless: GHC "headless" gate default + disconnect reset (#1470) ---
 add_decenza_test(tst_de1device_headless
     tst_de1device_headless.cpp
     mocks/MockTransport.h
-    ${CMAKE_SOURCE_DIR}/src/ble/de1transport.h
-    ${BLE_SOURCES}
-    ${PROFILE_SOURCES}
-    ${CORE_SOURCES}
-    ${CONTROLLER_SOURCES}
-    ${SIMULATOR_SOURCES}
 )
 
 # --- tst_de1device_firmware: firmware-update BLE extensions on DE1Device ---
 add_decenza_test(tst_de1device_firmware
     tst_de1device_firmware.cpp
     mocks/MockTransport.h
-    ${CMAKE_SOURCE_DIR}/src/ble/de1transport.h
-    ${BLE_SOURCES}
-    ${PROFILE_SOURCES}
-    ${CORE_SOURCES}
-    ${CONTROLLER_SOURCES}
-    ${SIMULATOR_SOURCES}
 )
 
 # --- tst_firmwareupdater: FirmwareUpdater state-machine tests ---
 add_decenza_test(tst_firmwareupdater
     tst_firmwareupdater.cpp
     mocks/MockTransport.h
-    ${CMAKE_SOURCE_DIR}/src/ble/de1transport.h
     ${CMAKE_SOURCE_DIR}/src/controllers/firmwareupdater.cpp
     ${CMAKE_SOURCE_DIR}/src/core/firmwareassetcache.cpp
-    ${BLE_SOURCES}
-    ${PROFILE_SOURCES}
-    ${CORE_SOURCES}
-    ${CONTROLLER_SOURCES}
-    ${SIMULATOR_SOURCES}
 )
 
 # --- tst_profileupload: Profile upload frame-ACK verification ---
 add_decenza_test(tst_profileupload
     tst_profileupload.cpp
     mocks/MockTransport.h
-    ${CMAKE_SOURCE_DIR}/src/ble/de1transport.h
-    ${BLE_SOURCES}
-    ${PROFILE_SOURCES}
-    ${CORE_SOURCES}
-    ${CONTROLLER_SOURCES}
-    ${SIMULATOR_SOURCES}
 )
 
 # --- tst_blefidelity: BLE encode round-trip for all built-in profiles ---
 add_decenza_test(tst_blefidelity
     tst_blefidelity.cpp
-    ${PROFILE_SOURCES}
-    ${CODEC_SOURCES}
 )
 target_compile_definitions(tst_blefidelity PRIVATE
     SRCDIR="${CMAKE_CURRENT_SOURCE_DIR}"
@@ -526,11 +475,10 @@ set(HISTORY_SOURCES
     ${CMAKE_SOURCE_DIR}/src/history/shothistorystorage_internal.cpp
     ${CMAKE_SOURCE_DIR}/src/history/shothistorystorage_serialize.cpp
     ${CMAKE_SOURCE_DIR}/src/history/shothistorystorage_queries.cpp
-    ${CMAKE_SOURCE_DIR}/src/history/coffeebagstorage.cpp
-    ${CMAKE_SOURCE_DIR}/src/history/baristastorage.cpp
-    ${CMAKE_SOURCE_DIR}/src/barista/feedbackstorage.cpp    # [barista-fork] verbal-feedback KB (baristatools.cpp/aimanager.cpp dep)
-    ${CMAKE_SOURCE_DIR}/src/barista/tasksstorage.cpp       # [barista-fork] reminders + maintenance (baristatools.cpp/aimanager.cpp dep)
-    ${CMAKE_SOURCE_DIR}/src/history/equipmentstorage.cpp
+    # [barista-fork merge 2026-07-14] coffeebagstorage/baristastorage/feedbackstorage/tasksstorage/
+    # equipmentstorage were REMOVED from HISTORY_SOURCES here: upstream relocated the shared storage
+    # sources into CORE_SOURCES (compiled once into decenza_testlib, which every test links). Listing
+    # them here too double-compiled them -> duplicate symbols at link. CORE_SOURCES is the single home.
     ${CMAKE_SOURCE_DIR}/src/history/recipestorage.cpp
     ${CMAKE_SOURCE_DIR}/src/history/shotprojection.cpp
     ${CMAKE_SOURCE_DIR}/src/history/shotprojection.h
@@ -548,15 +496,9 @@ set(HISTORY_SOURCES
 find_package(Qt6 REQUIRED COMPONENTS Quick)
 add_decenza_test(tst_coffeebags
     tst_coffeebags.cpp
-    ${CMAKE_SOURCE_DIR}/src/ble/de1transport.h
     ${CMAKE_SOURCE_DIR}/src/history/unifiedbeansearchmodel.cpp
     ${CMAKE_SOURCE_DIR}/src/network/beanbaseclient.cpp
     ${HISTORY_SOURCES}
-    ${BLE_SOURCES}
-    ${PROFILE_SOURCES}
-    ${CORE_SOURCES}
-    ${CONTROLLER_SOURCES}
-    ${SIMULATOR_SOURCES}
     ${CMAKE_BINARY_DIR}/version_code.cpp
 )
 target_link_libraries(tst_coffeebags PRIVATE Qt6::Graphs Qt6::Quick)
@@ -566,13 +508,7 @@ target_include_directories(tst_coffeebags PRIVATE ${CMAKE_BINARY_DIR})
 find_package(Qt6 REQUIRED COMPONENTS Quick)
 add_decenza_test(tst_dbmigration
     tst_dbmigration.cpp
-    ${CMAKE_SOURCE_DIR}/src/ble/de1transport.h
     ${HISTORY_SOURCES}
-    ${BLE_SOURCES}
-    ${PROFILE_SOURCES}
-    ${CORE_SOURCES}
-    ${CONTROLLER_SOURCES}
-    ${SIMULATOR_SOURCES}
     ${CMAKE_BINARY_DIR}/version_code.cpp
 )
 target_link_libraries(tst_dbmigration PRIVATE Qt6::Graphs Qt6::Quick)
@@ -583,8 +519,6 @@ target_include_directories(tst_dbmigration PRIVATE ${CMAKE_BINARY_DIR})
 # (add-equipment-packages). Static helpers only, so a minimal source set. ---
 add_decenza_test(tst_equipment
     tst_equipment.cpp
-    ${CMAKE_SOURCE_DIR}/src/history/equipmentstorage.cpp
-    ${CMAKE_SOURCE_DIR}/src/history/coffeebagstorage.cpp
     ${CMAKE_BINARY_DIR}/version_code.cpp
 )
 target_include_directories(tst_equipment PRIVATE ${CMAKE_BINARY_DIR})
@@ -596,7 +530,6 @@ target_include_directories(tst_equipment PRIVATE ${CMAKE_BINARY_DIR})
 add_decenza_test(tst_recipestorage
     tst_recipestorage.cpp
     ${CMAKE_SOURCE_DIR}/src/history/recipestorage.cpp
-    ${CMAKE_SOURCE_DIR}/src/history/coffeebagstorage.cpp
     ${CMAKE_BINARY_DIR}/version_code.cpp
 )
 target_include_directories(tst_recipestorage PRIVATE ${CMAKE_BINARY_DIR})
@@ -624,14 +557,8 @@ qt_add_resources(TST_DIALING_BLOCKS_AI_RESOURCES
     ${CMAKE_SOURCE_DIR}/resources/ai.qrc)
 add_decenza_test(tst_dialing_blocks
     tst_dialing_blocks.cpp
-    ${CMAKE_SOURCE_DIR}/src/ble/de1transport.h
     ${CMAKE_SOURCE_DIR}/src/ai/dialing_blocks.cpp
     ${HISTORY_SOURCES}
-    ${BLE_SOURCES}
-    ${PROFILE_SOURCES}
-    ${CORE_SOURCES}
-    ${CONTROLLER_SOURCES}
-    ${SIMULATOR_SOURCES}
     ${CMAKE_BINARY_DIR}/version_code.cpp
     ${TST_DIALING_BLOCKS_AI_RESOURCES}
 )
@@ -649,13 +576,7 @@ target_compile_definitions(tst_dialing_blocks PRIVATE
 # --- tst_shotrecord_cache: ShotRecord::cachedAnalysis dedup + fallback ---
 add_decenza_test(tst_shotrecord_cache
     tst_shotrecord_cache.cpp
-    ${CMAKE_SOURCE_DIR}/src/ble/de1transport.h
     ${HISTORY_SOURCES}
-    ${BLE_SOURCES}
-    ${PROFILE_SOURCES}
-    ${CORE_SOURCES}
-    ${CONTROLLER_SOURCES}
-    ${SIMULATOR_SOURCES}
     ${CMAKE_BINARY_DIR}/version_code.cpp
 )
 target_link_libraries(tst_shotrecord_cache PRIVATE Qt6::Graphs Qt6::Quick)
@@ -665,18 +586,14 @@ target_include_directories(tst_shotrecord_cache PRIVATE ${CMAKE_BINARY_DIR})
 add_decenza_test(tst_scaleprotocol
     tst_scaleprotocol.cpp
     ${CMAKE_SOURCE_DIR}/src/ble/transport/scalebletransport.h
-    ${CMAKE_SOURCE_DIR}/src/ble/scaledevice.cpp
     ${CMAKE_SOURCE_DIR}/src/ble/scales/decentscale.cpp
     ${CMAKE_SOURCE_DIR}/src/ble/scales/bookooscale.cpp
-    ${CMAKE_SOURCE_DIR}/src/ble/scales/scaletypeids.cpp
 )
 
 # --- tst_decentscalewifi: WiFi scale driver (WebSocket protocol) ---
 add_decenza_test(tst_decentscalewifi
     tst_decentscalewifi.cpp
-    ${CMAKE_SOURCE_DIR}/src/ble/scaledevice.cpp
     ${CMAKE_SOURCE_DIR}/src/ble/scales/decentscalewifi.cpp
-    ${CMAKE_SOURCE_DIR}/src/ble/scales/scaletypeids.cpp
 )
 target_link_libraries(tst_decentscalewifi PRIVATE
     Qt6::WebSockets
@@ -727,7 +644,6 @@ add_decenza_test(tst_weightprocessor
 add_decenza_test(tst_scalefeedliveness
     tst_scalefeedliveness.cpp
     mocks/MockScaleDevice.h
-    ${CMAKE_SOURCE_DIR}/src/ble/scaledevice.cpp
     ${CMAKE_SOURCE_DIR}/src/machine/weightprocessor.cpp
     ${CMAKE_SOURCE_DIR}/src/machine/stepexitarbiter.cpp
 )
@@ -743,7 +659,6 @@ add_decenza_test(tst_scaleblepriority
 # struct is header-inline; settings_hardware.cpp is QtCore-only (QSettings). ---
 add_decenza_test(tst_scaleskiphighlatch
     tst_scaleskiphighlatch.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/settings_hardware.cpp
 )
 
 # --- tst_sawprediction: shared SAW expected-drip kernel (σ + Gaussian math) ---
@@ -766,12 +681,6 @@ add_decenza_test(tst_settling
     ${CMAKE_SOURCE_DIR}/src/ai/conductance.cpp
     ${CMAKE_SOURCE_DIR}/src/models/shotdatamodel.cpp
     ${CMAKE_SOURCE_DIR}/src/rendering/fastlinerenderer.cpp
-    ${CMAKE_SOURCE_DIR}/src/ble/de1transport.h
-    ${BLE_SOURCES}
-    ${PROFILE_SOURCES}
-    ${CORE_SOURCES}
-    ${CONTROLLER_SOURCES}
-    ${SIMULATOR_SOURCES}
 )
 target_link_libraries(tst_settling PRIVATE Qt6::Graphs Qt6::Quick)
 
@@ -779,19 +688,11 @@ target_link_libraries(tst_settling PRIVATE Qt6::Graphs Qt6::Quick)
 add_decenza_test(tst_sav
     tst_sav.cpp
     mocks/MockScaleDevice.h
-    ${CMAKE_SOURCE_DIR}/src/ble/de1transport.h
-    ${MACHINE_SOURCES}
-    ${BLE_SOURCES}
-    ${PROFILE_SOURCES}
-    ${CORE_SOURCES}
-    ${CONTROLLER_SOURCES}
-    ${SIMULATOR_SOURCES}
 )
 
 # --- Shared Q_OBJECT headers for tests using MockTransport (listed as sources for AUTOMOC) ---
 set(MCP_MOC_HEADERS
     mocks/MockTransport.h
-    ${CMAKE_SOURCE_DIR}/src/ble/de1transport.h
     ${CMAKE_SOURCE_DIR}/src/mcp/mcptoolregistry.h
     ${CMAKE_SOURCE_DIR}/src/mcp/mcpresourceregistry.h
 )
@@ -805,12 +706,6 @@ add_decenza_test(tst_profilemanager
     ${CMAKE_SOURCE_DIR}/src/mcp/mcpresources.cpp
     ${CMAKE_SOURCE_DIR}/src/network/webdebuglogger.cpp
     ${CMAKE_SOURCE_DIR}/src/core/memorymonitor.cpp
-    ${BLE_SOURCES}
-    ${PROFILE_SOURCES}
-    ${CORE_SOURCES}
-    ${MACHINE_SOURCES}
-    ${CONTROLLER_SOURCES}
-    ${SIMULATOR_SOURCES}
     ${CMAKE_BINARY_DIR}/version_code.cpp
 )
 target_link_libraries(tst_profilemanager PRIVATE Qt6::Graphs Qt6::Quick Qt6::Qml paho-mqtt3a-static)
@@ -831,12 +726,6 @@ add_decenza_test(tst_mcptools_profiles
     ${MCP_MOC_HEADERS}
     ${CMAKE_SOURCE_DIR}/src/mcp/mcptools_profiles.cpp
     ${PROFILEMANAGER_SOURCES}
-    ${BLE_SOURCES}
-    ${PROFILE_SOURCES}
-    ${CORE_SOURCES}
-    ${MACHINE_SOURCES}
-    ${CONTROLLER_SOURCES}
-    ${SIMULATOR_SOURCES}
     ${CMAKE_BINARY_DIR}/version_code.cpp
 )
 target_link_libraries(tst_mcptools_profiles PRIVATE Qt6::Graphs Qt6::Quick paho-mqtt3a-static)
@@ -858,18 +747,10 @@ add_decenza_test(tst_mcptools_write
     ${CMAKE_SOURCE_DIR}/src/history/shothistorystorage_internal.cpp
     ${CMAKE_SOURCE_DIR}/src/history/shothistorystorage_serialize.cpp
     ${CMAKE_SOURCE_DIR}/src/history/shothistorystorage_queries.cpp
-    ${CMAKE_SOURCE_DIR}/src/history/coffeebagstorage.cpp
-    ${CMAKE_SOURCE_DIR}/src/history/equipmentstorage.cpp
     ${CMAKE_SOURCE_DIR}/src/history/recipestorage.cpp
     ${CMAKE_SOURCE_DIR}/src/history/shotprojection.cpp
     ${CMAKE_SOURCE_DIR}/src/history/shotprojection.h
     ${CMAKE_SOURCE_DIR}/src/ai/shotanalysis.cpp
-    ${BLE_SOURCES}
-    ${PROFILE_SOURCES}
-    ${CORE_SOURCES}
-    ${MACHINE_SOURCES}
-    ${CONTROLLER_SOURCES}
-    ${SIMULATOR_SOURCES}
     ${CMAKE_BINARY_DIR}/version_code.cpp
 )
 target_link_libraries(tst_mcptools_write PRIVATE Qt6::Graphs Qt6::Quick Qt6::TextToSpeech Qt6::Multimedia paho-mqtt3a-static)
@@ -892,18 +773,10 @@ add_decenza_test(tst_mcptools_presets
     ${CMAKE_SOURCE_DIR}/src/history/shothistorystorage_internal.cpp
     ${CMAKE_SOURCE_DIR}/src/history/shothistorystorage_serialize.cpp
     ${CMAKE_SOURCE_DIR}/src/history/shothistorystorage_queries.cpp
-    ${CMAKE_SOURCE_DIR}/src/history/coffeebagstorage.cpp
-    ${CMAKE_SOURCE_DIR}/src/history/equipmentstorage.cpp
     ${CMAKE_SOURCE_DIR}/src/history/recipestorage.cpp
     ${CMAKE_SOURCE_DIR}/src/history/shotprojection.cpp
     ${CMAKE_SOURCE_DIR}/src/history/shotprojection.h
     ${CMAKE_SOURCE_DIR}/src/ai/shotanalysis.cpp
-    ${BLE_SOURCES}
-    ${PROFILE_SOURCES}
-    ${CORE_SOURCES}
-    ${MACHINE_SOURCES}
-    ${CONTROLLER_SOURCES}
-    ${SIMULATOR_SOURCES}
     ${CMAKE_BINARY_DIR}/version_code.cpp
 )
 target_link_libraries(tst_mcptools_presets PRIVATE Qt6::Graphs Qt6::Quick Qt6::TextToSpeech Qt6::Multimedia paho-mqtt3a-static)
@@ -924,18 +797,10 @@ add_decenza_test(tst_mcpserver_session
     ${CMAKE_SOURCE_DIR}/src/history/shothistorystorage_internal.cpp
     ${CMAKE_SOURCE_DIR}/src/history/shothistorystorage_serialize.cpp
     ${CMAKE_SOURCE_DIR}/src/history/shothistorystorage_queries.cpp
-    ${CMAKE_SOURCE_DIR}/src/history/coffeebagstorage.cpp
-    ${CMAKE_SOURCE_DIR}/src/history/equipmentstorage.cpp
     ${CMAKE_SOURCE_DIR}/src/history/recipestorage.cpp
     ${CMAKE_SOURCE_DIR}/src/history/shotprojection.cpp
     ${CMAKE_SOURCE_DIR}/src/history/shotprojection.h
     ${CMAKE_SOURCE_DIR}/src/ai/shotanalysis.cpp
-    ${BLE_SOURCES}
-    ${PROFILE_SOURCES}
-    ${CORE_SOURCES}
-    ${MACHINE_SOURCES}
-    ${CONTROLLER_SOURCES}
-    ${SIMULATOR_SOURCES}
     ${CMAKE_BINARY_DIR}/version_code.cpp
 )
 target_link_libraries(tst_mcpserver_session PRIVATE Qt6::Graphs Qt6::Quick paho-mqtt3a-static)
@@ -957,18 +822,10 @@ add_decenza_test(tst_mcpserver_protocol
     ${CMAKE_SOURCE_DIR}/src/history/shothistorystorage_internal.cpp
     ${CMAKE_SOURCE_DIR}/src/history/shothistorystorage_serialize.cpp
     ${CMAKE_SOURCE_DIR}/src/history/shothistorystorage_queries.cpp
-    ${CMAKE_SOURCE_DIR}/src/history/coffeebagstorage.cpp
-    ${CMAKE_SOURCE_DIR}/src/history/equipmentstorage.cpp
     ${CMAKE_SOURCE_DIR}/src/history/recipestorage.cpp
     ${CMAKE_SOURCE_DIR}/src/history/shotprojection.cpp
     ${CMAKE_SOURCE_DIR}/src/history/shotprojection.h
     ${CMAKE_SOURCE_DIR}/src/ai/shotanalysis.cpp
-    ${BLE_SOURCES}
-    ${PROFILE_SOURCES}
-    ${CORE_SOURCES}
-    ${MACHINE_SOURCES}
-    ${CONTROLLER_SOURCES}
-    ${SIMULATOR_SOURCES}
     ${CMAKE_BINARY_DIR}/version_code.cpp
 )
 target_link_libraries(tst_mcpserver_protocol PRIVATE Qt6::Graphs Qt6::Quick paho-mqtt3a-static)
@@ -1000,18 +857,10 @@ add_decenza_test(tst_mcpremoteaccess
     ${CMAKE_SOURCE_DIR}/src/history/shothistorystorage_internal.cpp
     ${CMAKE_SOURCE_DIR}/src/history/shothistorystorage_serialize.cpp
     ${CMAKE_SOURCE_DIR}/src/history/shothistorystorage_queries.cpp
-    ${CMAKE_SOURCE_DIR}/src/history/coffeebagstorage.cpp
-    ${CMAKE_SOURCE_DIR}/src/history/equipmentstorage.cpp
     ${CMAKE_SOURCE_DIR}/src/history/recipestorage.cpp
     ${CMAKE_SOURCE_DIR}/src/history/shotprojection.cpp
     ${CMAKE_SOURCE_DIR}/src/history/shotprojection.h
     ${CMAKE_SOURCE_DIR}/src/ai/shotanalysis.cpp
-    ${BLE_SOURCES}
-    ${PROFILE_SOURCES}
-    ${CORE_SOURCES}
-    ${MACHINE_SOURCES}
-    ${CONTROLLER_SOURCES}
-    ${SIMULATOR_SOURCES}
     ${CMAKE_BINARY_DIR}/version_code.cpp
 )
 target_link_libraries(tst_mcpremoteaccess PRIVATE Qt6::Graphs Qt6::Quick paho-mqtt3a-static)
@@ -1029,7 +878,6 @@ add_decenza_test(tst_accessibility_announcements
     tst_accessibility_announcements.cpp
     ${CMAKE_SOURCE_DIR}/src/core/accessibilitymanager.cpp
     ${CMAKE_SOURCE_DIR}/src/core/translationmanager.cpp
-    ${CORE_SOURCES}
 )
 target_link_libraries(tst_accessibility_announcements PRIVATE
     Qt6::TextToSpeech Qt6::Multimedia Qt6::Quick Qt6::Network
@@ -1043,11 +891,6 @@ add_decenza_test(tst_steamhealth
     ${CMAKE_SOURCE_DIR}/src/rendering/fastlinerenderer.cpp
 )
 target_link_libraries(tst_steamhealth PRIVATE Qt6::Quick Qt6::Graphs)
-
-# --- tst_raceconditionfix: Temporary canary for the run_tests parser-race fix ---
-add_decenza_test(tst_raceconditionfix
-    tst_raceconditionfix.cpp
-)
 
 # --- tst_maintenancedocsync: [barista-fork] "periodic Decent maintenance-docs check" DB layer.
 # Static-helper coverage of TasksStorage's maintenance_doc_state machine + the is_default guard on
@@ -1082,3 +925,13 @@ target_compile_definitions(tst_kb_schema PRIVATE
     VALIDATE_KB_SCRIPT="${CMAKE_SOURCE_DIR}/tools/validate_kb.py"
     VALIDATE_KB_REAL_JSON="${CMAKE_SOURCE_DIR}/resources/ai/profile_knowledge.json"
 )
+
+# --- failonwarning_lint: guard that every QTEST_*MAIN test file arms
+# QTest::failOnWarning() (see tests/lint_failonwarning.cmake and the Handling
+# Warnings section of docs/CLAUDE_MD/TESTING.md). A pure cmake -P check — no
+# build, no extra dependency — that re-globs on each run, so a newly-added
+# test file that forgets the guard fails `ctest` without a reconfigure.
+add_test(NAME failonwarning_lint
+    COMMAND ${CMAKE_COMMAND}
+        -DLINT_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/lint_failonwarning.cmake)

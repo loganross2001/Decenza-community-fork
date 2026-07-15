@@ -1,4 +1,5 @@
 #include <QtTest>
+#include "core/settings.h"
 #include <QSignalSpy>
 #include <QRegularExpression>
 
@@ -13,7 +14,7 @@ class tst_SteamHealth : public QObject {
     Q_OBJECT
 
 private:
-    QSettings m_settings{"DecentEspresso", "DE1Qt"};
+    QSettings m_settings{Settings::testQSettingsPath(), QSettings::IniFormat};
     QByteArray m_origHistory;
     QVariant m_origLastWarned;
     QVariant m_origLastFlow;
@@ -23,7 +24,7 @@ private:
 
 private slots:
 
-    void init() {
+    void init() { QTest::failOnWarning();
         m_origHistory = m_settings.value("steam/sessionHistory").toByteArray();
         m_origLastWarned = m_settings.value("steam/lastWarnedSession");
         m_origLastFlow = m_settings.value("steam/lastTrackedFlow");

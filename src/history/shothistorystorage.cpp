@@ -3,6 +3,7 @@
 #include "coffeebagstorage.h"
 #include "baristastorage.h"
 #include "equipmentstorage.h"
+#include "core/settings.h"   // Settings::testQSettingsPath() under DECENZA_TESTING
 #include "recipestorage.h"
 #include "ai/conductance.h"
 #include "ai/shotanalysis.h"
@@ -879,8 +880,12 @@ bool ShotHistoryStorage::runMigrations()
             // "Decenza" (main.cpp setApplicationName) — a DIFFERENT,
             // empty store — which would silently return the 75 fallback
             // and no-op the reset for every user whose default ≠ 75.
+#ifdef DECENZA_TESTING
+            QSettings appSettings(Settings::testQSettingsPath(), QSettings::IniFormat);
+#else
             QSettings appSettings(QStringLiteral("DecentEspresso"),
                                   QStringLiteral("DE1Qt"));
+#endif
             const int defaultRating = appSettings.value(
                 QStringLiteral("shot/defaultRating"), 75).toInt();
 
@@ -1183,7 +1188,11 @@ bool ShotHistoryStorage::runMigrations()
             // Read the SAME QSettings scope SettingsDye writes to — a bare
             // QSettings() depends on QCoreApplication org/app being set, which
             // isn't guaranteed (the scope-mismatch bug migration 16 fixed).
+#ifdef DECENZA_TESTING
+            QSettings settings(Settings::testQSettingsPath(), QSettings::IniFormat);
+#else
             QSettings settings(QStringLiteral("DecentEspresso"), QStringLiteral("DE1Qt"));
+#endif
             const QString curBrand = settings.value("dye/grinderBrand").toString();
             const QString curModel = settings.value("dye/grinderModel").toString();
             const QString curBurrs = settings.value("dye/grinderBurrs").toString();
@@ -1597,6 +1606,53 @@ bool ShotHistoryStorage::runMigrations()
         }
     }
 
+    // Migration 33: non-frozen storage lifecycle (bean-freshness-followup, upstream #1510).
+    // [barista-fork] Renumbered upstream's 32 -> 33: the fork's +1 migration offset (documented) already
+    // holds 32 with recipes.temp_offset_c, so upstream's storage_hint/opened_date advance one slot. A fork
+    // device at v32 (temp-offset done) runs THIS to get the columns; a device at v31 runs 32 then 33.
+    // storage_hint (a non-frozen storage category) and opened_date (the
+    // non-frozen analogue of defrost_date) join the existing freeze-lifecycle
+    // fields on BOTH tables: coffee_bags (the current-portion state) AND shots
+    // (the per-shot snapshot, so historical shots record which storage regime
+    // they were pulled under). The shots columns mirror frozen_date/defrost_date
+    // added by migration 19 — the shot-save INSERT, shot-read SELECT, and
+    // device-transfer INSERT all name them. Additive with NULL defaults, no
+    // backfill (existing bags/shots simply have both unset). Fresh DBs get the
+    // coffee_bags columns from ensureTableStatic and the shots columns here (the
+    // shots CREATE TABLE omits the lifecycle columns, same as frozen_date). The
+    // hasColumn guards make both paths converge. Idempotent, gated
+    // ">= 32 && < 33". Whitespace before the open-paren
+    // dodges the QSqlQuery permission-hook false-positive; do not auto-format.
+    if (currentVersion >= 32 && currentVersion < 33) {
+        qDebug() << "ShotHistoryStorage: Running migration to version 33 (storage hint + opened date)";
+
+        if (!hasColumn("coffee_bags", "storage_hint")
+            && !query.exec ("ALTER TABLE coffee_bags ADD COLUMN storage_hint TEXT"))
+            qWarning() << "ShotHistoryStorage: migration 33 add coffee_bags.storage_hint failed -"
+                       << query.lastError().text();
+        if (!hasColumn("coffee_bags", "opened_date")
+            && !query.exec ("ALTER TABLE coffee_bags ADD COLUMN opened_date TEXT"))
+            qWarning() << "ShotHistoryStorage: migration 33 add coffee_bags.opened_date failed -"
+                       << query.lastError().text();
+        if (!hasColumn("shots", "storage_hint")
+            && !query.exec ("ALTER TABLE shots ADD COLUMN storage_hint TEXT"))
+            qWarning() << "ShotHistoryStorage: migration 33 add shots.storage_hint failed -"
+                       << query.lastError().text();
+        if (!hasColumn("shots", "opened_date")
+            && !query.exec ("ALTER TABLE shots ADD COLUMN opened_date TEXT"))
+            qWarning() << "ShotHistoryStorage: migration 33 add shots.opened_date failed -"
+                       << query.lastError().text();
+
+        if (hasColumn("coffee_bags", "storage_hint") && hasColumn("coffee_bags", "opened_date")
+            && hasColumn("shots", "storage_hint") && hasColumn("shots", "opened_date")) {
+            query.exec ("DELETE FROM schema_version");
+            query.exec ("INSERT INTO schema_version (version) VALUES (33)");
+            currentVersion = 33;
+        } else {
+            qWarning() << "ShotHistoryStorage: migration 33 incomplete - will retry next launch";
+        }
+    }
+
     // [barista-fork] Version-independent fork-schema repair. A shot DB written by a
     // DIFFERENT Decenza build (e.g. an upstream v2.0.0 database pulled in via
     // device-to-device import) carries a schema_version NUMBER that may sit at or
@@ -1786,6 +1842,8 @@ qint64 ShotHistoryStorage::saveShot(ShotDataModel* shotData,
     data.bagId = metadata.bagId;
     data.frozenDate = metadata.frozenDate;
     data.defrostDate = metadata.defrostDate;
+    data.storageHint = metadata.storageHint;
+    data.openedDate = metadata.openedDate;
     data.recipeId = metadata.recipeId;
     data.steamJson = metadata.steamJson;
     data.hotWaterJson = metadata.hotWaterJson;
@@ -1961,7 +2019,7 @@ qint64 ShotHistoryStorage::saveShotStatic(const QString& dbPath, const ShotSaveD
                     channeling_detected, grind_issue_detected,
                     skip_first_frame_detected, pour_truncated_detected,
                     stopped_by, beanbase_json, beanbase_id,
-                    bag_id, frozen_date, defrost_date,
+                    bag_id, frozen_date, defrost_date, storage_hint, opened_date,
                     recipe_id, steam_json, hot_water_json
                 ) VALUES (
                     :uuid, :timestamp, :profile_name, :profile_json, :beverage_type,
@@ -1975,7 +2033,7 @@ qint64 ShotHistoryStorage::saveShotStatic(const QString& dbPath, const ShotSaveD
                     :channeling_detected, :grind_issue_detected,
                     :skip_first_frame_detected, :pour_truncated_detected,
                     :stopped_by, :beanbase_json, :beanbase_id,
-                    :bag_id, :frozen_date, :defrost_date,
+                    :bag_id, :frozen_date, :defrost_date, :storage_hint, :opened_date,
                     :recipe_id, :steam_json, :hot_water_json
                 )
             )");
@@ -2024,6 +2082,8 @@ qint64 ShotHistoryStorage::saveShotStatic(const QString& dbPath, const ShotSaveD
             query.bindValue(":bag_id", bagIdIsSet(data.bagId) ? QVariant(data.bagId) : QVariant());
             query.bindValue(":frozen_date", data.frozenDate.isEmpty() ? QVariant() : data.frozenDate);
             query.bindValue(":defrost_date", data.defrostDate.isEmpty() ? QVariant() : data.defrostDate);
+            query.bindValue(":storage_hint", data.storageHint.isEmpty() ? QVariant() : data.storageHint);
+            query.bindValue(":opened_date", data.openedDate.isEmpty() ? QVariant() : data.openedDate);
             query.bindValue(":recipe_id", data.recipeId > 0 ? QVariant(data.recipeId) : QVariant());
             query.bindValue(":steam_json", data.steamJson.isEmpty() ? QVariant() : data.steamJson);
             query.bindValue(":hot_water_json", data.hotWaterJson.isEmpty() ? QVariant() : data.hotWaterJson);
@@ -2680,7 +2740,8 @@ ShotRecord ShotHistoryStorage::loadShotRecordStatic(QSqlDatabase& db, qint64 sho
                ep.in_inventory, ep.superseded_by, ep.name,
                eb.brand, eb.model,
                epp.model,
-               s.recipe_id, s.steam_json, s.hot_water_json
+               s.recipe_id, s.steam_json, s.hot_water_json,
+               s.storage_hint, s.opened_date
         FROM shots s
         LEFT JOIN equipment_items eg ON eg.package_id = s.equipment_id AND eg.kind = 'grinder'
         LEFT JOIN equipment_items eb ON eb.package_id = s.equipment_id AND eb.kind = 'basket'
@@ -2770,6 +2831,11 @@ ShotRecord ShotHistoryStorage::loadShotRecordStatic(QSqlDatabase& db, qint64 sho
     record.recipeId = query.value(47).isNull() ? -1 : query.value(47).toLongLong();
     record.steamJson = query.value(48).toString();
     record.hotWaterJson = query.value(49).toString();
+    // Non-frozen storage lifecycle snapshot (cols 50/51, bean-freshness-
+    // followup): the non-frozen analogue of frozen_date/defrost_date. Appended
+    // at the end of the SELECT so existing positional reads keep their indices.
+    record.storageHint = query.value(50).toString();
+    record.openedDate = query.value(51).toString();
     record.summary.hasVisualizerUpload = !record.visualizerId.isEmpty();
 
     // Snapshot stored badge values before the recompute block overwrites them, so
@@ -3058,6 +3124,8 @@ bool ShotHistoryStorage::updateShotMetadataStatic(QSqlDatabase& db, qint64 shotI
         {"bagId",           "bag_id"},
         {"frozenDate",      "frozen_date"},
         {"defrostDate",     "defrost_date"},
+        {"storageHint",     "storage_hint"},
+        {"openedDate",      "opened_date"},
     };
 
     // Build SET clause from only the keys present in the metadata.
@@ -3637,6 +3705,12 @@ bool ShotHistoryStorage::importDatabaseStatic(const QString& destDbPath, const Q
             const int idxBagId = srcRecord.indexOf("bag_id");
             const int idxFrozenDate = srcRecord.indexOf("frozen_date");
             const int idxDefrostDate = srcRecord.indexOf("defrost_date");
+            // Non-frozen storage lifecycle (bean-freshness-followup): carried
+            // verbatim like frozen_date/defrost_date. Present only on
+            // post-migration-32 sources → NULL on older ones (idx == -1),
+            // so a pre-32 source imports cleanly rather than failing per row.
+            const int idxStorageHint = srcRecord.indexOf("storage_hint");
+            const int idxOpenedDate = srcRecord.indexOf("opened_date");
             // equipment_id (a source package row id, remapped) + rpm exist only
             // on post-migration-22 sources (add-equipment-packages). Older
             // sources lack both — they resolve to NULL.
@@ -3676,9 +3750,9 @@ bool ShotHistoryStorage::importDatabaseStatic(const QString& destDbPath, const Q
                         channeling_detected, grind_issue_detected,
                         skip_first_frame_detected, pour_truncated_detected,
                         stopped_by, beanbase_json, beanbase_id,
-                        bag_id, frozen_date, defrost_date,
+                        bag_id, frozen_date, defrost_date, storage_hint, opened_date,
                         recipe_id, steam_json, hot_water_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 )");
 
                 insert.addBindValue(uuid);
@@ -3737,6 +3811,8 @@ bool ShotHistoryStorage::importDatabaseStatic(const QString& destDbPath, const Q
                 }
                 insert.addBindValue(srcValueOrNull(idxFrozenDate));
                 insert.addBindValue(srcValueOrNull(idxDefrostDate));
+                insert.addBindValue(srcValueOrNull(idxStorageHint));
+                insert.addBindValue(srcValueOrNull(idxOpenedDate));
                 // recipe_id is a row id in the SOURCE database — remap to the
                 // imported recipe's new id, or NULL when the recipe wasn't
                 // imported (so provenance never dangles). steam_json and

@@ -3047,6 +3047,8 @@ void MainController::onShotEnded() {
     metadata.bagId = m_settings->dye()->activeBagId();
     metadata.frozenDate = m_settings->dye()->activeBagFrozenDate();
     metadata.defrostDate = m_settings->dye()->activeBagDefrostDate();
+    metadata.storageHint = m_settings->dye()->activeBagStorageHint();
+    metadata.openedDate = m_settings->dye()->activeBagOpenedDate();
     // Recipe provenance (add-recipes): the recipe active at shot time and
     // the steam spec in effect, so promote-from-shot round-trips the drink.
     metadata.recipeId = m_settings->dye()->activeRecipeId();
@@ -3304,6 +3306,8 @@ void MainController::uploadPendingShot() {
     metadata.bagId = m_settings->dye()->activeBagId();
     metadata.frozenDate = m_settings->dye()->activeBagFrozenDate();
     metadata.defrostDate = m_settings->dye()->activeBagDefrostDate();
+    metadata.storageHint = m_settings->dye()->activeBagStorageHint();
+    metadata.openedDate = m_settings->dye()->activeBagOpenedDate();
     // Recipe provenance (add-recipes): the recipe active at shot time and
     // the steam spec in effect, so promote-from-shot round-trips the drink.
     metadata.recipeId = m_settings->dye()->activeRecipeId();
@@ -3466,6 +3470,8 @@ void MainController::generateFakeShotData() {
             metadata.bagId = m_settings->dye()->activeBagId();
             metadata.frozenDate = m_settings->dye()->activeBagFrozenDate();
             metadata.defrostDate = m_settings->dye()->activeBagDefrostDate();
+            metadata.storageHint = m_settings->dye()->activeBagStorageHint();
+            metadata.openedDate = m_settings->dye()->activeBagOpenedDate();
             metadata.recipeId = m_settings->dye()->activeRecipeId();
             metadata.steamJson = currentSteamSpecJson();
             metadata.hotWaterJson = currentHotWaterSpecJson();

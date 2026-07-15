@@ -38,7 +38,10 @@ Item {
         return ""
     }
 
-    readonly property color _parsedBgColor: bgColor !== "" ? bgColor : (hasAction ? Theme.primaryColor : Theme.surfaceColor)
+    // Action tiles use Theme.actionTileColor (neutral over a custom background
+    // image so they match the bars/cards, standard accent otherwise); an explicit
+    // per-widget bgColor still wins.
+    readonly property color _parsedBgColor: bgColor !== "" ? bgColor : (hasAction ? Theme.actionTileColor : Theme.surfaceColor)
 
     // A brew-settings widget highlights (Theme.highlightColor) whenever a real
     // brew override is in effect — temperature or target yield deviating from the
@@ -50,8 +53,14 @@ Item {
         || longPressAction === "brewSettings" || doubleclickAction === "brewSettings"
     readonly property bool _brewOverrideActive:
         MainController.temperatureIsRealOverride || MainController.yieldIsRealOverride
-    readonly property color _effectiveBackground:
+    readonly property color _baseBackground:
         (_isBrewSettingsWidget && _brewOverrideActive) ? Theme.highlightColor : _parsedBgColor
+    // Idle-screen action tiles (Recipes/Beans/Steam/Hot Water/Flush/Equipment/
+    // etc. — all compiled to CustomItem, see LayoutItemDelegate.compileToCustom)
+    // and user-authored Custom widgets share this rendering path; scrim
+    // uniformly like every other fill in the app when a background image is set.
+    readonly property color _effectiveBackground:
+        Settings.theme.backgroundImagePath.length > 0 ? Theme.scrimColor(_baseBackground) : _baseBackground
     // Content color for text and icon tinting on the button background
     readonly property color _contentColor: Theme.primaryContrastColor
 
@@ -512,6 +521,7 @@ Item {
         implicitHeight: root.hasEmoji ? Theme.scaled(120) : (fullText.implicitHeight + Theme.scaled(16) + (root.hasAction ? Theme.scaled(8) : 0))
 
         Rectangle {
+            id: fullBgRect
             visible: !root.hideBackground && (root.hasAction || root.hasEmoji)
             anchors.fill: parent
             color: fullTap.isPressed ? Qt.darker(root._effectiveBackground, 1.2) : root._effectiveBackground

@@ -11,7 +11,7 @@ import "../components"
 Page {
     id: recipesPage
     objectName: "recipesPage"
-    background: Rectangle { color: Theme.backgroundColor }
+    background: ThemedPageBackground {}
 
     StackView.onActivated: root.currentPageTitle = TranslationManager.translate("recipes.title", "Recipes")
 
@@ -276,7 +276,13 @@ Page {
                 if (stTemp > 0)
                     temps.push(stTemp)
             }
-            profileStepTemps = temps
+            // A resolved profile whose steps carry no explicit per-step
+            // temperature (e.g. some profile formats anchor solely on
+            // espresso_temperature) must still yield a non-empty array —
+            // otherwise ShotPlanText's _tempStr falls through to the
+            // loaded-profile branch, breaking "cards are immune to the
+            // loaded profile" and silently dropping the recipe's offset.
+            profileStepTemps = temps.length > 0 ? temps : (profileTempC > 0 ? [profileTempC] : [])
         }
         onRecipeChanged: refreshProfileNumbers()
         Component.onCompleted: refreshProfileNumbers()
@@ -428,7 +434,7 @@ Page {
                     }
                     implicitHeight: tileColumn.implicitHeight + 2 * Theme.spacingLarge
                     radius: Theme.cardRadius
-                    color: Theme.surfaceColor
+                    color: Theme.cardBackgroundColor
                     border.color: Theme.borderColor
                     border.width: 1
                     ColumnLayout {

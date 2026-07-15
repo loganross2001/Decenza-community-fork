@@ -901,7 +901,7 @@ private slots:
             // source column reads as "" and must normalize at bind time
             // (bindKind), not blow up the INSERT with an explicit NULL.
             QVERIFY(q.exec("ALTER TABLE coffee_bags DROP COLUMN kind"));
-            // Non-frozen storage lifecycle (migration 32): a pre-32 source has
+            // Non-frozen storage lifecycle (fork migration 33): a pre-33 source has
             // neither column on shots or coffee_bags. The shots-side transfer
             // path resolves the missing columns to NULL via source-column-index
             // lookup (idx == -1), so the per-row INSERT must NOT warn — the

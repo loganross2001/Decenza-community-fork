@@ -129,7 +129,7 @@ See `docs/CLAUDE_MD/MCP_SERVER.md` for the full data conventions section.
 ## Versioning
 
 - **Display version** (versionName): Set in `CMakeLists.txt` line 2: `project(Decenza VERSION x.y.z)`
-- **Version code** (versionCode): Stored in `versioncode.txt`. Does **not** auto-increment during local builds. CI workflows bump it on tag push, and the Android workflow commits the new value back to `main`.
+- **Version code** (versionCode): Stored in `versioncode.txt`. Does **not** auto-increment during ordinary local builds. CI workflows bump it on tag push, and the Android workflow commits the new value back to `main`. **[barista-fork]** Opt-in exception: `./build.sh --dev` derives an ever-increasing versionCode from the wall clock (minutes since 2020-01-01 UTC) so a private daily APK installs over the last one without editing `versioncode.txt`; the file is left untouched and CI/releases (which never pass `--dev`) still read it verbatim. See `LOCAL_DEV_BUILD` in `CMakeLists.txt`.
 - **version.h**: Auto-generated from `src/version.h.in` with VERSION_STRING macro
 - **AndroidManifest.xml**: Auto-generated from `android/AndroidManifest.xml.in` by CMake at build time (gitignored). Both `versionCode` and `versionName` come from `versioncode.txt` and `CMakeLists.txt` respectively.
 - **installer/version.iss**: Auto-generated from `installer/version.iss.in` by CMake at build time (gitignored).

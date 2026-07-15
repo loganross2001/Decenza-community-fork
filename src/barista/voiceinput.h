@@ -60,4 +60,8 @@ private:
     // own speech or a stale late result — an event-based flag (a timestamp cleared by the wall clock), not a
     // timer-as-guard. 0 = no active window. See handleFinal().
     qint64 m_ignoreFinalUntilMs = 0;
+    // [barista-fork] Wall-clock ms when the current recogniser listen-cycle started (set in startRecogniser).
+    // Lets handleError distinguish an idle-silence no-match (a healthy-length listen ended in silence) from a
+    // broken-mic no-match storm (returns instantly). 0 = never started. See kHealthyListenMs.
+    qint64 m_recogniserStartedMs = 0;
 };

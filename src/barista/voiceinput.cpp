@@ -11,6 +11,11 @@ constexpr qint64 kPostTtsIgnoreMs = 400;
 // [barista-fork] Cap consecutive transient-error auto-restarts so a client/timeout/no-match/busy storm
 // can't tight-loop the recogniser. Reset to 0 on any genuine final result (handleFinal).
 constexpr int kMaxTransientRestarts = 3;
+// [barista-fork] A recogniser session that listened at least this long before returning no-match/timeout
+// actually HEARD silence — the user was simply quiet, not a broken mic. Used to reset the fatal streak so
+// idle listening across a conversational pause never self-terminates (only a sub-second no-match storm,
+// i.e. a genuinely dead mic, still trips the cap). Well below a real listen-to-silence cycle (seconds).
+constexpr qint64 kHealthyListenMs = 1000;
 } // namespace
 
 #ifdef Q_OS_ANDROID
@@ -171,6 +176,9 @@ void VoiceInput::resumeMic() {
 void VoiceInput::startRecogniser() {
     if (!m_listening || m_paused)
         return;
+    // [barista-fork] Stamp the listen-cycle start so handleError can tell an idle-silence no-match (long
+    // healthy listen) from a broken-mic no-match storm (instant). See kHealthyListenMs.
+    m_recogniserStartedMs = QDateTime::currentMSecsSinceEpoch();
 #ifdef Q_OS_ANDROID
     registerVoiceNatives();   // once; the DecenzaSpeech class is loadable by now
     QJniObject ctx = QNativeInterface::QAndroidApplication::context();
@@ -245,6 +253,17 @@ void VoiceInput::handleError(int code) {
     // (handleFinal), so normal listening across utterances is unaffected — only an unbroken run of
     // errors with no real result in between can exhaust it and end the session.
     if (code == 5 || code == 6 || code == 7 || code == 8) {
+        // [barista-fork] The "heard nothing" family (6=timeout, 7=no-match) is the NORMAL outcome of an open
+        // mic during a conversational pause — there's no final result to reset the streak, so idle silence
+        // used to march the streak to fatal and kill the mic until a manual tap (seen on-device: 4× no-match
+        // over ~30s of silence → dead mic for ~1:45). When the session actually LISTENED for a healthy span
+        // first, the engine is fine and the user was just quiet → reset the streak so idle listening never
+        // self-terminates. A genuinely dead mic returns no-match INSTANTLY; that sub-second run still
+        // accumulates and trips the cap below (visible error, not an invisible battery-draining loop). The
+        // malfunction family (5=client, 8=busy) always accumulates — it can fire instantly and tight-loop.
+        if ((code == 6 || code == 7) && m_recogniserStartedMs != 0
+                && (QDateTime::currentMSecsSinceEpoch() - m_recogniserStartedMs) >= kHealthyListenMs)
+            m_errorStreak = 0;
         if (++m_errorStreak <= kMaxTransientRestarts) {
             BaristaDiagnostics::record(QStringLiteral("stt"), QStringLiteral("error"),
                 {{QStringLiteral("code"), code}, {QStringLiteral("streak"), m_errorStreak},

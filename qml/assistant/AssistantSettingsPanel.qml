@@ -713,7 +713,7 @@ Rectangle {
 
                         // Barista voice volume — linear 0..1 gain applied at playback (independent of coaching).
                         Tr {
-                            key: "barista.settings.volume"; fallback: "Voice volume"
+                            key: "barista.settings.volume"; fallback: "Barista voice volume"
                             color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true
                         }
                         RowLayout {
@@ -732,7 +732,7 @@ Rectangle {
                                     if (root._settings) root._settings.baristaVoiceVolume = value
                                     if (root._voice) root._voice.applyLiveVolume()
                                 }
-                                Accessible.name: TranslationManager.translate("barista.settings.volume", "Voice volume")
+                                Accessible.name: TranslationManager.translate("barista.settings.volume", "Barista voice volume")
                             }
                             Text {
                                 text: Math.round(baristaVolumeSlider.value * 100) + "%"
@@ -749,7 +749,7 @@ Rectangle {
 
                         // Barista voice speed — rate multiplier (independent of coaching).
                         Tr {
-                            key: "barista.settings.speed"; fallback: "Voice speed"
+                            key: "barista.settings.speed"; fallback: "Barista voice speed"
                             color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true
                         }
                         RowLayout {
@@ -761,7 +761,7 @@ Rectangle {
                                 from: 0.7; to: 1.3; stepSize: 0.05
                                 value: root._settings ? root._settings.baristaVoiceSpeed : 1.0
                                 onMoved: if (root._settings) root._settings.baristaVoiceSpeed = value
-                                Accessible.name: TranslationManager.translate("barista.settings.speed", "Voice speed")
+                                Accessible.name: TranslationManager.translate("barista.settings.speed", "Barista voice speed")
                             }
                             Text {
                                 text: baristaSpeedSlider.value.toFixed(2) + "×"

@@ -17,8 +17,13 @@ Item {
 
     readonly property var _orch: (typeof Barista !== "undefined") ? Barista.orchestrator : null
     readonly property var _voice: (typeof Barista !== "undefined") ? Barista.voice : null
+    // [barista-fork] The SEPARATE coaching voice (live steam + espresso coaches) — used by the Select Barista
+    // picker so a voice/volume/speed change can be scoped to coaching independently of the conversational voice.
+    readonly property var _coachingVoice: (typeof Barista !== "undefined") ? Barista.coachingVoice : null
     readonly property var _voiceInput: (typeof Barista !== "undefined") ? Barista.voiceInput : null
     readonly property var _settings: (typeof Barista !== "undefined") ? Barista.settings : null
+    // [barista-fork] Select Barista picker (compact per-role voice/volume/speed chooser) open state.
+    property bool _selectBaristaOpen: false
 
     // Voice-input session: 20s of silence auto-closes the mic (resets on any speech / reply / activity).
     Timer {
@@ -1810,55 +1815,16 @@ Item {
                 Item { Layout.fillWidth: true }
             }
 
-            // [barista-fork] Card footer — uses the larger card to put voice + volume one tap away.
-            // VOICE FAVORITES: quick-switch among your first three saved ElevenLabs voices (active highlighted).
-            // Manage the list in barista → gear → Voice → Saved voices; these mirror its first three.
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: Theme.spacingSmall
-                visible: root._settings && root._settings.ttsProvider === "elevenlabs"
-                         && root._settings.elevenlabsVoices.length > 0
-                Repeater {
-                    model: root._settings ? Math.min(3, root._settings.elevenlabsVoices.length) : 0
-                    delegate: AccessibleButton {
-                        required property int index
-                        readonly property var _fav: root._settings.elevenlabsVoices[index]
-                        Layout.fillWidth: true
-                        primary: !!root._settings && root._settings.elevenlabsVoiceId === (_fav ? _fav.id : "")
-                        subtle: !primary
-                        readonly property string _favLabel: (_fav && _fav.name && String(_fav.name).length > 0)
-                              ? String(_fav.name)
-                              : TranslationManager.translate("barista.voiceFav.slot", "Voice %1").arg(index + 1)
-                        // Short display label so three long voice names don't overflow/overlap in the narrow
-                        // row: take the name part before a separator, then cap length. Full name stays in the
-                        // accessibleName (AccessibleButton doesn't elide its own text).
-                        readonly property string _favShort: {
-                            var s = String(_favLabel).split(/ [-(–—,]/)[0].trim()
-                            if (s.length === 0) s = String(_favLabel)
-                            return s.length > 12 ? s.substring(0, 11) + "…" : s
-                        }
-                        text: _favShort
-                        // Distinct per-voice a11y label + active state, so a screen reader can tell the
-                        // three favorites apart and hear which one is selected.
-                        accessibleName: primary
-                              ? TranslationManager.translate("barista.voiceFav.current", "%1, current voice").arg(_favLabel)
-                              : TranslationManager.translate("barista.voiceFav.switchTo", "Switch to %1").arg(_favLabel)
-                        onClicked: {
-                            if (!root._settings || !_fav) return
-                            if (root._voice) root._voice.stop()          // barge-in: supersede any in-flight speech
-                            root._settings.elevenlabsVoiceId = _fav.id   // swap the active voice on the fly
-                            if (root._voice) root._voice.preview()       // audition it immediately
-                        }
-                    }
-                }
-            }
-
-            // VOLUME knob — the barista voice playback gain (0..1), applied live so a drag is heard immediately.
+            // [barista-fork] Card footer — declutter: the crowded voice-favorites row is gone. These two knobs
+            // adjust the BARISTA voice only (clearly labelled so it's obvious which role they touch); the
+            // coaching voice has its OWN volume/speed, reachable from Select Barista → Coaching or gear →
+            // Coaching. Both bind straight to baristaVoiceVolume/Speed so the card and the picker never diverge.
+            // VOLUME — barista playback gain (0..1), applied live so a drag is heard immediately.
             RowLayout {
                 Layout.fillWidth: true
                 spacing: Theme.spacingSmall
                 Text {
-                    text: TranslationManager.translate("barista.volume", "Volume")
+                    text: TranslationManager.translate("barista.baristaVolume", "Barista volume")
                     color: Theme.textSecondaryColor
                     font: Theme.labelFont
                     Accessible.ignored: true
@@ -1872,7 +1838,7 @@ Item {
                         if (root._settings) root._settings.baristaVoiceVolume = value
                         if (root._voice) root._voice.applyLiveVolume()   // instant, even mid-utterance
                     }
-                    Accessible.name: TranslationManager.translate("barista.volume", "Volume")
+                    Accessible.name: TranslationManager.translate("barista.baristaVolume", "Barista volume")
                 }
                 Text {
                     text: Math.round(cardVolumeSlider.value * 100) + "%"
@@ -1881,6 +1847,40 @@ Item {
                     Layout.preferredWidth: Theme.scaled(38)
                     horizontalAlignment: Text.AlignRight
                 }
+            }
+            // SPEED — barista rate multiplier (applied on the NEXT utterance, like the settings speed slider).
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: Theme.spacingSmall
+                Text {
+                    text: TranslationManager.translate("barista.baristaSpeed", "Barista speed")
+                    color: Theme.textSecondaryColor
+                    font: Theme.labelFont
+                    Accessible.ignored: true
+                }
+                Slider {
+                    id: cardSpeedSlider
+                    Layout.fillWidth: true
+                    from: 0.7; to: 1.3; stepSize: 0.05
+                    value: root._settings ? root._settings.baristaVoiceSpeed : 1.0
+                    onMoved: if (root._settings) root._settings.baristaVoiceSpeed = value
+                    Accessible.name: TranslationManager.translate("barista.baristaSpeed", "Barista speed")
+                }
+                Text {
+                    text: cardSpeedSlider.value.toFixed(2) + "×"
+                    color: Theme.textSecondaryColor
+                    font: Theme.labelFont
+                    Layout.preferredWidth: Theme.scaled(38)
+                    horizontalAlignment: Text.AlignRight
+                }
+            }
+            // SELECT BARISTA — opens the compact per-role picker (voice + volume + speed, scoped to
+            // Barista or Coaching by a dot-selector). Replaces the old first-three-voices favorites row.
+            AccessibleButton {
+                Layout.fillWidth: true
+                text: TranslationManager.translate("barista.selectBarista", "Select Barista")
+                accessibleName: text
+                onClicked: root._selectBaristaOpen = true
             }
         }
     }
@@ -1955,6 +1955,298 @@ Item {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 onClosed: root._showSettings = false
+            }
+        }
+    }
+
+    // [barista-fork] SELECT BARISTA picker — a compact per-role voice/volume/speed chooser opened from the
+    // card footer's "Select Barista" button. A dot-selector scopes every control to the Barista OR the
+    // Coaching voice (both already fully independent in settings — this just surfaces them one tap away). The
+    // voice dropdown REFLECTS the selected role's current provider (elevenlabs saved / openai / native) — it
+    // does not switch providers (that stays in full Settings). Volume applies live; speed on the next utterance.
+    Item {
+        id: selectBaristaLayer
+        anchors.fill: parent
+        visible: root._selectBaristaOpen
+        z: 100   // above the conversation + settings cards
+        // On open, re-establish the role-scoped slider bindings + resync the voice dropdown (a prior drag may
+        // have broken a binding, and the picker may re-open on the other role than it closed on).
+        onVisibleChanged: if (visible) { selectBaristaCard._rebindSliders(); voiceBox._sync() }
+
+        // Scrim — a tap outside the card dismisses the picker (the "click-away to close" a Popup would give).
+        MouseArea {
+            anchors.fill: parent
+            onClicked: root._selectBaristaOpen = false
+        }
+
+        Rectangle {
+            id: selectBaristaCard
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.rightMargin: Theme.spacingMedium
+            width: root._panelWidth
+            implicitHeight: pickerCol.implicitHeight + Theme.spacingLarge * 2
+            height: implicitHeight
+            radius: Theme.cardRadius
+            color: Theme.surfaceColor
+            border.width: 1
+            border.color: Theme.borderColor
+
+            Accessible.role: Accessible.Grouping
+            Accessible.name: TranslationManager.translate("barista.selectBarista", "Select Barista")
+
+            // Which voice these controls adjust: "barista" (conversational) or "coaching" (live cues).
+            property string pickerRole: "barista"
+            readonly property bool _isBarista: pickerRole === "barista"
+            readonly property var _roleVoice: _isBarista ? root._voice : root._coachingVoice
+            // The role's active provider — drives the voice dropdown's model + selection.
+            readonly property string _prov: root._settings
+                ? (_isBarista ? root._settings.ttsProvider : root._settings.coachingTtsProvider)
+                : "native"
+
+            // Re-establish the slider bindings (a drag breaks a value: binding, and a role flip needs the
+            // OTHER role's value) — called on open + whenever the role changes.
+            function _rebindSliders() {
+                pickVolume.value = Qt.binding(function() {
+                    return root._settings ? (_isBarista ? root._settings.baristaVoiceVolume
+                                                        : root._settings.coachingVoiceVolume) : 1.0 })
+                pickSpeed.value = Qt.binding(function() {
+                    return root._settings ? (_isBarista ? root._settings.baristaVoiceSpeed
+                                                        : root._settings.coachingVoiceSpeed) : 1.0 })
+            }
+            onPickerRoleChanged: { _rebindSliders(); voiceBox._sync() }
+            Component.onCompleted: _rebindSliders()
+
+            // Absorb taps on empty card area so they don't fall through to the dismiss-scrim below. First
+            // child (below pickerCol) so the interactive controls still receive their events.
+            MouseArea { anchors.fill: parent; onClicked: {} }
+
+            ColumnLayout {
+                id: pickerCol
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.margins: Theme.spacingLarge
+                spacing: Theme.spacingMedium
+
+                // Header: title + close
+                RowLayout {
+                    Layout.fillWidth: true
+                    Text {
+                        text: TranslationManager.translate("barista.selectBarista", "Select Barista")
+                        Layout.fillWidth: true
+                        color: Theme.textColor
+                        font: Theme.subtitleFont
+                        Accessible.ignored: true
+                    }
+                    AccessibleButton {
+                        subtle: true
+                        text: "×"   // × is a CLAUDE.md-safe glyph
+                        accessibleName: TranslationManager.translate("common.button.close", "Close")
+                        onClicked: root._selectBaristaOpen = false
+                    }
+                }
+
+                // Role dot-selector — scopes every control below to the barista OR coaching voice.
+                Text {
+                    text: TranslationManager.translate("barista.adjusting", "Adjusting:")
+                    color: Theme.textSecondaryColor
+                    font: Theme.labelFont
+                    Accessible.ignored: true
+                }
+                Repeater {
+                    model: [
+                        { role: "barista",  label: TranslationManager.translate("barista.roleBarista", "Barista") },
+                        { role: "coaching", label: TranslationManager.translate("barista.roleCoaching", "Coaching") }
+                    ]
+                    delegate: Item {
+                        required property var modelData
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: Theme.scaled(34)
+                        readonly property bool _sel: selectBaristaCard.pickerRole === modelData.role
+                        RowLayout {
+                            anchors.fill: parent
+                            spacing: Theme.spacingSmall
+                            // The "dot"
+                            Rectangle {
+                                Layout.preferredWidth: Theme.scaled(18)
+                                Layout.preferredHeight: Theme.scaled(18)
+                                radius: width / 2
+                                color: "transparent"
+                                border.width: 2
+                                border.color: _sel ? Theme.primaryColor : Theme.borderColor
+                                Rectangle {
+                                    anchors.centerIn: parent
+                                    width: parent.width * 0.5
+                                    height: width
+                                    radius: width / 2
+                                    color: Theme.primaryColor
+                                    visible: _sel
+                                }
+                            }
+                            Text {
+                                text: modelData.label
+                                Layout.fillWidth: true
+                                color: Theme.textColor
+                                font: Theme.bodyFont
+                                Accessible.ignored: true
+                            }
+                        }
+                        AccessibleMouseArea {
+                            anchors.fill: parent
+                            accessibleRole: Accessible.RadioButton
+                            accessibleChecked: _sel
+                            accessibleName: modelData.label
+                            onAccessibleClicked: selectBaristaCard.pickerRole = modelData.role
+                        }
+                    }
+                }
+
+                // Voice dropdown — provider-aware (elevenlabs saved / openai / native voices for THIS role).
+                Text {
+                    text: TranslationManager.translate("barista.voice", "Voice")
+                    color: Theme.textSecondaryColor
+                    font: Theme.labelFont
+                    Accessible.ignored: true
+                }
+                ComboBox {
+                    id: voiceBox
+                    Layout.fillWidth: true
+                    Accessible.name: TranslationManager.translate("barista.voice", "Voice")
+                    model: {
+                        if (!root._settings) return []
+                        if (selectBaristaCard._prov === "elevenlabs") {
+                            var out = []
+                            var vs = root._settings.elevenlabsVoices
+                            for (var i = 0; i < vs.length; i++)
+                                out.push(vs[i].name && String(vs[i].name).length > 0
+                                         ? String(vs[i].name)
+                                         : TranslationManager.translate("barista.voiceFav.slot", "Voice %1").arg(i + 1))
+                            return out
+                        }
+                        if (selectBaristaCard._prov === "openai")
+                            return ["nova", "shimmer", "alloy", "echo", "fable", "onyx"]
+                        return selectBaristaCard._roleVoice ? selectBaristaCard._roleVoice.availableVoices : []
+                    }
+                    // Set currentIndex from the role's saved selection — the model+selection both swap on a role
+                    // flip, and a ComboBox won't self-correct its integer index, so recompute explicitly.
+                    function _sync() {
+                        if (!root._settings) { currentIndex = -1; return }
+                        if (selectBaristaCard._prov === "elevenlabs") {
+                            var id = selectBaristaCard._isBarista ? root._settings.elevenlabsVoiceId
+                                                                  : root._settings.coachingElevenlabsVoiceId
+                            var vs = root._settings.elevenlabsVoices
+                            var idx = -1
+                            for (var i = 0; i < vs.length; i++) if (vs[i].id === id) { idx = i; break }
+                            currentIndex = idx
+                        } else if (selectBaristaCard._prov === "openai") {
+                            var v = selectBaristaCard._isBarista ? root._settings.openaiVoice
+                                                                 : root._settings.coachingOpenaiVoice
+                            currentIndex = model.indexOf(v)
+                        } else {
+                            var name = selectBaristaCard._roleVoice ? selectBaristaCard._roleVoice.voiceName : ""
+                            currentIndex = model.indexOf(name)
+                        }
+                    }
+                    onActivated: {
+                        if (!root._settings || currentIndex < 0) return
+                        if (selectBaristaCard._roleVoice) selectBaristaCard._roleVoice.stop()   // barge-in
+                        if (selectBaristaCard._prov === "elevenlabs") {
+                            var vs = root._settings.elevenlabsVoices
+                            var id = vs[currentIndex] ? vs[currentIndex].id : ""
+                            if (selectBaristaCard._isBarista) root._settings.elevenlabsVoiceId = id
+                            else root._settings.coachingElevenlabsVoiceId = id
+                        } else if (selectBaristaCard._prov === "openai") {
+                            if (selectBaristaCard._isBarista) root._settings.openaiVoice = currentText
+                            else root._settings.coachingOpenaiVoice = currentText
+                        } else if (selectBaristaCard._roleVoice) {
+                            selectBaristaCard._roleVoice.setVoiceByName(currentText)
+                        }
+                        if (selectBaristaCard._roleVoice) selectBaristaCard._roleVoice.preview()   // audition
+                    }
+                    onModelChanged: _sync()
+                    Component.onCompleted: _sync()
+                    Connections {
+                        target: selectBaristaCard._roleVoice
+                        function onAvailableVoicesChanged() { voiceBox._sync() }
+                    }
+                }
+
+                // Volume — role-scoped, applied live (a drag is heard immediately on the right voice).
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.spacingSmall
+                    Text {
+                        text: TranslationManager.translate("barista.volume", "Volume")
+                        color: Theme.textSecondaryColor
+                        font: Theme.labelFont
+                        Layout.preferredWidth: Theme.scaled(56)
+                        Accessible.ignored: true
+                    }
+                    Slider {
+                        id: pickVolume
+                        Layout.fillWidth: true
+                        from: 0.0; to: 1.0; stepSize: 0.02
+                        Accessible.name: TranslationManager.translate("barista.volume", "Volume")
+                        onMoved: {
+                            if (!root._settings) return
+                            if (selectBaristaCard._isBarista) root._settings.baristaVoiceVolume = value
+                            else root._settings.coachingVoiceVolume = value
+                            if (selectBaristaCard._roleVoice) selectBaristaCard._roleVoice.applyLiveVolume()
+                        }
+                    }
+                    Text {
+                        text: Math.round(pickVolume.value * 100) + "%"
+                        color: Theme.textSecondaryColor
+                        font: Theme.labelFont
+                        Layout.preferredWidth: Theme.scaled(38)
+                        horizontalAlignment: Text.AlignRight
+                    }
+                }
+
+                // Speed — role-scoped, applied on the next utterance (matches the settings speed slider).
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.spacingSmall
+                    Text {
+                        text: TranslationManager.translate("barista.speed", "Speed")
+                        color: Theme.textSecondaryColor
+                        font: Theme.labelFont
+                        Layout.preferredWidth: Theme.scaled(56)
+                        Accessible.ignored: true
+                    }
+                    Slider {
+                        id: pickSpeed
+                        Layout.fillWidth: true
+                        from: 0.7; to: 1.3; stepSize: 0.05
+                        Accessible.name: TranslationManager.translate("barista.speed", "Speed")
+                        onMoved: {
+                            if (!root._settings) return
+                            if (selectBaristaCard._isBarista) root._settings.baristaVoiceSpeed = value
+                            else root._settings.coachingVoiceSpeed = value
+                        }
+                    }
+                    Text {
+                        text: pickSpeed.value.toFixed(2) + "×"
+                        color: Theme.textSecondaryColor
+                        font: Theme.labelFont
+                        Layout.preferredWidth: Theme.scaled(38)
+                        horizontalAlignment: Text.AlignRight
+                    }
+                }
+
+                // Preview — audition the selected role's voice at its current volume/speed.
+                AccessibleButton {
+                    Layout.fillWidth: true
+                    text: TranslationManager.translate("barista.preview", "Preview")
+                    accessibleName: text
+                    onClicked: {
+                        if (selectBaristaCard._roleVoice) {
+                            selectBaristaCard._roleVoice.stop()
+                            selectBaristaCard._roleVoice.preview()
+                        }
+                    }
+                }
             }
         }
     }

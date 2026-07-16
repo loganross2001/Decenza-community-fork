@@ -54,16 +54,11 @@ Dialog {
     ]
 
     function applyRatio(r) {
-        // Apply the chosen ratio live: record the preference and recompute the
-        // stop-at-weight target (yield = dose × ratio) so the new ratio shows up
-        // everywhere immediately — the scale widget (ProfileManager.brewByRatio),
-        // Brew Settings, and the machine target. Setting brewYieldOverride emits
-        // brewOverridesChanged, which ProfileManager turns into a targetWeight sync
-        // + targetWeightChanged. Uses the measured dose (dyeBeanWeight), falling
-        // back to 18 g when none is recorded.
-        Settings.brew.lastUsedRatio = r
-        var dose = Settings.dye.dyeBeanWeight > 0 ? Settings.dye.dyeBeanWeight : 18.0
-        Settings.brew.brewYieldOverride = dose * r
+        // Arm brew-by-ratio MODE with the chosen ratio: the yield is now defined as dose × ratio and
+        // ProfileManager keeps the stop-at-weight target live as the dose changes (so it shows up everywhere
+        // immediately — the scale widget, Brew Settings, the machine target). setYieldByRatio records the ratio,
+        // sets the mode, and updates lastUsedRatio; ProfileManager derives dose × ratio from the measured dose.
+        Settings.brew.setYieldByRatio(r)
         root.close()
     }
 

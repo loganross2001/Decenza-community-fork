@@ -107,6 +107,10 @@ SettingsBrew::SettingsBrew(QObject* parent)
     if (m_hasBrewYieldOverride) {
         m_brewYieldOverride = m_settings.value("brew/brewYieldOverride", 0.0).toDouble();
     }
+    m_brewByRatioMode = m_settings.value("brew/brewByRatioMode", false).toBool();
+    m_brewRatio = m_settings.value("brew/brewRatio", 0.0).toDouble();
+    if (m_brewByRatioMode && m_brewRatio <= 0.0)   // corrupt/legacy state — a mode with no ratio is meaningless
+        m_brewByRatioMode = false;
 }
 
 // Espresso
@@ -946,6 +950,50 @@ bool SettingsBrew::hasBrewYieldOverride() const {
     return m_hasBrewYieldOverride;
 }
 
+bool SettingsBrew::brewByRatioMode() const {
+    return m_brewByRatioMode;
+}
+
+double SettingsBrew::brewRatio() const {
+    return m_brewRatio;
+}
+
+void SettingsBrew::setYieldByRatio(double ratio) {
+    if (ratio <= 0.0)
+        return;   // a ratio must be positive; use setYieldAbsolute(0) to clear instead
+    bool changed = false;
+    if (!m_brewByRatioMode) { m_brewByRatioMode = true; changed = true; }
+    if (!qFuzzyCompare(1.0 + m_brewRatio, 1.0 + ratio)) { m_brewRatio = ratio; changed = true; }
+    if (changed) {
+        m_settings.setValue("brew/brewByRatioMode", true);
+        m_settings.setValue("brew/brewRatio", ratio);
+    }
+    setLastUsedRatio(ratio);   // remember the preference (also drives the ratio pickers)
+    // NOTE: the absolute stop-at-weight target (brewYieldOverride) is synced by ProfileManager, which owns the
+    // dose — it recomputes dose x ratio here and on every dose change while the mode is on.
+    if (changed)
+        emit brewOverridesChanged();
+}
+
+void SettingsBrew::setYieldAbsolute(double grams) {
+    // The single funnel for absolute-yield writes: exit ratio mode first so the next dose change can't clobber
+    // the value with dose x ratio, then set (or clear, when grams <= 0) the override.
+    if (m_brewByRatioMode || m_brewRatio != 0.0) {
+        m_brewByRatioMode = false;
+        m_brewRatio = 0.0;
+        m_settings.remove("brew/brewByRatioMode");
+        m_settings.remove("brew/brewRatio");
+        // brewOverridesChanged is emitted by setBrewYieldOverride below (or emit here if it no-ops).
+    }
+    const double before = m_brewYieldOverride;
+    const bool hadBefore = m_hasBrewYieldOverride;
+    setBrewYieldOverride(grams);
+    // If the override value didn't change, setBrewYieldOverride won't have emitted — but we may have just
+    // exited ratio mode, so make sure the change is observed.
+    if (qFuzzyCompare(1.0 + before, 1.0 + m_brewYieldOverride) && hadBefore == m_hasBrewYieldOverride)
+        emit brewOverridesChanged();
+}
+
 void SettingsBrew::clearAllBrewOverrides() {
     bool changed = false;
 
@@ -954,6 +1002,14 @@ void SettingsBrew::clearAllBrewOverrides() {
         m_hasBrewYieldOverride = false;
         m_settings.remove("brew/brewYieldOverride");
         m_settings.remove("brew/hasBrewYieldOverride");
+        changed = true;
+    }
+
+    if (m_brewByRatioMode || m_brewRatio != 0.0) {   // clearing overrides also exits ratio mode
+        m_brewByRatioMode = false;
+        m_brewRatio = 0.0;
+        m_settings.remove("brew/brewByRatioMode");
+        m_settings.remove("brew/brewRatio");
         changed = true;
     }
 

@@ -299,6 +299,10 @@ signals:
     void autoLoadStaleCleared();
 
 private:
+    // [brew-by-ratio] Sync the absolute stop-at-weight target to dose x ratio while ratio mode is armed;
+    // idle-gated and no-op-when-unchanged. Called on dose change + brew-override change.
+    void recomputeRatioYield();
+
     // Current profile's frames with every temperature shifted so the reference
     // temperature (espressoTemperature) becomes targetTemp. Single source of truth
     // for the override delta, shared by the live-brew and save-to-profile paths.

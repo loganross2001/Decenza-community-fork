@@ -329,12 +329,19 @@ ProfileManager::ProfileManager(Settings* settings, DE1Device* device,
     // Keep MachineState in sync when yield override changes in Settings
     if (m_settings) {
         connect(m_settings->brew(), &SettingsBrew::brewOverridesChanged, this, [this]() {
+            // If ratio mode is armed, keep the absolute stop-at-weight target = dose x ratio. This can be
+            // re-entrant (the recompute writes brewYieldOverride → brewOverridesChanged), but recomputeRatioYield
+            // no-ops when the value is unchanged, so it settles in one extra hop.
+            recomputeRatioYield();
             if (m_machineState) {
                 m_machineState->setTargetWeight(targetWeight());
             }
             emit targetWeightChanged();
         });
         connect(m_settings->dye(), &SettingsDye::dyeBeanWeightChanged, this, [this]() {
+            // The live half of brew-by-ratio: a new dose re-derives the target (dose x ratio) while the mode is
+            // armed and the machine is idle. This is exactly what makes "yield = ratio x dose" track the scale.
+            recomputeRatioYield();
             emit targetWeightChanged();
         });
 
@@ -403,9 +410,10 @@ double ProfileManager::targetWeight() const {
 }
 
 bool ProfileManager::brewByRatioActive() const {
-    if (!m_settings || !m_settings->brew()->hasBrewYieldOverride())
-        return false;
-    return qAbs(m_settings->brew()->brewYieldOverride() - m_currentProfile.targetWeight()) > 0.1;
+    // Now a real, stored flag: are we in brew-by-ratio MODE (yield defined as dose x ratio)? This is stricter
+    // than the old heuristic ("any override != profile target"): a manual absolute override no longer reads as
+    // "by ratio" (it isn't). Consumers wanting "is there a non-default yield" should use hasBrewYieldOverride.
+    return m_settings && m_settings->brew()->brewByRatioMode();
 }
 
 double ProfileManager::brewByRatioDose() const {
@@ -413,9 +421,32 @@ double ProfileManager::brewByRatioDose() const {
 }
 
 double ProfileManager::brewByRatio() const {
-    if (!m_settings || !m_settings->brew()->hasBrewYieldOverride()) return 0.0;
+    if (!m_settings) return 0.0;
+    // In ratio mode the armed ratio is authoritative. Otherwise back-compute the IMPLIED ratio of the current
+    // absolute yield (override / dose) — the display convenience the ratio pickers have always shown.
+    if (m_settings->brew()->brewByRatioMode())
+        return m_settings->brew()->brewRatio();
+    if (!m_settings->brew()->hasBrewYieldOverride()) return 0.0;
     double dose = m_settings->dye()->dyeBeanWeight();
     return dose > 0 ? m_settings->brew()->brewYieldOverride() / dose : 0.0;
+}
+
+// Keep the absolute stop-at-weight target (brewYieldOverride) synced to dose x ratio while ratio mode is armed.
+// Gated on machine-idle (never move the target mid-pour) and no-ops when unchanged (so the re-entrant
+// brewOverridesChanged it triggers settles immediately). ProfileManager owns this because it already owns the
+// dose→target relationship (brewByRatio/targetWeight).
+void ProfileManager::recomputeRatioYield() {
+    if (!m_settings || !m_settings->brew()->brewByRatioMode())
+        return;
+    if (m_machineState && m_machineState->isFlowing())
+        return;   // never retarget mid-extraction
+    const double dose = m_settings->dye()->dyeBeanWeight();
+    const double ratio = m_settings->brew()->brewRatio();
+    if (dose <= 0.0 || ratio <= 0.0)
+        return;   // no dose yet → leave the last target; the next dose read will derive it
+    const double target = dose * ratio;
+    if (!qFuzzyCompare(1.0 + target, 1.0 + m_settings->brew()->brewYieldOverride()))
+        m_settings->brew()->setBrewYieldOverride(target);   // raw set; keeps mode (only the funnels toggle it)
 }
 
 void ProfileManager::setTargetWeight(double weight) {

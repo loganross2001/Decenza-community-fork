@@ -88,6 +88,12 @@ class SettingsBrew : public QObject {
     // Brew parameter overrides (persistent)
     Q_PROPERTY(double brewYieldOverride READ brewYieldOverride WRITE setBrewYieldOverride NOTIFY brewOverridesChanged)
     Q_PROPERTY(bool hasBrewYieldOverride READ hasBrewYieldOverride NOTIFY brewOverridesChanged)
+    // Brew-by-ratio MODE (persistent): when true, the yield is defined as a RATIO of the dose and the
+    // stop-at-weight target is kept live as dose x ratio (recomputed whenever the dose changes) instead of a
+    // frozen absolute grams value. brewRatio is the armed ratio. Default off = the legacy absolute-yield model
+    // is unchanged. Set through setYieldByRatio()/setYieldAbsolute() so mode and target never disagree.
+    Q_PROPERTY(bool brewByRatioMode READ brewByRatioMode NOTIFY brewOverridesChanged)
+    Q_PROPERTY(double brewRatio READ brewRatio NOTIFY brewOverridesChanged)
 
     // Stop-at-volume gating when a BLE scale provides weight data
     Q_PROPERTY(bool ignoreVolumeWithScale READ ignoreVolumeWithScale WRITE setIgnoreVolumeWithScale NOTIFY ignoreVolumeWithScaleChanged)
@@ -260,6 +266,19 @@ public:
     bool hasBrewYieldOverride() const;
     Q_INVOKABLE void clearAllBrewOverrides();
 
+    // Brew-by-ratio mode (persistent). brewByRatioMode: is the yield defined as a ratio of the dose?
+    // brewRatio: the armed ratio (dose x brewRatio = target yield). These are the ONE place mode + ratio live.
+    bool brewByRatioMode() const;
+    double brewRatio() const;
+    // Arm ratio mode with `ratio` (also records it as lastUsedRatio). The stop-at-weight target is then kept
+    // live as dose x ratio by ProfileManager. `ratio` <= 0 is ignored. Does NOT itself write the yield
+    // override — ProfileManager owns the dose, so it computes and syncs the absolute target.
+    Q_INVOKABLE void setYieldByRatio(double ratio);
+    // Set an ABSOLUTE yield (grams) and EXIT ratio mode — the single funnel every absolute-yield write must go
+    // through (manual target entry, shot-promote, bag override, etc.) so a stale ratio can't clobber it on the
+    // next dose change. grams <= 0 clears the override entirely (and still exits ratio mode).
+    Q_INVOKABLE void setYieldAbsolute(double grams);
+
     // Stop-at-volume gating
     bool ignoreVolumeWithScale() const;
     void setIgnoreVolumeWithScale(bool enabled);
@@ -313,4 +332,6 @@ private:
     bool m_hasTemperatureOverride = false;
     double m_brewYieldOverride = 0.0;
     bool m_hasBrewYieldOverride = false;
+    bool m_brewByRatioMode = false;   // yield defined as dose x brewRatio (kept live by ProfileManager)
+    double m_brewRatio = 0.0;         // the armed ratio when m_brewByRatioMode is true
 };

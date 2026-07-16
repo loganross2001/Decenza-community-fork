@@ -192,7 +192,7 @@ QJsonArray BaristaTools::toolDefinitions()
     lfProps["overall_rating_0to100"]= intProp("How much they liked it, 0-100, ONLY if they gave a clear sense of it (optional).");
     lfProps["acidity"]              = strProp("One of: sour, bright, balanced, flat (optional).");
     lfProps["bitterness"]           = strProp("One of: none, mild, harsh (optional).");
-    lfProps["body"]                 = strProp("One of: thin, medium, syrupy (optional).");
+    lfProps["body"]                 = strProp("The shot's body/mouthfeel — one of: thin, medium, heavy (optional). Recorded as the shot's structured taste_body, same as the post-shot taste picker.");
     lfProps["sweetness"]            = strProp("One of: low, balanced, high (optional).");
     lfProps["balance"]              = strProp("One of: under, balanced, over (optional).");
     lfProps["milk"]                 = strProp("For a milk drink, one of: thin, silky, stiff (optional).");
@@ -647,6 +647,25 @@ static int baristaEnjoymentForTaste(const QString& choice)
     if (choice == QLatin1String("balanced")) return 82;
     if (choice == QLatin1String("bitter"))   return 55;
     return 0;
+}
+
+// [barista-fork] Map the model's `body` axis to the canonical structured taste_body value ("thin"|"medium"|
+// "heavy") the tap-picker persists (PostShotReviewPage TastePicker). MUST return a canonical value or "" —
+// never a pass-through: updateShotMetadataStatic SILENTLY DROPS an out-of-set taste_body, so returning the raw
+// word would no-op the write. "syrupy"/"full"/"thick" (a heavy mouthfeel) → "heavy"; "light"/"watery" → "thin";
+// the three canonical words pass straight through. Anything else (incl. empty) → "" = no body write, so a shot's
+// existing taste_body is preserved. This is the ONLY taste axis the barista's note marker never captured.
+static QString baristaTasteBody(const QJsonObject& input)
+{
+    const QString body = input.value(QStringLiteral("body")).toString().trimmed().toLower();
+    if (body == QLatin1String("thin") || body == QLatin1String("light") || body == QLatin1String("watery"))
+        return QStringLiteral("thin");
+    if (body == QLatin1String("medium"))
+        return QStringLiteral("medium");
+    if (body == QLatin1String("heavy") || body == QLatin1String("syrupy")
+        || body == QLatin1String("full") || body == QLatin1String("thick"))
+        return QStringLiteral("heavy");
+    return QString();   // unset / unrecognised → no structured body write (preserve any existing value)
 }
 
 // [barista-fork] The "Tasted <choice>" note-merge now lives in ShotHistoryStorage::requestApplyTasteToShot
@@ -1213,9 +1232,15 @@ void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage*
         // rating for this morning's shot"), the model finds it via query_shots and passes its shotId as shot_id;
         // that OVERRIDES the anchor (resolved above as targetShotId), so the rating lands on THAT shot.
         const QString tasteChoice = baristaTasteChoice(input);
-        if (shotHistory && targetShotId > 0 && (hasRating || !tasteChoice.isEmpty())) {
+        const QString tasteBody = baristaTasteBody(input);
+        if (shotHistory && targetShotId > 0
+            && (hasRating || !tasteChoice.isEmpty() || !tasteBody.isEmpty())) {
             const int shotEnjoyment = hasRating ? rating : baristaEnjoymentForTaste(tasteChoice);
-            shotHistory->requestApplyTasteToShot(targetShotId, shotEnjoyment, shotEnjoyment > 0, tasteChoice);
+            // Also lands the structured taste_balance/taste_body columns (the tap-picker's source of truth), so
+            // the barista + the post-shot picker agree; a body-only remark ("it was thin") still records the
+            // body axis without touching enjoyment or balance (shotEnjoyment stays 0 → setEnjoyment false).
+            shotHistory->requestApplyTasteToShot(targetShotId, shotEnjoyment, shotEnjoyment > 0,
+                                                 tasteChoice, tasteBody);
         }
 
         // [barista-fork] PAST-SHOT rating stops here — do NOT write a feedback-KB row. The KB row's bean/dial

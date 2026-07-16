@@ -240,7 +240,13 @@ public:
     // read the shot's CURRENT espresso_notes (never a stale snapshot), replace any "Tasted <choice>" marker
     // line, and write it back together with enjoyment — so a verbal rating can never clobber notes the user
     // typed after the barista session started. tasteChoice "" → enjoyment only; setEnjoyment false → notes only.
-    Q_INVOKABLE void requestApplyTasteToShot(qint64 shotId, int enjoyment, bool setEnjoyment, const QString& tasteChoice);
+    // ALSO writes the structured taste columns so a SPOKEN rating shares the tap-picker's source of truth:
+    // tasteBalance (== the "sour"|"balanced"|"bitter" choice, into shots.taste_balance) and tasteBody
+    // ("thin"|"medium"|"heavy", into shots.taste_body — the body axis the note marker never captured). Each is
+    // written only when non-empty, so a balance-only utterance never clears an existing body (and vice-versa);
+    // both flow through updateShotMetadataStatic, which validates them against the canonical sets.
+    Q_INVOKABLE void requestApplyTasteToShot(qint64 shotId, int enjoyment, bool setEnjoyment,
+                                             const QString& tasteChoice, const QString& tasteBody = QString());
 
     // Async: fetch most recent shot ID on background thread, emits mostRecentShotIdReady()
     Q_INVOKABLE void requestMostRecentShotId();

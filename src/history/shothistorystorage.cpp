@@ -3300,7 +3300,7 @@ static QString notesWithTasteMarkerStatic(const QString& notes, const QString& c
 }
 
 void ShotHistoryStorage::requestApplyTasteToShot(qint64 shotId, int enjoyment, bool setEnjoyment,
-                                                 const QString& tasteChoice)
+                                                 const QString& tasteChoice, const QString& tasteBody)
 {
     if (!m_ready || shotId <= 0) {
         emit shotMetadataUpdated(shotId, false);
@@ -3308,7 +3308,7 @@ void ShotHistoryStorage::requestApplyTasteToShot(qint64 shotId, int enjoyment, b
     }
     const QString dbPath = m_dbPath;
     auto destroyed = m_destroyed;
-    runOnDbThread([this, dbPath, shotId, enjoyment, setEnjoyment, tasteChoice, destroyed]() {
+    runOnDbThread([this, dbPath, shotId, enjoyment, setEnjoyment, tasteChoice, tasteBody, destroyed]() {
         bool success = false;
         withTempDb(dbPath, "shs_taste", [&](QSqlDatabase& db) {
             // LIVE read of the shot's CURRENT notes on the (serialized) DB thread — the whole point of this
@@ -3324,6 +3324,14 @@ void ShotHistoryStorage::requestApplyTasteToShot(qint64 shotId, int enjoyment, b
                 meta.insert(QStringLiteral("enjoyment"), enjoyment);
             if (!tasteChoice.isEmpty())
                 meta.insert(QStringLiteral("espressoNotes"), notesWithTasteMarkerStatic(current, tasteChoice));
+            // [barista-fork] Structured taste columns — the tap-picker's source of truth. The balance choice
+            // ("sour"|"balanced"|"bitter") IS taste_balance; tasteBody ("thin"|"medium"|"heavy") is the body
+            // axis. Written only when non-empty so present-keys-only updateShotMetadataStatic never clears the
+            // other axis; it also validates each against its canonical set (a stray value is dropped, not saved).
+            if (!tasteChoice.isEmpty())
+                meta.insert(QStringLiteral("tasteBalance"), tasteChoice);
+            if (!tasteBody.isEmpty())
+                meta.insert(QStringLiteral("tasteBody"), tasteBody);
             if (!meta.isEmpty())
                 success = updateShotMetadataStatic(db, shotId, meta);
         });

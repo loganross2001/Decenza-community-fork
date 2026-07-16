@@ -1628,6 +1628,46 @@ private slots:
         });
     }
 
+    // [barista-fork] The barista's spoken-taste write (requestApplyTasteToShot) puts ONLY the axes the user
+    // actually mentioned into the metadata map, relying on updateShotMetadataStatic being present-keys-only so
+    // a balance-only remark never clears an existing taste_body (and a body-only remark never clears balance).
+    // This pins that preserve-don't-clear contract, which the barista's empty-guards depend on.
+    void tasteAxisUpdateIsPresentKeysOnly() {
+        const QString path = freshDbPath();
+        { ShotHistoryStorage s; initAndClose(path, s); }
+        qint64 shotId = -1;
+        withRawDb(path, "taste_pk_seed", [&](QSqlDatabase& db) {
+            QSqlQuery q(db);
+            QVERIFY(q.exec("INSERT INTO shots (uuid, timestamp, profile_name, duration_seconds) "
+                           "VALUES ('taste-pk', 1000, 'P', 30)"));
+            shotId = q.lastInsertId().toLongLong();
+            // Both axes set first (as a prior taste rating would leave them).
+            QVariantMap both;
+            both["tasteBalance"] = QStringLiteral("sour");
+            both["tasteBody"] = QStringLiteral("heavy");
+            QVERIFY(ShotHistoryStorage::updateShotMetadataStatic(db, shotId, both));
+        });
+        QVERIFY(shotId > 0);
+        withRawDb(path, "taste_pk_bodyonly", [&](QSqlDatabase& db) {
+            // A body-only update must set body and PRESERVE the existing balance.
+            QVariantMap bodyOnly;
+            bodyOnly["tasteBody"] = QStringLiteral("medium");
+            QVERIFY(ShotHistoryStorage::updateShotMetadataStatic(db, shotId, bodyOnly));
+            const ShotRecord r = ShotHistoryStorage::loadShotRecordStatic(db, shotId);
+            QCOMPARE(r.tasteBody, QStringLiteral("medium"));      // updated
+            QCOMPARE(r.tasteBalance, QStringLiteral("sour"));     // preserved, not cleared
+        });
+        withRawDb(path, "taste_pk_balanceonly", [&](QSqlDatabase& db) {
+            // A balance-only update must set balance and PRESERVE the just-set body.
+            QVariantMap balanceOnly;
+            balanceOnly["tasteBalance"] = QStringLiteral("bitter");
+            QVERIFY(ShotHistoryStorage::updateShotMetadataStatic(db, shotId, balanceOnly));
+            const ShotRecord r = ShotHistoryStorage::loadShotRecordStatic(db, shotId);
+            QCOMPARE(r.tasteBalance, QStringLiteral("bitter"));   // updated
+            QCOMPARE(r.tasteBody, QStringLiteral("medium"));      // preserved, not cleared
+        });
+    }
+
     // loadShotRecordStatic resolves grinder brand/model/burrs through the
     // equipment_id JOIN (the per-shot columns are gone — migration 23) and
     // derives equipmentState from the package's in_inventory + superseded_by

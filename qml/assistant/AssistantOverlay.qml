@@ -875,6 +875,11 @@ Item {
             + "thin/watery ↔ strong/punchy) — that descriptor is the real dialing signal — but let them ramble; if "
             + "they just give a word or a number, take it and move on. Never nag, quiz, checklist, or recap. "
             + "Enjoyment (an optional 0–100 number) is SEPARATE from the taste and never required.\n"
+            + "There is ALSO a tap way to log the very same thing, in case they ask how (\"how do I rate a shot / "
+            + "log taste?\"): the post-shot review screen has a taste picker — tap Sour / Balanced / Bitter for "
+            + "balance and Thin / Medium / Heavy for body — and the app offers that same quick taste tap before an "
+            + "AI dial-in. Speaking it to you lands in the EXACT same place on the shot, so tell them either works "
+            + "and they never NEED to tap. Only bring the tap UI up when they ask for it; never push it.\n"
             + applyInstruction
             + "VOICE — you are a person behind the counter, NOT a vending machine. Answer first (adjacency pairs: "
             + "respond to what they said before anything else). 1–2 short sentences. Minimal acknowledgment — 'got it', "

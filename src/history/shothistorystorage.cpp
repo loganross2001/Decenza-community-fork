@@ -1653,6 +1653,43 @@ bool ShotHistoryStorage::runMigrations()
         }
     }
 
+    // Migration 34: structured taste axes (add-ai-taste-intake, upstream #1515).
+    // [barista-fork] Renumbered upstream's 33 -> 34: the fork's +1 migration offset (documented) already
+    // holds 33 with the storage-lifecycle columns, so upstream's taste axes advance one slot. A fork device
+    // at v33 (storage done) runs THIS to get the columns; a device at v32 runs 33 then 34.
+    // taste_balance (sour|balanced|bitter) and taste_body (thin|medium|heavy) capture the two
+    // dial-in taste axes the shot curve can't reveal, tapped in the AI taste
+    // intake picker or on the review page. Shots-only — taste is a per-shot
+    // observation, not a coffee_bags attribute. Empty-string = unset (matching
+    // enjoyment0to100 == 0); an ADD COLUMN with no default leaves existing rows
+    // NULL, which surfaces as "" on read (QSqlQuery::value().toString()) — the
+    // same "unset" sentinel new writes use. Written only via
+    // requestUpdateShotMetadata (a post-hoc edit),
+    // so no shot-save INSERT binding is needed — but the shot-read SELECT and the
+    // device-transfer INSERT name them. Idempotent, gated ">= 33 && < 34".
+    // Whitespace before the open-paren dodges the QSqlQuery permission-hook
+    // false-positive; do not auto-format.
+    if (currentVersion >= 33 && currentVersion < 34) {
+        qDebug() << "ShotHistoryStorage: Running migration to version 34 (taste axes)";
+
+        if (!hasColumn("shots", "taste_balance")
+            && !query.exec ("ALTER TABLE shots ADD COLUMN taste_balance TEXT"))
+            qWarning() << "ShotHistoryStorage: migration 34 add shots.taste_balance failed -"
+                       << query.lastError().text();
+        if (!hasColumn("shots", "taste_body")
+            && !query.exec ("ALTER TABLE shots ADD COLUMN taste_body TEXT"))
+            qWarning() << "ShotHistoryStorage: migration 34 add shots.taste_body failed -"
+                       << query.lastError().text();
+
+        if (hasColumn("shots", "taste_balance") && hasColumn("shots", "taste_body")) {
+            query.exec ("DELETE FROM schema_version");
+            query.exec ("INSERT INTO schema_version (version) VALUES (34)");
+            currentVersion = 34;
+        } else {
+            qWarning() << "ShotHistoryStorage: migration 34 incomplete - will retry next launch";
+        }
+    }
+
     // [barista-fork] Version-independent fork-schema repair. A shot DB written by a
     // DIFFERENT Decenza build (e.g. an upstream v2.0.0 database pulled in via
     // device-to-device import) carries a schema_version NUMBER that may sit at or
@@ -2741,7 +2778,8 @@ ShotRecord ShotHistoryStorage::loadShotRecordStatic(QSqlDatabase& db, qint64 sho
                eb.brand, eb.model,
                epp.model,
                s.recipe_id, s.steam_json, s.hot_water_json,
-               s.storage_hint, s.opened_date
+               s.storage_hint, s.opened_date,
+               s.taste_balance, s.taste_body
         FROM shots s
         LEFT JOIN equipment_items eg ON eg.package_id = s.equipment_id AND eg.kind = 'grinder'
         LEFT JOIN equipment_items eb ON eb.package_id = s.equipment_id AND eb.kind = 'basket'
@@ -2836,6 +2874,11 @@ ShotRecord ShotHistoryStorage::loadShotRecordStatic(QSqlDatabase& db, qint64 sho
     // at the end of the SELECT so existing positional reads keep their indices.
     record.storageHint = query.value(50).toString();
     record.openedDate = query.value(51).toString();
+    // Structured taste axes (cols 52/53, add-ai-taste-intake): sour|balanced|
+    // bitter and thin|medium|heavy. "" = unset. Appended at the end of the SELECT
+    // so existing positional reads keep their indices.
+    record.tasteBalance = query.value(52).toString();
+    record.tasteBody = query.value(53).toString();
     record.summary.hasVisualizerUpload = !record.visualizerId.isEmpty();
 
     // Snapshot stored badge values before the recompute block overwrites them, so
@@ -3081,14 +3124,41 @@ void ShotHistoryStorage::requestDeleteShot(qint64 shotId)
                 qDebug() << "ShotHistoryStorage: Async deleted shot" << shotId;
             } else {
                 qWarning() << "ShotHistoryStorage: Failed to async delete shot" << shotId;
-                emit errorOccurred(QString("Failed to delete shot %1").arg(shotId));
+                // User-facing (toast): no internal shot id — logged above.
+                emit errorOccurred(QStringLiteral("Couldn't delete the shot — please try again."));
             }
         }, Qt::QueuedConnection);
     });
 }
 
-bool ShotHistoryStorage::updateShotMetadataStatic(QSqlDatabase& db, qint64 shotId, const QVariantMap& metadata)
+bool ShotHistoryStorage::updateShotMetadataStatic(QSqlDatabase& db, qint64 shotId, const QVariantMap& metadataIn)
 {
+    // Sanitize structured-taste values against their allowed sets before use.
+    // "" is a valid "unset". Any out-of-set value is dropped (with a warning) so
+    // a bad taste key can never write garbage — without failing an update that
+    // also carries legitimate fields (add-ai-taste-intake). Non-taste keys pass
+    // through untouched.
+    QVariantMap metadata = metadataIn;
+    static const QStringList kTasteBalanceValues = {"sour", "balanced", "bitter"};
+    static const QStringList kTasteBodyValues    = {"thin", "medium", "heavy"};
+    const auto sanitizeTaste = [&](const QString& key, const QStringList& allowed) {
+        if (!metadata.contains(key)) return;
+        const QString raw = metadata.value(key).toString();
+        if (raw.isEmpty()) return;  // "" = unset/clear, always valid
+        // Normalize case/whitespace so a drifted producer ("Balanced", " sour ")
+        // is corrected rather than silently discarded. Only a genuinely
+        // out-of-set value is dropped (with a warning).
+        const QString norm = raw.trimmed().toLower();
+        if (allowed.contains(norm)) {
+            metadata.insert(key, norm);
+        } else {
+            qWarning() << "ShotHistoryStorage: dropping invalid" << key << "value" << raw;
+            metadata.remove(key);
+        }
+    };
+    sanitizeTaste("tasteBalance", kTasteBalanceValues);
+    sanitizeTaste("tasteBody", kTasteBodyValues);
+
     // Map camelCase metadata keys to DB column names.
     // Only columns with keys present in the metadata map are updated,
     // so partial updates don't wipe unspecified fields.
@@ -3126,6 +3196,11 @@ bool ShotHistoryStorage::updateShotMetadataStatic(QSqlDatabase& db, qint64 shotI
         {"defrostDate",     "defrost_date"},
         {"storageHint",     "storage_hint"},
         {"openedDate",      "opened_date"},
+        // Structured taste axes (add-ai-taste-intake): the taste intake picker
+        // and the review-page picker write these post-hoc. Values validated
+        // against the allowed sets below before the map is consulted.
+        {"tasteBalance",    "taste_balance"},
+        {"tasteBody",       "taste_body"},
     };
 
     // Build SET clause from only the keys present in the metadata.
@@ -3195,7 +3270,9 @@ void ShotHistoryStorage::requestUpdateShotMetadata(qint64 shotId, const QVariant
             if (success) {
                 invalidateDistinctCache();
             } else {
-                emit errorOccurred(QString("Failed to save metadata for shot %1").arg(shotId));
+                // User-facing (surfaced as a toast): no internal shot id, no
+                // "metadata" jargon. The id + success are logged at qDebug below.
+                emit errorOccurred(QStringLiteral("Couldn't save your shot changes — please try again."));
             }
             emit shotMetadataUpdated(shotId, success);
             qDebug() << "ShotHistoryStorage: Async updated metadata for shot" << shotId << "success:" << success;
@@ -3711,6 +3788,11 @@ bool ShotHistoryStorage::importDatabaseStatic(const QString& destDbPath, const Q
             // so a pre-32 source imports cleanly rather than failing per row.
             const int idxStorageHint = srcRecord.indexOf("storage_hint");
             const int idxOpenedDate = srcRecord.indexOf("opened_date");
+            // Structured taste axes (add-ai-taste-intake): carried verbatim like
+            // storage_hint/opened_date. Present only on post-migration-33 sources
+            // → NULL on older ones (idx == -1).
+            const int idxTasteBalance = srcRecord.indexOf("taste_balance");
+            const int idxTasteBody = srcRecord.indexOf("taste_body");
             // equipment_id (a source package row id, remapped) + rpm exist only
             // on post-migration-22 sources (add-equipment-packages). Older
             // sources lack both — they resolve to NULL.
@@ -3751,8 +3833,9 @@ bool ShotHistoryStorage::importDatabaseStatic(const QString& destDbPath, const Q
                         skip_first_frame_detected, pour_truncated_detected,
                         stopped_by, beanbase_json, beanbase_id,
                         bag_id, frozen_date, defrost_date, storage_hint, opened_date,
+                        taste_balance, taste_body,
                         recipe_id, steam_json, hot_water_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 )");
 
                 insert.addBindValue(uuid);
@@ -3813,6 +3896,8 @@ bool ShotHistoryStorage::importDatabaseStatic(const QString& destDbPath, const Q
                 insert.addBindValue(srcValueOrNull(idxDefrostDate));
                 insert.addBindValue(srcValueOrNull(idxStorageHint));
                 insert.addBindValue(srcValueOrNull(idxOpenedDate));
+                insert.addBindValue(srcValueOrNull(idxTasteBalance));
+                insert.addBindValue(srcValueOrNull(idxTasteBody));
                 // recipe_id is a row id in the SOURCE database — remap to the
                 // imported recipe's new id, or NULL when the recipe wasn't
                 // imported (so provenance never dangles). steam_json and

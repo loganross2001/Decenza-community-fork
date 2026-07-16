@@ -1830,70 +1830,13 @@ Item {
                 Item { Layout.fillWidth: true }
             }
 
-            // [barista-fork] Card footer — declutter: the crowded voice-favorites row is gone. These two knobs
-            // adjust the BARISTA voice only (clearly labelled so it's obvious which role they touch); the
-            // coaching voice has its OWN volume/speed, reachable from Select Barista → Coaching or gear →
-            // Coaching. Both bind straight to baristaVoiceVolume/Speed so the card and the picker never diverge.
-            // VOLUME — barista playback gain (0..1), applied live so a drag is heard immediately.
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: Theme.spacingSmall
-                Text {
-                    text: TranslationManager.translate("barista.baristaVolume", "Barista volume")
-                    color: Theme.textSecondaryColor
-                    font: Theme.labelFont
-                    Accessible.ignored: true
-                }
-                Slider {
-                    id: cardVolumeSlider
-                    Layout.fillWidth: true
-                    from: 0.0; to: 1.0; stepSize: 0.02
-                    value: root._settings ? root._settings.baristaVoiceVolume : 1.0
-                    onMoved: {
-                        if (root._settings) root._settings.baristaVoiceVolume = value
-                        if (root._voice) root._voice.applyLiveVolume()   // instant, even mid-utterance
-                    }
-                    Accessible.name: TranslationManager.translate("barista.baristaVolume", "Barista volume")
-                }
-                Text {
-                    text: Math.round(cardVolumeSlider.value * 100) + "%"
-                    color: Theme.textSecondaryColor
-                    font: Theme.labelFont
-                    Layout.preferredWidth: Theme.scaled(38)
-                    horizontalAlignment: Text.AlignRight
-                }
-            }
-            // SPEED — barista rate multiplier (applied on the NEXT utterance, like the settings speed slider).
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: Theme.spacingSmall
-                Text {
-                    text: TranslationManager.translate("barista.baristaSpeed", "Barista speed")
-                    color: Theme.textSecondaryColor
-                    font: Theme.labelFont
-                    Accessible.ignored: true
-                }
-                Slider {
-                    id: cardSpeedSlider
-                    Layout.fillWidth: true
-                    from: 0.7; to: 1.3; stepSize: 0.05
-                    value: root._settings ? root._settings.baristaVoiceSpeed : 1.0
-                    onMoved: if (root._settings) root._settings.baristaVoiceSpeed = value
-                    Accessible.name: TranslationManager.translate("barista.baristaSpeed", "Barista speed")
-                }
-                Text {
-                    text: cardSpeedSlider.value.toFixed(2) + "×"
-                    color: Theme.textSecondaryColor
-                    font: Theme.labelFont
-                    Layout.preferredWidth: Theme.scaled(38)
-                    horizontalAlignment: Text.AlignRight
-                }
-            }
-            // SELECT BARISTA — opens the compact per-role picker (voice + volume + speed, scoped to
-            // Barista or Coaching by a dot-selector). Replaces the old first-three-voices favorites row.
+            // [barista-fork] Card footer — fully decluttered: NO volume/speed knobs on the card face. A single
+            // "Barista options" button opens the per-role popup, where a General/Coaching dot-selector scopes
+            // the voice dropdown + volume + speed for each voice independently. Keeps the card face to just the
+            // conversation + Chat/Pause; every voice knob lives one tap away in Barista options (or gear → Voice).
             AccessibleButton {
                 Layout.fillWidth: true
-                text: TranslationManager.translate("barista.selectBarista", "Select Barista")
+                text: TranslationManager.translate("barista.baristaOptions", "Barista options")
                 accessibleName: text
                 onClicked: root._selectBaristaOpen = true
             }
@@ -1974,9 +1917,10 @@ Item {
         }
     }
 
-    // [barista-fork] SELECT BARISTA picker — a compact per-role voice/volume/speed chooser opened from the
-    // card footer's "Select Barista" button. A dot-selector scopes every control to the Barista OR the
-    // Coaching voice (both already fully independent in settings — this just surfaces them one tap away). The
+    // [barista-fork] BARISTA OPTIONS picker — a compact per-role voice/volume/speed chooser opened from the
+    // card footer's "Barista options" button. A General/Coaching dot-selector scopes every control to the
+    // conversational OR the coaching voice (both fully independent in settings — this surfaces them one tap
+    // away, and is now the ONLY on-card path to the voice knobs since the card-face sliders were removed). The
     // voice dropdown REFLECTS the selected role's current provider (elevenlabs saved / openai / native) — it
     // does not switch providers (that stays in full Settings). Volume applies live; speed on the next utterance.
     Item {
@@ -2008,7 +1952,7 @@ Item {
             border.color: Theme.borderColor
 
             Accessible.role: Accessible.Grouping
-            Accessible.name: TranslationManager.translate("barista.selectBarista", "Select Barista")
+            Accessible.name: TranslationManager.translate("barista.baristaOptions", "Barista options")
 
             // Which voice these controls adjust: "barista" (conversational) or "coaching" (live cues).
             property string pickerRole: "barista"
@@ -2048,7 +1992,7 @@ Item {
                 RowLayout {
                     Layout.fillWidth: true
                     Text {
-                        text: TranslationManager.translate("barista.selectBarista", "Select Barista")
+                        text: TranslationManager.translate("barista.baristaOptions", "Barista options")
                         Layout.fillWidth: true
                         color: Theme.textColor
                         font: Theme.subtitleFont
@@ -2071,7 +2015,7 @@ Item {
                 }
                 Repeater {
                     model: [
-                        { role: "barista",  label: TranslationManager.translate("barista.roleBarista", "Barista") },
+                        { role: "barista",  label: TranslationManager.translate("barista.roleGeneral", "General") },
                         { role: "coaching", label: TranslationManager.translate("barista.roleCoaching", "Coaching") }
                     ]
                     delegate: Item {

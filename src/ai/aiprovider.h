@@ -208,6 +208,10 @@ public:
     // not in availableModels(), so a stale/unknown stored value can't break the
     // request.
     void setModel(const QString& modelId);
+    // [barista-fork] Set the wire model bypassing the availableModels() allow-list. ONLY for internal,
+    // non-user-selectable providers (e.g. the AIManager quick-filler provider pinned to Haiku) — the UI
+    // model picker still routes through setModel(), so this can't surface an unlisted model to users.
+    void setModelUnchecked(const QString& modelId) { m_model = modelId; }
 
     void analyze(const QString& systemPrompt, const QString& userPrompt) override;
     void analyzeConversation(const QString& systemPrompt, const QJsonArray& messages) override;

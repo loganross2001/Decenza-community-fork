@@ -228,6 +228,11 @@ public:
     // recent advice) anchored on the latest shot for the current bean — falling back to the latest
     // shot overall when the bean name doesn't match. Emits baristaContextReady() on the main thread.
     Q_INVOKABLE void requestBaristaContext(const QString& beanBrand, const QString& beanType, const QString& profileName);
+    // [barista-fork] Fire the parallel quick-filler (dedicated Haiku provider) the instant the user's turn is
+    // dispatched, so a short spoken "one sec" can play ~2s sooner than the main turn's own lead-in. Silent
+    // no-op when there is no Anthropic key. Emits quickFillerReady() on completion (overlay gates whether it
+    // actually speaks). `utterance` is the user's words, used only to make the acknowledgement contextual.
+    Q_INVOKABLE void requestQuickFiller(const QString& utterance);
     // Anchor shot id resolved by the last requestBaristaContext (0 if none) — for closed-loop turn stamping.
     Q_INVOKABLE qint64 lastBaristaAnchorId() const { return m_lastBaristaAnchorId; }
 
@@ -395,10 +400,15 @@ signals:
     // silent. Only re-emitted for a conversation request (mirrors conversationResponseReceived gating).
     void conversationInterimText(const QString& text);
     void conversationErrorOccurred(const QString& error);
+    // [barista-fork] A tiny model-generated "give me a sec" filler, produced by the dedicated Haiku provider
+    // in parallel with the main turn so it can be spoken ~2s sooner. The overlay gates it (only speaks if the
+    // real answer hasn't already landed) — see AssistantOverlay onQuickFillerReady.
+    void quickFillerReady(const QString& text);
 
 private slots:
     void onAnalysisComplete(const QString& response);
     void onInterimText(const QString& text);   // [barista-fork] route provider interimText → conversation
+    void onQuickFillerReady(const QString& text);   // [barista-fork] filler provider analysisComplete → quickFillerReady
     void onAnalysisFailed(const QString& error);
     void onTestResult(bool success, const QString& message);
     void onOllamaModelsRefreshed(const QStringList& models);
@@ -442,6 +452,14 @@ private:
     std::unique_ptr<AIProvider> m_geminiProvider;
     std::unique_ptr<AIProvider> m_openrouterProvider;
     std::unique_ptr<AIProvider> m_ollamaProvider;
+    // [barista-fork] Dedicated Haiku provider for the parallel "quick filler" — a tiny, fast "one sec" the
+    // barista can speak ~2s sooner than the main turn's own lead-in. Kept OUT of providerById/currentProvider
+    // so it is never selected as the main provider; only ever driven by requestQuickFiller(). Null when there
+    // is no Anthropic key (silent no-op → current behavior). m_fillerInFlightGen guards a superseded filler
+    // from being spoken after a newer requestQuickFiller() bumps m_fillerGen.
+    std::unique_ptr<AIProvider> m_fillerProvider;
+    int m_fillerGen = 0;
+    int m_fillerInFlightGen = -1;
 
     // State
     bool m_analyzing = false;

@@ -112,6 +112,7 @@ Item {
     // is actually sent). Clears the per-turn spoken flag + cue so each turn starts fresh.
     function _beginSlowOpWatch() {
         root._spokeThisTurn = false
+        root._quickFillerSpoke = false   // [barista-fork] fresh turn → the quick filler may speak again
         root._thinkingCue = false
         slowOpTimer.restart()
         root._updateThinkingLoop()   // [barista-fork] start the continuous thinking hum immediately
@@ -269,6 +270,10 @@ Item {
     // onInterimReceived) OR the final answer. The 5s silence-breaker (Part B) only fires while this is still
     // false, so a natural verbal acknowledgment always suppresses the non-verbal cue. Reset at each turn start.
     property bool _spokeThisTurn: false
+    // [barista-fork] True once the parallel Haiku quick-filler has spoken this turn (see onQuickFillerReady).
+    // When set, the model's own (slower) pre-tool lead-in is NOT spoken again — the filler already covered
+    // "I'm on it" ~2s earlier. Reset at each turn start alongside _spokeThisTurn.
+    property bool _quickFillerSpoke: false
     // [barista-fork] Part B cue latch: a more pronounced avatar "thinking" beat while the slow op drags on with
     // nothing spoken. Set when the 5s timer fires; cleared as soon as anything is spoken or the turn resolves.
     property bool _thinkingCue: false
@@ -1336,6 +1341,14 @@ Item {
                        + " confidence=" + Barista.voiceId.heardConfidence + "]\n" + t
             Barista.voiceId.consumeHeard()
         }
+        // [barista-fork] Parallel quick-filler: fire a tiny Haiku "one sec" in parallel with the main turn so a
+        // spoken acknowledgement can play ~2s sooner than the model's own (slower) lead-in. Only when a voice
+        // will actually speak it (voiceEnabled) and the main turn is Anthropic (matches where the lead-in comes
+        // from). AIManager no-ops without an Anthropic key. Uses the user's plain words `t`, not `_modelText`
+        // (no voiceHint prefix). The overlay gate (onQuickFillerReady) suppresses it if the real answer wins.
+        if (_sendIsAnthropic && root._voice && root._settings && root._settings.voiceEnabled
+                && typeof MainController !== "undefined" && MainController.aiManager)
+            MainController.aiManager.requestQuickFiller(t)
         // [barista-fork] User-initiated: the FIRST utterance of a primed session BEGINS the Claude
         // conversation with the user's real words as the first turn (no synthetic kickoff). Subsequent
         // turns follow up. The persona's greeting rules fold any hello into this first reply.
@@ -1453,6 +1466,15 @@ Item {
             var clean = root._stripBlock(text)
             if (clean.length === 0)
                 return
+            // [barista-fork] The parallel quick-filler already spoke a "one sec" for this turn — don't speak the
+            // model's own (redundant) lead-in on top of it. Still record it as _leadinSpokenText so the final
+            // answer's dup-guard can suppress a restatement; the quick filler already paused the mic + marked
+            // the turn spoken.
+            if (root._quickFillerSpoke) {
+                root._leadinSpokenText = clean
+                root._diag("leadin_skipped_quickfiller", { chars: clean.length })
+                return
+            }
             // [barista-fork] Text-on-speak: hold the lead-in text until the voice is audible (onAudibleChanged
             // reveals it). If muted (nothing will be spoken), show it now so a muted reply still displays.
             if (!root._voice || !root._settings || !root._settings.voiceEnabled) root._message = clean
@@ -1573,6 +1595,28 @@ Item {
             // owns this signal and emits the fuller combined block via onContextReady below.
             if (root._awaitingContext && !(typeof Barista !== "undefined" && Barista.contextBuilder))
                 root._askWithContext(dataBlock, false)
+        }
+        // [barista-fork] The parallel Haiku quick-filler returned. Speak it ONLY if it's still needed —
+        // event-based gate (no timer): the turn must still be in flight (_thinking), nothing spoken yet this
+        // turn (!_spokeThisTurn), the voice idle, and a voice enabled. If the real answer/lead-in already won
+        // the race, drop it silently. Speaking marks the turn so the model's own lead-in is suppressed
+        // (onInterimReceived) and sets _leadinSpokenText so the final answer's dup-guard still works.
+        function onQuickFillerReady(text) {
+            var clean = root._stripBlock(text || "")
+            if (root._state !== "conversing" || !root._thinking || root._spokeThisTurn
+                    || (root._voice && root._voice.speaking) || clean.length === 0
+                    || !root._voice || !root._settings || !root._settings.voiceEnabled) {
+                root._diag("quick_filler_suppressed", { chars: clean.length,
+                    thinking: root._thinking, spoke: root._spokeThisTurn })
+                return
+            }
+            root._quickFillerSpoke = true
+            root._leadinSpokenText = clean   // the post-tool answer must not just restate the filler
+            root._pendingDisplayText = clean // revealed when the filler becomes audible (onAudibleChanged)
+            root._markSpokeThisTurn()
+            if (root._voiceInput && root._voiceInput.listening) root._voiceInput.pauseMic()
+            root._diag("quick_filler_spoke", { chars: clean.length })
+            root._speakSanitised(clean)
         }
     }
     // Combined context (dial-in + community bean profile + curated profile guidance) from the builder.

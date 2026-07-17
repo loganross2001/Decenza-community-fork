@@ -308,6 +308,19 @@ void AIManager::createProviders()
     anthropic->setWebTools(BaristaTools::webToolDefinitions());
     m_anthropicProvider.reset(anthropic);
 
+    // [barista-fork] Dedicated Haiku provider for the parallel quick-filler (requestQuickFiller). Plain
+    // single-shot analyze() path — NO client tools / web tools / interim wiring, and deliberately kept out of
+    // providerById()/currentProvider() so it can never serve a real turn. Pinned to Haiku via setModelUnchecked
+    // (Haiku isn't in the user-facing model list). Only built when an Anthropic key exists; otherwise the
+    // filler is a silent no-op and behavior is unchanged. A failed filler is swallowed — it must never surface.
+    if (!anthropicKey.isEmpty()) {
+        auto* filler = new AnthropicProvider(m_networkManager, anthropicKey, this);
+        filler->setModelUnchecked(QStringLiteral("claude-haiku-4-5"));
+        connect(filler, &AIProvider::analysisComplete, this, &AIManager::onQuickFillerReady);
+        connect(filler, &AIProvider::analysisFailed, this, [](const QString&) { /* filler failure: silent */ });
+        m_fillerProvider.reset(filler);
+    }
+
     // Create Gemini provider
     QString geminiKey = m_settings->ai()->geminiApiKey();
     auto* gemini = new GeminiProvider(m_networkManager, geminiKey, this);
@@ -1531,6 +1544,40 @@ static QString formatWhoBlock(const QString& activeUser, const QVector<Barista>&
         "MAINTENANCE and REMINDERS belong to the MACHINE, not to any user — they are the same for everyone, so "
         "never reframe them as the active user's (e.g. not \"your descale\" tied to a guest — it's the machine's).\n");
     return out;
+}
+
+// [barista-fork] Parallel quick-filler: fire a tiny Haiku turn the instant the user's utterance is dispatched,
+// so a short spoken acknowledgement can play ~2s sooner than the main turn's own (slower) lead-in. Model-
+// generated + varied (never a hardcoded string). Silent no-op without an Anthropic key. m_fillerInFlightGen
+// pins THIS request's generation; if a newer requestQuickFiller() bumps m_fillerGen before this one returns,
+// the stale completion is dropped in onQuickFillerReady. The overlay does the real "is it still needed" gating.
+void AIManager::requestQuickFiller(const QString& utterance)
+{
+    if (!m_fillerProvider)
+        return;
+    m_fillerInFlightGen = ++m_fillerGen;
+    const QString sys = QStringLiteral(
+        "You are a warm, concise espresso barista. The user just said: \"%1\". You are about to take a moment "
+        "to answer. Reply with ONLY a very short, natural spoken acknowledgement that you're on it — 3 to 8 "
+        "words, warm and varied (e.g. \"Sure, one sec…\", \"Let me look into that.\", \"On it — give me a "
+        "moment.\"). Do NOT answer the question, do NOT invent specifics, no emojis, no surrounding quotes.")
+        .arg(QString(utterance).replace(QLatin1Char('"'), QLatin1Char('\'')));
+    m_fillerProvider->analyze(sys, utterance);
+}
+
+void AIManager::onQuickFillerReady(const QString& text)
+{
+    // Drop a filler whose turn has been superseded by a newer quick-filler request.
+    if (m_fillerInFlightGen != m_fillerGen)
+        return;
+    QString t = text.trimmed();
+    // Strip a stray wrapping quote pair the model may add despite the instruction.
+    if (t.size() >= 2 && ((t.startsWith(QLatin1Char('"')) && t.endsWith(QLatin1Char('"')))
+                          || (t.startsWith(QLatin1Char('\'')) && t.endsWith(QLatin1Char('\'')))))
+        t = t.mid(1, t.size() - 2).trimmed();
+    if (t.isEmpty())
+        return;
+    emit quickFillerReady(t);
 }
 
 void AIManager::requestBaristaContext(const QString& beanBrand, const QString& beanType, const QString& profileName)

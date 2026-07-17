@@ -863,6 +863,12 @@ void AssistantVoice::handleAndroidPlaybackFinished(int tag) {
     const QString roleStr = m_role == Role::Barista ? QStringLiteral("barista") : QStringLiteral("coaching");
     if (tag == kTagVoice) {
         m_androidPlaying = false;
+        // [barista-fork] Release the pending-synth hold on EVERY voice finish. On a normal completion this is a
+        // no-op (handleAndroidPlaybackStarted already cleared it), but when the native player ERRORS before it
+        // ever starts (onError → nativeOnFinished with no nativeOnStarted), m_pendingSynth would otherwise stay
+        // true → speaking stuck true → the thinking-hum's want-condition never clears and the pulse lingers
+        // forever. Clearing it here is the definitive "this utterance is over" signal so speaking can settle.
+        m_pendingSynth = false;
         setPlaybackDurationMs(0);   // clip done — clear so the next utterance's scroll doesn't reuse a stale length
         BaristaDiagnostics::record(QStringLiteral("voice"), QStringLiteral("native_playback_finished"),
             {{QStringLiteral("role"), roleStr}, {QStringLiteral("tag"), tag}});

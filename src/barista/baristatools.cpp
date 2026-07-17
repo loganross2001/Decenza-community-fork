@@ -335,6 +335,48 @@ QJsonArray BaristaTools::toolDefinitions()
     pd["input_schema"] = pdSchema;
     tools.append(pd);
 
+    // [barista-fork] remember_fact (WRITE) — durable BASIC facts the user tells the barista about themselves or
+    // their world, so continuity carries across sessions. Curated, NOT a transcript: the model decides what is a
+    // keep-worthy fact. Facts already known are injected each turn as [knownFacts], so the barista shouldn't
+    // re-ask them. Scoped to the active user by the executor (never trusted from the model).
+    QJsonObject rf;
+    rf["name"] = QString("remember_fact");
+    rf["description"] = QString(
+        "Save a DURABLE BASIC FACT the user tells you about themselves or their world so you remember it in future "
+        "conversations — names and relationships (family, friends, pets), preferences, where they live or work, "
+        "allergies, an ongoing project or goal. Store ONLY facts the user is clearly telling YOU as part of THIS "
+        "conversation. Do NOT store: a transcript or paraphrase of the discussion, small talk or passing/ephemeral "
+        "remarks, anything you merely overheard that wasn't addressed to you, or coffee dial-in numbers and shot "
+        "ratings (those have their own tools). One fact per call. Phrase it as a short self-contained statement "
+        "(\"Oldest daughter Audrey attends University of Washington\", \"Prefers lighter roasts\", \"Has a dog "
+        "named Max\"). If the user corrects something, call forget_fact for the old version then remember_fact for "
+        "the new. Acknowledge briefly once it's saved (\"Got it — I'll remember that\"). You already receive the "
+        "facts you know in your context, so don't re-ask what you've been told.");
+    QJsonObject rfSchema;
+    rfSchema["type"] = QString("object");
+    QJsonObject rfProps;
+    rfProps["fact"] = strProp("The fact to remember, as a short self-contained statement (required).");
+    rfProps["category"] = strProp("Optional one-word grouping, e.g. \"family\", \"preference\", \"work\", \"pet\", \"home\".");
+    rfSchema["properties"] = rfProps;
+    rfSchema["required"] = QJsonArray{ QString("fact") };
+    rf["input_schema"] = rfSchema;
+    tools.append(rf);
+
+    // [barista-fork] forget_fact (WRITE) — the correction/removal path for remember_fact.
+    QJsonObject ff;
+    ff["name"] = QString("forget_fact");
+    ff["description"] = QString(
+        "Remove a fact you previously remembered — a correction, or something that's no longer true. Pass a few "
+        "words that identify the fact (matched within your stored facts). Confirm briefly what you dropped.");
+    QJsonObject ffSchema;
+    ffSchema["type"] = QString("object");
+    QJsonObject ffProps;
+    ffProps["fact"] = strProp("Words identifying the fact to forget, e.g. \"dog named Max\" (required).");
+    ffSchema["properties"] = ffProps;
+    ffSchema["required"] = QJsonArray{ QString("fact") };
+    ff["input_schema"] = ffSchema;
+    tools.append(ff);
+
     // [barista-fork] list_due_reminders (READ) — surface reminders that are now due. Due reminders/maintenance
     // are ALSO folded into the context block (dueItems) each turn, so reach for this for an explicit recall
     // ("what am I supposed to do today?") or after completing one, to see what's left.
@@ -962,6 +1004,66 @@ void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage*
                     done(QJsonObject{{QStringLiteral("error"), QStringLiteral("failed to save personal date")}});
             });
         tasks->requestAddPersonalDate(fields);
+        return;
+    }
+
+    // [barista-fork] remember_fact (WRITE) — store a durable basic fact. The ACTIVE USER is stamped app-side
+    // from the anchor snapshot (m_settings->dye()->dyeBarista()), NEVER trusted from the model, so facts scope
+    // to whoever the barista is talking to (no cross-user contamination). The model supplies only fact/category.
+    if (name == QLatin1String("remember_fact")) {
+        if (!tasks) {
+            done(QJsonObject{{QStringLiteral("error"), QStringLiteral("fact storage unavailable")}});
+            return;
+        }
+        const QString fact = input.value(QStringLiteral("fact")).toString().trimmed();
+        if (fact.isEmpty()) {
+            done(QJsonObject{{QStringLiteral("error"),
+                QStringLiteral("remember_fact needs a fact to store")}});
+            return;
+        }
+        QVariantMap fields;
+        fields.insert(QStringLiteral("user"), anchorSnapshot.value(QStringLiteral("activeUser")).toString());
+        fields.insert(QStringLiteral("fact"), fact);
+        fields.insert(QStringLiteral("category"), input.value(QStringLiteral("category")).toString().trimmed());
+
+        auto conn = std::make_shared<QMetaObject::Connection>();
+        *conn = QObject::connect(tasks, &TasksStorage::userFactAdded, tasks,
+            [done, conn, fact](qint64 id) {
+                QObject::disconnect(*conn);
+                if (id > 0)
+                    done(QJsonObject{{QStringLiteral("ok"), true}, {QStringLiteral("factId"), id},
+                                     {QStringLiteral("fact"), fact}});
+                else
+                    done(QJsonObject{{QStringLiteral("error"), QStringLiteral("failed to save the fact")}});
+            });
+        tasks->requestAddUserFact(fields);
+        return;
+    }
+
+    // [barista-fork] forget_fact (WRITE) — remove previously-remembered facts (a correction). Scoped to the
+    // active user, same as remember_fact.
+    if (name == QLatin1String("forget_fact")) {
+        if (!tasks) {
+            done(QJsonObject{{QStringLiteral("error"), QStringLiteral("fact storage unavailable")}});
+            return;
+        }
+        const QString fact = input.value(QStringLiteral("fact")).toString().trimmed();
+        if (fact.isEmpty()) {
+            done(QJsonObject{{QStringLiteral("error"),
+                QStringLiteral("forget_fact needs words identifying the fact to remove")}});
+            return;
+        }
+        QVariantMap fields;
+        fields.insert(QStringLiteral("user"), anchorSnapshot.value(QStringLiteral("activeUser")).toString());
+        fields.insert(QStringLiteral("fact"), fact);
+
+        auto conn = std::make_shared<QMetaObject::Connection>();
+        *conn = QObject::connect(tasks, &TasksStorage::userFactForgotten, tasks,
+            [done, conn](int removed) {
+                QObject::disconnect(*conn);
+                done(QJsonObject{{QStringLiteral("ok"), true}, {QStringLiteral("removed"), removed}});
+            });
+        tasks->requestForgetUserFact(fields);
         return;
     }
 

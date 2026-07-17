@@ -289,11 +289,17 @@ void AIManager::createProviders()
             // [barista-fork] Thread the feedback KB + the app-side anchor/dial snapshot into the executor so
             // log_tasting_feedback stamps shot_id + bean/profile/dial itself (never from the model). The
             // m_webToolsHandler seam runs the fast-path web tools (get_weather/get_stock_quote/get_local_news).
+            // [barista-fork] Stamp the FRESH active roster user into the snapshot so remember_fact/forget_fact
+            // scope facts to whoever the barista is talking to RIGHT NOW (survives a mid-session set_active_user
+            // switch, unlike the snapshot which is frozen at context-assembly time). Never trusted from the model.
+            QVariantMap anchor = m_lastBaristaAnchorSnapshot;
+            if (m_settings && m_settings->dye())
+                anchor.insert(QStringLiteral("activeUser"), m_settings->dye()->dyeBarista());
             BaristaTools::executeTool(m_shotHistory, m_feedbackStorage, m_tasksStorage, m_applyDialHandler,
                                       m_endConversationHandler, m_webToolsHandler,
                                       m_getActiveRecipeHandler, m_activateRecipeHandler, m_deactivateRecipeHandler,
                                       m_setActiveUserHandler,
-                                      m_lastBaristaAnchorSnapshot,
+                                      anchor,
                                       name, input, std::move(done));
         });
     // [barista-fork] Register the fast-path web-tool DEFINITIONS separately. They ship under the webSearch gate
@@ -1566,6 +1572,7 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
         QJsonObject dueItems;      // [barista-fork] due reminders + due maintenance (assistant.db, shot-independent)
         QJsonObject docChange;     // [barista-fork] a pending Decent cleaning-guide change to OFFER (assistant.db)
         QJsonObject occasion;      // [barista-fork] today's US holiday + personal dates for the greeting/goodbye
+        QJsonArray knownFacts;     // [barista-fork] durable basic facts the user told the barista (remember_fact)
 
         withTempDb(dbPath, "barista_ctx", [&](QSqlDatabase& db) {
             // Anchor: latest shot for the current bean; else latest overall (robust to bean-name drift).
@@ -1746,6 +1753,20 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
                         "('Happy Thanksgiving!', 'Happy anniversary!'). It is part of the hello or sign-off, NOT a "
                         "separate proactive item, and never mid-conversation — do not force it or repeat it.");
 
+                // [barista-fork] KNOWN FACTS — durable basic facts the user told the barista (remember_fact),
+                // scoped to the active user (+ unattributed). Read UNCONDITIONALLY like dueItems (shot-independent)
+                // and capped at 30 so the injected prompt can't grow without bound. Injected as background
+                // continuity the barista already knows — it should weave them in, not recite or re-ask them.
+                for (const QVariant& r : TasksStorage::fetchUserFactsStatic(db, activeUser, 30)) {
+                    const QVariantMap m = r.toMap();
+                    QJsonObject o;
+                    o[QStringLiteral("fact")] = m.value(QStringLiteral("fact")).toString();
+                    const QString cat = m.value(QStringLiteral("category")).toString();
+                    if (!cat.isEmpty())
+                        o[QStringLiteral("category")] = cat;
+                    knownFacts.append(o);
+                }
+
                 // [barista-fork] MAINTENANCE-DOC CHANGE: the periodic Decent cleaning-guide check
                 // (MaintenanceDocSync) sets reviewed=0 when it detects a change the owner hasn't seen yet.
                 // Fold in the fetched doc text PLUS the CURRENT still-default schedule (is_default=1 rows only —
@@ -1815,7 +1836,7 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
 
         QMetaObject::invokeMethod(qApp, [self, serial, shot, anchorId, beanFilterMissed,
                                          beanBrand, beanType, profileName, beanFeedback, dueItems, docChange,
-                                         occasion, dialInSessions, bestRecentShot, beanBestShot, grinderContext,
+                                         occasion, knownFacts, dialInSessions, bestRecentShot, beanBestShot, grinderContext,
                                          grinderCalibration, recentAdvice, fullHistory, recipesBlock, whoBlock]() {
             if (!self || serial != self->m_baristaContextSerial)
                 return;   // stale — a newer request superseded this one
@@ -1874,13 +1895,30 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
                 occasionSuffix = QStringLiteral("\n\n## todaysOccasion (acknowledge once in your greeting or goodbye, only if natural):\n")
                                + QString::fromUtf8(QJsonDocument(occasion).toJson(QJsonDocument::Indented));
 
+            // [barista-fork] knownFacts — durable basic facts remembered about this user; background continuity,
+            // NOT a proactive item. Shot-independent, so it rides every path including the no-shot early returns.
+            QString factsSuffix;
+            if (!knownFacts.isEmpty()) {
+                QJsonObject facts;
+                facts[QStringLiteral("facts")] = knownFacts;
+                facts[QStringLiteral("note")] = QStringLiteral(
+                    "Facts you've remembered about this user from past conversations — treat as background you "
+                    "already know. Weave them in naturally when relevant; do NOT recite the list, and do NOT re-ask "
+                    "what's already here. Use remember_fact to add a new durable fact, forget_fact to correct one.");
+                if (knownFacts.size() >= 30)
+                    facts[QStringLiteral("truncatedNote")] = QStringLiteral(
+                        "Showing the 30 most recent facts; older ones may be omitted.");
+                factsSuffix = QStringLiteral("\n\n## knownFacts (things you remember about this user):\n")
+                            + QString::fromUtf8(QJsonDocument(facts).toJson(QJsonDocument::Indented));
+            }
+
             if (anchorId <= 0 || !shot.isValid()) {
-                emit self->baristaContextReady(QStringLiteral("recordedShots: 0") + dueSuffix + docSuffix + occasionSuffix + recipesBlock + whoBlock);
+                emit self->baristaContextReady(QStringLiteral("recordedShots: 0") + dueSuffix + docSuffix + occasionSuffix + factsSuffix + recipesBlock + whoBlock);
                 return;
             }
             QJsonObject obj = self->buildUserPromptObjectForShot(shot);
             if (obj.isEmpty()) {
-                emit self->baristaContextReady(QStringLiteral("recordedShots: 0") + dueSuffix + docSuffix + occasionSuffix + recipesBlock + whoBlock);
+                emit self->baristaContextReady(QStringLiteral("recordedShots: 0") + dueSuffix + docSuffix + occasionSuffix + factsSuffix + recipesBlock + whoBlock);
                 return;
             }
             self->enrichUserPromptObject(obj, shot, dialInSessions, bestRecentShot, grinderContext,
@@ -1935,6 +1973,7 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
             block += dueSuffix;   // [barista-fork] due reminders/maintenance ride the same first-reply turn
             block += docSuffix;   // [barista-fork] a pending Decent cleaning-guide change to offer (rare, one-time)
             block += occasionSuffix;   // [barista-fork] today's holiday/personal dates for a warm greeting/goodbye
+            block += factsSuffix;      // [barista-fork] durable basic facts remembered about this user
             block += recipesBlock;     // [barista-fork] Recipes 2.0 proactive block (active recipe + MRU list)
             block += whoBlock;         // [barista-fork] Phase 1 identity: who's here + honest-attribution note
             emit self->baristaContextReady(block);

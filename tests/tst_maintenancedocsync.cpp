@@ -216,6 +216,99 @@ private slots:
         });
     }
 
+    // --- user_facts: the barista's durable basic-fact memory --------------------------------------
+
+    static QVariantMap fact(const QString& user, const QString& f, const QString& cat = QString())
+    {
+        QVariantMap m;
+        m.insert(QStringLiteral("user"), user);
+        m.insert(QStringLiteral("fact"), f);
+        if (!cat.isEmpty()) m.insert(QStringLiteral("category"), cat);
+        return m;
+    }
+
+    void addAndFetchUserFact()
+    {
+        const QString path = m_dir.path() + "/facts_add.db";
+        withRawDb(path, "facts_add", [](QSqlDatabase& db) {
+            QVERIFY(TasksStorage::ensureSchemaStatic(db));
+            const qint64 id = TasksStorage::insertUserFactStatic(db, fact("Chris", "Oldest daughter Audrey attends UW", "family"));
+            QVERIFY(id > 0);
+            const QVariantList rows = TasksStorage::fetchUserFactsStatic(db, "Chris", 30);
+            QCOMPARE(rows.size(), 1);
+            QCOMPARE(rows.first().toMap().value("fact").toString(), QStringLiteral("Oldest daughter Audrey attends UW"));
+            QCOMPARE(rows.first().toMap().value("category").toString(), QStringLiteral("family"));
+        });
+    }
+
+    void dedupeCaseInsensitiveKeepsOneRow()
+    {
+        const QString path = m_dir.path() + "/facts_dedupe.db";
+        withRawDb(path, "facts_dedupe", [](QSqlDatabase& db) {
+            QVERIFY(TasksStorage::ensureSchemaStatic(db));
+            const qint64 a = TasksStorage::insertUserFactStatic(db, fact("Chris", "Has a dog named Max"));
+            // Same fact, different case → dedupes to the existing id, no second row.
+            const qint64 b = TasksStorage::insertUserFactStatic(db, fact("Chris", "has a DOG named max"));
+            QVERIFY(a > 0);
+            QCOMPARE(a, b);
+            QCOMPARE(TasksStorage::fetchUserFactsStatic(db, "Chris", 30).size(), 1);
+        });
+    }
+
+    void perUserScopingIsolatesFacts()
+    {
+        const QString path = m_dir.path() + "/facts_scope.db";
+        withRawDb(path, "facts_scope", [](QSqlDatabase& db) {
+            QVERIFY(TasksStorage::ensureSchemaStatic(db));
+            QVERIFY(TasksStorage::insertUserFactStatic(db, fact("Chris", "Prefers lighter roasts")) > 0);
+            QVERIFY(TasksStorage::insertUserFactStatic(db, fact("Dana", "Drinks decaf only")) > 0);
+            QVERIFY(TasksStorage::insertUserFactStatic(db, fact("", "House has hard water")) > 0);   // unattributed
+
+            // Chris sees his own + the unattributed row, NOT Dana's.
+            const QVariantList chris = TasksStorage::fetchUserFactsStatic(db, "Chris", 30);
+            QCOMPARE(chris.size(), 2);
+            QStringList cf; for (const QVariant& r : chris) cf << r.toMap().value("fact").toString();
+            QVERIFY(cf.contains("Prefers lighter roasts"));
+            QVERIFY(cf.contains("House has hard water"));
+            QVERIFY(!cf.contains("Drinks decaf only"));
+
+            // Dana likewise sees her own + unattributed, not Chris's.
+            const QVariantList dana = TasksStorage::fetchUserFactsStatic(db, "Dana", 30);
+            QCOMPARE(dana.size(), 2);
+            QStringList dfacts; for (const QVariant& r : dana) dfacts << r.toMap().value("fact").toString();
+            QVERIFY(dfacts.contains("Drinks decaf only"));
+            QVERIFY(!dfacts.contains("Prefers lighter roasts"));
+        });
+    }
+
+    void forgetRemovesMatchingFacts()
+    {
+        const QString path = m_dir.path() + "/facts_forget.db";
+        withRawDb(path, "facts_forget", [](QSqlDatabase& db) {
+            QVERIFY(TasksStorage::ensureSchemaStatic(db));
+            QVERIFY(TasksStorage::insertUserFactStatic(db, fact("Chris", "Has a dog named Max")) > 0);
+            QVERIFY(TasksStorage::insertUserFactStatic(db, fact("Chris", "Works at Boeing")) > 0);
+            // Substring, case-insensitive; scoped to Chris.
+            const int removed = TasksStorage::deleteUserFactsStatic(db, "Chris", "dog named max");
+            QCOMPARE(removed, 1);
+            const QVariantList rows = TasksStorage::fetchUserFactsStatic(db, "Chris", 30);
+            QCOMPARE(rows.size(), 1);
+            QCOMPARE(rows.first().toMap().value("fact").toString(), QStringLiteral("Works at Boeing"));
+        });
+    }
+
+    void fetchHonorsCap()
+    {
+        const QString path = m_dir.path() + "/facts_cap.db";
+        withRawDb(path, "facts_cap", [](QSqlDatabase& db) {
+            QVERIFY(TasksStorage::ensureSchemaStatic(db));
+            for (int i = 0; i < 10; ++i)
+                QVERIFY(TasksStorage::insertUserFactStatic(db, fact("Chris", QStringLiteral("Fact number %1").arg(i))) > 0);
+            QCOMPARE(TasksStorage::fetchUserFactsStatic(db, "Chris", 3).size(), 3);
+            QCOMPARE(TasksStorage::fetchUserFactsStatic(db, "Chris", 30).size(), 10);
+        });
+    }
+
 private:
     QTemporaryDir m_dir;
 };

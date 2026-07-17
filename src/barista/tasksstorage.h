@@ -94,6 +94,17 @@ public:
     // (id -1 on failure). Wired through the add_personal_date barista client tool.
     Q_INVOKABLE void requestAddPersonalDate(const QVariantMap& fields);   // personalDateAdded(qint64)
 
+    // --- User facts (async) — durable BASIC facts the user tells the barista ("my daughter Audrey is at UW") ---
+
+    // Store one durable fact. `fields` keys: user (QString, active roster user, '' = unattributed),
+    // fact (QString, required, short canonical statement), category (QString, optional). Dedupes on
+    // (user, fact) case-insensitively — a repeat re-emits the existing id, no duplicate row. Emits
+    // userFactAdded(id) (id -1 on failure). Wired through the remember_fact barista client tool.
+    Q_INVOKABLE void requestAddUserFact(const QVariantMap& fields);       // userFactAdded(qint64)
+    // Forget facts. `fields` keys: user (QString), fact (QString, required — a substring identifying the
+    // fact, matched case-insensitively within that user's rows). Emits userFactForgotten(count removed).
+    Q_INVOKABLE void requestForgetUserFact(const QVariantMap& fields);    // userFactForgotten(int)
+
     // --- Maintenance (async, for the settings dialog) ---
 
     // All maintenance tasks (enabled + disabled), for the settings dialog. Emits maintenanceTasksReady.
@@ -132,6 +143,14 @@ public:
     // given year) and recurring rows (year == 0). Each row carries: id, label, month, day, year.
     static qint64 insertPersonalDateStatic(QSqlDatabase& db, const QVariantMap& fields);
     static QVariantList fetchPersonalDatesForTodayStatic(QSqlDatabase& db, int month, int day, int year);
+
+    // [barista-fork] User facts. insert dedupes on (user, fact) case-insensitively → returns the existing id
+    // when the fact is already stored (never a duplicate row), else the new id (-1 on failure). fetch returns
+    // that user's facts PLUS unattributed (user='') rows, newest first, capped. delete removes rows for `user`
+    // whose fact contains `factSubstr` (case-insensitive) and returns the number removed.
+    static qint64 insertUserFactStatic(QSqlDatabase& db, const QVariantMap& fields);
+    static QVariantList fetchUserFactsStatic(QSqlDatabase& db, const QString& user, int cap);
+    static int deleteUserFactsStatic(QSqlDatabase& db, const QString& user, const QString& factSubstr);
     // Open reminders with due_at <= nowEpoch, newest-due first (limit capped). Rows carry:
     // id, text, dueAt, recurrence, userPhrasing, createdAt.
     static QVariantList fetchDueRemindersStatic(QSqlDatabase& db, qint64 nowEpoch, int limit);
@@ -179,6 +198,8 @@ public:
 signals:
     void reminderCreated(qint64 id);                 // id -1 on failure
     void personalDateAdded(qint64 id);               // [barista-fork] id -1 on failure
+    void userFactAdded(qint64 id);                   // [barista-fork] id -1 on failure (dedupe → existing id)
+    void userFactForgotten(int removed);             // [barista-fork] number of rows deleted
     void dueRemindersReady(const QVariantList& rows);
     void reminderCompleted(qint64 id);               // id -1 on failure / not found
     void maintenanceTasksReady(const QVariantList& rows);

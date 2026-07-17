@@ -147,6 +147,43 @@ void TasksStorage::requestAddPersonalDate(const QVariantMap& fields)
         [this, newId](bool) { emit personalDateAdded(*newId); });
 }
 
+// ------------------------------------------------------------------------ User facts (async)
+
+void TasksStorage::requestAddUserFact(const QVariantMap& fields)
+{
+    if (m_dbPath.isEmpty()) {
+        qWarning() << "TasksStorage: requestAddUserFact on uninitialized storage";
+        emit userFactAdded(-1);
+        return;
+    }
+    auto newId = std::make_shared<qint64>(-1);
+    runAsync("user_fact_add",
+        [fields, newId](QSqlDatabase& db) {
+            if (!TasksStorage::ensureSchemaStatic(db))
+                return;
+            *newId = TasksStorage::insertUserFactStatic(db, fields);
+        },
+        [this, newId](bool) { emit userFactAdded(*newId); });
+}
+
+void TasksStorage::requestForgetUserFact(const QVariantMap& fields)
+{
+    if (m_dbPath.isEmpty()) {
+        emit userFactForgotten(0);
+        return;
+    }
+    const QString user = fields.value(QStringLiteral("user")).toString();
+    const QString factSubstr = fields.value(QStringLiteral("fact")).toString();
+    auto removed = std::make_shared<int>(0);
+    runAsync("user_fact_forget",
+        [user, factSubstr, removed](QSqlDatabase& db) {
+            if (!TasksStorage::ensureSchemaStatic(db))
+                return;
+            *removed = TasksStorage::deleteUserFactsStatic(db, user, factSubstr);
+        },
+        [this, removed](bool) { emit userFactForgotten(*removed); });
+}
+
 // -------------------------------------------------------------------------- Maintenance (async)
 
 void TasksStorage::requestMaintenanceTasks()
@@ -289,8 +326,25 @@ bool TasksStorage::ensureSchemaStatic(QSqlDatabase& db)
         return false;
     }
 
+    // [barista-fork] User facts — durable BASIC facts the user tells the barista, curated via the
+    // remember_fact tool (never auto-extracted). `user` scopes a fact to the active roster user ('' =
+    // unattributed) so different users never cross-contaminate. Additive; rides the shared assistant.db backup.
+    if (!query.exec(R"(
+        CREATE TABLE IF NOT EXISTS user_facts (
+            id INTEGER PRIMARY KEY,
+            user TEXT NOT NULL DEFAULT '',
+            fact TEXT NOT NULL,
+            category TEXT DEFAULT '',
+            created_at INTEGER DEFAULT 0
+        )
+    )")) {
+        qWarning() << "TasksStorage: failed to create user_facts:" << query.lastError().text();
+        return false;
+    }
+
     query.exec("CREATE INDEX IF NOT EXISTS idx_reminders_open ON reminders(completed_at, due_at)");
     query.exec("CREATE INDEX IF NOT EXISTS idx_personal_dates_md ON personal_dates(month, day)");
+    query.exec("CREATE INDEX IF NOT EXISTS idx_user_facts_user ON user_facts(user)");
 
     // Seed the editable-default maintenance schedule only when the table is empty (a first run). We
     // INSERT OR IGNORE by task_key so re-seeding never clobbers an owner's edited row. Seeding only
@@ -426,6 +480,82 @@ QVariantList TasksStorage::fetchPersonalDatesForTodayStatic(QSqlDatabase& db, in
         rows.append(m);
     }
     return rows;
+}
+
+// [barista-fork] User facts ----------------------------------------------------------------
+
+qint64 TasksStorage::insertUserFactStatic(QSqlDatabase& db, const QVariantMap& fields)
+{
+    const QString user = fields.value(QStringLiteral("user")).toString();
+    const QString fact = fields.value(QStringLiteral("fact")).toString().trimmed();
+    const QString category = fields.value(QStringLiteral("category")).toString().trimmed();
+    if (fact.isEmpty())
+        return -1;
+    // Dedupe on (user, fact) case-insensitively — re-remembering an identical fact re-emits the existing id
+    // instead of stacking duplicate rows (the model may re-assert a fact across turns).
+    QSqlQuery dup(db);
+    dup.prepare("SELECT id FROM user_facts WHERE user = :user AND LOWER(fact) = LOWER(:fact) LIMIT 1");
+    dup.bindValue(":user", user);
+    dup.bindValue(":fact", fact);
+    if (dup.exec() && dup.next())
+        return dup.value(0).toLongLong();
+
+    const qint64 now = QDateTime::currentSecsSinceEpoch();
+    QSqlQuery q(db);
+    q.prepare("INSERT INTO user_facts (user, fact, category, created_at) "
+              "VALUES (:user, :fact, :category, :created)");
+    q.bindValue(":user", user);
+    q.bindValue(":fact", fact);
+    q.bindValue(":category", category);
+    q.bindValue(":created", now);
+    if (!q.exec()) {
+        qWarning() << "TasksStorage: user_fact insert failed:" << q.lastError().text();
+        return -1;
+    }
+    return q.lastInsertId().toLongLong();
+}
+
+QVariantList TasksStorage::fetchUserFactsStatic(QSqlDatabase& db, const QString& user, int cap)
+{
+    QVariantList rows;
+    const int lim = cap > 0 ? cap : 30;
+    QSqlQuery q(db);
+    // This user's facts PLUS unattributed ('') rows (so a fact stored before a user was set isn't lost).
+    // Newest first; the cap bounds prompt growth (injected every conversation).
+    q.prepare("SELECT fact, category FROM user_facts "
+              "WHERE user = :user OR user = '' "
+              "ORDER BY created_at DESC LIMIT :lim");
+    q.bindValue(":user", user);
+    q.bindValue(":lim", lim);
+    if (!q.exec()) {
+        qWarning() << "TasksStorage: fetchUserFacts failed:" << q.lastError().text();
+        return rows;
+    }
+    while (q.next()) {
+        QVariantMap m;
+        m.insert(QStringLiteral("fact"),     q.value(0).toString());
+        m.insert(QStringLiteral("category"), q.value(1).toString());
+        rows.append(m);
+    }
+    return rows;
+}
+
+int TasksStorage::deleteUserFactsStatic(QSqlDatabase& db, const QString& user, const QString& factSubstr)
+{
+    const QString sub = factSubstr.trimmed();
+    if (sub.isEmpty())
+        return 0;
+    QSqlQuery q(db);
+    // Scope the delete to this user's rows (plus unattributed), matching the fact substring case-insensitively.
+    q.prepare("DELETE FROM user_facts WHERE (user = :user OR user = '') "
+              "AND LOWER(fact) LIKE '%' || LOWER(:sub) || '%'");
+    q.bindValue(":user", user);
+    q.bindValue(":sub", sub);
+    if (!q.exec()) {
+        qWarning() << "TasksStorage: deleteUserFacts failed:" << q.lastError().text();
+        return 0;
+    }
+    return q.numRowsAffected();
 }
 
 QVariantList TasksStorage::fetchDueRemindersStatic(QSqlDatabase& db, qint64 nowEpoch, int limit)

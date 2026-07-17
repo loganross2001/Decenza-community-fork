@@ -1377,14 +1377,24 @@ void MainController::applyActivatedRecipe(qint64 recipeId, const QVariantMap& re
         // Profile-less recipes have no profile to override or re-upload.
         bool hasOverrides = false;
         if (!profileLess) {
-            // A recipe YIELD matching the profile's own default is not an
-            // override — don't arm the flag for it (Bug A). Temperature no
-            // longer needs this guard: its stored offset is unambiguous.
-            const double yieldG = recipe.value("yieldG").toDouble();
-            if (yieldG > 0
-                && qAbs(yieldG - m_profileManager->currentProfile().targetWeight()) > 0.1) {
-                m_settings->brew()->setBrewYieldOverride(yieldG);
+            // [brew-by-ratio] A ratio recipe defines its yield as dose x ratio — arm brew-by-ratio mode so the
+            // stop-at-weight target tracks the dose (which was just written above) live. Otherwise fall back to
+            // the absolute yield, routed through setYieldAbsolute so it also EXITS any ratio mode a prior recipe
+            // left armed (the single-funnel rule). A recipe YIELD matching the profile's own default is not an
+            // override — don't arm the flag for it (Bug A); but if a prior ratio mode is still on, exit it.
+            const double yieldRatio = recipe.value("yieldRatio").toDouble();
+            if (yieldRatio > 0) {
+                m_settings->brew()->setYieldByRatio(yieldRatio);
                 hasOverrides = true;
+            } else {
+                const double yieldG = recipe.value("yieldG").toDouble();
+                if (yieldG > 0
+                    && qAbs(yieldG - m_profileManager->currentProfile().targetWeight()) > 0.1) {
+                    m_settings->brew()->setYieldAbsolute(yieldG);
+                    hasOverrides = true;
+                } else if (m_settings->brew()->brewByRatioMode()) {
+                    m_settings->brew()->setYieldAbsolute(0);   // recipe pins no yield → drop the stale ratio mode
+                }
             }
             // Temperature is a stored OFFSET against the profile
             // (recipe-relative-temp-offset): the brew temperature is computed

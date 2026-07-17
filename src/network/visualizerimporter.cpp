@@ -15,7 +15,6 @@
 #include <QDir>
 #include <QUrl>
 #include <QDebug>
-#include <limits>
 
 // Sanitize JSON to fix malformed numbers from Visualizer API
 // Fixes: .5 -> 0.5, 9. -> 9.0

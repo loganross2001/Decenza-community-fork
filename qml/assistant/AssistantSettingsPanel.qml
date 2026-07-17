@@ -165,6 +165,32 @@ Rectangle {
         // column binds its width to the Flickable's VIEWPORT (its own width), not the whole panel — so
         // horizontal size is stable and vertical dragging actually flicks. contentWidth: width +
         // VerticalFlick kills horizontal scroll so sliders (a horizontal drag) never contend with the page.
+        // [barista-fork] Per-voice levels: each voice remembers its own volume/speed, so when the active
+        // voice/provider changes the sliders must reload THAT voice's saved values. The value: bindings would do
+        // this on their own via the re-emitted *VoiceVolume/SpeedChanged — EXCEPT dragging a Slider writes value
+        // and breaks its declarative binding. So re-arm the bindings on any voice-IDENTITY change (not the level
+        // signals, which also fire on the slider's own drag). StackLayout instantiates all pages, so the slider
+        // ids always resolve.
+        Connections {
+            target: root._settings
+            ignoreUnknownSignals: true
+            function _rebindGeneral() {
+                baristaVolumeSlider.value = Qt.binding(function() { return root._settings ? root._settings.baristaVoiceVolume : 1.0 })
+                baristaSpeedSlider.value  = Qt.binding(function() { return root._settings ? root._settings.baristaVoiceSpeed : 1.0 })
+            }
+            function _rebindCoaching() {
+                coachingVolumeSlider.value = Qt.binding(function() { return root._settings ? root._settings.coachingVoiceVolume : 1.0 })
+                coachingSpeedSlider.value  = Qt.binding(function() { return root._settings ? root._settings.coachingVoiceSpeed : 1.0 })
+            }
+            function onVoiceNameChanged() { _rebindGeneral() }
+            function onTtsProviderChanged() { _rebindGeneral() }
+            function onOpenaiVoiceChanged() { _rebindGeneral() }
+            function onElevenlabsVoiceIdChanged() { _rebindGeneral() }
+            function onCoachingVoiceNameChanged() { _rebindCoaching() }
+            function onCoachingTtsProviderChanged() { _rebindCoaching() }
+            function onCoachingOpenaiVoiceChanged() { _rebindCoaching() }
+            function onCoachingElevenlabsVoiceIdChanged() { _rebindCoaching() }
+        }
         StackLayout {
             id: pages
             Layout.fillWidth: true

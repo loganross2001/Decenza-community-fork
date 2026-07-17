@@ -259,5 +259,12 @@ signals:
     void proactivityLevelChanged();
 
 private:
+    // [barista-fork] Per-(voice, role) volume/speed store. currentVoiceKey() = "provider:voiceId" for the given
+    // role; read/writeVoiceLevel() persist a field (genVol|genSpeed|coachVol|coachSpeed) under that key in the
+    // barista/voiceLevels JSON map, falling back on read to the legacy flat per-role key. See the .cpp block.
+    QString currentVoiceKey(bool coaching) const;
+    double readVoiceLevel(bool coaching, const QString& field, const QString& legacyKey) const;
+    void writeVoiceLevel(bool coaching, const QString& field, double value);
+
     mutable QSettings m_settings;  // org/app default = DecentEspresso/DE1Qt (set in main)
 };

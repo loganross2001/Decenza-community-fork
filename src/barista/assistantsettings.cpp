@@ -93,6 +93,10 @@ void AssistantSettings::setVoiceName(const QString& name) {
         return;
     m_settings.setValue(QStringLiteral("barista/voiceName"), name);
     emit voiceNameChanged();
+    // [barista-fork] Per-voice levels: the active general voice changed → its saved volume/speed differ, so
+    // re-emit to make the General sliders reload THIS voice's values (baristaVoiceVolume/Speed resolve by voice).
+    emit baristaVoiceVolumeChanged();
+    emit baristaVoiceSpeedChanged();
 }
 
 QString AssistantSettings::userName() const {
@@ -205,6 +209,9 @@ void AssistantSettings::setTtsProvider(const QString& p) {
         return;
     m_settings.setValue(QStringLiteral("barista/ttsProvider"), p);
     emit ttsProviderChanged();
+    // [barista-fork] Provider is part of the voice key → the general sliders reload this provider's saved levels.
+    emit baristaVoiceVolumeChanged();
+    emit baristaVoiceSpeedChanged();
 }
 
 QString AssistantSettings::openaiVoice() const {
@@ -216,6 +223,9 @@ void AssistantSettings::setOpenaiVoice(const QString& v) {
         return;
     m_settings.setValue(QStringLiteral("barista/openaiVoice"), v);
     emit openaiVoiceChanged();
+    // [barista-fork] Per-voice levels: general OpenAI voice changed → reload its saved volume/speed.
+    emit baristaVoiceVolumeChanged();
+    emit baristaVoiceSpeedChanged();
 }
 
 QString AssistantSettings::openaiApiKey() const {
@@ -252,6 +262,9 @@ void AssistantSettings::setElevenlabsVoiceId(const QString& id) {
         return;
     m_settings.setValue(QStringLiteral("barista/elevenlabsVoiceId"), id);
     emit elevenlabsVoiceIdChanged();
+    // [barista-fork] Per-voice levels: general ElevenLabs voice changed → reload its saved volume/speed.
+    emit baristaVoiceVolumeChanged();
+    emit baristaVoiceSpeedChanged();
 }
 
 // [barista-fork] Coaching voice — a parallel provider + per-provider voice selection, persisted under
@@ -266,6 +279,9 @@ void AssistantSettings::setCoachingTtsProvider(const QString& p) {
         return;
     m_settings.setValue(QStringLiteral("barista/coachingTtsProvider"), p);
     emit coachingTtsProviderChanged();
+    // [barista-fork] Provider is part of the voice key → the Coaching sliders reload this provider's saved levels.
+    emit coachingVoiceVolumeChanged();
+    emit coachingVoiceSpeedChanged();
 }
 
 QString AssistantSettings::coachingVoiceName() const {
@@ -277,6 +293,9 @@ void AssistantSettings::setCoachingVoiceName(const QString& name) {
         return;
     m_settings.setValue(QStringLiteral("barista/coachingVoiceName"), name);
     emit coachingVoiceNameChanged();
+    // [barista-fork] Per-voice levels: coaching native voice changed → reload its saved volume/speed.
+    emit coachingVoiceVolumeChanged();
+    emit coachingVoiceSpeedChanged();
 }
 
 QString AssistantSettings::coachingOpenaiVoice() const {
@@ -290,6 +309,9 @@ void AssistantSettings::setCoachingOpenaiVoice(const QString& v) {
         return;
     m_settings.setValue(QStringLiteral("barista/coachingOpenaiVoice"), v);
     emit coachingOpenaiVoiceChanged();
+    // [barista-fork] Per-voice levels: coaching OpenAI voice changed → reload its saved volume/speed.
+    emit coachingVoiceVolumeChanged();
+    emit coachingVoiceSpeedChanged();
 }
 
 QString AssistantSettings::coachingElevenlabsVoiceId() const {
@@ -303,6 +325,9 @@ void AssistantSettings::setCoachingElevenlabsVoiceId(const QString& id) {
         return;
     m_settings.setValue(QStringLiteral("barista/coachingElevenlabsVoiceId"), id);
     emit coachingElevenlabsVoiceIdChanged();
+    // [barista-fork] Per-voice levels: coaching ElevenLabs voice changed → reload its saved volume/speed.
+    emit coachingVoiceVolumeChanged();
+    emit coachingVoiceSpeedChanged();
 }
 
 // Saved ElevenLabs voices — a JSON array of {name, id} objects under barista/elevenlabsVoices, mirroring
@@ -480,51 +505,92 @@ static double clampVolume(double v) {
     return v;
 }
 
+// [barista-fork] PER-(voice, role) volume + speed. Owner: too painful to re-tune level/speed every time you
+// switch voice or role. Stored in ONE JSON map `barista/voiceLevels` keyed by "provider:voiceId" (consistent
+// with barista/elevenlabsVoices; a voiceId can carry chars unsafe for a QSettings sub-key). Each entry holds up
+// to genVol/genSpeed/coachVol/coachSpeed, so the SAME voice remembers different levels for General vs Coaching.
+// The four role getters/setters resolve to the CURRENT voice for their role; a voice-identity change re-emits
+// their *Changed signals (see the voice setters) so the sliders reload the newly-selected voice's saved levels.
+// A missing entry falls back to the legacy flat per-role key — a user's existing single setting seeds every
+// voice until they tune each one. The STORED value is the raw 0..1 slider position; effectiveVolume()'s
+// perceptual curve is applied downstream and is untouched.
+QString AssistantSettings::currentVoiceKey(bool coaching) const {
+    const QString provider = coaching ? coachingTtsProvider() : ttsProvider();
+    QString voice;
+    if (provider == QLatin1String("elevenlabs"))
+        voice = coaching ? coachingElevenlabsVoiceId() : elevenlabsVoiceId();
+    else if (provider == QLatin1String("openai"))
+        voice = coaching ? coachingOpenaiVoice() : openaiVoice();
+    else
+        voice = coaching ? coachingVoiceName() : voiceName();   // native (may be "" = engine default)
+    return provider + QLatin1Char(':') + voice;
+}
+
+double AssistantSettings::readVoiceLevel(bool coaching, const QString& field, const QString& legacyKey) const {
+    const QJsonObject levels = QJsonDocument::fromJson(
+        m_settings.value(QStringLiteral("barista/voiceLevels")).toString().toUtf8()).object();
+    const QJsonObject entry = levels.value(currentVoiceKey(coaching)).toObject();
+    if (entry.contains(field))
+        return entry.value(field).toDouble();
+    return m_settings.value(legacyKey, 1.0).toDouble();   // seed from the pre-per-voice single setting
+}
+
+void AssistantSettings::writeVoiceLevel(bool coaching, const QString& field, double value) {
+    QJsonObject levels = QJsonDocument::fromJson(
+        m_settings.value(QStringLiteral("barista/voiceLevels")).toString().toUtf8()).object();
+    const QString key = currentVoiceKey(coaching);
+    QJsonObject entry = levels.value(key).toObject();
+    entry[field] = value;
+    levels[key] = entry;
+    m_settings.setValue(QStringLiteral("barista/voiceLevels"),
+        QString::fromUtf8(QJsonDocument(levels).toJson(QJsonDocument::Compact)));
+}
+
 double AssistantSettings::baristaVoiceSpeed() const {
-    return m_settings.value(QStringLiteral("barista/baristaVoiceSpeed"), 1.0).toDouble();
+    return readVoiceLevel(false, QStringLiteral("genSpeed"), QStringLiteral("barista/baristaVoiceSpeed"));
 }
 
 void AssistantSettings::setBaristaVoiceSpeed(double s) {
     s = clampSpeed(s);
     if (qFuzzyCompare(baristaVoiceSpeed(), s))
         return;
-    m_settings.setValue(QStringLiteral("barista/baristaVoiceSpeed"), s);
+    writeVoiceLevel(false, QStringLiteral("genSpeed"), s);
     emit baristaVoiceSpeedChanged();
 }
 
 double AssistantSettings::coachingVoiceSpeed() const {
-    return m_settings.value(QStringLiteral("barista/coachingVoiceSpeed"), 1.0).toDouble();
+    return readVoiceLevel(true, QStringLiteral("coachSpeed"), QStringLiteral("barista/coachingVoiceSpeed"));
 }
 
 void AssistantSettings::setCoachingVoiceSpeed(double s) {
     s = clampSpeed(s);
     if (qFuzzyCompare(coachingVoiceSpeed(), s))
         return;
-    m_settings.setValue(QStringLiteral("barista/coachingVoiceSpeed"), s);
+    writeVoiceLevel(true, QStringLiteral("coachSpeed"), s);
     emit coachingVoiceSpeedChanged();
 }
 
 double AssistantSettings::baristaVoiceVolume() const {
-    return m_settings.value(QStringLiteral("barista/baristaVoiceVolume"), 1.0).toDouble();
+    return readVoiceLevel(false, QStringLiteral("genVol"), QStringLiteral("barista/baristaVoiceVolume"));
 }
 
 void AssistantSettings::setBaristaVoiceVolume(double v) {
     v = clampVolume(v);
     if (qFuzzyCompare(baristaVoiceVolume(), v))
         return;
-    m_settings.setValue(QStringLiteral("barista/baristaVoiceVolume"), v);
+    writeVoiceLevel(false, QStringLiteral("genVol"), v);
     emit baristaVoiceVolumeChanged();
 }
 
 double AssistantSettings::coachingVoiceVolume() const {
-    return m_settings.value(QStringLiteral("barista/coachingVoiceVolume"), 1.0).toDouble();
+    return readVoiceLevel(true, QStringLiteral("coachVol"), QStringLiteral("barista/coachingVoiceVolume"));
 }
 
 void AssistantSettings::setCoachingVoiceVolume(double v) {
     v = clampVolume(v);
     if (qFuzzyCompare(coachingVoiceVolume(), v))
         return;
-    m_settings.setValue(QStringLiteral("barista/coachingVoiceVolume"), v);
+    writeVoiceLevel(true, QStringLiteral("coachVol"), v);
     emit coachingVoiceVolumeChanged();
 }
 

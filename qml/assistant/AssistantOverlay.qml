@@ -2235,6 +2235,10 @@ Item {
                         } else if (selectBaristaCard._roleVoice) {
                             selectBaristaCard._roleVoice.setVoiceByName(currentText)
                         }
+                        // [barista-fork] Per-voice levels: the new voice has its OWN saved volume/speed. A prior
+                        // drag broke the value: bindings, so re-arm them to reload THIS voice's values (else the
+                        // sliders show — and a nudge would overwrite — the previous voice's level).
+                        selectBaristaCard._rebindSliders()
                         if (selectBaristaCard._roleVoice) selectBaristaCard._roleVoice.preview()   // audition
                     }
                     onModelChanged: _sync()

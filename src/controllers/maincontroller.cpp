@@ -1586,6 +1586,15 @@ double MainController::activeBaselineTemperatureC() const {
 
 double MainController::activeBaselineYieldG() const {
     if (!m_activeRecipe.isEmpty()) {
+        // [brew-by-ratio] A ratio recipe's baseline yield is dose x ratio (the derived value), so the live
+        // dose x ratio target renders as the baseline — un-highlighted, Update-disabled — instead of a phantom
+        // override of the profile default. Uses the live dose (what the target is actually derived from).
+        const double ratio = m_activeRecipe.value(QStringLiteral("yieldRatio")).toDouble();
+        if (ratio > 0.0 && m_settings) {
+            const double dose = m_settings->dye()->dyeBeanWeight();
+            if (dose > 0.0)
+                return dose * ratio;
+        }
         const double y = m_activeRecipe.value(QStringLiteral("yieldG")).toDouble();
         if (y > 0.0)
             return y;

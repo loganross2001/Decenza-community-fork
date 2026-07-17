@@ -237,7 +237,11 @@ Rectangle {
                 tempOverridden: false
                 dose: card.recipe.doseG || 0
                 profileYield: card.profileYieldG
-                targetWeight: card.recipe.yieldG > 0 ? card.recipe.yieldG : card.profileYieldG
+                // [brew-by-ratio] A ratio recipe's yield IS dose x ratio — show that single derived value (no
+                // stored absolute to render alongside it); else the absolute yieldG, else the profile default.
+                targetWeight: (card.recipe.yieldRatio > 0)
+                              ? (card.recipe.doseG || 0) * card.recipe.yieldRatio
+                              : (card.recipe.yieldG > 0 ? card.recipe.yieldG : card.profileYieldG)
                 // No arrow/highlight: a card is a static recipe definition, not
                 // a live per-brew comparison — it shows the resulting yield only.
                 yieldOverridden: false

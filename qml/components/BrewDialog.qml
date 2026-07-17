@@ -1278,12 +1278,16 @@ Dialog {
                         enabled: targetInput.overridden
                         onClicked: {
                             if (root.recipeActive) {
-                                // Absolute grams, matching what activation reads back.
-                                // recipeUpdated → MainController refreshes m_activeRecipe.
+                                // [brew-by-ratio] Persist HOW the yield is defined, not just the number: in
+                                // ratio mode save yieldRatio (and clear yieldG) so the recipe re-derives
+                                // dose x ratio on every future activation; otherwise save the absolute grams
+                                // (and clear yieldRatio). recipeUpdated → MainController refreshes m_activeRecipe.
                                 root._pendingRecipeUpdateId = Settings.dye.activeRecipeId
+                                var yieldMap = Settings.brew.brewByRatioMode
+                                    ? {"yieldRatio": Settings.brew.brewRatio, "yieldG": 0}
+                                    : {"yieldG": root.targetValue, "yieldRatio": 0}
                                 MainController.recipeStorage.requestUpdateRecipe(
-                                    Settings.dye.activeRecipeId,
-                                    {"yieldG": root.targetValue})
+                                    Settings.dye.activeRecipeId, yieldMap)
                                 return
                             }
                             var profile = ProfileManager.getCurrentProfile()

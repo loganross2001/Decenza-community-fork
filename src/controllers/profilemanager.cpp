@@ -446,7 +446,7 @@ void ProfileManager::recomputeRatioYield() {
         return;   // no dose yet → leave the last target; the next dose read will derive it
     const double target = dose * ratio;
     if (!qFuzzyCompare(1.0 + target, 1.0 + m_settings->brew()->brewYieldOverride()))
-        m_settings->brew()->setBrewYieldOverride(target);   // raw set; keeps mode (only the funnels toggle it)
+        m_settings->brew()->syncRatioYieldTarget(target);   // keeps mode; setBrewYieldOverride would EXIT it
 }
 
 void ProfileManager::setTargetWeight(double weight) {

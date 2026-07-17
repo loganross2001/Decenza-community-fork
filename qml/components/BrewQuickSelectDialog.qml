@@ -90,11 +90,10 @@ Dialog {
                                              || stepGrind(root.pendingGrind, -1, root.grindStep) !== ""
 
     function applyAll() {
-        // Ratio: record preference + recompute stop-at-weight target (yield =
-        // dose × ratio), matching RatioPresetDialog.applyRatio.
-        Settings.brew.lastUsedRatio = root.pendingRatio
-        var dose = Settings.dye.dyeBeanWeight > 0 ? Settings.dye.dyeBeanWeight : 18.0
-        Settings.brew.brewYieldOverride = dose * root.pendingRatio
+        // Ratio: arm brew-by-ratio MODE (yield tracks dose x ratio live), matching RatioPresetDialog.applyRatio.
+        // Writing a raw brewYieldOverride here would EXIT the mode (single-funnel rule) and leave a stale
+        // absolute for the next dose change to clobber, so go through setYieldByRatio.
+        Settings.brew.setYieldByRatio(root.pendingRatio)
         // Temp: plain property write (setter is NOT Q_INVOKABLE).
         Settings.brew.temperatureOverride = root.pendingTempC
         // Grind: only write a real, non-empty value.

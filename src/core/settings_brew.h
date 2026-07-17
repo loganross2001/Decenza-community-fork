@@ -274,10 +274,12 @@ public:
     // live as dose x ratio by ProfileManager. `ratio` <= 0 is ignored. Does NOT itself write the yield
     // override — ProfileManager owns the dose, so it computes and syncs the absolute target.
     Q_INVOKABLE void setYieldByRatio(double ratio);
-    // Set an ABSOLUTE yield (grams) and EXIT ratio mode — the single funnel every absolute-yield write must go
-    // through (manual target entry, shot-promote, bag override, etc.) so a stale ratio can't clobber it on the
-    // next dose change. grams <= 0 clears the override entirely (and still exits ratio mode).
+    // Set an ABSOLUTE yield (grams) and EXIT ratio mode. Equivalent to setBrewYieldOverride (which itself exits
+    // ratio mode); kept as the readable intent. grams <= 0 clears the override.
     Q_INVOKABLE void setYieldAbsolute(double grams);
+    // ProfileManager ONLY: set the derived stop-at-weight target (dose x ratio) while KEEPING ratio mode armed.
+    // Every OTHER absolute write goes through setBrewYieldOverride, which exits the mode (single-funnel safety).
+    void syncRatioYieldTarget(double yield);
 
     // Stop-at-volume gating
     bool ignoreVolumeWithScale() const;
@@ -322,6 +324,11 @@ signals:
     void ignoreVolumeWithScaleChanged();
 
 private:
+    // Raw write of the absolute yield-override value; no mode change, no emit. Returns whether it changed.
+    bool writeYieldOverrideInternal(double yield);
+    // Clear brew-by-ratio mode; no emit. Returns whether it changed.
+    bool exitRatioModeInternal();
+
     mutable QSettings m_settings;
 
     // Session-only steam-disable flag (used during descaling)

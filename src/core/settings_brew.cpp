@@ -922,28 +922,54 @@ double SettingsBrew::brewYieldOverride() const {
     return m_brewYieldOverride;
 }
 
-void SettingsBrew::setBrewYieldOverride(double yield) {
-    bool changed = false;
+// Raw write of the absolute override VALUE only — no mode change, no emit. Returns whether it changed.
+bool SettingsBrew::writeYieldOverrideInternal(double yield) {
     if (yield <= 0) {
         if (m_hasBrewYieldOverride || !qFuzzyIsNull(m_brewYieldOverride)) {
             m_brewYieldOverride = 0;
             m_hasBrewYieldOverride = false;
             m_settings.remove("brew/brewYieldOverride");
             m_settings.remove("brew/hasBrewYieldOverride");
-            changed = true;
+            return true;
         }
-    } else {
-        if (!qFuzzyCompare(1.0 + m_brewYieldOverride, 1.0 + yield) || !m_hasBrewYieldOverride) {
-            m_brewYieldOverride = yield;
-            m_hasBrewYieldOverride = true;
-            m_settings.setValue("brew/brewYieldOverride", yield);
-            m_settings.setValue("brew/hasBrewYieldOverride", true);
-            changed = true;
-        }
+        return false;
     }
-    if (changed) {
+    if (!qFuzzyCompare(1.0 + m_brewYieldOverride, 1.0 + yield) || !m_hasBrewYieldOverride) {
+        m_brewYieldOverride = yield;
+        m_hasBrewYieldOverride = true;
+        m_settings.setValue("brew/brewYieldOverride", yield);
+        m_settings.setValue("brew/hasBrewYieldOverride", true);
+        return true;
+    }
+    return false;
+}
+
+// Clear ratio mode — no emit. Returns whether it changed.
+bool SettingsBrew::exitRatioModeInternal() {
+    if (!m_brewByRatioMode && m_brewRatio == 0.0)
+        return false;
+    m_brewByRatioMode = false;
+    m_brewRatio = 0.0;
+    m_settings.remove("brew/brewByRatioMode");
+    m_settings.remove("brew/brewRatio");
+    return true;
+}
+
+void SettingsBrew::setBrewYieldOverride(double yield) {
+    // The Q_PROPERTY WRITE and EVERY external raw absolute write funnels through here — and it ALSO exits ratio
+    // mode. That's the single-funnel safety net: a raw absolute can never be left armed for the next dose-change
+    // recompute to clobber (the whole class of bug the review found). ProfileManager's own live recompute uses
+    // syncRatioYieldTarget() instead, which keeps the mode on.
+    bool changed = exitRatioModeInternal();
+    changed = writeYieldOverrideInternal(yield) || changed;
+    if (changed)
         emit brewOverridesChanged();
-    }
+}
+
+void SettingsBrew::syncRatioYieldTarget(double yield) {
+    // ProfileManager ONLY: set the derived stop-at-weight target while KEEPING ratio mode armed.
+    if (writeYieldOverrideInternal(yield))
+        emit brewOverridesChanged();
 }
 
 bool SettingsBrew::hasBrewYieldOverride() const {
@@ -976,22 +1002,9 @@ void SettingsBrew::setYieldByRatio(double ratio) {
 }
 
 void SettingsBrew::setYieldAbsolute(double grams) {
-    // The single funnel for absolute-yield writes: exit ratio mode first so the next dose change can't clobber
-    // the value with dose x ratio, then set (or clear, when grams <= 0) the override.
-    if (m_brewByRatioMode || m_brewRatio != 0.0) {
-        m_brewByRatioMode = false;
-        m_brewRatio = 0.0;
-        m_settings.remove("brew/brewByRatioMode");
-        m_settings.remove("brew/brewRatio");
-        // brewOverridesChanged is emitted by setBrewYieldOverride below (or emit here if it no-ops).
-    }
-    const double before = m_brewYieldOverride;
-    const bool hadBefore = m_hasBrewYieldOverride;
+    // Named intent for an absolute-yield write. setBrewYieldOverride already exits ratio mode + sets/clears the
+    // value in one emit, so this is just the readable spelling at call sites that mean "an absolute, not a ratio".
     setBrewYieldOverride(grams);
-    // If the override value didn't change, setBrewYieldOverride won't have emitted — but we may have just
-    // exited ratio mode, so make sure the change is observed.
-    if (qFuzzyCompare(1.0 + before, 1.0 + m_brewYieldOverride) && hadBefore == m_hasBrewYieldOverride)
-        emit brewOverridesChanged();
 }
 
 void SettingsBrew::clearAllBrewOverrides() {

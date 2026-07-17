@@ -238,10 +238,13 @@ Page {
         stableMs: 2500
         onStableCaptured: function(net) {
             // net is always >= minNet (5 g) here — no extra floor needed.
-            // Always write the canonical dose + yield. The shared Brew Settings
-            // dialog reflects it via its dyeBeanWeight watcher while it is open.
+            // Write the canonical dose. In brew-by-ratio MODE that is enough: ProfileManager derives the
+            // target = dose x brewRatio from this dose change (and writing a raw yield here would EXIT the mode
+            // via setBrewYieldOverride — the single-funnel rule). Otherwise keep the legacy convenience of
+            // stamping the absolute yield = net x lastUsedRatio for non-ratio users.
             Settings.dye.dyeBeanWeight = net
-            Settings.brew.brewYieldOverride = net * Settings.brew.lastUsedRatio
+            if (!Settings.brew.brewByRatioMode)
+                Settings.brew.brewYieldOverride = net * Settings.brew.lastUsedRatio
             idlePage.beanCaptureText = TranslationManager.translate("idle.doseCaptured", "Dose set: %1g").arg(net.toFixed(1))
             idlePage.beanCaptureShown = true
             idleBeanCaptureTimer.restart()

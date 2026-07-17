@@ -2355,8 +2355,14 @@ Page {
                                         radius: Theme.scaled(8)
                                         color: wizardRatioMa.pressed ? Qt.darker(Theme.backgroundColor, 1.1) : "transparent"
                                         border.width: 1
-                                        border.color: Theme.textSecondaryColor
-                                        opacity: wizardPage.fYieldMode === "ratio" ? 1.0 : 0.55
+                                        // [barista-fork] Discoverability: the dim (0.55) is right when this is just the
+                                        // DERIVED view of a set gram yield (absolute mode) — it reads as secondary. But
+                                        // when NOTHING is set yet ("none"), dimming it hid that a recipe can be defined
+                                        // by dose × ratio at all (owner: "I'm not seeing a way to work with dose + ratio").
+                                        // Make it a prominent, tappable peer of the Yield field when unset.
+                                        border.color: wizardPage.fYieldMode === "none" ? Theme.primaryColor : Theme.textSecondaryColor
+                                        opacity: wizardPage.fYieldMode === "ratio" ? 1.0
+                                               : (wizardPage.fYieldMode === "none" ? 0.95 : 0.55)
                                         Accessible.role: Accessible.Button
                                         Accessible.name: TranslationManager.translate(
                                             "recipes.composer.chooseNamedRatio", "Choose a named brew ratio")

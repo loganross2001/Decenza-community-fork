@@ -211,7 +211,8 @@ Page {
         roasterName: fRoaster,
         coffeeName: fCoffee,
         doseG: parseFloat(doseField.text) || 0,
-        yieldG: parseFloat(yieldField.text) || 0,
+        yieldG: wizardPage.fYieldByRatio ? 0 : (parseFloat(yieldField.text) || 0),
+        yieldRatio: wizardPage.fYieldByRatio ? (parseFloat(ratioField.text) || 0) : 0,
         tempOffsetC: isTeaDrink
             ? (fProfileTempC > 0
                 ? (fTeaTempC > 0 && Math.abs(fTeaTempC - fProfileTempC) > 0.05
@@ -288,7 +289,11 @@ Page {
         fCoffee = r.coffeeName || ""
         fEquipmentId = r.equipmentId || 0
         doseField.text = r.doseG > 0 ? Number(r.doseG).toFixed(1) : ""
+        // [brew-by-ratio] Restore how the yield was defined: a ratio recipe (yieldRatio > 0) opens in ratio
+        // mode with the ratio field populated; otherwise the absolute grams field.
+        wizardPage.fYieldByRatio = (r.yieldRatio || 0) > 0
         yieldField.text = r.yieldG > 0 ? Number(r.yieldG).toFixed(1) : ""
+        ratioField.text = (r.yieldRatio || 0) > 0 ? Number(r.yieldRatio).toFixed(1) : ""
         fLoadedTempOffsetC = r.tempOffsetC || 0
         refreshProfileTemp()
         // The stored offset loads verbatim — no open-time subtraction against
@@ -493,6 +498,10 @@ Page {
         captureBaseline()
     }
 
+    // [brew-by-ratio] Whether the yield is defined as a ratio of the dose (stores yieldRatio) instead of an
+    // absolute grams value (yieldG). Set by the details "By ratio" toggle; restored from the recipe on edit.
+    property bool fYieldByRatio: false
+
     // Resolve the selected profile's base temperature (for the offset
     // control) and target yield (for the summary hero's plan line).
     property real fProfileYieldG: 0
@@ -561,7 +570,8 @@ Page {
             coffeeName: fCoffee,
             equipmentId: fEquipmentId,
             doseG: parseFloat(doseField.text) || 0,
-            yieldG: parseFloat(yieldField.text) || 0,
+            yieldG: wizardPage.fYieldByRatio ? 0 : (parseFloat(yieldField.text) || 0),
+            yieldRatio: wizardPage.fYieldByRatio ? (parseFloat(ratioField.text) || 0) : 0,
             // The offset IS the stored value (recipe-relative-temp-offset):
             // the stepper edits it verbatim, 0 = brew at the profile's own
             // temperature. Tea details edit the ABSOLUTE temp instead
@@ -2182,12 +2192,46 @@ Page {
                                         : TranslationManager.translate("recipes.composer.doseLabel", "Dose (g)")
                                     onEdited: wizardPage._detailsUserEdited = true
                                 }
-                                NumberField {
-                                    id: yieldField
+                                // [brew-by-ratio] Yield as absolute grams OR as a ratio of the dose. When "by
+                                // ratio" is on, the recipe stores yieldRatio (yield = dose x ratio, tracked live
+                                // by the scale) instead of a hardcoded yield_g. Coffee only — tea has no ratio.
+                                ColumnLayout {
                                     visible: !wizardPage.isHotWaterTea
                                     Layout.preferredWidth: Theme.scaled(120)
-                                    label: TranslationManager.translate("recipes.composer.yieldLabel", "Yield (g)")
-                                    onEdited: wizardPage._detailsUserEdited = true
+                                    spacing: Theme.scaled(2)
+                                    NumberField {
+                                        id: yieldField
+                                        visible: !wizardPage.fYieldByRatio
+                                        Layout.fillWidth: true
+                                        label: TranslationManager.translate("recipes.composer.yieldLabel", "Yield (g)")
+                                        onEdited: wizardPage._detailsUserEdited = true
+                                    }
+                                    NumberField {
+                                        id: ratioField
+                                        visible: wizardPage.fYieldByRatio
+                                        Layout.fillWidth: true
+                                        label: TranslationManager.translate("recipes.composer.ratioLabel", "Ratio 1:")
+                                        onEdited: wizardPage._detailsUserEdited = true
+                                    }
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: Theme.scaled(4)
+                                        StyledSwitch {
+                                            id: yieldByRatioSwitch
+                                            checked: wizardPage.fYieldByRatio
+                                            onToggled: {
+                                                wizardPage.fYieldByRatio = checked
+                                                wizardPage._detailsUserEdited = true
+                                            }
+                                            Accessible.name: TranslationManager.translate("recipes.composer.byRatio", "Yield by ratio")
+                                        }
+                                        Label {
+                                            text: TranslationManager.translate("recipes.composer.byRatio", "By ratio")
+                                            font: Theme.captionFont
+                                            color: Theme.textSecondaryColor
+                                            Accessible.ignored: true
+                                        }
+                                    }
                                 }
                                 // Coffee drinks: temperature as an OFFSET on the
                                 // profile (shot-plan semantics). Tea: absolute.

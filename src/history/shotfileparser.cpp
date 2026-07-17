@@ -1,5 +1,6 @@
 #include "shotfileparser.h"
 #include "core/grinderaliases.h"
+#include "network/tastecvamap.h"
 #include <QFile>
 #include <QRegularExpression>
 #include <QJsonDocument>
@@ -252,6 +253,14 @@ ShotFileParser::ParseResult ShotFileParser::parseVisualizerShot(const QJsonObjec
     // A deterministic uuid keyed on the Visualizer id makes re-runs of the
     // recovery idempotent (importShotRecord dedupes on uuid first). Feed the
     // visualizer id as the "filename" so it stays stable across runs.
+    //
+    // The sync-gap case — a shot pulled ON THIS DEVICE has a local uuid keyed on
+    // its FILENAME, so this visualizer-id-keyed uuid can't match it — is handled
+    // by importShotRecordStatic's dedicated visualizer_id dedupe probe: it
+    // compares record.visualizerId (set below) against the local shot's
+    // visualizer_id column (populated when that shot was uploaded), the one
+    // identifier guaranteed identical on both sides. So dedupe no longer has to
+    // rely on the weaker timestamp + profile_title fallback for these.
     result.record.summary.uuid = generateUuid(timestamp, visualizerId);
     result.record.visualizerId = visualizerId;
 
@@ -272,6 +281,15 @@ ShotFileParser::ParseResult ShotFileParser::parseVisualizerShot(const QJsonObjec
     if (pressure.isEmpty()) {
         result.errorMessage = "Missing pressure samples";
         return result;
+    }
+    // A pressure series materially shorter than the timeframe means a partial /
+    // truncated upload: toPointVector zips with qMin, so the shot still imports
+    // but with a chopped-off trace. That's better than dropping it, but log so a
+    // systematic upstream truncation is diagnosable rather than silent.
+    if (pressure.size() < elapsed.size() - 1) {
+        qWarning() << "parseVisualizerShot: pressure series truncated for" << visualizerId
+                   << "-" << pressure.size() << "of" << elapsed.size()
+                   << "samples; importing partial trace";
     }
     const QVector<double> flow         = jsonArrayToDoubles(data.value("espresso_flow").toArray());
     const QVector<double> tempBasket   = jsonArrayToDoubles(data.value("espresso_temperature_basket").toArray());
@@ -343,6 +361,15 @@ ShotFileParser::ParseResult ShotFileParser::parseVisualizerShot(const QJsonObjec
     result.record.summary.finalWeight = jsonToScalar(shotJson.value("drink_weight"));
     result.record.summary.beverageType = "espresso";
 
+    // Structured taste axes: reverse the CVA mapping the uploader applies
+    // (tasteBalance/tasteBody → acidity/bitterness/mouthfeel) so a recovered
+    // shot keeps its taste dial-in. See applyTasteCvaMapping in tastecvamap.h.
+    const int acidity    = qRound(jsonToScalar(shotJson.value("acidity")));
+    const int bitterness = qRound(jsonToScalar(shotJson.value("bitterness")));
+    const int mouthfeel  = qRound(jsonToScalar(shotJson.value("mouthfeel")));
+    result.record.tasteBalance = cvaToTasteBalance(acidity, bitterness);
+    result.record.tasteBody    = cvaToTasteBody(mouthfeel);
+
     // If final weight is unset but we recorded weight samples, use the peak.
     if (result.record.summary.finalWeight <= 0 && !result.record.weight.isEmpty()) {
         double maxWeight = 0;
@@ -354,14 +381,25 @@ ShotFileParser::ParseResult ShotFileParser::parseVisualizerShot(const QJsonObjec
     // Frame boundaries: the download has no de1app timers block, but it does
     // carry espresso_state_change — a per-sample array that flips sign
     // (+/-10000000) at each frame transition (the same convention Decenza
-    // uploads; see VISUALIZER.md "state_change Array"). Emit a phase marker
-    // at each sign change so the shot-detail view still draws frame lines.
+    // uploads; see VISUALIZER.md "state_change Array"). Emit a phase marker at
+    // the start of frame 0 and at each subsequent sign change, numbered 0,1,2,…
+    // to match the live-shot convention (MainController / ShotDataModel):
+    //   - shot_phases.label is NOT NULL, so every marker MUST carry a non-empty
+    //     label or its INSERT is rejected and the shot silently loses all frame
+    //     lines. Labels are internal (the detail view draws lines by
+    //     time/frameNumber, not text), so a generic "Frame N" is sufficient; it
+    //     must NOT be "Start", which ShotAnalysis::detectSkipFirstFrame treats as
+    //     a synthetic leading marker to skip.
+    //   - a frameNumber==0 marker MUST exist: detectSkipFirstFrame keys off it
+    //     (sawFrameZero). Without it, every recovered shot takes the strict
+    //     firmware-bug branch and is spuriously badged "skipped first frame".
     const QVector<double> stateChange = jsonArrayToDoubles(data.value("espresso_state_change").toArray());
     if (stateChange.size() >= 2 && stateChange.size() <= elapsed.size()) {
         int frameNumber = 0;
-        // Real downloads start the series at 0.0; seed the reference sign from the
-        // first *non-zero* sample so the leading 0 -> ±1e7 step isn't recorded as
-        // a phantom frame boundary at t≈0.
+        // Real downloads start the series at 0.0; the first *non-zero* sample is
+        // where extraction (frame 0) actually begins — emit the frame-0 boundary
+        // there and seed the reference sign, so the leading 0 -> ±1e7 step isn't
+        // double-counted as an extra frame transition.
         bool havePrev = false;
         bool prevPos = false;
         for (qsizetype i = 0; i < stateChange.size(); ++i) {
@@ -369,6 +407,11 @@ ShotFileParser::ParseResult ShotFileParser::parseVisualizerShot(const QJsonObjec
                 continue;
             const bool curPos = stateChange[i] > 0;
             if (!havePrev) {
+                HistoryPhaseMarker marker;
+                marker.time = elapsed[i];
+                marker.frameNumber = 0;             // start of frame 0
+                marker.label = QStringLiteral("Frame 1");
+                result.record.phases.append(marker);
                 prevPos = curPos;
                 havePrev = true;
                 continue;
@@ -377,10 +420,18 @@ ShotFileParser::ParseResult ShotFileParser::parseVisualizerShot(const QJsonObjec
                 HistoryPhaseMarker marker;
                 marker.time = elapsed[i];
                 marker.frameNumber = ++frameNumber;
+                marker.label = QStringLiteral("Frame %1").arg(frameNumber + 1);
                 result.record.phases.append(marker);
                 prevPos = curPos;
             }
         }
+    } else if (!stateChange.isEmpty()) {
+        // Present but unusable (fewer than 2 samples, or longer than the
+        // timeframe => misaligned). The shot imports fine but the detail view
+        // draws no frame lines; log so a schema drift is diagnosable.
+        qWarning() << "parseVisualizerShot: unusable espresso_state_change for" << visualizerId
+                   << "(" << stateChange.size() << "samples vs" << elapsed.size()
+                   << "timeframe); no frame markers";
     }
 
     // Profile JSON is fetched separately (the download carries only a URL).

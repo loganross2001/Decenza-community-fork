@@ -142,6 +142,8 @@ Item {
                     zoneName: "centerStatus"
                     items: previewRoot._items("centerStatus")
                     zoneScale: previewRoot._scale("centerStatus")
+                    alignment: previewRoot._opt("centerStatus", "alignment", "center")
+                    zoneStyle: previewRoot._opt("centerStatus", "style", "standard")
                     visible: previewRoot._items("centerStatus").length > 0
                 }
                 LayoutCenterZone {
@@ -151,6 +153,7 @@ Item {
                     items: previewRoot._items("centerTop")
                     zoneScale: previewRoot._scale("centerTop")
                     alignment: previewRoot._opt("centerTop", "alignment", "center")
+                    zoneStyle: previewRoot._opt("centerTop", "style", "standard")
                 }
                 LayoutCenterZone {
                     Layout.fillWidth: true
@@ -159,6 +162,8 @@ Item {
                     zoneName: "centerMiddle"
                     items: previewRoot._items("centerMiddle")
                     zoneScale: previewRoot._scale("centerMiddle")
+                    alignment: previewRoot._opt("centerMiddle", "alignment", "center")
+                    zoneStyle: previewRoot._opt("centerMiddle", "style", "standard")
                     visible: previewRoot._items("centerMiddle").length > 0
                 }
             }

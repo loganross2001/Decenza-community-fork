@@ -10,6 +10,7 @@
 class MainController;
 class ProfileSaveHelper;
 class Settings;
+class TranslationManager;
 
 class VisualizerImporter : public QObject {
     Q_OBJECT
@@ -23,6 +24,12 @@ class VisualizerImporter : public QObject {
 
 public:
     explicit VisualizerImporter(QNetworkAccessManager* networkManager, MainController* controller, Settings* settings, QObject* parent = nullptr);
+
+    // Inject the TranslationManager so user-visible error strings can be
+    // localized (mirrors AccessibilityManager/LiveSteamCoach). Wired from
+    // MainController::setTranslationManager. Until injected, tr_() returns the
+    // English fallback.
+    void setTranslationManager(TranslationManager* tm) { m_translationManager = tm; }
 
     bool isImporting() const { return m_importing; }
     bool isFetching() const { return m_fetching; }
@@ -66,10 +73,10 @@ public:
     //   2. for each in-range shot, downloads the full record
     //      (GET /api/shots/{id}/download) and its profile
     //      (GET /api/shots/{id}/profile?format=json);
-    //   3. parses via ShotFileParser::parseVisualizerShot and inserts through
-    //      ShotHistoryStorage::importShotRecord, which DEDUPES against local
-    //      history (by uuid, then timestamp+profile) so a shot the user still
-    //      has is skipped and re-running is idempotent.
+    //   3. parses via ShotFileParser::parseVisualizerShot and inserts (on a
+    //      background DB thread via importShotRecordAsync), which DEDUPES against
+    //      local history (by visualizer_id, then uuid, then timestamp+profile) so
+    //      a shot the user still has is skipped and re-running is idempotent.
     // Emits recoveryProgress after each shot and recoveryComplete when done.
     // Requires Visualizer credentials; fails clearly via recoveryFailed if
     // they are not configured. A no-op if a recovery is already running.
@@ -108,6 +115,10 @@ private:
     // Auth header for API requests
     QString authHeader() const;
 
+    // Translate a user-visible string via the injected TranslationManager,
+    // falling back to the English source when none is set.
+    QString tr_(const char* key, const char* fallback) const;
+
     // --- Recovery internals ---
     // A shot to recover: its Visualizer id and start time (from the list).
     struct RecoveryShot {
@@ -116,8 +127,12 @@ private:
     };
     // Page GET /api/shots collecting in-window ids, then start downloads.
     void recoverFetchListPage(int page);
-    // Download the next queued shot's full record + profile, parse, insert.
+    // Advance to the next queued shot (resets the per-shot retry counter) and
+    // kick off its download.
     void recoverNextShot();
+    // Download the current shot's full record (with bounded transient retry) +
+    // profile, then parse and insert.
+    void recoverDownloadCurrent();
     // Finish the run: emit recoveryComplete and reset state.
     void finishRecovery();
 
@@ -127,6 +142,7 @@ private:
     qint64 m_recoverToEpoch = 0;
     QVector<RecoveryShot> m_recoverQueue;   // in-window shots still to fetch
     RecoveryShot m_recoverCurrent;          // shot whose download is in flight
+    int m_recoverAttempts = 0;              // download attempts for m_recoverCurrent (bounded retry)
     int m_recoverTotal = 0;
     int m_recoverImported = 0;
     int m_recoverSkipped = 0;
@@ -143,6 +159,7 @@ private:
 
     MainController* m_controller;
     Settings* m_settings;
+    TranslationManager* m_translationManager = nullptr;
     QNetworkAccessManager* m_networkManager;
     ProfileSaveHelper* m_saveHelper;
     bool m_importing = false;

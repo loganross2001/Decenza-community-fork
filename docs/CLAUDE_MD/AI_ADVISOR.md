@@ -19,14 +19,29 @@ When `Settings.ai.tasteIntakeOnAsk` is on (default), opening the advisor for a
 shot (`ConversationOverlay.openWithShot`) shows a fully text-free intake over the
 conversation — Extraction (`Sour`/`Balanced`/`Bitter` → `taste_balance`), Body
 (`Thin`/`Medium`/`Heavy` → `taste_body`), Overall (reused `RatingInput` →
-`enjoyment0to100`) — **unless there's already something to return to**: a saved
-conversation for the shot's context (`conversation.hasHistory`) or taste feedback
-already saved on the shot (any of `taste_balance` / `taste_body` /
-`enjoyment0to100`). So a new / cleared / backed-out-without-asking conversation
-re-shows the intake; once the user has asked the AI or recorded any taste it goes
-straight to the text conversation. **Ask** persists the taps via
+`enjoyment0to100`) — **whenever that shot has no taste feedback saved yet** (any of
+`taste_balance` / `taste_body` / `enjoyment0to100` set suppresses it). The gate is
+**per shot, independent of conversation history**: the conversation is keyed by
+bean+profile and shared across shots, so an ongoing conversation must NOT suppress
+the intake for a new, unrated shot — each new shot has its own qualities worth
+capturing. So a shot you've rated/tasted goes straight to the chat; a new or
+backed-out-without-entering shot re-shows the intake. **Ask** persists the taps via
 `requestUpdateShotMetadata`, composes a first-person question, and sends it with
 the shot attached; **Skip** drops into the normal text conversation.
+
+The overlay reads only the host page's shot *snapshot* for the gate, and
+`PostShotReviewPage` deliberately does not reload that snapshot on metadata save
+(it would clobber in-progress edits). So on Ask the overlay also emits
+`tasteIntakeSubmitted(tasteBalance, tasteBody, overall)`; the review page mirrors
+those axes into its live `editTaste*` / `editEnjoyment` fields (via
+`applyEditState`) and advances **both** review-page baselines — `editShotData`
+(what `hasUnsavedChanges` compares against) and `_committedState` (the undo
+baseline) — mirroring the `ChangeBeansDialog.onBagSelected` external-flow
+pattern, so no redundant re-save/Visualizer PATCH or phantom undo frame fires on
+the next flush. The rating slider and taste chips update at once and the next
+Ask sees the feedback — the
+review page's AI-Advice click passes the *live* taste, not the stale snapshot, to
+`openWithShot`.
 
 The taps are structured shot columns (`taste_balance`/`taste_body`, migration 33),
 not free text — so the same picker also appears on the post-shot review page (no

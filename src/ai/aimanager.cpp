@@ -19,6 +19,7 @@
 #include "../barista/baristatools.h"
 #include "../barista/feedbackstorage.h"   // [barista-fork] verbal-feedback KB (proactive context + write tool)
 #include "../barista/tasksstorage.h"      // [barista-fork] reminders + maintenance (proactive dueItems + task tools)
+#include "../core/translationmanager.h"
 
 #include <QNetworkAccessManager>
 #include <QStandardPaths>
@@ -328,6 +329,27 @@ void AIManager::createProviders()
     connect(ollama, &AIProvider::testResult, this, &AIManager::onTestResult);
     connect(ollama, &OllamaProvider::modelsRefreshed, this, &AIManager::onOllamaModelsRefreshed);
     m_ollamaProvider.reset(ollama);
+}
+
+void AIManager::setTranslationManager(TranslationManager* tm)
+{
+    m_translationManager = tm;
+    // Fan out to every owned provider (created in the ctor, before this runs)
+    // and the conversation, so their user-visible error strings localize too.
+    for (AIProvider* p : { m_openaiProvider.get(), m_anthropicProvider.get(),
+                           m_geminiProvider.get(), m_openrouterProvider.get(),
+                           m_ollamaProvider.get() }) {
+        if (p) p->setTranslationManager(tm);
+    }
+    if (m_conversation) m_conversation->setTranslationManager(tm);
+}
+
+QString AIManager::tr_(const char* key, const char* fallback) const
+{
+    if (m_translationManager)
+        return m_translationManager->translate(QString::fromUtf8(key),
+                                               QString::fromUtf8(fallback));
+    return QString::fromUtf8(fallback);
 }
 
 QString AIManager::selectedProvider() const
@@ -1926,7 +1948,7 @@ void AIManager::testConnection()
 {
     AIProvider* provider = currentProvider();
     if (!provider) {
-        m_lastTestResult = "No AI provider selected";
+        m_lastTestResult = tr_("ai.error.noProviderSelected", "No AI provider selected");
         m_lastTestSuccess = false;
         emit testResultChanged();
         return;
@@ -1938,20 +1960,20 @@ void AIManager::testConnection()
 void AIManager::analyze(const QString& systemPrompt, const QString& userPrompt)
 {
     if (m_analyzing) {
-        m_lastError = "Analysis already in progress";
+        m_lastError = tr_("ai.error.analysisInProgress", "Analysis already in progress");
         emit errorOccurred(m_lastError);
         return;
     }
 
     AIProvider* provider = currentProvider();
     if (!provider) {
-        m_lastError = "No AI provider configured";
+        m_lastError = tr_("ai.error.noProviderConfigured", "No AI provider configured");
         emit errorOccurred(m_lastError);
         return;
     }
 
     if (!isConfigured()) {
-        m_lastError = "AI provider not configured";
+        m_lastError = tr_("ai.error.providerNotConfigured", "AI provider not configured");
         emit errorOccurred(m_lastError);
         return;
     }
@@ -2216,19 +2238,19 @@ void AIManager::analyzeConversation(const QString& systemPrompt, const QJsonArra
                                     bool webSearch, bool clientTools)
 {
     if (m_analyzing) {
-        emit conversationErrorOccurred("Analysis already in progress");
+        emit conversationErrorOccurred(tr_("ai.error.analysisInProgress", "Analysis already in progress"));
         return;
     }
 
     AIProvider* provider = currentProvider();
     if (!provider) {
-        m_lastError = "No AI provider configured";
+        m_lastError = tr_("ai.error.noProviderConfigured", "No AI provider configured");
         emit conversationErrorOccurred(m_lastError);
         return;
     }
 
     if (!isConfigured()) {
-        m_lastError = "AI provider not configured";
+        m_lastError = tr_("ai.error.providerNotConfigured", "AI provider not configured");
         emit conversationErrorOccurred(m_lastError);
         return;
     }

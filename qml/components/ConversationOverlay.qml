@@ -82,6 +82,11 @@ Rectangle {
         if (overlay.shotId > 0 && Object.keys(meta).length > 0 && MainController.shotHistory)
             MainController.shotHistory.requestUpdateShotMetadata(overlay.shotId, meta)
 
+        // Reflect the taps back to the host page right away so its rating slider
+        // and taste chips update, and its per-shot intake gate sees the feedback
+        // on the next Ask (the overlay only ever reads the host's shot snapshot).
+        overlay.tasteIntakeSubmitted(intakeTasteBalance, intakeTasteBody, intakeOverall)
+
         // Send first, then dismiss only if it actually went through. Dismissing
         // up front would, on mobile (where conversationInput is hidden), silently
         // discard the composed question if the send were refused.
@@ -94,6 +99,13 @@ Rectangle {
     // Emitted when the overlay clears pendingShotSummary (parent must handle)
     signal pendingShotSummaryCleared()
     signal closed()
+
+    // Emitted when the tap-only intake is submitted, carrying the tapped axes so
+    // the host page (e.g. PostShotReviewPage) can mirror them into its live edit
+    // fields immediately — the overlay has already persisted them to the DB, so
+    // the host advances its baseline rather than re-saving. Empty string / 0
+    // means "not tapped" and should be left untouched by the host.
+    signal tasteIntakeSubmitted(string tasteBalance, string tasteBody, int overall)
 
     property bool isMobile: Qt.platform.os === "android" || Qt.platform.os === "ios"
 
@@ -184,20 +196,20 @@ Rectangle {
         overlay.isMistakeShot = isMistake
         overlay.shotDebugLog = shotData.debugLog || ""
 
-        // Taste intake gate. Show the intake unless there's already something to
-        // go back to: a SAVED CONVERSATION for this shot's context, or taste
-        // feedback already entered + saved on the shot. So a new / cleared /
-        // backed-out-without-asking conversation (all empty) re-shows the intake
-        // next time; once the user has asked the AI or recorded any taste, it
-        // goes straight to the text conversation. (switchConversation ran above,
-        // so `conversation` reflects this shot's context.)
-        var conv = MainController.aiManager.conversation
-        var hasConversation = conv && conv.hasHistory
+        // Taste intake gate — per SHOT, not per conversation. Show the intake
+        // whenever THIS shot has no taste feedback saved yet, even if a
+        // conversation for this bean+profile is already going: the conversation
+        // is shared across many shots, so its history is not a per-shot signal,
+        // and each new shot has its own qualities worth capturing. Once this shot
+        // has any saved feedback (a rating or a taste axis), the intake is
+        // suppressed for it — so backing out without entering anything re-shows it
+        // next time, while a shot you've already rated/tasted goes straight to the
+        // text conversation.
         var hasSavedFeedback = ((shotData.tasteBalance || "").length > 0)
                             || ((shotData.tasteBody || "").length > 0)
                             || ((shotData.enjoyment0to100 || 0) > 0)
         var canIntake = Settings.ai.tasteIntakeOnAsk && !isMistake && shotId > 0
-                        && !hasConversation && !hasSavedFeedback
+                        && !hasSavedFeedback
         if (canIntake) {
             overlay.intakeTasteBalance = ""
             overlay.intakeTasteBody = ""

@@ -93,6 +93,43 @@ Item {
             // the visual "thinking beat" going; the loop covers the silence from the moment the user stops.
         }
     }
+    // [barista-fork] Minimum-delay gate for the parallel quick-filler. The owner's rule: the spoken "give me a
+    // sec" must NOT fire when the real answer would arrive quickly (answers often land in ~2s), or it sounds
+    // needless. So the Haiku filler (which typically returns in ~0.6s) is HELD until this 1.75s threshold; if the
+    // real answer/lead-in wins the race first, _cancelSlowOpWatch stops this timer and the filler is dropped.
+    // Single-shot, distinct job from slowOpTimer (that's the 3s visual heartbeat).
+    Timer {
+        id: fillerGateTimer
+        interval: 1750
+        repeat: false
+        onTriggered: {
+            root._fillerGateOpen = true
+            root._trySpeakQuickFiller()   // speak a filler that already arrived while we were holding it
+        }
+    }
+    // Speak the held quick-filler IFF it's still needed. Shared by fillerGateTimer (gate just opened) and
+    // onQuickFillerReady (filler arrived after the gate already opened). Gate: turn still in flight (_thinking),
+    // nothing spoken yet, voice idle + enabled, and the 1.75s minimum has passed.
+    function _trySpeakQuickFiller() {
+        var clean = root._stripBlock(root._quickFillerText || "")
+        if (!root._fillerGateOpen || clean.length === 0)
+            return
+        if (root._state !== "conversing" || !root._thinking || root._spokeThisTurn
+                || (root._voice && root._voice.speaking)
+                || !root._voice || !root._settings || !root._settings.voiceEnabled) {
+            root._diag("quick_filler_suppressed", { chars: clean.length,
+                thinking: root._thinking, spoke: root._spokeThisTurn, gateOpen: root._fillerGateOpen })
+            return
+        }
+        root._quickFillerText = ""   // consumed
+        root._quickFillerSpoke = true
+        root._leadinSpokenText = clean   // the post-tool answer must not just restate the filler
+        root._pendingDisplayText = clean // revealed when the filler becomes audible (onAudibleChanged)
+        root._markSpokeThisTurn()
+        if (root._voiceInput && root._voiceInput.listening) root._voiceInput.pauseMic()
+        root._diag("quick_filler_spoke", { chars: clean.length })
+        root._speakSanitised(clean)
+    }
     // [barista-fork] Reactive control of the cue loop, which doubles as the SPEAKER KEEPALIVE: run it whenever a
     // turn is in flight OR a speak is pending-but-not-yet-audible (`speaking && !audible` = the synth/prepare gap
     // that was clipping the first words on a sleepy BT speaker), and stop the instant real audio is `audible`
@@ -113,13 +150,18 @@ Item {
     function _beginSlowOpWatch() {
         root._spokeThisTurn = false
         root._quickFillerSpoke = false   // [barista-fork] fresh turn → the quick filler may speak again
+        root._quickFillerText = ""       // [barista-fork] no held filler carries into a new turn
+        root._fillerGateOpen = false     // [barista-fork] re-arm the 1.75s minimum-delay gate
         root._thinkingCue = false
         slowOpTimer.restart()
+        fillerGateTimer.restart()        // [barista-fork] start the quick-filler's 1.75s hold
         root._updateThinkingLoop()   // [barista-fork] start the continuous thinking hum immediately
     }
     // Silence is broken (something was spoken) or the turn ended → stop watching + drop the cue.
     function _cancelSlowOpWatch() {
         slowOpTimer.stop()
+        fillerGateTimer.stop()           // [barista-fork] the answer won the race → the held filler is moot
+        root._quickFillerText = ""       // [barista-fork] never let a held filler speak into a resolved turn
         root._thinkingCue = false
         if (root._voice) root._voice.stopThinkingLoop()   // [barista-fork] turn resolved → stop the hum
     }
@@ -274,6 +316,10 @@ Item {
     // When set, the model's own (slower) pre-tool lead-in is NOT spoken again — the filler already covered
     // "I'm on it" ~2s earlier. Reset at each turn start alongside _spokeThisTurn.
     property bool _quickFillerSpoke: false
+    // [barista-fork] The Haiku filler text, HELD until the 1.75s minimum-delay gate opens (see fillerGateTimer /
+    // _trySpeakQuickFiller). Empty when nothing is pending. _fillerGateOpen flips true at 1.75s into the turn.
+    property string _quickFillerText: ""
+    property bool _fillerGateOpen: false
     // [barista-fork] Part B cue latch: a more pronounced avatar "thinking" beat while the slow op drags on with
     // nothing spoken. Set when the 5s timer fires; cleared as soon as anything is spoken or the turn resolves.
     property bool _thinkingCue: false
@@ -1596,27 +1642,14 @@ Item {
             if (root._awaitingContext && !(typeof Barista !== "undefined" && Barista.contextBuilder))
                 root._askWithContext(dataBlock, false)
         }
-        // [barista-fork] The parallel Haiku quick-filler returned. Speak it ONLY if it's still needed —
-        // event-based gate (no timer): the turn must still be in flight (_thinking), nothing spoken yet this
-        // turn (!_spokeThisTurn), the voice idle, and a voice enabled. If the real answer/lead-in already won
-        // the race, drop it silently. Speaking marks the turn so the model's own lead-in is suppressed
-        // (onInterimReceived) and sets _leadinSpokenText so the final answer's dup-guard still works.
+        // [barista-fork] The parallel Haiku quick-filler returned (usually ~0.6s). HOLD it — don't speak until
+        // the 1.75s minimum-delay gate opens (fillerGateTimer), so a fast real answer pre-empts it. If the gate
+        // is already open (a slow turn), speak now via the shared gate check; otherwise store it and the timer
+        // speaks it at 1.75s. Speaking marks the turn so the model's own lead-in is suppressed (onInterimReceived)
+        // and sets _leadinSpokenText so the final answer's dup-guard still works.
         function onQuickFillerReady(text) {
-            var clean = root._stripBlock(text || "")
-            if (root._state !== "conversing" || !root._thinking || root._spokeThisTurn
-                    || (root._voice && root._voice.speaking) || clean.length === 0
-                    || !root._voice || !root._settings || !root._settings.voiceEnabled) {
-                root._diag("quick_filler_suppressed", { chars: clean.length,
-                    thinking: root._thinking, spoke: root._spokeThisTurn })
-                return
-            }
-            root._quickFillerSpoke = true
-            root._leadinSpokenText = clean   // the post-tool answer must not just restate the filler
-            root._pendingDisplayText = clean // revealed when the filler becomes audible (onAudibleChanged)
-            root._markSpokeThisTurn()
-            if (root._voiceInput && root._voiceInput.listening) root._voiceInput.pauseMic()
-            root._diag("quick_filler_spoke", { chars: clean.length })
-            root._speakSanitised(clean)
+            root._quickFillerText = root._stripBlock(text || "")
+            root._trySpeakQuickFiller()   // no-op until _fillerGateOpen; then speaks if still needed
         }
     }
     // Combined context (dial-in + community bean profile + curated profile guidance) from the builder.

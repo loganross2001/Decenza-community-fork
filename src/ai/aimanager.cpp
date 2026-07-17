@@ -1574,11 +1574,20 @@ void AIManager::requestQuickFiller(const QString& utterance)
     // instruction, and Anthropic's default temperature (1.0) does the rest. The model sees the actual utterance
     // as the user turn, so it naturally varies with what was asked.
     const QString sys = QStringLiteral(
-        "You are a warm espresso barista. The user just spoke to you and you need a brief moment before you can "
-        "answer them. Reply with ONLY a short, natural spoken acknowledgement that you're on it — 3 to 8 words. "
+        "You are a warm espresso barista. The user just spoke to you and you need a brief moment to gather your "
+        "thoughts before answering. Reply with ONLY a short, natural spoken acknowledgement that you're thinking "
+        "about it — 3 to 8 words. "
+        // CRITICAL wording rule: this plays BEFORE you (the real turn) have decided whether to look anything up,
+        // so it must NEVER imply retrieval or action. Do NOT say you're 'getting', 'finding', 'looking up',
+        // 'pulling up', 'checking', or 'grabbing' anything — you might not be. Only acknowledge that you're taking
+        // a moment to think ("give me a sec", "hmm, let me think on that", "one moment"). It can echo the TOPIC
+        // lightly but must not promise an action.
+        "IMPORTANT: this is spoken BEFORE you know whether you'll look anything up, so NEVER imply you're "
+        "fetching, getting, finding, looking up, pulling up, checking, or retrieving anything — do not promise an "
+        "action you might not take. ONLY acknowledge that you're taking a moment to think it over. "
         "Make it feel fresh and human EVERY time: vary your wording, NEVER fall back on a stock catchphrase (do "
-        "not just say \"one sec\" or the same opener each time), and let it lightly echo what they actually asked "
-        "so it never sounds robotic. Do NOT answer, do NOT invent any specifics, no emojis, no surrounding quotes.");
+        "not just say \"one sec\" or the same opener each time). Do NOT answer, do NOT invent any specifics, no "
+        "emojis, no surrounding quotes.");
     m_fillerProvider->analyze(sys, utterance);
 }
 

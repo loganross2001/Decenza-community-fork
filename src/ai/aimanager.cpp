@@ -316,7 +316,8 @@ void AIManager::createProviders()
     if (!anthropicKey.isEmpty()) {
         auto* filler = new AnthropicProvider(m_networkManager, anthropicKey, this);
         filler->setModelUnchecked(QStringLiteral("claude-haiku-4-5"));
-        connect(filler, &AIProvider::analysisComplete, this, &AIManager::onQuickFillerReady);
+        // NOTE: analysisComplete is NOT statically connected here — requestQuickFiller() makes a per-request
+        // gen-capturing connection so a superseded turn's completion can be dropped (see m_fillerConn).
         connect(filler, &AIProvider::analysisFailed, this, [](const QString&) { /* filler failure: silent */ });
         m_fillerProvider.reset(filler);
     }
@@ -1548,28 +1549,43 @@ static QString formatWhoBlock(const QString& activeUser, const QVector<Barista>&
 
 // [barista-fork] Parallel quick-filler: fire a tiny Haiku turn the instant the user's utterance is dispatched,
 // so a short spoken acknowledgement can play ~2s sooner than the main turn's own (slower) lead-in. Model-
-// generated + varied (never a hardcoded string). Silent no-op without an Anthropic key. m_fillerInFlightGen
-// pins THIS request's generation; if a newer requestQuickFiller() bumps m_fillerGen before this one returns,
-// the stale completion is dropped in onQuickFillerReady. The overlay does the real "is it still needed" gating.
+// generated + varied (never a hardcoded string). Silent no-op without an Anthropic key. A per-request lambda
+// captures this request's gen; if a newer requestQuickFiller() bumps m_fillerGen before this one returns, the
+// stale completion is dropped. The overlay does the real "is it still needed" gating.
 void AIManager::requestQuickFiller(const QString& utterance)
 {
     if (!m_fillerProvider)
         return;
-    m_fillerInFlightGen = ++m_fillerGen;
+    // Capture THIS request's gen in a per-request connection. analysisComplete carries no gen and the provider
+    // does not abort an in-flight request, so a plain static slot would happily speak turn N's filler into turn
+    // N+1. Reconnect each call (dropping the prior in-flight connection) and gate on the captured gen.
+    const int gen = ++m_fillerGen;
+    QObject::disconnect(m_fillerConn);
+    m_fillerConn = connect(m_fillerProvider.get(), &AIProvider::analysisComplete, this,
+        [this, gen](const QString& text) {
+            if (gen != m_fillerGen)   // a newer requestQuickFiller() superseded this one → drop
+                return;
+            onQuickFillerReady(text);
+        });
+    // [barista-fork] STATIC system prompt (the utterance rides as the user message below, not embedded here) so
+    // it stays cache-friendly AND — the load-bearing part — it forces VARIETY. The owner's rule: fillers must
+    // sound human, never a canned catchphrase ("don't sound like an ATM"). No lead example to anchor on (an
+    // "e.g. one sec" list made Haiku parrot "one sec"); instead, explicit anti-catchphrase + riff-on-their-words
+    // instruction, and Anthropic's default temperature (1.0) does the rest. The model sees the actual utterance
+    // as the user turn, so it naturally varies with what was asked.
     const QString sys = QStringLiteral(
-        "You are a warm, concise espresso barista. The user just said: \"%1\". You are about to take a moment "
-        "to answer. Reply with ONLY a very short, natural spoken acknowledgement that you're on it — 3 to 8 "
-        "words, warm and varied (e.g. \"Sure, one sec…\", \"Let me look into that.\", \"On it — give me a "
-        "moment.\"). Do NOT answer the question, do NOT invent specifics, no emojis, no surrounding quotes.")
-        .arg(QString(utterance).replace(QLatin1Char('"'), QLatin1Char('\'')));
+        "You are a warm espresso barista. The user just spoke to you and you need a brief moment before you can "
+        "answer them. Reply with ONLY a short, natural spoken acknowledgement that you're on it — 3 to 8 words. "
+        "Make it feel fresh and human EVERY time: vary your wording, NEVER fall back on a stock catchphrase (do "
+        "not just say \"one sec\" or the same opener each time), and let it lightly echo what they actually asked "
+        "so it never sounds robotic. Do NOT answer, do NOT invent any specifics, no emojis, no surrounding quotes.");
     m_fillerProvider->analyze(sys, utterance);
 }
 
 void AIManager::onQuickFillerReady(const QString& text)
 {
-    // Drop a filler whose turn has been superseded by a newer quick-filler request.
-    if (m_fillerInFlightGen != m_fillerGen)
-        return;
+    // Staleness is already handled by the per-request gen check in requestQuickFiller's lambda; this only
+    // cleans up and forwards the accepted filler.
     QString t = text.trimmed();
     // Strip a stray wrapping quote pair the model may add despite the instruction.
     if (t.size() >= 2 && ((t.startsWith(QLatin1Char('"')) && t.endsWith(QLatin1Char('"')))

@@ -455,11 +455,13 @@ private:
     // [barista-fork] Dedicated Haiku provider for the parallel "quick filler" — a tiny, fast "one sec" the
     // barista can speak ~2s sooner than the main turn's own lead-in. Kept OUT of providerById/currentProvider
     // so it is never selected as the main provider; only ever driven by requestQuickFiller(). Null when there
-    // is no Anthropic key (silent no-op → current behavior). m_fillerInFlightGen guards a superseded filler
-    // from being spoken after a newer requestQuickFiller() bumps m_fillerGen.
+    // is no Anthropic key (silent no-op → current behavior). Each requestQuickFiller() captures its own gen in a
+    // per-request lambda (m_fillerConn, reconnected each call); a completion whose captured gen != m_fillerGen is a
+    // superseded turn and is dropped. This is the REAL staleness guard — the provider does not abort in-flight
+    // requests and analysisComplete carries no gen, so a plain slot could speak an old turn's filler over a new one.
     std::unique_ptr<AIProvider> m_fillerProvider;
     int m_fillerGen = 0;
-    int m_fillerInFlightGen = -1;
+    QMetaObject::Connection m_fillerConn;
 
     // State
     bool m_analyzing = false;

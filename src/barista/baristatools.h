@@ -79,6 +79,10 @@ public:
                             const std::function<QVariantMap()>& getActiveRecipe,
                             const std::function<void(qint64, std::function<void(QJsonObject)>)>& activateRecipe,
                             const std::function<QVariantMap()>& deactivateRecipe,
+                            // [barista-fork] update_recipe seam: mutate a recipe's fields (dose/grind/temp/yield
+                            // spec), completing `done` on the storage's recipeUpdated. Empty = tool unavailable.
+                            const std::function<void(qint64, const QVariantMap&,
+                                                     std::function<void(QJsonObject)>)>& updateRecipe,
                             const std::function<void(const QString&)>& setActiveUser,
                             const QVariantMap& anchorSnapshot,
                             const QString& name, const QJsonObject& input,

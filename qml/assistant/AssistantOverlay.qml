@@ -974,7 +974,12 @@ Item {
             + "so a direct request is approval enough. The machine's answer is the truth — report activation success or "
             + "failure from the tool result, and if it failed say plainly that nothing changed and why. If a dial change "
             + "you applied also updated the active recipe, mention it once, in passing. Don't lecture about how recipes "
-            + "work — the user built them."
+            + "work — the user built them. "
+            + "To EDIT a saved recipe (\"change my latte to 1:2.5\", \"bump the dose to 19\", \"save it a degree cooler\"), "
+            + "use update_recipe — it changes the recipe's stored design only, it does NOT activate it or touch the "
+            + "machine. Resolve the recipe_id from get_active_recipe/list_recipes, confirm the SPECIFIC change with the "
+            + "user first, then call it. Yield is one anchor: set EITHER a fixed gram yield OR a ratio of the dose "
+            + "(e.g. 1:2.5), never both. Report updated:true from the result honestly."
 
         // Proactivity level (user setting): what the assistant may VOLUNTEER (it always answers direct asks).
         var level = root._settings ? root._settings.proactivityLevel : "full"

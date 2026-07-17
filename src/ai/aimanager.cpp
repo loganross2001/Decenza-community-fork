@@ -298,6 +298,7 @@ void AIManager::createProviders()
             BaristaTools::executeTool(m_shotHistory, m_feedbackStorage, m_tasksStorage, m_applyDialHandler,
                                       m_endConversationHandler, m_webToolsHandler,
                                       m_getActiveRecipeHandler, m_activateRecipeHandler, m_deactivateRecipeHandler,
+                                      m_updateRecipeHandler,
                                       m_setActiveUserHandler,
                                       anchor,
                                       name, input, std::move(done));

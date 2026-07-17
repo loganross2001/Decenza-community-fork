@@ -9,6 +9,7 @@
 #include "tasksstorage.h"
 #include "baristadiagnostics.h"  // [barista-fork] tool-call timeline recorder
 #include "../history/recipestorage.h"  // [barista-fork] Recipes 2.0 tools (list_recipes / activate / etc.)
+#include "../core/yieldspec.h"          // [barista-fork] update_recipe yield-anchor (ratio clamp / mode)
 #include "../history/baristastorage.h"  // [barista-fork] Phase 1 identity: roster for set_active_user
 
 #include <QJsonDocument>
@@ -533,6 +534,41 @@ QJsonArray BaristaTools::toolDefinitions()
     ract["input_schema"] = ractSchema;
     tools.append(ract);
 
+    // [barista-fork] update_recipe — edit a SAVED recipe's fields (does not touch the machine; no activation).
+    // Approve-then-apply lives in the model (like activate_recipe): confirm the exact change with the user first.
+    const auto numProp = [](const QString& d){ QJsonObject o; o["type"] = QString("number"); o["description"] = d; return o; };
+    QJsonObject rupd;
+    rupd["name"] = QString("update_recipe");
+    rupd["description"] = QString(
+        "Change the saved settings of an existing recipe (its stored design — this does NOT activate it or change "
+        "the machine). Use it when the user wants to tweak a recipe: dose, grind, temperature, name, or the yield. "
+        "Resolve recipe_id first from get_active_recipe / list_recipes — never invent an id. Send ONLY the fields "
+        "you are changing. Yield is ONE anchor: send EITHER yield_g (a fixed gram target) OR ratio (a multiple of "
+        "the dose, e.g. 2.0 = 1:2, so the grams follow the weighed dose) — never both, and sending one replaces "
+        "the other. Confirm the SPECIFIC change with the user BEFORE calling (approve-then-apply); approval is for "
+        "that one edit only. The result is ground truth: report updated:true honestly, never claim a save that "
+        "did not return updated:true.");
+    QJsonObject rupdSchema;
+    rupdSchema["type"] = QString("object");
+    QJsonObject rupdProps;
+    rupdProps["recipe_id"]  = intProp("The id of the recipe to change (from get_active_recipe or list_recipes). "
+                                      "Never invent or guess an id.");
+    rupdProps["dose_g"]     = numProp("New dose in grams.");
+    rupdProps["grind_setting"] = strProp("New grinder setting (the recipe's own grind); '' clears it.");
+    rupdProps["rpm"]        = intProp("New grinder RPM, if the grinder is RPM-based.");
+    rupdProps["temperature_offset_c"] = numProp("Signed temperature DELTA in Celsius against the recipe's profile "
+                                      "(e.g. -1 for 1C cooler); 0 clears it. This is an OFFSET, not an absolute.");
+    rupdProps["title"]      = strProp("New name/title for the recipe.");
+    rupdProps["yield_g"]    = numProp("Absolute yield target in grams. Mutually exclusive with ratio; 0 clears "
+                                      "the yield. Sending this replaces any stored ratio.");
+    rupdProps["ratio"]      = numProp("Yield as a multiple of the dose (2.0 = 1:2; clamped 0.5-6.0) so the gram "
+                                      "target follows the weighed dose. Mutually exclusive with yield_g; 0 clears "
+                                      "the yield. Sending this replaces any stored absolute yield.");
+    rupdSchema["properties"] = rupdProps;
+    rupdSchema["required"] = QJsonArray{ QString("recipe_id") };
+    rupd["input_schema"] = rupdSchema;
+    tools.append(rupd);
+
     QJsonObject rdeact;
     rdeact["name"] = QString("deactivate_recipe");
     rdeact["description"] = QString(
@@ -727,6 +763,8 @@ void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage*
                                const std::function<QVariantMap()>& getActiveRecipe,
                                const std::function<void(qint64, std::function<void(QJsonObject)>)>& activateRecipe,
                                const std::function<QVariantMap()>& deactivateRecipe,
+                               const std::function<void(qint64, const QVariantMap&,
+                                                        std::function<void(QJsonObject)>)>& updateRecipe,
                                const std::function<void(const QString&)>& setActiveUser,
                                const QVariantMap& anchorSnapshot,
                                const QString& name, const QJsonObject& input,
@@ -850,6 +888,57 @@ void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage*
         }
         const qint64 recipeId = input.value(QStringLiteral("recipe_id")).toVariant().toLongLong();
         activateRecipe(recipeId, [done](QJsonObject result) { done(result); });
+        return;
+    }
+
+    // [barista-fork] update_recipe (edits a saved recipe; no machine mutation). Approve-then-apply is a model
+    // (persona) gate. Builds the storage field map (same YieldSpec vocabulary as the MCP recipe_update).
+    if (name == QLatin1String("update_recipe")) {
+        if (!updateRecipe) {
+            done(QJsonObject{{QStringLiteral("success"), false},
+                             {QStringLiteral("failure_reason"), QStringLiteral("unavailable")},
+                             {QStringLiteral("detail"), QStringLiteral("Recipe editing is unavailable.")}});
+            return;
+        }
+        if (!input.contains(QStringLiteral("recipe_id"))) {
+            done(QJsonObject{{QStringLiteral("error"), QStringLiteral("update_recipe needs recipe_id")}});
+            return;
+        }
+        const qint64 recipeId = input.value(QStringLiteral("recipe_id")).toVariant().toLongLong();
+        const bool hasYieldG = input.contains(QStringLiteral("yield_g"));
+        const bool hasRatio  = input.contains(QStringLiteral("ratio"));
+        if (hasYieldG && hasRatio) {
+            done(QJsonObject{{QStringLiteral("error"), QStringLiteral(
+                "yield_g and ratio are mutually exclusive — a recipe holds ONE yield anchor. Send exactly one.")}});
+            return;
+        }
+        // Translate the model's snake_case inputs → the storage field names (matches recipeFieldsFromArgs).
+        QVariantMap fields;
+        if (input.contains(QStringLiteral("dose_g")))
+            fields.insert(QStringLiteral("doseG"), input.value(QStringLiteral("dose_g")).toDouble());
+        if (input.contains(QStringLiteral("grind_setting")))
+            fields.insert(QStringLiteral("grindPinned"), input.value(QStringLiteral("grind_setting")).toString());
+        if (input.contains(QStringLiteral("rpm")))
+            fields.insert(QStringLiteral("rpmPinned"), input.value(QStringLiteral("rpm")).toVariant().toInt());
+        if (input.contains(QStringLiteral("temperature_offset_c")))
+            fields.insert(QStringLiteral("tempOffsetC"), input.value(QStringLiteral("temperature_offset_c")).toDouble());
+        if (input.contains(QStringLiteral("title")))
+            fields.insert(QStringLiteral("name"), input.value(QStringLiteral("title")).toString());
+        if (hasYieldG) {
+            const double g = input.value(QStringLiteral("yield_g")).toDouble();
+            fields.insert(QStringLiteral("yieldValue"), g > 0 ? g : 0.0);
+            fields.insert(QStringLiteral("yieldMode"), g > 0 ? QStringLiteral("absolute") : QStringLiteral("none"));
+        } else if (hasRatio) {
+            const double r = input.value(QStringLiteral("ratio")).toDouble();
+            fields.insert(QStringLiteral("yieldValue"), r > 0 ? YieldSpec::clampRatio(r) : 0.0);
+            fields.insert(QStringLiteral("yieldMode"), r > 0 ? QStringLiteral("ratio") : QStringLiteral("none"));
+        }
+        if (fields.isEmpty()) {
+            done(QJsonObject{{QStringLiteral("error"), QStringLiteral(
+                "update_recipe needs recipe_id plus at least one field to change")}});
+            return;
+        }
+        updateRecipe(recipeId, fields, [done](QJsonObject result) { done(result); });
         return;
     }
 

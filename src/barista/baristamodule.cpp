@@ -296,6 +296,48 @@ BaristaModule::BaristaModule(MainController* mainController, MachineState* machi
                 QObject::connect(thread, &QThread::finished, thread, &QObject::deleteLater);
                 thread->start();
             });
+            // [barista-fork] update_recipe seam: mutate a saved recipe's fields (no machine mutation — the
+            // storage does its own background work). One-shot recipeUpdated correlation + 10s safety timeout,
+            // mirroring the MCP recipe_update handler.
+            ai->setUpdateRecipeHandler([mc](qint64 recipeId, const QVariantMap& fields,
+                                            std::function<void(QJsonObject)> reply) {
+                RecipeStorage* rs = mc ? mc->recipeStorage() : nullptr;
+                if (!rs) {
+                    reply(QJsonObject{{QStringLiteral("success"), false},
+                                      {QStringLiteral("failure_reason"), QStringLiteral("unavailable")},
+                                      {QStringLiteral("detail"), QStringLiteral("Recipe editing is unavailable.")}});
+                    return;
+                }
+                auto done = std::make_shared<bool>(false);
+                auto conn = std::make_shared<QMetaObject::Connection>();
+                QTimer* timer = new QTimer(rs);
+                timer->setSingleShot(true);
+                auto finish = [done, conn, timer, reply](QJsonObject r) {
+                    if (*done) return;
+                    *done = true;
+                    if (*conn) QObject::disconnect(*conn);
+                    timer->stop(); timer->deleteLater();
+                    reply(r);
+                };
+                *conn = QObject::connect(rs, &RecipeStorage::recipeUpdated, rs,
+                    [finish, recipeId](qint64 updatedId, bool success) {
+                        if (updatedId != recipeId) return;   // someone else's update
+                        if (success)
+                            finish(QJsonObject{{QStringLiteral("updated"), true},
+                                               {QStringLiteral("recipe_id"), static_cast<double>(recipeId)}});
+                        else
+                            finish(QJsonObject{{QStringLiteral("updated"), false},
+                                {QStringLiteral("failure_reason"), QStringLiteral("not_found_or_failed")},
+                                {QStringLiteral("detail"), QStringLiteral("That recipe could not be updated.")}});
+                    });
+                QObject::connect(timer, &QTimer::timeout, rs, [finish]() {
+                    finish(QJsonObject{{QStringLiteral("updated"), false},
+                        {QStringLiteral("failure_reason"), QStringLiteral("timeout")},
+                        {QStringLiteral("detail"), QStringLiteral("No confirmation the recipe saved within 10s.")}});
+                });
+                timer->start(10000);
+                rs->requestUpdateRecipe(recipeId, fields);
+            });
         }
     }
 }

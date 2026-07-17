@@ -74,7 +74,11 @@ struct Recipe {
     qint64 equipmentId = 0;   // FK -> equipment_packages.id; 0 = none
 
     double doseG = 0;         // 0 = unset
-    double yieldG = 0;        // 0 = unset
+    double yieldG = 0;        // 0 = unset (absolute yield in grams — the legacy fixed model)
+    // Yield defined as a RATIO of the dose (brew-by-ratio): when > 0, the recipe's yield is dose x yieldRatio,
+    // and activating the recipe arms brew-by-ratio mode so the target tracks the dose live. 0 = use the
+    // absolute yieldG instead. The two are mutually exclusive in intent; yieldRatio wins when both are set.
+    double yieldRatio = 0;    // 0 = absolute-yield recipe (use yieldG)
     // Temperature as a SIGNED DELTA against the profile's espresso_temperature
     // (recipe-relative-temp-offset); 0 = brew at the profile's own temperature.
     // The effective brew temperature is always computed profileTemp + offset at

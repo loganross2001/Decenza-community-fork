@@ -110,6 +110,7 @@ const RecipeCol kCols[] = {
     COL_EPOCH("equipment_id",          equipmentId),
     COL_DBL  ("dose_g",                doseG),
     COL_DBL  ("yield_g",               yieldG),
+    COL_DBL  ("yield_ratio",           yieldRatio),
     COL_DBL_SIGNED("temp_offset_c",    tempOffsetC),
     COL_STR  ("grind_pinned",          grindPinned),
     COL_EPOCH("rpm_pinned",            rpmPinned),
@@ -723,6 +724,7 @@ bool RecipeStorage::ensureTableStatic(QSqlDatabase& db)
             equipment_id INTEGER,
             dose_g REAL,
             yield_g REAL,
+            yield_ratio REAL, -- brew-by-ratio: >0 = yield is dose x ratio (else use yield_g)
             temp_offset_c REAL,
             temp_override_c REAL, -- dead: pre-31 absolute temps; carrier for legacy-source imports only
             grind_pinned TEXT,

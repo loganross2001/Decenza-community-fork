@@ -1690,6 +1690,30 @@ bool ShotHistoryStorage::runMigrations()
         }
     }
 
+    // Migration 35: recipes.yield_ratio (brew-by-ratio, private fork feature).
+    // [barista-fork] Renumbered from the upstream-based build's 34 -> 35: the fork's +1 migration offset
+    // already holds 34 with the taste axes, so yield_ratio advances one slot. When > 0 a recipe's yield is
+    // defined as dose x ratio (and activating it arms brew-by-ratio mode) instead of the absolute yield_g.
+    // Additive, NULL default = absolute-yield recipe (every existing recipe unchanged). Fresh DBs get the
+    // column from ensureTableStatic's CREATE TABLE, so the ALTER is guarded by hasColumn. Whitespace before
+    // the open-paren dodges the QSqlQuery permission-hook false-positive; do not auto-format.
+    if (currentVersion >= 34 && currentVersion < 35) {
+        qDebug() << "ShotHistoryStorage: Running migration to version 35 (recipe yield ratio)";
+
+        if (!hasColumn("recipes", "yield_ratio")
+            && !query.exec ("ALTER TABLE recipes ADD COLUMN yield_ratio REAL"))
+            qWarning() << "ShotHistoryStorage: migration 35 add recipes.yield_ratio failed -"
+                       << query.lastError().text();
+
+        if (hasColumn("recipes", "yield_ratio")) {
+            query.exec ("DELETE FROM schema_version");
+            query.exec ("INSERT INTO schema_version (version) VALUES (35)");
+            currentVersion = 35;
+        } else {
+            qWarning() << "ShotHistoryStorage: migration 35 incomplete - will retry next launch";
+        }
+    }
+
     // [barista-fork] Version-independent fork-schema repair. A shot DB written by a
     // DIFFERENT Decenza build (e.g. an upstream v2.0.0 database pulled in via
     // device-to-device import) carries a schema_version NUMBER that may sit at or

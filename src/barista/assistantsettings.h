@@ -24,6 +24,8 @@ class AssistantSettings : public QObject {
     Q_PROPERTY(QString bellSound READ bellSound WRITE setBellSound NOTIFY bellSoundChanged)
     // [barista-fork] The subtle "thinking" earcon that loops while the barista is working: off|hum|breath|pulse|drone.
     Q_PROPERTY(QString thinkingSound READ thinkingSound WRITE setThinkingSound NOTIFY thinkingSoundChanged)
+    // [barista-fork] Playback gain (0..1) for the thinking/pulse earcon, independent of the spoken-voice volume.
+    Q_PROPERTY(double thinkingVolume READ thinkingVolume WRITE setThinkingVolume NOTIFY thinkingVolumeChanged)
     Q_PROPERTY(QString bellCustomPath READ bellCustomPath WRITE setBellCustomPath NOTIFY bellCustomPathChanged)
     Q_PROPERTY(QString ttsProvider READ ttsProvider WRITE setTtsProvider NOTIFY ttsProviderChanged)
     Q_PROPERTY(QString openaiVoice READ openaiVoice WRITE setOpenaiVoice NOTIFY openaiVoiceChanged)
@@ -102,6 +104,8 @@ public:
     QString bellSound() const;                    // "poof" | "ding" | ... | "off" | "custom"
     QString thinkingSound() const;                // "off" | "hum" | "breath" | "pulse" | "drone"
     void setThinkingSound(const QString& sound);
+    double thinkingVolume() const;                // thinking/pulse earcon gain 0..1 (default 0.5)
+    void setThinkingVolume(double v);
     QString pauseMode() const;                    // "hold" | "freeze" (default "hold")
     void setPauseMode(const QString& mode);
     QString elevenlabsModel() const;              // ElevenLabs model id (default "eleven_turbo_v2_5")
@@ -223,6 +227,7 @@ signals:
     void homeLocationChanged();   // [barista-fork]
     void bellSoundChanged();
     void thinkingSoundChanged();
+    void thinkingVolumeChanged();
     void elevenlabsModelChanged();
     void pauseModeChanged();
     void bellCustomPathChanged();

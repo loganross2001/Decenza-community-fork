@@ -864,6 +864,36 @@ Rectangle {
                             }
                         }
 
+                        // [barista-fork] Pulse volume — gain for the thinking earcon, separate from the spoken
+                        // voice. Auditioned on release (not per-step, which would chop the loop). Hidden when
+                        // the thinking sound is "off" (nothing to set a level for).
+                        Tr {
+                            key: "barista.settings.pulseVolume"; fallback: "Pulse volume"
+                            color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true
+                            visible: root._settings && root._settings.thinkingSound !== "off"
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.spacingSmall
+                            visible: root._settings && root._settings.thinkingSound !== "off"
+                            Slider {
+                                id: pulseVolumeSlider
+                                Layout.fillWidth: true
+                                from: 0.0; to: 1.0; stepSize: 0.05
+                                value: root._settings ? root._settings.thinkingVolume : 0.5
+                                onMoved: if (root._settings) root._settings.thinkingVolume = value
+                                // Audition at the new level once the drag settles (restart reads thinkingVolume).
+                                onPressedChanged: if (!pressed && root._voice
+                                        && typeof root._voice.previewThinkingSound === "function")
+                                    root._voice.previewThinkingSound()
+                                Accessible.name: TranslationManager.translate("barista.settings.pulseVolume", "Pulse volume")
+                            }
+                            Text {
+                                text: Math.round(pulseVolumeSlider.value * 100) + "%"
+                                color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true
+                            }
+                        }
+
                         // [barista-fork] Pause button behavior — flexibility in the voice-only UX.
                         Tr {
                             key: "barista.settings.pauseMode"; fallback: "Pause button"
@@ -1360,6 +1390,34 @@ Rectangle {
                             }
                             Text {
                                 text: coachingSpeedSlider.value.toFixed(2) + "×"
+                                color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true
+                            }
+                        }
+
+                        // [barista-fork] Pulse volume (duplicate of the Voice tab's control — same global
+                        // thinkingVolume setting, so the two sliders stay in sync). Auditioned on release.
+                        Tr {
+                            key: "barista.settings.pulseVolume"; fallback: "Pulse volume"
+                            color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true
+                            visible: root._settings && root._settings.thinkingSound !== "off"
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.spacingSmall
+                            visible: root._settings && root._settings.thinkingSound !== "off"
+                            Slider {
+                                id: coachingPulseVolumeSlider
+                                Layout.fillWidth: true
+                                from: 0.0; to: 1.0; stepSize: 0.05
+                                value: root._settings ? root._settings.thinkingVolume : 0.5
+                                onMoved: if (root._settings) root._settings.thinkingVolume = value
+                                onPressedChanged: if (!pressed && root._voice
+                                        && typeof root._voice.previewThinkingSound === "function")
+                                    root._voice.previewThinkingSound()
+                                Accessible.name: TranslationManager.translate("barista.settings.pulseVolume", "Pulse volume")
+                            }
+                            Text {
+                                text: Math.round(coachingPulseVolumeSlider.value * 100) + "%"
                                 color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true
                             }
                         }

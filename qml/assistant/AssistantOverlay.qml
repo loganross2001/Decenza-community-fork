@@ -210,7 +210,12 @@ Item {
                 root._endSessionNow()
                 return
             }
-            if (!root._voiceInput || !root._voiceInput.listening) return
+            // [barista-fork] Re-evaluate the hum BEFORE bailing on a dead mic session. When a TTS synth yields no
+            // audio (cloud timeout/error), `audible` never rises so onAudibleChanged never fires — the trailing
+            // _updateThinkingLoop() below is then the ONLY thing that stops the hum, and this early return used to
+            // skip it, leaving the pulse looping into the next turn (observed: ~53s of stuck hum). speaking+_thinking
+            // are both false here so want computes false → the hum stops correctly even with no live mic.
+            if (!root._voiceInput || !root._voiceInput.listening) { root._updateThinkingLoop(); return }
             if (root._voice.speaking) root._voiceInput.pauseMic()
             // [barista-fork] Only reopen the mic when the TURN is actually done. A lead-in finishing while a
             // tool is still running (_thinking stays true until onResponseReceived) is NOT the end of the turn —
@@ -2191,6 +2196,42 @@ Item {
                     }
                     Text {
                         text: pickSpeed.value.toFixed(2) + "×"
+                        color: Theme.textSecondaryColor
+                        font: Theme.labelFont
+                        Layout.preferredWidth: Theme.scaled(38)
+                        horizontalAlignment: Text.AlignRight
+                    }
+                }
+
+                // [barista-fork] Pulse volume — the thinking earcon's gain, a single GLOBAL setting (not
+                // role-scoped like the sliders above), mirrored on the gear's Voice/Coaching tabs. Auditioned on
+                // release. Hidden when the thinking sound is "off".
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.spacingSmall
+                    visible: root._settings && root._settings.thinkingSound !== "off"
+                    Text {
+                        // Distinct key from the tabs' full "Pulse volume" label so a translation of the full
+                        // key never silently overrides this compact popup label.
+                        text: TranslationManager.translate("barista.settings.pulseVolumeShort", "Pulse")
+                        color: Theme.textSecondaryColor
+                        font: Theme.labelFont
+                        Layout.preferredWidth: Theme.scaled(56)
+                        Accessible.ignored: true
+                    }
+                    Slider {
+                        id: pickPulseVolume
+                        Layout.fillWidth: true
+                        from: 0.0; to: 1.0; stepSize: 0.05
+                        value: root._settings ? root._settings.thinkingVolume : 0.5
+                        Accessible.name: TranslationManager.translate("barista.settings.pulseVolume", "Pulse volume")
+                        onMoved: if (root._settings) root._settings.thinkingVolume = value
+                        onPressedChanged: if (!pressed && selectBaristaCard._roleVoice
+                                && typeof selectBaristaCard._roleVoice.previewThinkingSound === "function")
+                            selectBaristaCard._roleVoice.previewThinkingSound()
+                    }
+                    Text {
+                        text: Math.round(pickPulseVolume.value * 100) + "%"
                         color: Theme.textSecondaryColor
                         font: Theme.labelFont
                         Layout.preferredWidth: Theme.scaled(38)

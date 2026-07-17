@@ -145,6 +145,18 @@ void AssistantSettings::setThinkingSound(const QString& sound) {
     emit thinkingSoundChanged();
 }
 
+double AssistantSettings::thinkingVolume() const {
+    return m_settings.value(QStringLiteral("barista/thinkingVolume"), 0.5).toDouble();
+}
+
+void AssistantSettings::setThinkingVolume(double v) {
+    const double c = v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v);
+    if (qFuzzyCompare(thinkingVolume(), c))
+        return;
+    m_settings.setValue(QStringLiteral("barista/thinkingVolume"), c);
+    emit thinkingVolumeChanged();
+}
+
 // [barista-fork] Which ElevenLabs model to synthesize with. Default is the fast low-latency turbo model;
 // the owner can switch to eleven_multilingual_v2 (steadier / less stutter, higher latency) or flash (fastest).
 QString AssistantSettings::elevenlabsModel() const {

@@ -693,11 +693,13 @@ void AssistantVoice::startThinkingLoop() {
     const QString fileName   = keepaliveOnly ? QStringLiteral("keepalive.wav")
                                              : QStringLiteral("think-%1.wav").arg(name);
     m_thinkingLooping = true;
+    // [barista-fork] User-configurable pulse gain (SettingsAITab / Coaching / Barista-options slider). keepalive.wav
+    // stays near unity (authored sub-perceptible); the audible hums scale by thinkingVolume (default 0.5).
+    const double humVol = m_settings ? m_settings->thinkingVolume() : 0.5;
     BaristaDiagnostics::record(QStringLiteral("voice"), QStringLiteral("thinking_loop_on"), {{QStringLiteral("sound"), soundLabel}});
 #ifdef Q_OS_ANDROID
     const QString path = extractSoundAssetToFile(fileName);
-    // keepalive.wav is already authored at ~-42 dBFS → play near unity (still inaudible); the hums play at 0.5.
-    const float gain = keepaliveOnly ? 1.0f : 0.5f;
+    const float gain = keepaliveOnly ? 1.0f : static_cast<float>(humVol);
     if (!path.isEmpty() && m_androidCue.isValid()) {
         m_androidCue.callMethod<void>("playLooping", "(Ljava/lang/String;F)V",
             QJniObject::fromString(path).object<jstring>(), static_cast<jfloat>(gain));
@@ -707,7 +709,7 @@ void AssistantVoice::startThinkingLoop() {
         m_thinkingLoop = new QSoundEffect(this);
         m_thinkingLoop->setLoopCount(QSoundEffect::Infinite);
     }
-    m_thinkingLoop->setVolume(keepaliveOnly ? 1.0 : 0.35);
+    m_thinkingLoop->setVolume(keepaliveOnly ? 1.0 : humVol);
     m_thinkingLoop->setSource(QUrl(QStringLiteral("qrc:/sounds/") + fileName));
     m_thinkingLoop->play();
 #endif

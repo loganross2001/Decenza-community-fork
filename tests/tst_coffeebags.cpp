@@ -882,7 +882,7 @@ private slots:
             QCOMPARE(q.value(0).toInt(), 0);  // existing rows default to 0
             QVERIFY(q.exec("SELECT version FROM schema_version"));
             QVERIFY(q.next());
-            QCOMPARE(q.value(0).toInt(), 34);  // chain runs on to the latest (fork mig 34 = taste axes)
+            QCOMPARE(q.value(0).toInt(), 35);  // chain runs on to the latest (fork mig 35 = recipe yield ratio (latest))
         });
     }
 
@@ -1196,7 +1196,7 @@ private slots:
             QSqlQuery q(db);
             QVERIFY(q.exec("SELECT version FROM schema_version"));
             QVERIFY(q.next());
-            QCOMPARE(q.value(0).toInt(), 34);  // chain runs on to the latest (fork mig 34 = taste axes)
+            QCOMPARE(q.value(0).toInt(), 35);  // chain runs on to the latest (fork mig 35 = recipe yield ratio (latest))
         });
     }
 
@@ -1229,7 +1229,7 @@ private slots:
             QSqlQuery q(db);
             QVERIFY(q.exec("SELECT version FROM schema_version"));
             QVERIFY(q.next());
-            QCOMPARE(q.value(0).toInt(), 34);  // chain runs on to the latest (fork mig 34 = taste axes)
+            QCOMPARE(q.value(0).toInt(), 35);  // chain runs on to the latest (fork mig 35 = recipe yield ratio (latest))
             // The repaired table is writable — insertRecipeStatic binds
             // rpm_pinned unconditionally, so it would fail wholesale if the
             // ALTER hadn't landed.
@@ -1274,7 +1274,7 @@ private slots:
             QSqlQuery q(db);
             QVERIFY(q.exec("SELECT version FROM schema_version"));
             QVERIFY(q.next());
-            QCOMPARE(q.value(0).toInt(), 34);  // full chain runs to the latest (fork mig 34 = taste axes)
+            QCOMPARE(q.value(0).toInt(), 35);  // full chain runs to the latest (fork mig 35 = recipe yield ratio (latest))
         });
     }
 

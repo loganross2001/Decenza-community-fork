@@ -78,13 +78,31 @@ Dialog {
         : [fEquipmentBrand, fEquipmentModel].filter(function(s){ return s && s.length > 0 }).join(" ")
     property string fDose: ""         // text form; "" = unset
     property string fYield: ""
+    // Yield anchor (add-yield-ratio-anchor): the bag's own yield is a spec —
+    // a fixed weight OR a ratio of the dose, never both. Whichever field was
+    // last edited is the anchor; the other shows derived and dimmed.
+    property string fYieldRatio: ""   // text form; "" = unset
+    property string fYieldAnchor: "none"   // "none" | "absolute" | "ratio"
+    function syncDerivedBagYield() {
+        var d = parseFloat(fDose) || 0
+        if (fYieldAnchor === "ratio") {
+            var r = parseFloat(fYieldRatio) || 0
+            fYield = (d > 0 && r > 0) ? (d * r).toFixed(1) : ""
+        } else if (fYieldAnchor === "absolute") {
+            var y = parseFloat(fYield) || 0
+            fYieldRatio = (d > 0 && y > 0) ? (y / d).toFixed(1) : ""
+        }
+    }
     property string fNotes: ""
     property bool fFreeze: false
     property string fFrozenDate: ""
     property string fDefrostDate: ""
-    // Non-frozen storage lifecycle (bean-freshness-followup). storageHint is a
-    // category tag ("" = unset); openedDate is the non-frozen analogue of the
-    // defrost date. Both apply only while the freeze toggle is OFF.
+    // Out-of-freezer storage lifecycle. storageHint is the PLAN for how beans
+    // are kept when not in the freezer ("" = unset); openedDate marks the
+    // current portion leaving airtight storage — a different event from
+    // defrostDate (leaving the freezer), on a different axis. NEITHER is
+    // freeze-gated: a frozen bag carries a plan for when it is thawed, and a
+    // thawed portion can then be opened. frozenDate alone decides frozen-ness.
     property string fStorageHint: ""
     property string fOpenedDate: ""
 
@@ -352,7 +370,7 @@ Dialog {
         fGrinderSetting = ""
         fEquipmentId = -1; fEquipmentName = ""; fEquipmentBrand = ""; fEquipmentModel = ""; fEquipmentBurrs = ""
         fRpm = ""
-        fDose = ""; fYield = ""; fNotes = ""
+        fDose = ""; fYield = ""; fYieldRatio = ""; fYieldAnchor = "none"; fNotes = ""
         fFreeze = false; fFrozenDate = ""; fDefrostDate = ""
         fStorageHint = ""; fOpenedDate = ""
         syncDetailFieldsFromBlob()   // blob is empty: clears every detail field
@@ -384,7 +402,19 @@ Dialog {
         // toFixed(1) (not String()) so a non-exact double like 37.8 prefills as
         // "37.8", not "37.800000000000004" — matching the brew-settings format.
         fDose = (bag.doseWeightG ?? 0) > 0 ? Number(bag.doseWeightG).toFixed(1) : ""
-        fYield = (bag.yieldOverrideG ?? 0) > 0 ? Number(bag.yieldOverrideG).toFixed(1) : ""
+        // Yield spec: the anchored field gets the stored value; the other
+        // derives through the dose. Search-model history rows carry the same
+        // yieldValue/yieldMode keys as stored bags.
+        var yMode = bag.yieldMode || "none"
+        var yVal = bag.yieldValue ?? 0
+        if ((yMode === "ratio" || yMode === "absolute") && yVal > 0) {
+            fYieldAnchor = yMode
+            if (yMode === "ratio") { fYieldRatio = Number(yVal).toFixed(1); fYield = "" }
+            else { fYield = Number(yVal).toFixed(1); fYieldRatio = "" }
+        } else {
+            fYieldAnchor = "none"; fYield = ""; fYieldRatio = ""
+        }
+        syncDerivedBagYield()
     }
 
     // Tier 1-4 search result -> creation form. Roast date is ALWAYS blank and
@@ -551,23 +581,43 @@ Dialog {
             "grinderSetting": isTea ? "" : fGrinderSetting.trim(),
             "rpm": isTea ? 0 : (parseInt(fRpm) || 0),
             "doseWeightG": parseWeight(fDose),
-            "yieldOverrideG": parseWeight(fYield),
+            // Yield spec: only the anchor is stored (one value + a mode).
+            "yieldValue": fYieldAnchor === "ratio"
+                ? ((parseFloat(fYieldRatio) || 0) > 0
+                   ? Math.max(0.5, Math.min(6.0, parseFloat(fYieldRatio))) : 0)
+                : parseWeight(fYield),
+            "yieldMode": (fYieldAnchor === "ratio" && (parseFloat(fYieldRatio) || 0) > 0) ? "ratio"
+                       : (fYieldAnchor === "absolute" && parseWeight(fYield) > 0) ? "absolute"
+                       : "none",
             "notes": fNotes,
             "frozenDate": fFreeze ? (fFrozenDate.length === 10 ? fFrozenDate : todayIso()) : "",
-            // Non-frozen storage hint: cleared to "" whenever the bag is frozen
-            // (the dropdown is hidden, not merely disabled with a stale value).
-            "storageHint": fFreeze ? "" : fStorageHint
+            // Out-of-freezer storage plan: how the beans are kept when NOT in
+            // the freezer. Orthogonal to the freeze axis, so it is written in
+            // every freeze state — a plan is most useful precisely while the
+            // bag is frozen ("when this is thawed, it goes in a vacuum jar").
+            "storageHint": fStorageHint
         }
         // kind is stamped at creation only (immutable identity; the edit
         // path never writes it).
         if (formMode !== "edit")
             fields["kind"] = bagKind
         if (formMode === "edit") {
+            // defrostDate follows the freeze toggle, unlike storageHint/openedDate
+            // below — and that asymmetry is deliberate, not the bug this change
+            // fixed. frozenDate and defrostDate are the SAME axis (the freezer):
+            // turning the toggle off says this bag is not stored frozen, which
+            // retires that axis as a unit, and a thaw date without a freeze date
+            // would be a thaw from a freezer the bag was never in. The bug was
+            // freezing clearing OTHER axes. Cross-axis clearing is the error;
+            // within-axis is coherent.
             fields["defrostDate"] = fFreeze ? (fDefrostDate.length === 10 ? fDefrostDate : "") : ""
-            // openedDate is the non-frozen analogue of defrostDate — edit-mode
-            // only (the "Mark Opened" quick action on the bag card is the
-            // everyday path), and cleared when the bag is frozen.
-            fields["openedDate"] = fFreeze ? "" : (fOpenedDate.length === 10 ? fOpenedDate : "")
+            // openedDate marks the current portion leaving airtight storage —
+            // the sibling of defrostDate (leaving the freezer), not its
+            // non-frozen substitute. Edit-mode only (the "Mark Opened" quick
+            // action on the bag card is the everyday path). Independent of the
+            // freeze axis: a bag frozen, later thawed, then moved to a counter
+            // jar carries both.
+            fields["openedDate"] = fOpenedDate.length === 10 ? fOpenedDate : ""
             // Re-point the bag's equipment package (<=0 -> NULL via the column hook).
             fields["equipmentId"] = fEquipmentId
             // A link change fixes the whole bag: propagate the (new or
@@ -757,7 +807,7 @@ Dialog {
         implicitHeight: Math.min(mainColumn.implicitHeight,
                                  root.parent ? root.parent.height * 0.9 : mainColumn.implicitHeight)
         textFields: [searchField, roasterInput.textField, coffeeInput.textField, roastDateField.textField,
-                     grindSettingInput, doseInput, yieldInput,
+                     grindSettingInput, doseInput, yieldInput, yieldRatioInput,
                      notesInput, frozenDateField.textField, defrostDateField.textField,
                      openedDateField.textField,
                      originField.textField, regionField.textField, farmField.textField,
@@ -1681,7 +1731,7 @@ Dialog {
                     }
 
                     // Defrost date is only directly editable in edit mode
-                    // ("Next Portion" on the bag card is the everyday path)
+                    // ("Thaw" on the bag card is the everyday path)
                     BeanDateField {
                         id: defrostDateField
                         visible: root.fFreeze && root.formMode === "edit"
@@ -1693,15 +1743,15 @@ Dialog {
                         onValueEdited: function(dateString) { root.fDefrostDate = dateString }
                     }
 
-                    // --- Non-frozen storage (bean-freshness-followup): only
-                    // meaningful while NOT frozen, so both hide once the freeze
-                    // toggle is on (frozen state is fully expressed by the
-                    // freeze toggle + frozen date). storageHint has no "frozen"
-                    // value by design. ---
+                    // --- Out-of-freezer storage: how the beans are kept when
+                    // NOT in the freezer. This is a plan, not present state, so
+                    // it is orthogonal to the freeze axis and always shown — on
+                    // a frozen bag it records where the beans go once thawed.
+                    // The enum has no "frozen" value; frozenDate alone decides
+                    // frozen-ness, so the two can never disagree. ---
                     FieldRow {
-                        visible: !root.fFreeze
                         labelKey: "changebeans.form.storageHint"
-                        labelFallback: "Storage:"
+                        labelFallback: "Out of freezer:"
 
                         StyledComboBox {
                             id: storageHintCombo
@@ -1709,7 +1759,7 @@ Dialog {
                             // Canonical enum values (index-aligned with model);
                             // index 0 = unset ("").
                             readonly property var hintValues: ["", "counter", "airtight", "vacuum-sealed", "fridge"]
-                            accessibleLabel: TranslationManager.translate("changebeans.form.storageHint.accessible", "Storage type")
+                            accessibleLabel: TranslationManager.translate("changebeans.form.storageHint.accessible", "Storage type when out of the freezer")
                             model: [
                                 TranslationManager.translate("changebeans.form.storageHint.unset", "Not specified"),
                                 TranslationManager.translate("changebeans.form.storageHint.counter", "Counter"),
@@ -1723,10 +1773,12 @@ Dialog {
 
                     // Opened date is only directly editable in edit mode
                     // ("Mark Opened" on the bag card is the everyday path),
-                    // mirroring the defrost field above.
+                    // mirroring the defrost field above. Not freeze-gated: a
+                    // bag frozen, later thawed, then moved to a counter jar
+                    // legitimately carries both a defrost and an opened date.
                     BeanDateField {
                         id: openedDateField
-                        visible: !root.fFreeze && root.formMode === "edit"
+                        visible: root.formMode === "edit"
                         labelKey: "changebeans.form.openedDate"
                         labelFallback: "Opened:"
                         value: root.fOpenedDate
@@ -1811,27 +1863,66 @@ Dialog {
                             placeholder: TranslationManager.translate("changebeans.form.grams", "g")
                             accessibleName: TranslationManager.translate("changebeans.form.dose.accessible", "Dose weight in grams")
                             inputMethodHints: Qt.ImhFormattedNumbersOnly
-                            onTextEdited: root.fDose = text
+                            onTextEdited: {
+                                root.fDose = text
+                                // A dose edit re-derives the non-anchored
+                                // yield field; the anchor never moves.
+                                root.syncDerivedBagYield()
+                            }
                         }
 
                         Tr {
-                            key: "changebeans.form.yieldOverride"
-                            fallback: "Yield override:"
+                            key: "changebeans.form.yield"
+                            fallback: "Yield:"
+                            font: Theme.bodyFont
+                            color: Theme.textSecondaryColor
+                            Accessible.ignored: true
+                        }
+
+                        // The bag's own yield anchor (add-yield-ratio-anchor):
+                        // a fixed weight OR a ratio of the dose — last edited
+                        // wins, the other shows derived and dimmed. Blank =
+                        // no yield of its own (the profile answers).
+                        StyledTextField {
+                            id: yieldInput
+                            Layout.fillWidth: true
+                            text: root.fYield
+                            opacity: root.fYieldAnchor === "ratio" ? 0.55 : 1.0
+                            placeholder: TranslationManager.translate("changebeans.form.yieldOverride.placeholder", "Profile default")
+                            accessibleName: TranslationManager.translate("changebeans.form.yieldOverride.accessible", "Yield in grams, blank to follow the profile default")
+                            inputMethodHints: Qt.ImhFormattedNumbersOnly
+                            onTextEdited: {
+                                root.fYield = text
+                                root.fYieldAnchor = (parseFloat(text) || 0) > 0 ? "absolute" : "none"
+                                if (root.fYieldAnchor === "none")
+                                    root.fYieldRatio = ""
+                                root.syncDerivedBagYield()
+                            }
+                        }
+
+                        Tr {
+                            key: "changebeans.form.ratio"
+                            fallback: "Ratio 1:"
                             font: Theme.bodyFont
                             color: Theme.textSecondaryColor
                             Accessible.ignored: true
                         }
 
                         StyledTextField {
-                            id: yieldInput
+                            id: yieldRatioInput
                             Layout.fillWidth: true
-                            text: root.fYield
-                            // Blank = follow the profile's target weight; a value
-                            // overrides it for this bean (see yieldOverrideG).
-                            placeholder: TranslationManager.translate("changebeans.form.yieldOverride.placeholder", "Profile default")
-                            accessibleName: TranslationManager.translate("changebeans.form.yieldOverride.accessible", "Yield override in grams, blank to follow the profile default")
+                            text: root.fYieldRatio
+                            opacity: root.fYieldAnchor === "ratio" ? 1.0 : 0.55
+                            placeholder: TranslationManager.translate("changebeans.form.ratioMultiplier", "x")
+                            accessibleName: TranslationManager.translate("changebeans.form.yieldRatio.accessible", "Yield as a ratio of the dose, blank to follow the profile default")
                             inputMethodHints: Qt.ImhFormattedNumbersOnly
-                            onTextEdited: root.fYield = text
+                            onTextEdited: {
+                                root.fYieldRatio = text
+                                root.fYieldAnchor = (parseFloat(text) || 0) > 0 ? "ratio" : "none"
+                                if (root.fYieldAnchor === "none")
+                                    root.fYield = ""
+                                root.syncDerivedBagYield()
+                            }
                         }
                     }
 

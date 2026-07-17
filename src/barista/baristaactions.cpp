@@ -84,12 +84,13 @@ QVariantMap BaristaActions::applyFromNext(const QVariantMap& next, qint64 anchor
             m_undo["targetWeightG"] = brew->brewYieldOverride();
             m_undo["lastUsedRatio_had"] = true;
             m_undo["lastUsedRatio"] = lastRatioBefore;
-            // [brew-by-ratio] Arm ratio MODE so the yield tracks the dose live (like the ratio pill), instead of
-            // writing a raw absolute that setBrewYieldOverride would immediately snapshot out of ratio mode.
-            // setYieldByRatio also records lastUsedRatio; ProfileManager derives dose x ratio when a dose exists.
-            brew->setYieldByRatio(ratio);
-            // Success = the mode is armed at this ratio (the absolute target may be pending a dose read).
-            if (brew->brewByRatioMode() && qAbs(brew->brewRatio() - ratio) < 0.01)
+            // [brew-by-ratio] Arm a RATIO ANCHOR so the yield tracks the dose live (like the ratio pill), instead
+            // of writing a raw absolute. Mirrors RatioPresetDialog: record lastUsedRatio (preset memory) then
+            // setBrewRatioAnchor (the anchor). ProfileManager resolves dose x ratio to grams when a dose exists.
+            brew->setLastUsedRatio(ratio);
+            brew->setBrewRatioAnchor(ratio);
+            // Success = the anchor is armed at this ratio (the resolved grams may be pending a dose read).
+            if (brew->brewYieldMode() == QLatin1String("ratio") && qAbs(brew->brewYieldOverride() - ratio) < 0.01)
                 applied << QStringLiteral("ratio 1:%1").arg(ratio, 0, 'f', 2);
             else failed << QStringLiteral("ratio");
         } else { rejected << QStringLiteral("ratio"); }

@@ -268,7 +268,10 @@ BaristaModule::BaristaModule(MainController* mainController, MachineState* machi
                                     ro[QStringLiteral("name")] = rec.name;
                                     ro[QStringLiteral("profile")] = rec.profileTitle;
                                     ro[QStringLiteral("dose_g")] = rec.doseG;
-                                    ro[QStringLiteral("yield_g")] = rec.yieldG;
+                                    // [barista-fork] Yield is now a spec (add-yield-ratio-anchor): report the
+                                    // value + mode ("absolute" = grams, "ratio" = multiple of the dose, "none").
+                                    ro[QStringLiteral("yield_value")] = rec.yieldValue;
+                                    ro[QStringLiteral("yield_mode")] = rec.yieldMode;
                                     ro[QStringLiteral("has_milk")] = hasMilk;
                                     ro[QStringLiteral("steam_heater_started")] = hasMilk;
                                     r[QStringLiteral("recipe")] = ro;

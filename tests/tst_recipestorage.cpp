@@ -70,7 +70,8 @@ static Recipe sampleRecipe() {
     r.coffeeName = "Guji";
     r.equipmentId = 7;
     r.doseG = 18.0;
-    r.yieldG = 40.0;
+    r.yieldValue = 40.0;   // yield spec (add-yield-ratio-anchor)
+    r.yieldMode = "absolute";
     r.tempOffsetC = -2.5;  // SIGNED: negative offsets must survive the bind
     r.grindPinned = "";  // no grind recorded (a valid state)
     r.rpmPinned = 90;    // migration-26 field; round-trips through COL_EPOCH
@@ -98,8 +99,10 @@ private slots:
     void variantMapRoundTrip() {
         Recipe r = sampleRecipe();
         r.bagId = 12;
+        r.createdEpoch = 1700000000;  // read-only column still surfaces in the map
         const Recipe back = Recipe::fromVariantMap(r.toVariantMap());
         QCOMPARE(back.bagId, r.bagId);
+        QCOMPARE(back.createdEpoch, r.createdEpoch);
         QCOMPARE(back.name, r.name);
         QCOMPARE(back.profileTitle, r.profileTitle);
         QCOMPARE(back.profileJson, r.profileJson);
@@ -109,7 +112,8 @@ private slots:
         QCOMPARE(back.coffeeName, r.coffeeName);
         QCOMPARE(back.equipmentId, r.equipmentId);
         QCOMPARE(back.doseG, r.doseG);
-        QCOMPARE(back.yieldG, r.yieldG);
+        QCOMPARE(back.yieldValue, r.yieldValue);
+        QCOMPARE(back.yieldMode, r.yieldMode);
         QCOMPARE(back.tempOffsetC, r.tempOffsetC);
         QCOMPARE(back.grindPinned, r.grindPinned);
         QCOMPARE(back.rpmPinned, r.rpmPinned);
@@ -124,6 +128,7 @@ private slots:
         QCOMPARE(r.name, QString("Only name"));
         QCOMPARE(r.equipmentId, (qint64)0);
         QCOMPARE(r.doseG, 0.0);
+        QCOMPARE(r.yieldMode, QString("none"));
         QCOMPARE(r.archived, false);
         QVERIFY(r.grindPinned.isEmpty());
         QVERIFY(r.drinkType.isEmpty());
@@ -238,6 +243,10 @@ private slots:
             QCOMPARE(loaded.rpmPinned, (qint64)90);
             QCOMPARE(loaded.steamJson, sampleRecipe().steamJson);
             QCOMPARE(loaded.createdFromShotId, (qint64)42);
+            // created_at is read-only (COL_EPOCH_RO): the SQL DEFAULT stamped it
+            // at insert and it surfaces on load, even though the struct's value
+            // was never bound.
+            QVERIFY(loaded.createdEpoch > 0);
             // rpm_pinned is COL_EPOCH: updating to 0 clears it to NULL (the
             // pin-clearing path MainController relies on when the override is
             // turned off), and it reloads as 0.
@@ -619,6 +628,54 @@ private slots:
         });
     }
 
+    // Import must preserve the source's original created_at (recipe-list-
+    // organization): "Date created" ordering has to survive transfer / backup
+    // restore. created_at is read-only, so the INSERT lets the DEFAULT stamp
+    // import-time — importRecipesStatic re-stamps it from the source row.
+    void importPreservesCreatedAt() {
+        const QString srcPath = freshDbPath();
+        const QString destPath = freshDbPath();
+        const qint64 pastEpoch = 1500000000;  // a fixed date well before "now"
+        qint64 srcWithDate = 0, srcNullDate = 0;
+        withRawDb(srcPath, "created_src", [&](QSqlDatabase& db) {
+            QVERIFY(RecipeStorage::ensureTableStatic(db));
+            Recipe a = sampleRecipe(); a.name = "Has date";
+            srcWithDate = RecipeStorage::insertRecipeStatic(db, a);
+            QVERIFY(srcWithDate > 0);
+            Recipe b = sampleRecipe(); b.name = "No date";
+            srcNullDate = RecipeStorage::insertRecipeStatic(db, b);
+            QVERIFY(srcNullDate > 0);
+            // Force one row's created_at to a fixed past value (the DEFAULT
+            // stamped ~now at insert), and clear the other's to NULL to exercise
+            // the guard's else-branch.
+            QSqlQuery u(db);
+            u.prepare("UPDATE recipes SET created_at = :c WHERE id = :id");
+            u.bindValue(":c", pastEpoch); u.bindValue(":id", srcWithDate);
+            QVERIFY(u.exec());
+            QSqlQuery n(db);
+            n.prepare("UPDATE recipes SET created_at = NULL WHERE id = :id");
+            n.bindValue(":id", srcNullDate);
+            QVERIFY(n.exec());
+        });
+        withRawDb(destPath, "created_dest", [&](QSqlDatabase& db) {
+            QVERIFY(RecipeStorage::ensureTableStatic(db));
+            // The post-import grind-ownership backfill queries coffee_bags.
+            QVERIFY(CoffeeBagStorage::ensureTableStatic(db));
+        });
+        withRawDb(srcPath, "created_src2", [&](QSqlDatabase& srcDb) {
+            withRawDb(destPath, "created_dest2", [&](QSqlDatabase& destDb) {
+                QHash<qint64, qint64> idMap;
+                QVERIFY(RecipeStorage::importRecipesStatic(srcDb, destDb, /*merge=*/false,
+                                                           idMap, {}, {}));
+                // The dated recipe keeps its ORIGINAL created_at, not import-time.
+                QCOMPARE(RecipeStorage::loadRecipeStatic(destDb, idMap.value(srcWithDate)).createdEpoch,
+                         pastEpoch);
+                // The NULL-date recipe still lands with a valid DEFAULT (never 0).
+                QVERIFY(RecipeStorage::loadRecipeStatic(destDb, idMap.value(srcNullDate)).createdEpoch > 0);
+            });
+        });
+    }
+
     // The import backfill is scoped to the rows the import inserted: a
     // pre-existing LOCAL recipe whose grind was deliberately cleared (a
     // supported state post-migration-30) must survive an unrelated import
@@ -652,6 +709,75 @@ private slots:
                 QVERIFY(RecipeStorage::importRecipesStatic(srcDb, destDb, /*merge=*/true,
                                                            idMap, {}, {}));
                 QVERIFY(RecipeStorage::loadRecipeStatic(destDb, localId).grindPinned.isEmpty());
+            });
+        });
+    }
+
+    // Yield-spec import conversion (add-yield-ratio-anchor): a pre-34 source
+    // (yield_g but no yield_mode) converts on import — yield_g > 0 becomes
+    // {value, absolute}, else "none" — producing the same specs the local
+    // migration would have.
+    void importConvertsLegacyYieldG() {
+        const QString srcPath = freshDbPath();
+        const QString destPath = freshDbPath();
+        withRawDb(srcPath, "y34_src", [&](QSqlDatabase& db) {
+            QVERIFY(RecipeStorage::ensureTableStatic(db));
+            QSqlQuery q(db);
+            QVERIFY(q.exec("ALTER TABLE recipes DROP COLUMN yield_value"));
+            QVERIFY(q.exec("ALTER TABLE recipes DROP COLUMN yield_mode"));
+            QVERIFY(q.exec("INSERT INTO recipes (name, yield_g) VALUES ('LegacyYield', 40.0)"));
+            QVERIFY(q.exec("INSERT INTO recipes (name) VALUES ('LegacyNone')"));
+        });
+        withRawDb(destPath, "y34_dest", [&](QSqlDatabase& db) {
+            QVERIFY(RecipeStorage::ensureTableStatic(db));
+            QVERIFY(CoffeeBagStorage::ensureTableStatic(db));
+        });
+        withRawDb(srcPath, "y34_src2", [&](QSqlDatabase& srcDb) {
+            withRawDb(destPath, "y34_dest2", [&](QSqlDatabase& destDb) {
+                QHash<qint64, qint64> idMap;
+                QVERIFY(RecipeStorage::importRecipesStatic(srcDb, destDb, /*merge=*/false,
+                                                           idMap, {}, {}));
+                QSqlQuery q(destDb);
+                QVERIFY(q.exec("SELECT yield_value, yield_mode FROM recipes WHERE name = 'LegacyYield'"));
+                QVERIFY(q.next());
+                QCOMPARE(q.value(0).toDouble(), 40.0);
+                QCOMPARE(q.value(1).toString(), QStringLiteral("absolute"));
+                QVERIFY(q.exec("SELECT yield_mode FROM recipes WHERE name = 'LegacyNone'"));
+                QVERIFY(q.next());
+                QCOMPARE(q.value(1).isValid() ? q.value(0).toString() : q.value(0).toString(),
+                         QStringLiteral("none"));
+            });
+        });
+    }
+
+    // A ≥34 source imports its spec VERBATIM and its dead yield_g is ignored
+    // — reconverting would resurrect a yield the user has since changed to a
+    // ratio (the staged-conversion discipline of the temperature migration).
+    void importNeverReconvertsFromDeadYieldG() {
+        const QString srcPath = freshDbPath();
+        const QString destPath = freshDbPath();
+        withRawDb(srcPath, "y34v_src", [&](QSqlDatabase& db) {
+            QVERIFY(RecipeStorage::ensureTableStatic(db));
+            // A recipe migrated from yield_g 40 then changed to a 1:2 ratio:
+            // the dead column still holds 40.
+            QSqlQuery q(db);
+            QVERIFY(q.exec("INSERT INTO recipes (name, yield_g, yield_value, yield_mode) "
+                           "VALUES ('NowRatio', 40.0, 2.0, 'ratio')"));
+        });
+        withRawDb(destPath, "y34v_dest", [&](QSqlDatabase& db) {
+            QVERIFY(RecipeStorage::ensureTableStatic(db));
+            QVERIFY(CoffeeBagStorage::ensureTableStatic(db));
+        });
+        withRawDb(srcPath, "y34v_src2", [&](QSqlDatabase& srcDb) {
+            withRawDb(destPath, "y34v_dest2", [&](QSqlDatabase& destDb) {
+                QHash<qint64, qint64> idMap;
+                QVERIFY(RecipeStorage::importRecipesStatic(srcDb, destDb, /*merge=*/false,
+                                                           idMap, {}, {}));
+                QSqlQuery q(destDb);
+                QVERIFY(q.exec("SELECT yield_value, yield_mode FROM recipes WHERE name = 'NowRatio'"));
+                QVERIFY(q.next());
+                QCOMPARE(q.value(0).toDouble(), 2.0);
+                QCOMPARE(q.value(1).toString(), QStringLiteral("ratio"));
             });
         });
     }

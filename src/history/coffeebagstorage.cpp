@@ -1,6 +1,7 @@
 #include "coffeebagstorage.h"
 #include "core/settings.h"   // Settings::testQSettingsPath() under DECENZA_TESTING
 #include "core/dbutils.h"
+#include "core/yieldspec.h"
 
 #include <QSqlQuery>
 #include <QSqlError>
@@ -95,6 +96,13 @@ QVariant bindKind(const CoffeeBag& b) {
     return b.kind.isEmpty() ? QStringLiteral("coffee") : b.kind;
 }
 
+// yield_mode hooks (add-yield-ratio-anchor): NULL / junk normalizes to
+// "none" on every path, and "none" is stored explicitly — the normalized
+// mode is never empty, so bindStr's empty->NULL collapse never applies.
+void readYieldMode(CoffeeBag& b, const QVariant& v) { b.yieldMode = YieldSpec::normalizedMode(v.toString()); }
+QVariant bindYieldMode(const CoffeeBag& b) { return YieldSpec::normalizedMode(b.yieldMode); }
+void setYieldMode(CoffeeBag& b, const QVariant& v) { b.yieldMode = YieldSpec::normalizedMode(v.toString()); }
+
 // String columns carry an explicit Visualizer flag (the identity/lifecycle
 // strings sync; the grinder/visualizer-id strings do not). The numeric/bool
 // columns are all local-only.
@@ -151,7 +159,17 @@ const BagCol kCols[] = {
     COL_EPOCH("equipment_id",          equipmentId),
     COL_EPOCH("rpm",                   rpm),
     COL_DBL  ("dose_weight_g",         doseWeightG),
-    COL_DBL  ("yield_override_g",      yieldOverrideG),
+    // Yield spec (add-yield-ratio-anchor). Local-only like the rest of the
+    // dial memory (visualizer=false on both columns — Visualizer's bag record
+    // has no yield concept, so an anchor edit must never trigger a PATCH).
+    // Plain COL_DBL is safe for yield_value (strictly positive in both
+    // modes); yield_mode normalizes through YieldSpec so NULL/junk reads as
+    // "none". The legacy yield_override_g column is dead in place
+    // (migration 34), like the grinder identity columns above.
+    COL_DBL  ("yield_value",           yieldValue),
+    BagCol   { "yield_mode", "yieldMode", false, true,
+               &readYieldMode, &bindYieldMode,
+               &getMember<&CoffeeBag::yieldMode>, &setYieldMode },
     COL_STR  ("visualizer_bag_id",     visualizerBagId,     false),
     COL_STR  ("visualizer_roaster_id", visualizerRoasterId, false),
     COL_BOOL ("visualizer_sync_pending", visualizerSyncPending),
@@ -383,6 +401,7 @@ void CoffeeBagStorage::requestUpdateBag(qint64 bagId, const QVariantMap& fields,
     if (m_dbPath.isEmpty()) {
         qWarning() << "CoffeeBagStorage: requestUpdateBag on uninitialized storage, bag" << bagId;
         emit bagUpdated(bagId, false);
+        emit errorOccurred(QStringLiteral("Couldn't save your bean changes — please try again."));
         return;
     }
     auto success = std::make_shared<bool>(false);
@@ -396,6 +415,14 @@ void CoffeeBagStorage::requestUpdateBag(qint64 bagId, const QVariantMap& fields,
         // terminal status callers (e.g. the MCP bag_update tool) wait on.
         [this, bagId, fields, success](bool) {
             emit bagUpdated(bagId, *success);
+            if (!*success) {
+                // The dialog has already closed and bagsChanged() is not
+                // emitted, so the card still shows the old value — without
+                // this the user reads that as "I forgot to pick it", retries,
+                // and fails again. Covers every surface: dialog save, the
+                // card's Thaw / Mark Opened quick actions, MCP and web writes.
+                emit errorOccurred(QStringLiteral("Couldn't save your bean changes — please try again."));
+            }
             if (*success) {
                 emit bagsChanged();
                 if (touchesVisualizerFields(fields))
@@ -498,7 +525,9 @@ bool CoffeeBagStorage::ensureTableStatic(QSqlDatabase& db)
             equipment_id INTEGER,
             rpm INTEGER,
             dose_weight_g REAL,
-            yield_override_g REAL,
+            yield_override_g REAL, -- dead: pre-34 absolute yields; carrier for legacy-source imports only
+            yield_value REAL,
+            yield_mode TEXT,
             visualizer_bag_id TEXT,
             visualizer_roaster_id TEXT,
             visualizer_sync_pending INTEGER NOT NULL DEFAULT 0,
@@ -665,14 +694,6 @@ bool CoffeeBagStorage::touchesVisualizerFields(const QVariantMap& fields)
         if (kVisualizerKeys.contains(it.key()))
             return true;
     return false;
-}
-
-double CoffeeBagStorage::yieldOverrideForTarget(double shotTargetWeightG, double profileTargetWeightG)
-{
-    // 0.1 g epsilon absorbs float noise / display rounding so a target that
-    // equals the profile default isn't recorded as an override.
-    return (shotTargetWeightG > 0.0 && qAbs(shotTargetWeightG - profileTargetWeightG) > 0.1)
-               ? shotTargetWeightG : 0.0;
 }
 
 CoffeeBag CoffeeBagStorage::bagFromLegacyPreset(const QJsonObject& preset)
@@ -917,8 +938,21 @@ bool CoffeeBagStorage::importBagsStatic(QSqlDatabase& srcDb, QSqlDatabase& destD
                            ? col
                            : QStringLiteral("NULL AS %1").arg(col));
 
+    // Yield-spec conversion for pre-34 sources (add-yield-ratio-anchor): a
+    // source with yield_override_g but no yield_mode column converts on
+    // import — >0 becomes {value, absolute}, else the struct default "none" —
+    // matching what the local migration did. A ≥34 source imports its spec
+    // verbatim through kCols and its dead yield_override_g is ignored
+    // (reconverting would resurrect a yield the user has since changed).
+    const bool srcNeedsYieldConversion = !srcColumns.contains(QStringLiteral("yield_mode"))
+        && srcColumns.contains(QStringLiteral("yield_override_g"));
+    QString trailingCols;
+    if (srcNeedsYieldConversion)
+        trailingCols = QStringLiteral(", COALESCE(yield_override_g, 0)");
+
     QSqlQuery srcBags(srcDb);
-    if (!srcBags.exec(QString("SELECT %1 FROM coffee_bags").arg(selectCols.join(QStringLiteral(", "))))) {
+    if (!srcBags.exec(QString("SELECT %1%2 FROM coffee_bags")
+                          .arg(selectCols.join(QStringLiteral(", ")), trailingCols))) {
         qWarning() << "CoffeeBagStorage: failed to query source bags:" << srcBags.lastError().text();
         return false;
     }
@@ -926,6 +960,13 @@ bool CoffeeBagStorage::importBagsStatic(QSqlDatabase& srcDb, QSqlDatabase& destD
     int imported = 0, matched = 0;
     while (srcBags.next()) {
         CoffeeBag bag = bagFromQueryRow(srcBags);
+        if (srcNeedsYieldConversion) {
+            const double legacyYieldG = srcBags.value(kColCount).toDouble();
+            if (legacyYieldG > 0) {
+                bag.yieldValue = legacyYieldG;
+                bag.yieldMode = YieldSpec::modeAbsolute();
+            }
+        }
         // Remap the source equipment_id to the imported package's new dest id
         // (add-equipment-packages task 2.8). A source id absent from the map
         // (older source with no equipment tables, or an unmatched package)

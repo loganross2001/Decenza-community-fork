@@ -90,10 +90,11 @@ Dialog {
                                              || stepGrind(root.pendingGrind, -1, root.grindStep) !== ""
 
     function applyAll() {
-        // Ratio: arm brew-by-ratio MODE (yield tracks dose x ratio live), matching RatioPresetDialog.applyRatio.
-        // Writing a raw brewYieldOverride here would EXIT the mode (single-funnel rule) and leave a stale
-        // absolute for the next dose change to clobber, so go through setYieldByRatio.
-        Settings.brew.setYieldByRatio(root.pendingRatio)
+        // Ratio: arm a RATIO ANCHOR (yield tracks dose x ratio live), matching RatioPresetDialog.applyRatio —
+        // record lastUsedRatio (preset memory) then setBrewRatioAnchor (the session anchor). The anchor derives
+        // the target from the live dose; nothing here flattens it to a stale absolute.
+        Settings.brew.lastUsedRatio = root.pendingRatio
+        Settings.brew.setBrewRatioAnchor(root.pendingRatio)
         // Temp: plain property write (setter is NOT Q_INVOKABLE).
         Settings.brew.temperatureOverride = root.pendingTempC
         // Grind: only write a real, non-empty value.

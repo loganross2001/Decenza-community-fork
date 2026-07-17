@@ -74,11 +74,15 @@ struct Recipe {
     qint64 equipmentId = 0;   // FK -> equipment_packages.id; 0 = none
 
     double doseG = 0;         // 0 = unset
-    double yieldG = 0;        // 0 = unset (absolute yield in grams — the legacy fixed model)
-    // Yield defined as a RATIO of the dose (brew-by-ratio): when > 0, the recipe's yield is dose x yieldRatio,
-    // and activating the recipe arms brew-by-ratio mode so the target tracks the dose live. 0 = use the
-    // absolute yieldG instead. The two are mutually exclusive in intent; yieldRatio wins when both are set.
-    double yieldRatio = 0;    // 0 = absolute-yield recipe (use yieldG)
+    // Yield as a spec, not a number (add-yield-ratio-anchor): yieldValue +
+    // yieldMode ("none" | "absolute" | "ratio", see src/core/yieldspec.h).
+    // mode "none" = the recipe designs no yield and the ladder falls through
+    // to the bag, then the profile. A ratio's gram target is derived at use
+    // time (value x dose), mirroring how tempOffsetC below stores a relative
+    // quantity resolved at use time. Replaces the legacy absolute yield_g,
+    // which migration 34 converts and leaves dead in place.
+    double yieldValue = 0;    // 0 = unset (grams when absolute, multiplier when ratio)
+    QString yieldMode = QStringLiteral("none");
     // Temperature as a SIGNED DELTA against the profile's espresso_temperature
     // (recipe-relative-temp-offset); 0 = brew at the profile's own temperature.
     // The effective brew temperature is always computed profileTemp + offset at
@@ -101,6 +105,11 @@ struct Recipe {
     qint64 clonedFromRecipeId = 0;
 
     qint64 lastUsedEpoch = 0; // bumped on activation and shot save (MRU)
+    // Stamped by the created_at SQL DEFAULT at insert. Never written through the
+    // generated kCols INSERT/UPDATE path (COL_EPOCH_RO); the import path
+    // re-stamps it directly to preserve source dates (see importRecipesStatic).
+    // Surfaced so the recipes page can sort by date added.
+    qint64 createdEpoch = 0;
 
     bool isValid() const { return id > 0; }
     QVariantMap toVariantMap() const;

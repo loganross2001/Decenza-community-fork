@@ -1,6 +1,7 @@
 #include "recipestorage.h"
 #include "coffeebagstorage.h"
 #include "core/dbutils.h"
+#include "core/yieldspec.h"
 
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -62,6 +63,14 @@ template<auto M> void setDbl (Recipe& r, const QVariant& v) { static_assert(std:
 template<auto M> void setI64 (Recipe& r, const QVariant& v) { static_assert(std::is_same_v<RecipeMemberT<M>, qint64>);  r.*M = v.toLongLong(); }
 template<auto M> void setBool(Recipe& r, const QVariant& v) { static_assert(std::is_same_v<RecipeMemberT<M>, bool>);    r.*M = v.toBool(); }
 
+// yield_mode hooks: NULL / junk normalizes to "none" on every path (a row
+// imported from an unconverted source reads as mode-less until the deferred
+// conversion runs), and "none" is stored explicitly — bindStr's empty->NULL
+// collapse never applies because the normalized mode is never empty.
+void readYieldMode(Recipe& r, const QVariant& v) { r.yieldMode = YieldSpec::normalizedMode(v.toString()); }
+QVariant bindYieldMode(const Recipe& r) { return YieldSpec::normalizedMode(r.yieldMode); }
+void setYieldMode(Recipe& r, const QVariant& v) { r.yieldMode = YieldSpec::normalizedMode(v.toString()); }
+
 struct RecipeCol {
     const char* sql;                            // SQLite column name
     const char* key;                            // camelCase Recipe / QVariantMap key
@@ -96,6 +105,14 @@ struct RecipeCol {
     RecipeCol{ sqlName, #member, false, \
                &readI64<&Recipe::member>, nullptr, \
                &getMember<&Recipe::member>, &setI64<&Recipe::member> }
+// Read-only epoch: SELECTed and surfaced in the map, but excluded from the
+// generated INSERT/UPDATE (writable=false), so the column's SQL DEFAULT
+// (strftime) owns its insert-time value. Used for created_at. (The import path
+// re-stamps created_at with a direct UPDATE — see importRecipesStatic.)
+#define COL_EPOCH_RO(sqlName, member) \
+    RecipeCol{ sqlName, #member, false, \
+               &readI64<&Recipe::member>, nullptr, \
+               &getMember<&Recipe::member>, &setI64<&Recipe::member> }
 
 const RecipeCol kCols[] = {
     COL_ID   ("id",                    id),
@@ -109,8 +126,16 @@ const RecipeCol kCols[] = {
     COL_STR  ("coffee_name",           coffeeName),
     COL_EPOCH("equipment_id",          equipmentId),
     COL_DBL  ("dose_g",                doseG),
-    COL_DBL  ("yield_g",               yieldG),
-    COL_DBL  ("yield_ratio",           yieldRatio),
+    // Yield spec (add-yield-ratio-anchor). Plain COL_DBL is correct for
+    // yield_value: both a gram target and a ratio are strictly positive, so
+    // the nullIfZero collapse is safe (contrast temp_offset_c below, whose 0
+    // is meaningful). yield_mode normalizes through YieldSpec so NULL/junk
+    // reads as "none" and "none" round-trips explicitly. The legacy yield_g
+    // column is dead in place (migration 34), like temp_override_c.
+    COL_DBL  ("yield_value",           yieldValue),
+    RecipeCol{ "yield_mode", "yieldMode", true,
+               &readYieldMode, &bindYieldMode,
+               &getMember<&Recipe::yieldMode>, &setYieldMode },
     COL_DBL_SIGNED("temp_offset_c",    tempOffsetC),
     COL_STR  ("grind_pinned",          grindPinned),
     COL_EPOCH("rpm_pinned",            rpmPinned),
@@ -120,6 +145,11 @@ const RecipeCol kCols[] = {
     COL_EPOCH("created_from_shot_id",  createdFromShotId),
     COL_EPOCH("cloned_from_recipe_id", clonedFromRecipeId),
     COL_EPOCH("last_used",             lastUsedEpoch),
+    // Read-only (writable=false): the SQL DEFAULT sets it at insert. Position
+    // within kCols is free — the SELECT list and the positional read both
+    // derive from this array, so they can't drift (COL_ID is non-writable and
+    // sits first); placed last only by convention.
+    COL_EPOCH_RO("created_at",          createdEpoch),
 };
 
 #undef COL_STR
@@ -127,6 +157,7 @@ const RecipeCol kCols[] = {
 #undef COL_DBL_SIGNED
 #undef COL_BOOL
 #undef COL_EPOCH
+#undef COL_EPOCH_RO
 #undef COL_ID
 
 constexpr int kColCount = static_cast<int>(std::size(kCols));
@@ -723,8 +754,9 @@ bool RecipeStorage::ensureTableStatic(QSqlDatabase& db)
             coffee_name TEXT,
             equipment_id INTEGER,
             dose_g REAL,
-            yield_g REAL,
-            yield_ratio REAL, -- brew-by-ratio: >0 = yield is dose x ratio (else use yield_g)
+            yield_g REAL, -- dead: pre-34 absolute yields; carrier for legacy-source imports only
+            yield_value REAL,
+            yield_mode TEXT,
             temp_offset_c REAL,
             temp_override_c REAL, -- dead: pre-31 absolute temps; carrier for legacy-source imports only
             grind_pinned TEXT,
@@ -1412,10 +1444,29 @@ bool RecipeStorage::importRecipesStatic(QSqlDatabase& srcDb, QSqlDatabase& destD
     const bool srcHasOverrideCol = srcColumns.contains(QStringLiteral("temp_override_c"));
     const bool srcHasOffsetCol = srcColumns.contains(QStringLiteral("temp_offset_c"));
     QString trailingCols;
-    if (srcHasOverrideCol)
+    int nextTrailingIdx = kColCount;
+    if (srcHasOverrideCol) {
         trailingCols += QStringLiteral(", COALESCE(temp_override_c, 0)");
-    if (srcHasOverrideCol && srcHasOffsetCol)
+        ++nextTrailingIdx;
+    }
+    if (srcHasOverrideCol && srcHasOffsetCol) {
         trailingCols += QStringLiteral(", temp_offset_c IS NULL");
+        ++nextTrailingIdx;
+    }
+    // Yield-spec conversion for pre-34 sources (add-yield-ratio-anchor): a
+    // source with yield_g but no yield_mode column converts on import —
+    // yield_g > 0 becomes {yield_g, absolute}, else the struct's default
+    // "none" — producing the same specs the local migration would have.
+    // Unlike temperature the conversion needs no external anchor, so it runs
+    // inline on the struct rather than staging for a deferred pass. A ≥34
+    // source imports its spec verbatim through kCols and its dead yield_g is
+    // ignored — reconverting would resurrect a yield the user has since
+    // changed to a ratio or cleared.
+    const bool srcNeedsYieldConversion = !srcColumns.contains(QStringLiteral("yield_mode"))
+        && srcColumns.contains(QStringLiteral("yield_g"));
+    const int yieldTrailingIdx = nextTrailingIdx;
+    if (srcNeedsYieldConversion)
+        trailingCols += QStringLiteral(", COALESCE(yield_g, 0)");
     QString selectSql = QString("SELECT %1%2 FROM recipes")
         .arg(selectCols.join(QStringLiteral(", ")), trailingCols);
 
@@ -1445,6 +1496,14 @@ bool RecipeStorage::importRecipesStatic(QSqlDatabase& srcDb, QSqlDatabase& destD
         recipe.equipmentId = packageIdMap.value(recipe.equipmentId, 0);
         recipe.bagId = bagIdMap.value(recipe.bagId, 0);
 
+        if (srcNeedsYieldConversion) {
+            const double legacyYieldG = srcRecipes.value(yieldTrailingIdx).toDouble();
+            if (legacyYieldG > 0) {
+                recipe.yieldValue = legacyYieldG;
+                recipe.yieldMode = YieldSpec::modeAbsolute();
+            }
+        }
+
         qint64 destId = -1;
         if (merge) {
             // Identity: case-insensitive name + profile_title + bean link
@@ -1466,7 +1525,13 @@ bool RecipeStorage::importRecipesStatic(QSqlDatabase& srcDb, QSqlDatabase& destD
             dupQuery.bindValue(":beanbase", recipe.beanBaseId);
             dupQuery.bindValue(":roaster", recipe.roasterName);
             dupQuery.bindValue(":coffee", recipe.coffeeName);
-            if (dupQuery.exec() && dupQuery.next()) {
+            if (!dupQuery.exec()) {
+                // Without this, an exec failure short-circuits to "no duplicate
+                // found" and silently inserts a duplicate on merge — log so a
+                // dedup DB error is at least visible.
+                qWarning() << "RecipeStorage: import dedup query failed (may insert a duplicate):"
+                           << dupQuery.lastError().text();
+            } else if (dupQuery.next()) {
                 destId = dupQuery.value(0).toLongLong();
                 matched++;
             }
@@ -1478,6 +1543,21 @@ bool RecipeStorage::importRecipesStatic(QSqlDatabase& srcDb, QSqlDatabase& destD
                 return false;
             imported++;
             insertedIds.append(destId);
+            // Preserve the source's original creation timestamp. created_at is
+            // read-only in kCols, so the INSERT let the DEFAULT stamp it with
+            // import-time; restamp it here when the source carried a value, so
+            // "Date created" ordering stays meaningful across transfer / backup
+            // restore. Best-effort: the row already has a valid DEFAULT, so a
+            // failure here only loses the original date — never abort the import.
+            if (recipe.createdEpoch > 0) {
+                QSqlQuery keepCreated(destDb);
+                keepCreated.prepare("UPDATE recipes SET created_at = :c WHERE id = :id");
+                keepCreated.bindValue(":c", recipe.createdEpoch);
+                keepCreated.bindValue(":id", destId);
+                if (!keepCreated.exec())
+                    qWarning() << "RecipeStorage: could not preserve created_at on import:"
+                               << keepCreated.lastError().text();
+            }
             if (rowUnconverted && legacyAbsTemp > 0) {
                 // Stage the legacy absolute + the unconverted marker; the
                 // deferred pass (convertLegacyTempOffsetsStatic) turns it into

@@ -10,6 +10,7 @@
 #include "ai/shotsummarizer.h"
 #include "history/shotbadgeprojection.h"
 #include "core/grinderaliases.h"
+#include "core/yieldspec.h"
 #include "models/shotdatamodel.h"
 #include "profile/profile.h"
 #include "network/visualizeruploader.h"
@@ -1690,13 +1691,13 @@ bool ShotHistoryStorage::runMigrations()
         }
     }
 
-    // Migration 35: recipes.yield_ratio (brew-by-ratio, private fork feature).
+    // Migration 35: recipes.yield_ratio (brew-by-ratio, private fork feature — now RETIRED in favour of
+    // upstream's yield-spec anchor, but the migration and column STAY: it is already on shipped devices
+    // (DB at v35), and migration 36 below reads yield_ratio to translate those recipes into the new model.
     // [barista-fork] Renumbered from the upstream-based build's 34 -> 35: the fork's +1 migration offset
-    // already holds 34 with the taste axes, so yield_ratio advances one slot. When > 0 a recipe's yield is
-    // defined as dose x ratio (and activating it arms brew-by-ratio mode) instead of the absolute yield_g.
-    // Additive, NULL default = absolute-yield recipe (every existing recipe unchanged). Fresh DBs get the
-    // column from ensureTableStatic's CREATE TABLE, so the ALTER is guarded by hasColumn. Whitespace before
-    // the open-paren dodges the QSqlQuery permission-hook false-positive; do not auto-format.
+    // already holds 34 with the taste axes. Additive, NULL default. Fresh DBs get the column from
+    // ensureTableStatic's CREATE TABLE, so the ALTER is guarded by hasColumn. Whitespace before the
+    // open-paren dodges the QSqlQuery permission-hook false-positive; do not auto-format.
     if (currentVersion >= 34 && currentVersion < 35) {
         qDebug() << "ShotHistoryStorage: Running migration to version 35 (recipe yield ratio)";
 
@@ -1711,6 +1712,92 @@ bool ShotHistoryStorage::runMigrations()
             currentVersion = 35;
         } else {
             qWarning() << "ShotHistoryStorage: migration 35 incomplete - will retry next launch";
+        }
+    }
+
+    // Migration 36: yield specs (add-yield-ratio-anchor, upstream #1534 — adopted into the fork chain).
+    // [barista-fork] This is upstream's migration "34 (yield specs)" RENUMBERED to 36 so it runs AFTER the
+    // fork's shipped 34 (taste axes) and 35 (yield_ratio) on a device already at v35. Yield stops being a
+    // bare gram number and becomes {value, mode} with mode none|absolute|ratio, on three tables:
+    //   recipes      yield_value + yield_mode  (from the legacy yield_g)
+    //   coffee_bags  yield_value + yield_mode  (from the legacy yield_override_g)
+    //   shots        yield_mode + yield_anchor_value — the anchor that PRODUCED the target (intent),
+    //                alongside the untouched yield_override (outcome, resolved grams — what detectors read).
+    // Backfills are a relabel, not a recomputation. The legacy columns stay dead in place. Backfill is
+    // gated on yield_mode IS NULL so the whole block is idempotent. Whitespace before the open-paren dodges
+    // the QSqlQuery permission-hook false-positive; do not auto-format.
+    if (currentVersion >= 35 && currentVersion < 36) {
+        qDebug() << "ShotHistoryStorage: Running migration to version 36 (yield specs)";
+
+        if (!hasColumn("recipes", "yield_value")
+            && !query.exec ("ALTER TABLE recipes ADD COLUMN yield_value REAL"))
+            qWarning() << "ShotHistoryStorage: migration 36 add recipes.yield_value failed -"
+                       << query.lastError().text();
+        if (!hasColumn("recipes", "yield_mode")
+            && !query.exec ("ALTER TABLE recipes ADD COLUMN yield_mode TEXT"))
+            qWarning() << "ShotHistoryStorage: migration 36 add recipes.yield_mode failed -"
+                       << query.lastError().text();
+        if (!hasColumn("coffee_bags", "yield_value")
+            && !query.exec ("ALTER TABLE coffee_bags ADD COLUMN yield_value REAL"))
+            qWarning() << "ShotHistoryStorage: migration 36 add coffee_bags.yield_value failed -"
+                       << query.lastError().text();
+        if (!hasColumn("coffee_bags", "yield_mode")
+            && !query.exec ("ALTER TABLE coffee_bags ADD COLUMN yield_mode TEXT"))
+            qWarning() << "ShotHistoryStorage: migration 36 add coffee_bags.yield_mode failed -"
+                       << query.lastError().text();
+        if (!hasColumn("shots", "yield_mode")
+            && !query.exec ("ALTER TABLE shots ADD COLUMN yield_mode TEXT"))
+            qWarning() << "ShotHistoryStorage: migration 36 add shots.yield_mode failed -"
+                       << query.lastError().text();
+        if (!hasColumn("shots", "yield_anchor_value")
+            && !query.exec ("ALTER TABLE shots ADD COLUMN yield_anchor_value REAL"))
+            qWarning() << "ShotHistoryStorage: migration 36 add shots.yield_anchor_value failed -"
+                       << query.lastError().text();
+
+        bool backfilled = hasColumn("recipes", "yield_value") && hasColumn("recipes", "yield_mode")
+            && hasColumn("coffee_bags", "yield_value") && hasColumn("coffee_bags", "yield_mode")
+            && hasColumn("shots", "yield_mode") && hasColumn("shots", "yield_anchor_value");
+        if (backfilled) {
+            backfilled = query.exec (
+                    "UPDATE recipes SET "
+                    "yield_value = CASE WHEN COALESCE(yield_g, 0) > 0 THEN yield_g ELSE NULL END, "
+                    "yield_mode = CASE WHEN COALESCE(yield_g, 0) > 0 THEN 'absolute' ELSE 'none' END "
+                    "WHERE yield_mode IS NULL")
+                && query.exec (
+                    "UPDATE coffee_bags SET "
+                    "yield_value = CASE WHEN COALESCE(yield_override_g, 0) > 0 THEN yield_override_g ELSE NULL END, "
+                    "yield_mode = CASE WHEN COALESCE(yield_override_g, 0) > 0 THEN 'absolute' ELSE 'none' END "
+                    "WHERE yield_mode IS NULL")
+                && query.exec (
+                    "UPDATE shots SET "
+                    "yield_anchor_value = CASE WHEN COALESCE(yield_override, 0) > 0 THEN yield_override ELSE NULL END, "
+                    "yield_mode = CASE WHEN COALESCE(yield_override, 0) > 0 THEN 'absolute' ELSE 'none' END "
+                    "WHERE yield_mode IS NULL");
+            if (!backfilled)
+                qWarning() << "ShotHistoryStorage: migration 36 backfill failed -"
+                           << query.lastError().text();
+        }
+
+        // [barista-fork] Carry the RETIRED fork brew-by-ratio recipes into the adopted model. A fork ratio
+        // recipe stored the ratio in yield_ratio with yield_g cleared to 0, so upstream's backfill above just
+        // relabelled it 'none'. Re-label those as a true ratio anchor (value = the stored ratio). Runs AFTER
+        // the backfill so it overrides that 'none'; a failure only warns (the recipe degrades to 'none', not a
+        // wedged DB). Guarded on the legacy column's presence.
+        if (backfilled && hasColumn("recipes", "yield_ratio")) {
+            if (!query.exec (
+                    "UPDATE recipes SET yield_value = yield_ratio, yield_mode = 'ratio' "
+                    "WHERE COALESCE(yield_ratio, 0) > 0 "
+                    "AND (yield_mode IS NULL OR yield_mode = '' OR yield_mode = 'none')"))
+                qWarning() << "ShotHistoryStorage: migration 36 yield_ratio->yieldspec translation failed -"
+                           << query.lastError().text();
+        }
+
+        if (backfilled) {
+            query.exec ("DELETE FROM schema_version");
+            query.exec ("INSERT INTO schema_version (version) VALUES (36)");
+            currentVersion = 36;
+        } else {
+            qWarning() << "ShotHistoryStorage: migration 36 incomplete - will retry next launch";
         }
     }
 
@@ -1913,6 +2000,8 @@ qint64 ShotHistoryStorage::saveShot(ShotDataModel* shotData,
     data.recipeId = metadata.recipeId;
     data.steamJson = metadata.steamJson;
     data.hotWaterJson = metadata.hotWaterJson;
+    data.yieldMode = metadata.yieldMode;
+    data.yieldAnchorValue = metadata.yieldAnchorValue;
 
     if (profile) {
         data.profileKbId = ShotSummarizer::computeProfileKbId(profile->title(), profile->editorType());
@@ -2081,7 +2170,8 @@ qint64 ShotHistoryStorage::saveShotStatic(const QString& dbPath, const ShotSaveD
                     equipment_id, rpm,
                     drink_tds, drink_ey, enjoyment, espresso_notes, bean_notes, barista,
                     profile_notes, debug_log,
-                    temperature_override, yield_override, profile_kb_id,
+                    temperature_override, yield_override, yield_mode, yield_anchor_value,
+                    profile_kb_id,
                     channeling_detected, grind_issue_detected,
                     skip_first_frame_detected, pour_truncated_detected,
                     stopped_by, beanbase_json, beanbase_id,
@@ -2095,7 +2185,8 @@ qint64 ShotHistoryStorage::saveShotStatic(const QString& dbPath, const ShotSaveD
                     :equipment_id, :rpm,
                     :drink_tds, :drink_ey, :enjoyment, :espresso_notes, :bean_notes, :barista,
                     :profile_notes, :debug_log,
-                    :temperature_override, :yield_override, :profile_kb_id,
+                    :temperature_override, :yield_override, :yield_mode, :yield_anchor_value,
+                    :profile_kb_id,
                     :channeling_detected, :grind_issue_detected,
                     :skip_first_frame_detected, :pour_truncated_detected,
                     :stopped_by, :beanbase_json, :beanbase_id,
@@ -2132,6 +2223,13 @@ qint64 ShotHistoryStorage::saveShotStatic(const QString& dbPath, const ShotSaveD
             query.bindValue(":debug_log", data.debugLog);
             query.bindValue(":temperature_override", data.temperatureOverride);
             query.bindValue(":yield_override", data.targetWeight);
+            // The anchor that produced the target (intent) rides alongside the
+            // resolved grams (outcome). Mode always stores explicitly — 'none'
+            // included — so NULL stays the "unconverted" marker for migration
+            // 34's backfill and legacy-source imports.
+            query.bindValue(":yield_mode", YieldSpec::normalizedMode(data.yieldMode));
+            query.bindValue(":yield_anchor_value",
+                            data.yieldAnchorValue > 0 ? QVariant(data.yieldAnchorValue) : QVariant());
             query.bindValue(":profile_kb_id", data.profileKbId.isEmpty() ? QVariant() : data.profileKbId);
             query.bindValue(":channeling_detected", data.channelingDetected ? 1 : 0);
             query.bindValue(":grind_issue_detected", data.grindIssueDetected ? 1 : 0);
@@ -2808,7 +2906,8 @@ ShotRecord ShotHistoryStorage::loadShotRecordStatic(QSqlDatabase& db, qint64 sho
                epp.model,
                s.recipe_id, s.steam_json, s.hot_water_json,
                s.storage_hint, s.opened_date,
-               s.taste_balance, s.taste_body
+               s.taste_balance, s.taste_body,
+               s.yield_mode, s.yield_anchor_value
         FROM shots s
         LEFT JOIN equipment_items eg ON eg.package_id = s.equipment_id AND eg.kind = 'grinder'
         LEFT JOIN equipment_items eb ON eb.package_id = s.equipment_id AND eb.kind = 'basket'
@@ -2908,6 +3007,16 @@ ShotRecord ShotHistoryStorage::loadShotRecordStatic(QSqlDatabase& db, qint64 sho
     // so existing positional reads keep their indices.
     record.tasteBalance = query.value(52).toString();
     record.tasteBody = query.value(53).toString();
+    // Yield anchor provenance (cols 54/55, add-yield-ratio-anchor). A NULL
+    // mode (a row imported from a pre-34 source before its backfill ran)
+    // reads by the legacy rule: absolute when a target was recorded, else
+    // none — the exact relabel migration 34 applies.
+    record.yieldMode = YieldSpec::normalizedMode(query.value(54).toString());
+    record.yieldAnchorValue = query.value(55).toDouble();
+    if (query.value(54).isNull() && record.targetWeight > 0) {
+        record.yieldMode = YieldSpec::modeAbsolute();
+        record.yieldAnchorValue = record.targetWeight;
+    }
     record.summary.hasVisualizerUpload = !record.visualizerId.isEmpty();
 
     // Snapshot stored badge values before the recompute block overwrites them, so
@@ -3843,6 +3952,13 @@ bool ShotHistoryStorage::importDatabaseStatic(const QString& destDbPath, const Q
             const int idxRecipeId = srcRecord.indexOf("recipe_id");
             const int idxSteamJson = srcRecord.indexOf("steam_json");
             const int idxHotWaterJson = srcRecord.indexOf("hot_water_json");
+            // Yield anchor provenance (add-yield-ratio-anchor): carried
+            // verbatim from post-migration-34 sources. A pre-34 source has
+            // neither column — those rows convert on import by the same
+            // relabel migration 34 applies (yield_override > 0 → 'absolute'
+            // with the target as anchor value, else 'none').
+            const int idxYieldMode = srcRecord.indexOf("yield_mode");
+            const int idxYieldAnchorValue = srcRecord.indexOf("yield_anchor_value");
             auto srcValueOrNull = [&srcShots](int idx) {
                 return idx >= 0 ? srcShots.value(idx) : QVariant();
             };
@@ -3863,14 +3979,15 @@ bool ShotHistoryStorage::importDatabaseStatic(const QString& destDbPath, const Q
                         drink_tds, drink_ey,
                         enjoyment, espresso_notes, bean_notes, barista,
                         profile_notes, visualizer_id, visualizer_url, debug_log,
-                        temperature_override, yield_override, profile_kb_id,
+                        temperature_override, yield_override, yield_mode, yield_anchor_value,
+                        profile_kb_id,
                         channeling_detected, grind_issue_detected,
                         skip_first_frame_detected, pour_truncated_detected,
                         stopped_by, beanbase_json, beanbase_id,
                         bag_id, frozen_date, defrost_date, storage_hint, opened_date,
                         taste_balance, taste_body,
                         recipe_id, steam_json, hot_water_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 )");
 
                 insert.addBindValue(uuid);
@@ -3907,6 +4024,21 @@ bool ShotHistoryStorage::importDatabaseStatic(const QString& destDbPath, const Q
                 insert.addBindValue(srcShots.value("debug_log"));
                 insert.addBindValue(srcShots.value("temperature_override"));
                 insert.addBindValue(srcShots.value("yield_override"));
+                // Anchor provenance: verbatim from a ≥34 source; pre-34 rows
+                // (or a ≥34 row still carrying the NULL unconverted marker)
+                // convert by the migration-34 relabel.
+                {
+                    const QVariant srcMode = srcValueOrNull(idxYieldMode);
+                    if (srcMode.isValid() && !srcMode.isNull()) {
+                        insert.addBindValue(srcMode);
+                        insert.addBindValue(srcValueOrNull(idxYieldAnchorValue));
+                    } else {
+                        const double target = srcShots.value("yield_override").toDouble();
+                        insert.addBindValue(target > 0 ? QStringLiteral("absolute")
+                                                       : QStringLiteral("none"));
+                        insert.addBindValue(target > 0 ? QVariant(target) : QVariant());
+                    }
+                }
                 insert.addBindValue(srcShots.value("profile_kb_id"));
                 // Quality flags — fallback to 0 for pre-migration source databases
                 QVariant ch = srcShots.value("channeling_detected");
@@ -4201,7 +4333,8 @@ qint64 ShotHistoryStorage::importShotRecordStatic(QSqlDatabase& db, const ShotRe
             taste_balance, taste_body,
             visualizer_id, visualizer_url,
             profile_notes, debug_log,
-            temperature_override, yield_override, profile_kb_id,
+            temperature_override, yield_override, yield_mode, yield_anchor_value,
+            profile_kb_id,
             channeling_detected, grind_issue_detected,
             skip_first_frame_detected, pour_truncated_detected
         ) VALUES (
@@ -4213,7 +4346,8 @@ qint64 ShotHistoryStorage::importShotRecordStatic(QSqlDatabase& db, const ShotRe
             :taste_balance, :taste_body,
             :visualizer_id, :visualizer_url,
             :profile_notes, :debug_log,
-            :temperature_override, :yield_override, :profile_kb_id,
+            :temperature_override, :yield_override, :yield_mode, :yield_anchor_value,
+            :profile_kb_id,
             :channeling_detected, :grind_issue_detected,
             :skip_first_frame_detected, :pour_truncated_detected
         )
@@ -4254,6 +4388,19 @@ qint64 ShotHistoryStorage::importShotRecordStatic(QSqlDatabase& db, const ShotRe
     // Bind overrides (always have values - user override or profile default)
     query.bindValue(":temperature_override", record.temperatureOverride);
     query.bindValue(":yield_override", record.targetWeight);
+    // Anchor provenance: a record that carries none (external-format imports
+    // leave it empty) falls back to the migration-34 relabel of its target.
+    {
+        QString mode = YieldSpec::normalizedMode(record.yieldMode);
+        double anchor = record.yieldAnchorValue;
+        if (!YieldSpec::isSet(mode) && record.targetWeight > 0
+            && record.yieldMode.isEmpty()) {
+            mode = YieldSpec::modeAbsolute();
+            anchor = record.targetWeight;
+        }
+        query.bindValue(":yield_mode", mode);
+        query.bindValue(":yield_anchor_value", anchor > 0 ? QVariant(anchor) : QVariant());
+    }
     query.bindValue(":profile_kb_id", record.profileKbId.isEmpty() ? QVariant() : record.profileKbId);
     query.bindValue(":channeling_detected", record.channelingDetected ? 1 : 0);
     query.bindValue(":grind_issue_detected", record.grindIssueDetected ? 1 : 0);

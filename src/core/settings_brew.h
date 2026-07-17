@@ -28,9 +28,8 @@ class SettingsBrew : public QObject {
     // +/- grind values in NUMERIC mode. One source of truth (was a per-widget
     // option). Default 1.0, clamped to [0.1, 5.0].
     Q_PROPERTY(double grindQuickSelectStep READ grindQuickSelectStep WRITE setGrindQuickSelectStep NOTIFY grindQuickSelectStepChanged)
-    // Step size (°C) for the temperature quick-select brew-bar pill's +/- values.
-    // Global preference (one source of truth), mirroring grindQuickSelectStep.
-    // Default 0.5, clamped to [0.1, 5.0].
+    // [barista-fork] Temperature quick-select step (°C) for the brew widgets — fork-only, preserved across the
+    // yield-spec adoption merge.
     Q_PROPERTY(double temperatureQuickSelectStep READ temperatureQuickSelectStep WRITE setTemperatureQuickSelectStep NOTIFY temperatureQuickSelectStepChanged)
     // Master toggle for weight-timed steaming (UI label "Weight-timed steaming").
     // When off, steam time is never scaled from milk weight. Default OFF; setting a
@@ -85,15 +84,17 @@ class SettingsBrew : public QObject {
     Q_PROPERTY(double temperatureOverride READ temperatureOverride WRITE setTemperatureOverride NOTIFY temperatureOverrideChanged)
     Q_PROPERTY(bool hasTemperatureOverride READ hasTemperatureOverride NOTIFY temperatureOverrideChanged)
 
-    // Brew parameter overrides (persistent)
+    // Brew parameter overrides (persistent). The yield override is the SESSION
+    // YIELD ANCHOR (add-yield-ratio-anchor): {value, mode} where mode is
+    // "none" | "absolute" | "ratio" (src/core/yieldspec.h). brewYieldOverride
+    // is the anchor VALUE in its mode's own unit — grams when absolute, a
+    // dose multiplier when ratio. Writing through the legacy property setter
+    // anchors an ABSOLUTE (grams); ratio writers use setBrewRatioAnchor().
+    // hasBrewYieldOverride is defined as mode != none — never inferred by
+    // comparing a resolved gram value against the profile target.
     Q_PROPERTY(double brewYieldOverride READ brewYieldOverride WRITE setBrewYieldOverride NOTIFY brewOverridesChanged)
+    Q_PROPERTY(QString brewYieldMode READ brewYieldMode NOTIFY brewOverridesChanged)
     Q_PROPERTY(bool hasBrewYieldOverride READ hasBrewYieldOverride NOTIFY brewOverridesChanged)
-    // Brew-by-ratio MODE (persistent): when true, the yield is defined as a RATIO of the dose and the
-    // stop-at-weight target is kept live as dose x ratio (recomputed whenever the dose changes) instead of a
-    // frozen absolute grams value. brewRatio is the armed ratio. Default off = the legacy absolute-yield model
-    // is unchanged. Set through setYieldByRatio()/setYieldAbsolute() so mode and target never disagree.
-    Q_PROPERTY(bool brewByRatioMode READ brewByRatioMode NOTIFY brewOverridesChanged)
-    Q_PROPERTY(double brewRatio READ brewRatio NOTIFY brewOverridesChanged)
 
     // Stop-at-volume gating when a BLE scale provides weight data
     Q_PROPERTY(bool ignoreVolumeWithScale READ ignoreVolumeWithScale WRITE setIgnoreVolumeWithScale NOTIFY ignoreVolumeWithScaleChanged)
@@ -123,9 +124,8 @@ public:
 
     double grindQuickSelectStep() const;
     void setGrindQuickSelectStep(double step);
-
-    double temperatureQuickSelectStep() const;
-    void setTemperatureQuickSelectStep(double step);
+    double temperatureQuickSelectStep() const;            // [barista-fork]
+    void setTemperatureQuickSelectStep(double step);      // [barista-fork]
 
     bool milkAutoCaptureEnabled() const;
     void setMilkAutoCaptureEnabled(bool enabled);
@@ -260,26 +260,27 @@ public:
     bool hasTemperatureOverride() const;
     Q_INVOKABLE void clearTemperatureOverride();
 
-    // Brew parameter overrides (persistent)
-    double brewYieldOverride() const;
+    // Brew parameter overrides (persistent) — the session yield anchor.
+    double brewYieldOverride() const;   // anchor value, in its mode's unit
+    QString brewYieldMode() const;      // "none" | "absolute" | "ratio"
+    // Anchor an absolute gram target (mode -> "absolute"); <= 0 clears the
+    // anchor entirely (mode -> "none"). Grams clamp to [1, 500].
     void setBrewYieldOverride(double yield);
-    bool hasBrewYieldOverride() const;
+    // Anchor a ratio (mode -> "ratio"); <= 0 clears. Clamped to the single
+    // C++ ratio bound (YieldSpec::clampRatio, 0.5–6.0) that every ratio
+    // write boundary shares.
+    Q_INVOKABLE void setBrewRatioAnchor(double ratio);
+    // Restore a stored spec verbatim (recipe/bag activation): mode is
+    // normalized, values clamped per mode; mode "none" clears.
+    void setBrewYieldAnchor(double value, const QString& mode);
+    bool hasBrewYieldOverride() const;  // == mode != "none"
     Q_INVOKABLE void clearAllBrewOverrides();
-
-    // Brew-by-ratio mode (persistent). brewByRatioMode: is the yield defined as a ratio of the dose?
-    // brewRatio: the armed ratio (dose x brewRatio = target yield). These are the ONE place mode + ratio live.
-    bool brewByRatioMode() const;
-    double brewRatio() const;
-    // Arm ratio mode with `ratio` (also records it as lastUsedRatio). The stop-at-weight target is then kept
-    // live as dose x ratio by ProfileManager. `ratio` <= 0 is ignored. Does NOT itself write the yield
-    // override — ProfileManager owns the dose, so it computes and syncs the absolute target.
-    Q_INVOKABLE void setYieldByRatio(double ratio);
-    // Set an ABSOLUTE yield (grams) and EXIT ratio mode. Equivalent to setBrewYieldOverride (which itself exits
-    // ratio mode); kept as the readable intent. grams <= 0 clears the override.
-    Q_INVOKABLE void setYieldAbsolute(double grams);
-    // ProfileManager ONLY: set the derived stop-at-weight target (dose x ratio) while KEEPING ratio mode armed.
-    // Every OTHER absolute write goes through setBrewYieldOverride, which exits the mode (single-funnel safety).
-    void syncRatioYieldTarget(double yield);
+    // The profile-load reset (add-yield-ratio-anchor): clears the temperature
+    // override unconditionally and an ABSOLUTE yield anchor (a gram target
+    // describes the profile it was set against), but KEEPS a ratio anchor —
+    // 1:2 is 1:2 on any profile. Callers that must drop everything (explicit
+    // user Clear, profile edit, new profile) use clearAllBrewOverrides().
+    Q_INVOKABLE void clearProfileScopedBrewOverrides();
 
     // Stop-at-volume gating
     bool ignoreVolumeWithScale() const;
@@ -294,7 +295,7 @@ signals:
     void ratioPreset3Changed();
     void doseCupTareWeightChanged();
     void grindQuickSelectStepChanged();
-    void temperatureQuickSelectStepChanged();
+    void temperatureQuickSelectStepChanged();   // [barista-fork]
     void milkAutoCaptureEnabledChanged();
     void doseCaptureSoundEnabledChanged();
     void lastSteamMilkGChanged();
@@ -324,11 +325,6 @@ signals:
     void ignoreVolumeWithScaleChanged();
 
 private:
-    // Raw write of the absolute yield-override value; no mode change, no emit. Returns whether it changed.
-    bool writeYieldOverrideInternal(double yield);
-    // Clear brew-by-ratio mode; no emit. Returns whether it changed.
-    bool exitRatioModeInternal();
-
     mutable QSettings m_settings;
 
     // Session-only steam-disable flag (used during descaling)
@@ -338,7 +334,9 @@ private:
     double m_temperatureOverride = 0.0;
     bool m_hasTemperatureOverride = false;
     double m_brewYieldOverride = 0.0;
-    bool m_hasBrewYieldOverride = false;
-    bool m_brewByRatioMode = false;   // yield defined as dose x brewRatio (kept live by ProfileManager)
-    double m_brewRatio = 0.0;         // the armed ratio when m_brewByRatioMode is true
+    QString m_brewYieldMode;  // normalized; "none" when no anchor is armed
+
+    // Shared write path for the session anchor: normalizes + clamps, updates
+    // the cache and QSettings, emits brewOverridesChanged once.
+    void writeBrewYieldAnchor(double value, const QString& mode);
 };

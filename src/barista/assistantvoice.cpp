@@ -308,6 +308,14 @@ void AssistantVoice::speak(const QString& rawText) {
     ++m_speakGen;
     m_pendingSynth = true;
     updateSpeaking();
+    // [barista-fork] Coach first-syllable protection (mirrors the barista's speaker-wake): a live coach cue
+    // speaks COLD — unlike a barista turn it has no preceding thinking-loop keepalive to hold the external
+    // speaker awake, so a sleeping BT/USB A2DP sink clips its opening word. Wake it NOW; the synth/prepare gap
+    // before playback (cloud fetch or native prep) is the lead-time for the sink to spin up. Barista turns are
+    // already covered (thinking loop / app-load playWakeTone), and a running keepalive already holds the sink,
+    // so scope this to the coach and skip when a keepalive is active.
+    if (m_role == Role::Coaching && !m_thinkingLooping)
+        playSpeakerWake();
     const QString provider = effectiveProvider();
     // [barista-fork][audio-diag] Capture the ROUTE so we can see why the barista plays on the tablet while
     // system audio uses the external speaker: which synth path (cloud mp3 vs native TTS), what Qt thinks the
@@ -752,6 +760,14 @@ void AssistantVoice::playWakeTone() {
         return;
     if (m_thinkingLooping)   // [barista-fork] the cue loop already keeps the speaker awake → no wake tone needed
         return;
+    playSpeakerWake();
+}
+
+// [barista-fork] The raw speaker-wake: play the short sub-perceptible tone through the cue player (external-
+// speaker route) so a sleeping BT/USB A2DP sink powers up before real audio. NO role/mute guards — the caller
+// owns those. Used by playWakeTone() (barista app-load pre-warm, guarded above) and by speak() for the COACHING
+// role (a cold cue has no preceding keepalive to protect its first syllable).
+void AssistantVoice::playSpeakerWake() {
     BaristaDiagnostics::record(QStringLiteral("voice"), QStringLiteral("wake_tone"), {});
 #ifdef Q_OS_ANDROID
     const QString dest = QDir::tempPath() + QStringLiteral("/decenza_wake.wav");

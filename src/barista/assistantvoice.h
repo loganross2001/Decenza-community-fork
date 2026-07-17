@@ -160,6 +160,7 @@ private:
 
     void applyVoiceFromSettings();
     void updateSpeaking();
+    void playSpeakerWake();                      // [barista-fork] raw speaker-wake tone (no guards); see .cpp
     void synthOpenAI(const QString& text);       // POST OpenAI TTS → play the returned mp3
     void synthElevenLabs(const QString& text);   // POST ElevenLabs TTS → play the returned mp3
     void playMp3(const QByteArray& audio);       // play compressed audio via QMediaPlayer

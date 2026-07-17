@@ -57,7 +57,8 @@ QVariantMap BaristaActions::applyFromNext(const QVariantMap& next, qint64 anchor
     if (brew && yield > 0) {
         if (yield >= 10.0 && yield <= 120.0) {
             m_undo["targetWeightG_had"] = brew->hasBrewYieldOverride();
-            m_undo["targetWeightG"] = brew->brewYieldOverride();
+            m_undo["targetWeightG"] = brew->brewYieldOverride();   // raw anchor value (ratio in ratio mode)
+            m_undo["yieldMode"] = brew->brewYieldMode();           // capture the MODE too — undo must restore it
             brew->setBrewYieldOverride(yield);
             // [barista-fork] Also sync lastUsedRatio (mirrors BrewDialog): the idle bean auto-capture recomputes
             // the yield from lastUsedRatio on the next weigh-in, so leaving it stale would silently revert this.
@@ -81,7 +82,8 @@ QVariantMap BaristaActions::applyFromNext(const QVariantMap& next, qint64 anchor
         const double computedYield = baseDose * ratio;
         if (computedYield >= 10.0 && computedYield <= 120.0) {
             m_undo["targetWeightG_had"] = brew->hasBrewYieldOverride();
-            m_undo["targetWeightG"] = brew->brewYieldOverride();
+            m_undo["targetWeightG"] = brew->brewYieldOverride();   // raw anchor value (ratio in ratio mode)
+            m_undo["yieldMode"] = brew->brewYieldMode();           // capture the MODE too — undo must restore it
             m_undo["lastUsedRatio_had"] = true;
             m_undo["lastUsedRatio"] = lastRatioBefore;
             // [brew-by-ratio] Arm a RATIO ANCHOR so the yield tracks the dose live (like the ratio pill), instead
@@ -158,7 +160,10 @@ void BaristaActions::undoLast() {
     }
     if (brew && m_undo.contains("targetWeightG")) {
         if (m_undo.value("targetWeightG_had").toBool())
-            brew->setBrewYieldOverride(m_undo.value("targetWeightG").toDouble());
+            // Restore through the MODE-AWARE setter: in ratio mode the captured value is the ratio (e.g. 2.0),
+            // not grams — setBrewYieldOverride would force mode=absolute and brew a nonsensical 2 g yield.
+            brew->setBrewYieldAnchor(m_undo.value("targetWeightG").toDouble(),
+                                     m_undo.value("yieldMode").toString());
         else
             brew->setBrewYieldOverride(0);   // S3: clear the override we created (0 = no override)
     }

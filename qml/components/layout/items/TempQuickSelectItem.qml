@@ -11,8 +11,9 @@ import "../.."
 // the shipped temperature UI (TemperatureItem / BrewDialog) reads and writes.
 //
 // The step is a global preference (Settings.brew.temperatureQuickSelectStep,
-// default 0.5 °C), mirroring the grind pill's global grindQuickSelectStep — no
-// per-instance option. Values are stepped in Celsius (the internal/stored unit);
+// default 0.5 °C) — no per-instance option. (The grind pill's step is now
+// history-derived upstream, but this fork-only temperature step stays a
+// preference.) Values are stepped in Celsius (the internal/stored unit);
 // the pill and picker DISPLAY them in the user's unit via Theme.formatTemperature.
 //
 // Pure layout widget: no barista / AI / feedback dependencies, so it can be

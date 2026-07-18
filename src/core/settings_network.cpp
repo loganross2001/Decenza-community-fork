@@ -896,8 +896,8 @@ const QHash<QString, QStringList>& readoutOptionSchema() {
         { QStringLiteral("milkWeight"),       { QStringLiteral("displayMode"), QStringLiteral("color") } },
         { QStringLiteral("profileName"),      { QStringLiteral("color") } },
         { QStringLiteral("activeBarista"),    { QStringLiteral("color") } },
-        // grindQuickSelect has no per-instance options: its step size is a global
-        // preference (Settings.brew.grindQuickSelectStep), not a per-widget option.
+        // grindQuickSelect has no per-instance options: its step size is now
+        // history-derived (grindStepForGrinder), not a per-widget option.
     };
     return schema;
 }

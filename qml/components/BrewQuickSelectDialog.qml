@@ -29,8 +29,13 @@ Dialog {
     // --- Steps (global preferences, shared with the individual pills) ---
     readonly property double tempStepC: (Settings.brew.temperatureQuickSelectStep > 0)
         ? Settings.brew.temperatureQuickSelectStep : 0.5
-    readonly property double grindStep: (Settings.brew.grindQuickSelectStep > 0)
-        ? Settings.brew.grindQuickSelectStep : 1.0
+    // [barista-fork] Upstream #1540 retired the global grindQuickSelectStep for a HISTORY-derived step. Mirror
+    // GrindQuickSelectItem: derive from the full cross-grinder history (grindStepForGrinder("")), fall back to 1.0.
+    readonly property double grindStep: {
+        var s = (MainController.shotHistory && MainController.shotHistory.grindStepForGrinder)
+            ? MainController.shotHistory.grindStepForGrinder("") : 0
+        return s > 0 ? s : 1.0
+    }
     readonly property double ratioStep: 0.1   // ratio picks are in 0.1 increments
 
     // --- Live current values (staged from these on open) ---

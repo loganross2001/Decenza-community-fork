@@ -24,10 +24,6 @@ class SettingsBrew : public QObject {
     // Dose cup tare: empty weight of the dosing vessel, subtracted from the scale
     // reading in "Get from scale" so the dose is net beans. Default 0 = no tare.
     Q_PROPERTY(double doseCupTareWeight READ doseCupTareWeight WRITE setDoseCupTareWeight NOTIFY doseCupTareWeightChanged)
-    // Global step size used by the grind quick-select widget when generating the
-    // +/- grind values in NUMERIC mode. One source of truth (was a per-widget
-    // option). Default 1.0, clamped to [0.1, 5.0].
-    Q_PROPERTY(double grindQuickSelectStep READ grindQuickSelectStep WRITE setGrindQuickSelectStep NOTIFY grindQuickSelectStepChanged)
     // [barista-fork] Temperature quick-select step (°C) for the brew widgets — fork-only, preserved across the
     // yield-spec adoption merge.
     Q_PROPERTY(double temperatureQuickSelectStep READ temperatureQuickSelectStep WRITE setTemperatureQuickSelectStep NOTIFY temperatureQuickSelectStepChanged)
@@ -122,8 +118,6 @@ public:
     double doseCupTareWeight() const;
     void setDoseCupTareWeight(double weight);
 
-    double grindQuickSelectStep() const;
-    void setGrindQuickSelectStep(double step);
     double temperatureQuickSelectStep() const;            // [barista-fork]
     void setTemperatureQuickSelectStep(double step);      // [barista-fork]
 
@@ -294,7 +288,6 @@ signals:
     void ratioPreset2Changed();
     void ratioPreset3Changed();
     void doseCupTareWeightChanged();
-    void grindQuickSelectStepChanged();
     void temperatureQuickSelectStepChanged();   // [barista-fork]
     void milkAutoCaptureEnabledChanged();
     void doseCaptureSoundEnabledChanged();

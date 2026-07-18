@@ -363,16 +363,18 @@ KeyboardAwareContainer {
                     }
                 }
 
-                // Grinder Settings (grind quick-select step)
+                // [barista-fork] Temperature quick-select step (°C) — the brew-bar temperature pill's +/-
+                // increment. Upstream #1540 dropped the grind-step card (grind step is now history-derived), but
+                // this fork-only control lived inside it, so it's preserved here in its own small card.
                 Rectangle {
-                    objectName: "grinder"
+                    objectName: "brewSteps"
                     Layout.fillWidth: true
-                    implicitHeight: grinderContent.implicitHeight + Theme.scaled(30)
+                    implicitHeight: brewStepsContent.implicitHeight + Theme.scaled(30)
                     color: Theme.cardBackgroundColor
                     radius: Theme.cardRadius
 
                     ColumnLayout {
-                        id: grinderContent
+                        id: brewStepsContent
                         anchors.left: parent.left
                         anchors.right: parent.right
                         anchors.top: parent.top
@@ -380,51 +382,13 @@ KeyboardAwareContainer {
                         spacing: Theme.scaled(10)
 
                         Text {
-                            text: TranslationManager.translate("settings.preferences.grinder", "Grinder")
+                            text: TranslationManager.translate("settings.preferences.tempStepCard", "Temperature")
                             color: Theme.textColor
                             font.family: Theme.bodyFont.family
                             font.pixelSize: Theme.scaled(16)
                             font.bold: true
                         }
 
-                        Text {
-                            Layout.fillWidth: true
-                            text: TranslationManager.translate("settings.preferences.grindStepDesc",
-                                "Increment between the grind values offered by the grind quick-select widget (numbers only).")
-                            color: Theme.textSecondaryColor
-                            font.family: Theme.bodyFont.family
-                            font.pixelSize: Theme.scaled(12)
-                            wrapMode: Text.WordWrap
-                        }
-
-                        ColumnLayout {
-                            Layout.fillWidth: true
-                            spacing: Theme.scaled(4)
-
-                            Text {
-                                text: TranslationManager.translate("settings.preferences.grindStep", "Grind step")
-                                color: Theme.textColor
-                                font.pixelSize: Theme.scaled(14)
-                                Accessible.ignored: true
-                            }
-
-                            ValueInput {
-                                Layout.fillWidth: true
-                                from: 0.1
-                                to: 5.0
-                                stepSize: 0.05
-                                decimals: 2
-                                value: Settings.brew.grindQuickSelectStep
-                                valueColor: Theme.primaryColor
-                                accessibleName: TranslationManager.translate("settings.preferences.grindStep", "Grind step")
-                                onValueModified: function(newValue) {
-                                    Settings.brew.grindQuickSelectStep = newValue
-                                }
-                            }
-                        }
-
-                        // Temperature quick-select step (°C) for the brew-bar
-                        // temperature pill's +/- values. Mirrors the grind step above.
                         ColumnLayout {
                             Layout.fillWidth: true
                             spacing: Theme.scaled(4)
@@ -452,6 +416,7 @@ KeyboardAwareContainer {
                         }
                     }
                 }
+
 
                 // Shot Map Settings
                 Rectangle {

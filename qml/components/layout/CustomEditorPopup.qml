@@ -154,6 +154,7 @@ Dialog {
         result = result.replace(/%DOSE%/g, "18.0")
         result = result.replace(/%SCALE%/g, "Lunar")
         result = result.replace(/%GRIND%/g, "1.8.0")
+        result = result.replace(/%RPM%/g, "1000")
         result = result.replace(/%GRINDER%/g, "Niche Zero")
         result = result.replace(/%ROASTER%/g, "Olympia Coffee")
         result = result.replace(/%COFFEE%/g, "Big Truck")
@@ -1223,6 +1224,7 @@ Dialog {
         { token: "%RATIO%", label: TranslationManager.translate("customeditor.var.ratio", "Brew Ratio") },
         { token: "%DOSE%", label: TranslationManager.translate("customeditor.var.dose", "Dose (g)") },
         { token: "%GRIND%", label: TranslationManager.translate("customeditor.var.grind", "Grind Setting") },
+        { token: "%RPM%", label: TranslationManager.translate("customeditor.var.rpm", "Grinder RPM") },
         { token: "%GRINDER%", label: TranslationManager.translate("customeditor.var.grinder", "Grinder Model") },
         { token: "%ROASTER%", label: TranslationManager.translate("customeditor.var.roaster", "Roaster") },
         { token: "%COFFEE%", label: TranslationManager.translate("customeditor.var.coffee", "Coffee") },

@@ -275,7 +275,7 @@ static bool queryShotList(QSqlDatabase& db, QVariantList& result) {
                final_weight, dose_weight, bean_brand, bean_type,
                enjoyment, visualizer_id, grinder_setting,
                temperature_override, yield_override, beverage_type,
-               drink_tds, drink_ey
+               drink_tds, drink_ey, rpm
         FROM shots ORDER BY timestamp DESC LIMIT 1000
     )") || !query.exec()) {
         qWarning() << "ShotServer: Shot list query failed:" << query.lastError().text();
@@ -295,6 +295,7 @@ static bool queryShotList(QSqlDatabase& db, QVariantList& result) {
         row["enjoyment"] = query.value(9).toDouble();
         row["hasVisualizerUpload"] = !query.value(10).toString().isEmpty();
         row["grinderSetting"] = query.value(11).toString();
+        row["rpm"] = query.value(17).toLongLong();  // RPM half of the dial-in
         row["temperatureOverrideC"] = query.value(12).toDouble();
         row["targetWeightG"] = query.value(13).toDouble();
         row["beverageType"] = query.value(14).toString();
@@ -2600,7 +2601,8 @@ btn.textContent='Copied!';setTimeout(function(){btn.textContent='Copy'},2000);
         QByteArray body = (headerEndPos >= 0) ? request.mid(headerEndPos + 4) : QByteArray();
         handleRecipesApi(socket, method, path, body);
     }
-    else if (path == "/api/bags" || path.startsWith("/api/bag/")) {
+    else if (path == "/api/bags" || path.startsWith("/api/bag/")
+             || path.startsWith("/api/beans/")) {
         qsizetype headerEndPos = request.indexOf("\r\n\r\n");
         QByteArray body = (headerEndPos >= 0) ? request.mid(headerEndPos + 4) : QByteArray();
         handleBagsApi(socket, method, path, body);

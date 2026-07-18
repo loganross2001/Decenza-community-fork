@@ -850,7 +850,13 @@ Page {
             "drinkEy": editDrinkEy,
             "espressoNotes": editNotes,
             "beverageType": editBeverageType,
-            "beanBaseJson": editBeanBaseJson
+            "beanBaseJson": editBeanBaseJson,
+            // Keep the indexed canonical id in lockstep with the blob — the
+            // backend does NOT derive beanbase_id from beanbase_json on a
+            // metadata update (updateShotMetadataStatic), so a link made here
+            // (e.g. the lightweight LinkBeanBaseDialog path) would otherwise
+            // leave beanbase_id stale and break the history search lane.
+            "beanBaseId": beanBaseLinked ? String(activeBeanBase.id) : ""
         }
         metadata["enjoyment"] = editEnjoyment
         metadata["tasteBalance"] = editTasteBalance
@@ -2108,6 +2114,8 @@ Page {
                     roastDate: editRoastDate
                     roastLevel: editRoastLevel
                     beanBaseData: editBeanBaseJson
+                    linkable: true
+                    onLinkRequested: postShotReviewPage.requestBeanLink()
                 }
 
                 AccessibleButton {
@@ -2123,7 +2131,13 @@ Page {
 
             BeanBaseDetailsRow {
                 Layout.fillWidth: true
-                visible: (editShotData.recipeId || -1) <= 0
+                // Recipe-gate AND the bean-linked gate. This override replaces the
+                // component's own `visible: hasData`, so without beanBaseLinked an
+                // unlinked no-recipe shot forces the row visible: it then paints its
+                // "Linked to Bean Base / Tap for bean details" fallback into a
+                // zero-height box (implicitHeight is 0 when !hasData), overlapping
+                // the Barista field below with a dead tap target.
+                visible: (editShotData.recipeId || -1) <= 0 && postShotReviewPage.beanBaseLinked
                 beanBaseJson: postShotReviewPage.editBeanBaseJson
             }
 
@@ -2307,6 +2321,8 @@ Page {
                                     roastDate: editRoastDate
                                     roastLevel: editRoastLevel
                                     beanBaseData: editBeanBaseJson
+                                    linkable: true
+                                    onLinkRequested: postShotReviewPage.requestBeanLink()
                                 }
                                 AccessibleButton {
                                     Layout.preferredHeight: Theme.scaled(44)
@@ -2462,6 +2478,41 @@ Page {
     // Change Beans + Change Equipment — page-scoped so both the recipe card and
     // the standalone bean/equipment rows share one instance regardless of which
     // is visible.
+    // "Link to Bean Base" nudge action. A historical shot (anything but the
+    // just-pulled one) links lightweight — attach the canonical record to THIS
+    // shot only, no bag created. The most-recent shot keeps the full Change
+    // Beans path, where linking the active bag is the intended "wrong bag" fix.
+    function requestBeanLink() {
+        if (editShotId === MainController.lastSavedShotId) {
+            reviewChangeBeansDialog.open()
+        } else {
+            reviewLinkBeanBaseDialog.openWith(
+                [editBeanBrand, editBeanType].filter(function(s) { return s && s.length > 0 }).join(" "))
+        }
+    }
+
+    // Apply a canonical Bean Base pick to this shot's snapshot only. Mirrors
+    // the fields ChangeBeansDialog.onBagSelected writes (so the linked shot
+    // looks identical) MINUS any bag: no inventory bag, activeBagId untouched.
+    function applyCanonicalLinkToShot(entry) {
+        editBeanBaseJson = JSON.stringify(entry)
+        if (entry.roasterName) editBeanBrand = String(entry.roasterName)
+        if (entry.roastName) editBeanType = String(entry.roastName)
+        if (entry.degree) editRoastLevel = String(entry.degree)
+        // autosave() -> saveEditedShot() persists the snapshot and already sets
+        // pendingVisualizerUpdate, so the enriched bean info pushes to Visualizer.
+        autosave("beanBase", true)
+        // Best-effort attribute enrichment (origin/variety/process/...): the
+        // onCanonicalDetails handler above merges it into editBeanBaseJson and
+        // re-saves when it arrives.
+        MainController.beanbase.fetchCanonicalDetails(entry)
+    }
+
+    LinkBeanBaseDialog {
+        id: reviewLinkBeanBaseDialog
+        onEntryPicked: function(entry) { postShotReviewPage.applyCanonicalLinkToShot(entry) }
+    }
+
     ChangeBeansDialog {
         id: reviewChangeBeansDialog
         // Only the most recent shot is the "post-shot" fix path (sets

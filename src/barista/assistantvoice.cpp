@@ -188,6 +188,12 @@ void AssistantVoice::updateSpeaking() {
 #endif
     if (active)
         m_pendingSynth = false;       // real audio started — hand off from the pending flag
+    // Coaching keepalive (started in speak() to protect the first syllable): retire it the
+    // moment real audio is out OR the synth resolved with no audio (any error/no-engine path
+    // clears m_pendingSynth then calls here). Event-based, no watchdog. Scoped to the coaching
+    // instance, whose thinking loop is only ever this keepalive (barista's is a separate object).
+    if (m_role == Role::Coaching && m_thinkingLooping && (active || !m_pendingSynth))
+        stopThinkingLoop();
     // [barista-fork] `audible` = real audio out RIGHT NOW (== `active`, no pending hold). Purely additive: it
     // drives the avatar's mouth so it doesn't move during the network→prepare gap. Never gates the mic.
     if (active != m_audible) {
@@ -314,8 +320,12 @@ void AssistantVoice::speak(const QString& rawText) {
     // before playback (cloud fetch or native prep) is the lead-time for the sink to spin up. Barista turns are
     // already covered (thinking loop / app-load playWakeTone), and a running keepalive already holds the sink,
     // so scope this to the coach and skip when a keepalive is active.
+    // Loop the silent keepalive (not a one-shot tone) so the sink stays awake across the
+    // ENTIRE synth/network gap — a single wake tone's ~200ms window closes during a 0.5-2s
+    // cloud-TTS fetch and the first syllable still clips. Stopped the instant real audio
+    // starts (updateSpeaking / handleAndroidPlaybackStarted) and on any no-audio exit.
     if (m_role == Role::Coaching && !m_thinkingLooping)
-        playSpeakerWake();
+        startThinkingLoop(/*forceSilent=*/true);
     const QString provider = effectiveProvider();
     // [barista-fork][audio-diag] Capture the ROUTE so we can see why the barista plays on the tablet while
     // system audio uses the external speaker: which synth path (cloud mp3 vs native TTS), what Qt thinks the
@@ -685,7 +695,7 @@ QString AssistantVoice::extractSoundAssetToFile(const QString& fileName) {
 }
 #endif
 
-void AssistantVoice::startThinkingLoop() {
+void AssistantVoice::startThinkingLoop(bool forceSilent) {
     // Honor the barista mute (a muted barista stays fully silent).
     if (m_role == Role::Barista && m_settings && !m_settings->voiceEnabled())
         return;
@@ -696,7 +706,7 @@ void AssistantVoice::startThinkingLoop() {
     // in handleAndroidPlaybackStarted the instant real audio starts). When the earcon is "off", we still loop a
     // sub-perceptible keepalive.wav (true silence lets the A2DP sink sleep) so "off" users get the wake benefit.
     const QString name = thinkingSoundName();   // empty => "off"
-    const bool keepaliveOnly = name.isEmpty();
+    const bool keepaliveOnly = forceSilent || name.isEmpty();
     const QString soundLabel = keepaliveOnly ? QStringLiteral("keepalive") : name;
     const QString fileName   = keepaliveOnly ? QStringLiteral("keepalive.wav")
                                              : QStringLiteral("think-%1.wav").arg(name);

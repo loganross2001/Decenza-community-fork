@@ -93,7 +93,10 @@ public:
     // continuously (through the native player, so it follows the external-speaker route on Android) until real
     // audio is audible or the turn ends. Honors the barista mute + the "off" setting. The loop IS the new
     // still-working heartbeat (replaces the delayed tick). Idempotent: start while looping is a no-op.
-    Q_INVOKABLE void startThinkingLoop();
+    // forceSilent: always use the sub-perceptible keepalive.wav (never an audible
+    // hum). The Coaching role uses this to hold a sleeping BT/USB speaker awake
+    // across the whole synth/network gap so the first syllable isn't clipped.
+    Q_INVOKABLE void startThinkingLoop(bool forceSilent = false);
     Q_INVOKABLE void stopThinkingLoop();
     // Audition the currently-selected thinking sound for a moment (settings picker), via the same cue path so
     // it plays out the external speaker.

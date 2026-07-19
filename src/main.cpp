@@ -3021,7 +3021,12 @@ int main(int argc, char *argv[])
             [&machineState, &settings, coachPhrasebook, coachingVoice, &mainController]() {
                 using Phase = MachineState::Phase;
                 const Phase phase = machineState.phase();
-                if (phase == Phase::EspressoPreheating || phase == Phase::Preinfusion) {
+                // Refresh on espresso AND steam entry: steam cues (steam-stretch/roll/almost/done)
+                // otherwise never get model-generated phrasings and always speak the terse
+                // hardcoded fallbacks ("Steam done"). refresh() is bean-scoped and self-dedupes
+                // (isFresh), so steaming after a shot with the same bean is a no-op.
+                if (phase == Phase::EspressoPreheating || phase == Phase::Preinfusion
+                    || phase == Phase::Steaming) {
                     const QString bean = (settings.dye()->dyeBeanBrand() + " " + settings.dye()->dyeBeanType()).trimmed();
                     coachPhrasebook->refresh(
                         QStringLiteral("Bean: %1. Write a brief pre-shot plan and varied spoken coaching cues.").arg(bean.isEmpty() ? QStringLiteral("unknown") : bean),

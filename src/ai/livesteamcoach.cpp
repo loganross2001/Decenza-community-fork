@@ -147,7 +147,7 @@ void LiveSteamCoach::onSteamFlowStopped() {
     // the pill shows until the phase exits Steaming (cues persist — there is
     // no auto-dismiss).
     emitCue(QStringLiteral("steam-done"),
-            tr_("steamCoach.cue.done", "Steam done"),
+            tr_("steamCoach.cue.done", "That's your milk — steam's off, give the pitcher a swirl and it's ready to pour"),
             QStringLiteral("positive"), /*speak=*/true, /*interrupt=*/true);
 }
 

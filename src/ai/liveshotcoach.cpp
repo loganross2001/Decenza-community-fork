@@ -142,7 +142,7 @@ void LiveShotCoach::evaluate(double shotTime) {
             && pressureChange < CHANNELING_PRESSURE_FLAT) {
             m_firedChanneling = true;
             emitCue(QStringLiteral("channeling"),
-                    tr_("liveCoach.cue.channeling", "Possible channeling"),
+                    tr_("liveCoach.cue.channeling", "Flow's climbing while the pressure holds — that can be channeling through the puck"),
                     QStringLiteral("caution"), /*speak=*/true, shotTime);
             return;
         }

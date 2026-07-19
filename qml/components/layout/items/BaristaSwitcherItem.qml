@@ -1,33 +1,34 @@
 import QtQuick
 import Decenza
 
-// Layout widget: the barista roster switcher — the one-tap active-user picker
-// that used to be hardcoded at the top of IdlePage. Wrapping BaristaChipRow as a
-// catalog widget lets the layout editor place it in any zone (bar or center),
-// like every other idle-screen element, instead of pinning it to a fixed spot.
+// Layout widget: the barista roster switcher (avatar chips + "+"), placeable in
+// any zone via the layout editor. It replaces the old hardcoded top-of-idle row.
 //
-// BaristaChipRow self-hides when the roster has 0 or 1 people, so a single-user
-// home still sees nothing here (the item collapses to zero size and the zone
-// simply renders empty) — the zero-friction behavior is preserved.
+// BaristaChipRow.alwaysShow keeps it rendered even for 0/1-person rosters — a
+// widget the user deliberately placed should never silently vanish. Its size is
+// bound directly to the chip row's implicit size (not gated on visibility), so
+// the layout cell never collapses to zero and then fails to re-expand.
+//
+// isCompact (true in bar zones) drives the chip row's compact layout: the name
+// sits beside the avatar in a short row that fits the bar height, instead of the
+// taller avatar-over-name stack used in center zones.
 Item {
     id: root
 
-    // Standard layout-item interface (set by LayoutItemDelegate.onLoaded).
     property bool isCompact: false
     property string itemId: ""
     property var modelData: ({})
     property color zoneTextColor: Theme.textColor
     property bool zoneValueBold: false
 
-    // Forward BaristaChipRow's self-hide (roster <= 1) up to the layout item, so a
-    // single-user home collapses this widget to nothing wherever it is placed —
-    // otherwise the wrapper would stay visible and reserve space in its zone.
-    visible: chipRow.visible
-    implicitWidth: chipRow.visible ? chipRow.implicitWidth : 0
-    implicitHeight: chipRow.visible ? chipRow.implicitHeight : 0
+    implicitWidth: chipRow.implicitWidth
+    implicitHeight: chipRow.implicitHeight
 
     BaristaChipRow {
         id: chipRow
         anchors.centerIn: parent
+        alwaysShow: true
+        compact: root.isCompact
+        showAdd: false   // switch-between-existing-people only; add a person from the menu
     }
 }

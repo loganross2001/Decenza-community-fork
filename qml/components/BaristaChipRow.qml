@@ -19,11 +19,33 @@ FocusScope {
     // Local mirror of the roster (QVariantList of barista variant maps).
     property var roster: []
 
+    // When true, always render (existing chips + the "+" add chip) regardless of
+    // roster size. Set by the placeable BaristaSwitcherItem: a widget the user
+    // deliberately added should never silently vanish. Default false preserves the
+    // legacy self-hide for any other caller.
+    property bool alwaysShow: false
+
+    // Compact (bar) layout: name sits BESIDE the avatar in a short row that fits a
+    // bar's height, instead of a taller avatar-over-name stack. Set from the
+    // widget's isCompact (true in top/bottom/status bars). Large stacked style is
+    // used in center zones and by the legacy hardcoded placement.
+    property bool compact: false
+
+    // Show the trailing "+" chip that creates a new person. Off for the idle-screen
+    // switcher widget: it is a switch-between-existing-people control; adding a
+    // person is a rare action done from the menu, not something to keep on the home
+    // screen. Default true preserves the full picker for any other caller.
+    property bool showAdd: true
+
+    // Avatar sizing keyed off compact so the whole row stays within the bar height.
+    readonly property real avatarOuter: compact ? Theme.scaled(34) : Theme.scaled(56)
+    readonly property real avatarInner: compact ? Theme.scaled(30) : Theme.scaled(46)
+
     readonly property var baristaStorage: MainController.baristaStorage
 
     // Hide entirely for single-user homes — the picker only earns its space
-    // once there is more than one person to switch between.
-    visible: roster.length > 1
+    // once there is more than one person to switch between (unless alwaysShow).
+    visible: alwaysShow || roster.length > 1
     implicitHeight: visible ? chipRow.implicitHeight : 0
     implicitWidth: chipRow.implicitWidth
 
@@ -79,19 +101,24 @@ FocusScope {
         Repeater {
             model: root.roster
 
-            delegate: ColumnLayout {
+            // GridLayout so the avatar/name arrangement flips with `compact`:
+            // columns:2 → avatar beside name (short, fits a bar); columns:1 →
+            // avatar above name (taller, for center zones / legacy placement).
+            delegate: GridLayout {
                 id: chip
                 required property var modelData
                 readonly property bool active: root.isActive(modelData)
 
                 Layout.alignment: Qt.AlignVCenter
-                spacing: Theme.scaled(4)
+                columns: root.compact ? 2 : 1
+                rowSpacing: root.compact ? 0 : Theme.scaled(4)
+                columnSpacing: root.compact ? Theme.scaled(6) : 0
 
                 // Circular avatar with selection ring on the active chip.
                 Item {
-                    Layout.alignment: Qt.AlignHCenter
-                    implicitWidth: Theme.scaled(56)
-                    implicitHeight: Theme.scaled(56)
+                    Layout.alignment: root.compact ? Qt.AlignVCenter : Qt.AlignHCenter
+                    implicitWidth: root.avatarOuter
+                    implicitHeight: root.avatarOuter
 
                     // Selection ring — mirrors the PresetPillRow / Theme focus look.
                     Rectangle {
@@ -106,8 +133,8 @@ FocusScope {
                     Rectangle {
                         id: avatarCircle
                         anchors.centerIn: parent
-                        width: Theme.scaled(46)
-                        height: Theme.scaled(46)
+                        width: root.avatarInner
+                        height: root.avatarInner
                         radius: width / 2
                         color: root.chipColorFor(chip.modelData)
                         opacity: avatarTap.isPressed ? 0.7 : 1.0
@@ -116,8 +143,8 @@ FocusScope {
                             anchors.centerIn: parent
                             visible: root.hasEmojiAvatar(chip.modelData)
                             source: visible ? Theme.emojiToImage(chip.modelData.avatar) : ""
-                            sourceSize.width: Theme.scaled(26)
-                            sourceSize.height: Theme.scaled(26)
+                            sourceSize.width: Math.round(root.avatarInner * 0.57)
+                            sourceSize.height: Math.round(root.avatarInner * 0.57)
                             Accessible.ignored: true
                         }
 
@@ -126,7 +153,7 @@ FocusScope {
                             visible: !root.hasEmojiAvatar(chip.modelData)
                             text: root.initialFor(chip.modelData)
                             color: Theme.primaryContrastColor
-                            font.pixelSize: Theme.scaled(22)
+                            font.pixelSize: Math.round(root.avatarInner * 0.48)
                             font.bold: true
                             Accessible.ignored: true
                         }
@@ -136,13 +163,13 @@ FocusScope {
                 }
 
                 Text {
-                    Layout.alignment: Qt.AlignHCenter
+                    Layout.alignment: root.compact ? Qt.AlignVCenter : Qt.AlignHCenter
                     Layout.maximumWidth: Theme.scaled(80)
                     text: chip.modelData.name || ""
                     color: chip.active ? Theme.primaryColor : Theme.textColor
                     font: Theme.captionFont
                     elide: Text.ElideRight
-                    horizontalAlignment: Text.AlignHCenter
+                    horizontalAlignment: root.compact ? Text.AlignLeft : Text.AlignHCenter
                     Accessible.ignored: true
                 }
 
@@ -165,15 +192,18 @@ FocusScope {
         }
 
         // Trailing "+" chip — opens the edit dialog to create a new person.
-        ColumnLayout {
+        GridLayout {
+            visible: root.showAdd
             Layout.alignment: Qt.AlignVCenter
-            spacing: Theme.scaled(4)
+            columns: root.compact ? 2 : 1
+            rowSpacing: root.compact ? 0 : Theme.scaled(4)
+            columnSpacing: root.compact ? Theme.scaled(6) : 0
 
             Rectangle {
                 id: addCircle
-                Layout.alignment: Qt.AlignHCenter
-                width: Theme.scaled(46)
-                height: Theme.scaled(46)
+                Layout.alignment: root.compact ? Qt.AlignVCenter : Qt.AlignHCenter
+                width: root.avatarInner
+                height: root.avatarInner
                 radius: width / 2
                 color: "transparent"
                 border.width: 1
@@ -184,7 +214,7 @@ FocusScope {
                     anchors.centerIn: parent
                     text: "+"
                     color: Theme.textSecondaryColor
-                    font.pixelSize: Theme.scaled(26)
+                    font.pixelSize: Math.round(root.avatarInner * 0.57)
                     Accessible.ignored: true
                 }
 
@@ -192,11 +222,11 @@ FocusScope {
             }
 
             Text {
-                Layout.alignment: Qt.AlignHCenter
+                Layout.alignment: root.compact ? Qt.AlignVCenter : Qt.AlignHCenter
                 text: TranslationManager.translate("barista.add", "Add")
                 color: Theme.textSecondaryColor
                 font: Theme.captionFont
-                horizontalAlignment: Text.AlignHCenter
+                horizontalAlignment: root.compact ? Text.AlignLeft : Text.AlignHCenter
                 Accessible.ignored: true
             }
 

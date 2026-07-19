@@ -212,6 +212,7 @@ Item {
                 case "scaleWeight":      src = "items/ScaleWeightItem.qml"; break
                 case "profileName":      src = "items/ProfileNameItem.qml"; break
                 case "activeBarista":    src = "items/ActiveBaristaItem.qml"; break
+                case "baristaSwitcher":  src = "items/BaristaSwitcherItem.qml"; break
                 case "doseWeight":       src = "items/DoseWeightItem.qml"; break
                 case "milkWeight":       src = "items/MilkWeightItem.qml"; break
                 case "ratioQuickSelect": src = "items/RatioQuickSelectItem.qml"; break

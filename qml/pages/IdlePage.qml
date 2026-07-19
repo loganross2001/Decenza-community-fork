@@ -599,11 +599,10 @@ Page {
         anchors.topMargin: Theme.pageTopMargin
         spacing: Theme.scaled(20)
 
-        // Barista picker — a one-tap roster switcher. Hides itself when there is
-        // 0 or 1 person in the roster (zero friction for single-user homes).
-        BaristaChipRow {
-            Layout.alignment: Qt.AlignHCenter
-        }
+        // The barista roster switcher is now the placeable "baristaSwitcher" layout
+        // widget (items/BaristaSwitcherItem.qml) — drop it into any zone via the
+        // layout editor instead of it being pinned here. It still self-hides for
+        // single-user homes wherever it is placed.
 
         RowLayout {
             Layout.alignment: Qt.AlignHCenter

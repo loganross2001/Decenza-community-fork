@@ -43,6 +43,7 @@ Item {
             case "weather":
             case "ghcSimulator":
             case "clock":
+            case "baristaSwitcher":
                 return true
             default:
                 return false

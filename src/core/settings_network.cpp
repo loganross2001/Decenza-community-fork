@@ -301,6 +301,10 @@ QString SettingsNetwork::defaultLayoutJson() const {
         QJsonObject({{"type", "steam"}, {"id", "steam1"}}),
         QJsonObject({{"type", "hotwater"}, {"id", "hotwater1"}}),
     });
+    // Note: the barista roster switcher ("baristaSwitcher") is intentionally not
+    // seeded into the default layout. It is available from the layout-editor
+    // palette for users who want it on the idle screen; the active barista can
+    // also always be changed from Settings > History/Data and via the assistant.
     zones["centerMiddle"] = QJsonArray({
         QJsonObject({{"type", "shotPlan"}, {"id", "plan1"}}),
     });
@@ -986,6 +990,7 @@ const QVector<WidgetCatalogEntry>& widgetCatalogTable() {
         { "waterLevel",       1, "layoutEditor.widgetWaterLevel",    "Water Level",    "layoutEditor.chipWater",      "Water",      "", true },
         { "profileName",      1, "layoutEditor.widgetProfileName",   "Profile Name",   "layoutEditor.chipProfileName","Profile",    "", true },
         { "activeBarista",    1, "layoutEditor.widgetActiveBarista", "Active Barista", "layoutEditor.chipActiveBarista","Barista",   "", true },
+        { "baristaSwitcher",  1, "layoutEditor.widgetBaristaSwitcher", "Barista Switcher", "layoutEditor.chipBaristaSwitcher","Switcher", "", true },
         { "doseWeight",       1, "layoutEditor.widgetDoseWeight",    "Dose Weight",    "layoutEditor.chipDoseWeight", "Dose",       "", true },
         { "milkWeight",       1, "layoutEditor.widgetMilkWeight",    "Milk Weight",    "layoutEditor.chipMilkWeight", "Milk",       "", true },
         { "ratioQuickSelect", 1, "layoutEditor.widgetRatioQuickSelect", "Ratio Quick-Select", "layoutEditor.chipRatioQuick", "Ratio", "", true },

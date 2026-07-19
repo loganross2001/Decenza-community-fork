@@ -917,6 +917,7 @@ set(QML_FILES
     qml/components/layout/items/ScaleWeightItem.qml
     qml/components/layout/items/ProfileNameItem.qml
     qml/components/layout/items/ActiveBaristaItem.qml
+    qml/components/layout/items/BaristaSwitcherItem.qml
     qml/components/layout/items/DoseWeightItem.qml
     qml/components/layout/items/MilkWeightItem.qml
     qml/components/layout/items/RatioQuickSelectItem.qml

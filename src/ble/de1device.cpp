@@ -966,10 +966,65 @@ void DE1Device::clearCommandQueue() {
     }
 }
 
+Profile DE1Device::profileForUpload(const Profile& profile) const {
+    m_lastShotPrimedFirstFrame = false;
+
+    // Opt-in only, and only when the hardware settings are wired.
+    if (!m_settings || !m_settings->primeFirstFrame())
+        return profile;
+
+    const QList<ProfileFrame>& orig = profile.steps();
+
+    // Cap guard BEFORE prepend: a full profile + 1 would exceed the DE1's frame
+    // limit, and Profile::setSteps() silently truncates the TAIL on overflow —
+    // which would drop the real last frame and corrupt the extraction. Skip the
+    // priming frame rather than risk that.
+    if (orig.isEmpty() || orig.size() >= Profile::MAX_FRAMES) {
+        qWarning() << "DE1Device::profileForUpload: prime-first-frame skipped: profile at frame cap"
+                   << "(frames=" << orig.size() << ")";
+        return profile;
+    }
+
+    // Sacrificial priming frame (mirrors RecipeGenerator's "Pre Fill" workaround):
+    // ~1s of low-pressure flow at the real first frame's temperature. Harmless
+    // whether the firmware skips it (user loses nothing) or runs it (~1s prime).
+    ProfileFrame preFill;
+    preFill.name = QStringLiteral("Pre Fill");
+    preFill.pump = QStringLiteral("flow");
+    preFill.flow = 8.0;
+    preFill.pressure = 3.0;
+    preFill.temperature = orig.first().temperature;
+    preFill.seconds = 1.0;
+    preFill.transition = QStringLiteral("fast");
+    preFill.sensor = QStringLiteral("coffee");
+    preFill.volume = 100.0;
+    preFill.maxFlowOrPressure = 8.0;
+    preFill.maxFlowOrPressureRange = 0.6;
+    preFill.exitIf = false;                 // no early exit; runs its full ~1s if executed
+    preFill.exitType = QStringLiteral("pressure_over");
+    preFill.exitPressureOver = 3.0;
+
+    QList<ProfileFrame> steps;
+    steps.append(preFill);
+    steps += orig;
+
+    Profile copy = profile;
+    copy.setSteps(steps);
+    // The header's NumberOfPreinfuseFrames flags "the first N frames are preinfuse".
+    // Every originally-preinfuse frame shifted down by one, so bump the count by one
+    // to keep the same frames flagged (the priming frame belongs to that group too).
+    // Set explicitly — countPreinfuseFrames() would return 0 for an exitIf=false frame.
+    copy.setPreinfuseFrameCount(profile.preinfuseFrameCount() + 1);
+
+    m_lastShotPrimedFirstFrame = true;
+    return copy;
+}
+
 void DE1Device::uploadProfile(const Profile& profile) {
+    const Profile p = profileForUpload(profile);
 #ifdef QT_DEBUG
     if (m_simulationMode && m_simulator) {
-        m_simulator->setProfile(profile);
+        m_simulator->setProfile(p);
     }
 #endif
 
@@ -983,34 +1038,35 @@ void DE1Device::uploadProfile(const Profile& profile) {
 
     // Attach the ACK listener BEFORE queuing writes so we observe every
     // writeComplete for this upload.
-    QList<QByteArray> frames = profile.toFrameBytes();
-    startProfileUploadTracking(profile.title(), frames, /*expectEspressoStart=*/false);
+    QList<QByteArray> frames = p.toFrameBytes();
+    startProfileUploadTracking(p.title(), frames, /*expectEspressoStart=*/false);
 
-    m_transport->write(DE1::Characteristic::HEADER_WRITE, profile.toHeaderBytes());
+    m_transport->write(DE1::Characteristic::HEADER_WRITE, p.toHeaderBytes());
     for (const QByteArray& frame : frames) {
         m_transport->write(DE1::Characteristic::FRAME_WRITE, frame);
     }
-    writeTankPreheatForProfile(profile);
+    writeTankPreheatForProfile(p);
 }
 
 void DE1Device::uploadProfileAndStartEspresso(const Profile& profile) {
+    const Profile p = profileForUpload(profile);
 #ifdef QT_DEBUG
     if (m_simulationMode && m_simulator) {
-        m_simulator->setProfile(profile);
+        m_simulator->setProfile(p);
     }
 #endif
 
     if (!m_transport) return;
     if (dropDeviceWriteIfFirmwareFlash("uploadProfileAndStartEspresso")) return;
 
-    QList<QByteArray> frames = profile.toFrameBytes();
-    startProfileUploadTracking(profile.title(), frames, /*expectEspressoStart=*/true);
+    QList<QByteArray> frames = p.toFrameBytes();
+    startProfileUploadTracking(p.title(), frames, /*expectEspressoStart=*/true);
 
-    m_transport->write(DE1::Characteristic::HEADER_WRITE, profile.toHeaderBytes());
+    m_transport->write(DE1::Characteristic::HEADER_WRITE, p.toHeaderBytes());
     for (const QByteArray& frame : frames) {
         m_transport->write(DE1::Characteristic::FRAME_WRITE, frame);
     }
-    writeTankPreheatForProfile(profile);
+    writeTankPreheatForProfile(p);
     // Queue espresso start AFTER all profile frames
     m_transport->write(DE1::Characteristic::REQUESTED_STATE,
                        QByteArray(1, static_cast<char>(DE1::State::Espresso)));

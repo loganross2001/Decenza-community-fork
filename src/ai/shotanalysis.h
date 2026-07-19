@@ -655,7 +655,11 @@ public:
                                        double finalWeightG = 0.0,
                                        int expectedFrameCount = -1,
                                        const std::optional<ExpertBand>& expertBand = std::nullopt,
-                                       bool profileKbResolved = true);
+                                       bool profileKbResolved = true,
+                                       // [prime-first-frame] true → suppress skip-first-frame detection: the
+                                       // sacrificial pre-fill frame is designed to be skipped, so the badge
+                                       // is meaningless on primed shots.
+                                       bool preFillInjected = false);
 
     // Backwards-compatible thin wrapper — equivalent to
     // analyzeShot(...).lines. Existing callers (in-app dialog, AI advisor

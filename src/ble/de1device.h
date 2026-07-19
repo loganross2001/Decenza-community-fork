@@ -179,6 +179,12 @@ public:
     // Hardware settings (heater calibration sent to firmware)
     void setSettings(SettingsHardware* settings);
 
+    // True iff the most recent profile upload injected the "prime first frame"
+    // sacrificial priming frame (Settings.hardware.primeFirstFrame ON and the
+    // profile was under the frame cap). Read by the shot-save path so the shot
+    // record knows the firmware ran N+1 frames — see profileForUpload().
+    bool lastShotPrimedFirstFrame() const { return m_lastShotPrimedFirstFrame; }
+
 public slots:
     void connectToDevice(const QString& address);
     void connectToDevice(const QBluetoothDeviceInfo& device);
@@ -414,6 +420,15 @@ private:
     // leaves the previous profile's preheat active.
     void writeTankPreheatForProfile(const Profile& profile);
 
+    // Returns the profile to actually upload. When Settings.hardware.primeFirstFrame
+    // is ON, prepends a short sacrificial "Pre Fill" frame (working around the DE1
+    // firmware "skip first step" bug) into a COPY — the on-disk profile is untouched
+    // — and lets Profile::toFrameBytes()/toHeaderBytes() recompute all indices, the
+    // extension frames, the tail, and the header counts. Returns the profile
+    // unchanged when the setting is off, no settings are wired, the profile is empty,
+    // or it is already at the DE1 frame cap. Sets m_lastShotPrimedFirstFrame.
+    Profile profileForUpload(const Profile& profile) const;
+
     // Owned when created internally via connectToDevice(); set externally via setTransport() for USB
     DE1Transport* m_transport = nullptr;
     bool m_ownsTransport = false;  // True when DE1Device created the transport (connectToDevice)
@@ -484,6 +499,9 @@ private:
     DE1Simulator* m_simulator = nullptr;  // For simulation mode
 #endif
     SettingsHardware* m_settings = nullptr;  // Heater calibration sent to firmware
+    // Set by profileForUpload() (const) → mutable. Whether the last upload injected
+    // the prime-first-frame priming step; read by the shot-save path.
+    mutable bool m_lastShotPrimedFirstFrame = false;
     bool m_profileUploadInProgress = false;  // True while profile header+frames are being sent
     bool m_sleepPendingAfterUpload = false;  // Sleep requested during profile upload
 

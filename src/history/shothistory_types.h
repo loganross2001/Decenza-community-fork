@@ -180,6 +180,12 @@ struct ShotRecord {
     // Profile snapshot
     QString profileJson;
 
+    // [prime-first-frame] True iff a sacrificial priming frame was injected at
+    // upload time. Read by the recompute-on-load path and threaded into analyzeShot,
+    // which SUPPRESSES skip-first-frame detection on primed shots (the sacrificial
+    // frame is designed to be skipped, so the badge is meaningless there).
+    bool preFillInjected = false;
+
     // AI knowledge base ID (e.g. "d-flow", "blooming espresso") for profile-aware analysis
     QString profileKbId;
 
@@ -300,6 +306,11 @@ struct ShotSaveData {
     // "profileEnd" | "" (unknown). Classified in MainController::onShotEnded
     // from SAW/SAV state + the user-stop flag. See ShotRecord::stoppedBy.
     QString stoppedBy;
+
+    // [prime-first-frame] True iff a sacrificial priming frame was injected at
+    // upload time. Persisted (shots.pre_fill_injected) so the skip-first-frame
+    // detector knows the firmware ran N+1 frames vs the N in profile_json.
+    bool preFillInjected = false;
 
     // Metadata
     QString beanBrand;

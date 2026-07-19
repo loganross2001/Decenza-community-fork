@@ -1801,6 +1801,29 @@ bool ShotHistoryStorage::runMigrations()
         }
     }
 
+    // Migration 37: shots.pre_fill_injected (prime-first-frame, private fork feature). Records whether a
+    // sacrificial priming frame was injected into the shot's profile at upload time (Settings.hardware.
+    // primeFirstFrame). The firmware then ran N+1 frames while profile_json holds N, so the skip-first-frame
+    // detector reads this flag to avoid false-firing on a primed shot. Additive, default 0. Fresh DBs run this
+    // from v1 like every other shots column added by migration (the base CREATE is the v1 schema). Whitespace
+    // before the open-paren dodges the QSqlQuery permission-hook false-positive; do not auto-format.
+    if (currentVersion >= 36 && currentVersion < 37) {
+        qDebug() << "ShotHistoryStorage: Running migration to version 37 (prime-first-frame flag)";
+
+        if (!hasColumn("shots", "pre_fill_injected")
+            && !query.exec ("ALTER TABLE shots ADD COLUMN pre_fill_injected INTEGER DEFAULT 0"))
+            qWarning() << "ShotHistoryStorage: migration 37 add shots.pre_fill_injected failed -"
+                       << query.lastError().text();
+
+        if (hasColumn("shots", "pre_fill_injected")) {
+            query.exec ("DELETE FROM schema_version");
+            query.exec ("INSERT INTO schema_version (version) VALUES (37)");
+            currentVersion = 37;
+        } else {
+            qWarning() << "ShotHistoryStorage: migration 37 incomplete - will retry next launch";
+        }
+    }
+
     // [barista-fork] Version-independent fork-schema repair. A shot DB written by a
     // DIFFERENT Decenza build (e.g. an upstream v2.0.0 database pulled in via
     // device-to-device import) carries a schema_version NUMBER that may sit at or
@@ -1974,6 +1997,7 @@ qint64 ShotHistoryStorage::saveShot(ShotDataModel* shotData,
     data.temperatureOverride = temperatureOverride;
     data.targetWeight = targetWeight;
     data.stoppedBy = stoppedBy;
+    data.preFillInjected = metadata.preFillInjected;
     data.beanBrand = metadata.beanBrand;
     data.beanType = metadata.beanType;
     data.roastDate = metadata.roastDate;
@@ -2045,7 +2069,7 @@ qint64 ShotHistoryStorage::saveShot(ShotDataModel* shotData,
         // one place (analyzeShot's body). See docs/SHOT_REVIEW.md §4 for the
         // full mapping table and decenza::deriveBadgesFromAnalysis (in
         // history/shotbadgeprojection.h) for the projection rules.
-        const AnalysisInputs inputs = prepareAnalysisInputs(data.profileKbId, data.profileJson);
+        const AnalysisInputs inputs = prepareAnalysisInputs(data.profileKbId, data.profileJson, data.preFillInjected);
         // KB-resolved bit gates grind Arm 1 — see openspec change
         // skip-grind-arm1-when-kb-unresolved. data.profileKbId is empty
         // when ShotSummarizer::matchProfileKey returned no hit (no exact
@@ -2061,7 +2085,7 @@ qint64 ShotHistoryStorage::saveShot(ShotDataModel* shotData,
             inputs.analysisFlags, inputs.firstFrameSeconds,
             data.targetWeight, data.finalWeight,
             inputs.frameCount, inputs.expertBand,
-            profileKbResolved);
+            profileKbResolved, inputs.preFillInjected);
         decenza::applyBadgesToTarget(data, analysis.detectors);
     }
 
@@ -2174,7 +2198,7 @@ qint64 ShotHistoryStorage::saveShotStatic(const QString& dbPath, const ShotSaveD
                     profile_kb_id,
                     channeling_detected, grind_issue_detected,
                     skip_first_frame_detected, pour_truncated_detected,
-                    stopped_by, beanbase_json, beanbase_id,
+                    stopped_by, pre_fill_injected, beanbase_json, beanbase_id,
                     bag_id, frozen_date, defrost_date, storage_hint, opened_date,
                     recipe_id, steam_json, hot_water_json
                 ) VALUES (
@@ -2189,7 +2213,7 @@ qint64 ShotHistoryStorage::saveShotStatic(const QString& dbPath, const ShotSaveD
                     :profile_kb_id,
                     :channeling_detected, :grind_issue_detected,
                     :skip_first_frame_detected, :pour_truncated_detected,
-                    :stopped_by, :beanbase_json, :beanbase_id,
+                    :stopped_by, :pre_fill_injected, :beanbase_json, :beanbase_id,
                     :bag_id, :frozen_date, :defrost_date, :storage_hint, :opened_date,
                     :recipe_id, :steam_json, :hot_water_json
                 )
@@ -2236,6 +2260,7 @@ qint64 ShotHistoryStorage::saveShotStatic(const QString& dbPath, const ShotSaveD
             query.bindValue(":skip_first_frame_detected", data.skipFirstFrameDetected ? 1 : 0);
             query.bindValue(":pour_truncated_detected", data.pourTruncatedDetected ? 1 : 0);
             query.bindValue(":stopped_by", data.stoppedBy);
+            query.bindValue(":pre_fill_injected", data.preFillInjected ? 1 : 0);
             query.bindValue(":beanbase_json", data.beanBaseJson.isEmpty() ? QVariant() : data.beanBaseJson);
             // beanbase_id is the indexed canonical UUID for the history
             // search lane — derived from the same blob the row stores.
@@ -2907,7 +2932,8 @@ ShotRecord ShotHistoryStorage::loadShotRecordStatic(QSqlDatabase& db, qint64 sho
                s.recipe_id, s.steam_json, s.hot_water_json,
                s.storage_hint, s.opened_date,
                s.taste_balance, s.taste_body,
-               s.yield_mode, s.yield_anchor_value
+               s.yield_mode, s.yield_anchor_value,
+               s.pre_fill_injected
         FROM shots s
         LEFT JOIN equipment_items eg ON eg.package_id = s.equipment_id AND eg.kind = 'grinder'
         LEFT JOIN equipment_items eb ON eb.package_id = s.equipment_id AND eb.kind = 'basket'
@@ -3017,6 +3043,7 @@ ShotRecord ShotHistoryStorage::loadShotRecordStatic(QSqlDatabase& db, qint64 sho
         record.yieldMode = YieldSpec::modeAbsolute();
         record.yieldAnchorValue = record.targetWeight;
     }
+    record.preFillInjected = query.value(56).toInt() != 0;
     record.summary.hasVisualizerUpload = !record.visualizerId.isEmpty();
 
     // Snapshot stored badge values before the recompute block overwrites them, so
@@ -3098,7 +3125,7 @@ ShotRecord ShotHistoryStorage::loadShotRecordStatic(QSqlDatabase& db, qint64 sho
     // defaults for any input shape it can't handle, which the projection
     // helper interprets as "all badges false."
     {
-        const AnalysisInputs inputs = prepareAnalysisInputs(record.profileKbId, record.profileJson);
+        const AnalysisInputs inputs = prepareAnalysisInputs(record.profileKbId, record.profileJson, record.preFillInjected);
         // KB-resolved bit gates grind Arm 1 — see openspec change
         // skip-grind-arm1-when-kb-unresolved. record.profileKbId can be
         // empty either because the saved row predates KB resolution or
@@ -3114,7 +3141,7 @@ ShotRecord ShotHistoryStorage::loadShotRecordStatic(QSqlDatabase& db, qint64 sho
             inputs.analysisFlags, inputs.firstFrameSeconds,
             record.targetWeight, record.summary.finalWeight,
             inputs.frameCount, inputs.expertBand,
-            profileKbResolved);
+            profileKbResolved, inputs.preFillInjected);
         decenza::applyBadgesToTarget(record, analysis.detectors);
         // Cache the AnalysisResult on the ShotRecord so convertShotRecord
         // (called next in the requestShot path) doesn't have to re-run

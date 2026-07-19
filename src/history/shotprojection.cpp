@@ -64,6 +64,7 @@ QVariantMap ShotProjection::toVariantMap() const
         || stoppedBy == QStringLiteral("volume"))
         m["stoppedBy"] = stoppedBy;
     m["profileJson"] = profileJson;
+    m["preFillInjected"] = preFillInjected;   // [prime-first-frame]
     m["profileKbId"] = profileKbId;
     // Sparse-emit: "" means unlinked (the common case) — omit rather than
     // surface an empty field to QML/MCP consumers.
@@ -181,6 +182,7 @@ ShotProjection ShotProjection::fromVariantMap(const QVariantMap& m)
     p.yieldAnchorValue = m.value("yieldAnchorValue").toDouble();
     p.stoppedBy = m.value("stoppedBy").toString();
     p.profileJson = m.value("profileJson").toString();
+    p.preFillInjected = m.value("preFillInjected").toBool();   // [prime-first-frame]
     p.profileKbId = m.value("profileKbId").toString();
     p.beanBaseJson = m.value("beanBaseJson").toString();
     p.bagId = m.value("bagId", -1).toLongLong();

@@ -91,6 +91,11 @@ struct ShotSummary {
     // need the cascade dominator without re-running detectors.
     bool pourTruncatedDetected = false;
 
+    // [prime-first-frame] True iff a sacrificial priming frame was injected at
+    // upload. Suppresses skip-first-frame detection in runShotAnalysisAndPopulate,
+    // keeping the AI summary consistent with the badge on primed shots.
+    bool preFillInjected = false;
+
     // Profile recipe rendered from profileJson (frame-by-frame intent).
     // Pre-computed at summarize() time so the JSON user prompt can ship it
     // under currentProfile.recipe without re-parsing the JSON on every read.

@@ -33,6 +33,11 @@ struct ShotMetadata {
     int espressoEnjoyment = 0;  // 0-100
     QString espressoNotes;
     QString barista;
+    // [prime-first-frame] True iff a sacrificial priming frame was injected into
+    // this shot's profile at upload time (Settings.hardware.primeFirstFrame). The
+    // firmware ran N+1 frames while profile_json holds N — the skip-first-frame
+    // detector reads this to avoid false-firing. Carried here to reach saveShot().
+    bool preFillInjected = false;
     // Compact-JSON linked-bean snapshot ("" = unlinked, the common free-text
     // case) — Visualizer canonical or Bean Base sourced. Persisted per shot
     // so history stays accurate even after the preset is edited or deleted.

@@ -3256,6 +3256,9 @@ void MainController::onShotEnded() {
 
     // Build metadata for history
     ShotMetadata metadata;
+    // [prime-first-frame] record whether this shot's upload injected the priming
+    // frame, so the skip-first-frame detector accounts for the extra firmware frame.
+    metadata.preFillInjected = m_device && m_device->lastShotPrimedFirstFrame();
     metadata.beanBrand = m_settings->dye()->dyeBeanBrand();
     metadata.beanType = m_settings->dye()->dyeBeanType();
     metadata.roastDate = m_settings->dye()->dyeRoastDate();
@@ -3521,6 +3524,10 @@ void MainController::uploadPendingShot() {
 
     // Build metadata from current settings
     ShotMetadata metadata;
+    // Note: preFillInjected is intentionally NOT set here. This is the manual
+    // Visualizer re-upload path (uploadShot → buildShotJson), which never calls
+    // saveShot and never reads preFillInjected — the flag is persisted only on the
+    // shot-end save path (onShotEnded), where the device latch is read fresh.
     metadata.beanBrand = m_settings->dye()->dyeBeanBrand();
     metadata.beanType = m_settings->dye()->dyeBeanType();
     metadata.roastDate = m_settings->dye()->dyeRoastDate();
@@ -3934,10 +3941,22 @@ void MainController::onShotSampleReceived(const ShotSample& sample) {
         QString frameName;
         int frameIndex = sample.frameNumber;
 
-        // Look up frame name from current profile
+        // [prime-first-frame] When a sacrificial "Pre Fill" frame was injected at
+        // upload, the firmware runs it as index 0 (no original-profile counterpart)
+        // and every real frame shifts +1. Offset ONLY the original-profile steps[]
+        // lookups by one; the recorded marker frame number, frameChanged(), and the
+        // timing-controller indices all stay the RAW firmware index. Non-primed
+        // shots (the common case) are byte-for-byte unchanged.
+        const bool primed = m_device && m_device->lastShotPrimedFirstFrame();
+
+        // Look up frame name from the original (un-primed) profile steps.
         const auto& steps = m_profileManager->currentProfile().steps();
-        if (frameIndex >= 0 && frameIndex < steps.size()) {
-            frameName = steps[frameIndex].name;
+        if (primed && frameIndex == 0) {
+            frameName = QStringLiteral("Pre Fill");
+        } else {
+            const int origFrameIndex = primed ? frameIndex - 1 : frameIndex;
+            if (origFrameIndex >= 0 && origFrameIndex < steps.size())
+                frameName = steps[origFrameIndex].name;
         }
 
         // Fall back to frame number if no name
@@ -3947,11 +3966,16 @@ void MainController::onShotSampleReceived(const ShotSample& sample) {
 
         // Determine transition reason for the PREVIOUS frame that just exited
         QString transitionReason;
-        int prevFrameIndex = m_lastFrameNumber;
-        if (prevFrameIndex >= 0 && prevFrameIndex < steps.size()) {
-            const ProfileFrame& prevFrame = steps[prevFrameIndex];
+        int prevFrameIndex = m_lastFrameNumber;   // raw firmware index (timing controller keys on this)
+        // [prime-first-frame] Original-profile index for the steps[] lookup: shifted
+        // down by one on a primed shot. -1 means the just-exited frame WAS the
+        // sacrificial pre-fill (no original counterpart) → skip the lookup, leaving
+        // transitionReason empty (the pre-fill's exit reason isn't meaningful).
+        const int origPrevFrameIndex = primed ? prevFrameIndex - 1 : prevFrameIndex;
+        if (origPrevFrameIndex >= 0 && origPrevFrameIndex < steps.size()) {
+            const ProfileFrame& prevFrame = steps[origPrevFrameIndex];
 
-            if (m_timingController && m_timingController->wasWeightExit(prevFrameIndex)) {
+            if (m_timingController && m_timingController->wasWeightExit(prevFrameIndex)) {   // firmware index — NOT offset
                 // App sent skipToNextFrame() due to weight - 100% certain
                 transitionReason = QStringLiteral("weight");
             } else if (prevFrame.exitIf) {

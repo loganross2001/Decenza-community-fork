@@ -44,10 +44,17 @@ struct AnalysisInputs {
     double firstFrameSeconds = -1.0;
     int frameCount = -1;
     std::optional<ShotAnalysis::ExpertBand> expertBand;  // cited per-profile band (D14); nullopt → no-op
+    bool preFillInjected = false;  // [prime-first-frame] gates skip-first-frame detection off (see analyzeShot)
 };
 
+// preFillInjected: this shot had a sacrificial priming frame prepended at upload
+// (Settings.hardware.primeFirstFrame), so the firmware ran N+1 frames vs the N in
+// profileJson. Rather than shift the scalars, it flows through AnalysisInputs to
+// analyzeShot, which SUPPRESSES skip-first-frame detection on primed shots — the
+// pre-fill frame is designed to be skipped, so skip-detection is meaningless there.
 AnalysisInputs prepareAnalysisInputs(const QString& profileKbId,
-                                     const QString& profileJson);
+                                     const QString& profileJson,
+                                     bool preFillInjected = false);
 
 // True when the OS reports a 12-hour locale (e.g. "h:mm AP" rather than
 // "HH:mm"). Cached after the first call so we don't re-walk QLocale on every

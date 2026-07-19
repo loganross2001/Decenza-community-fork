@@ -85,6 +85,17 @@ void SettingsHardware::setSteamTwoTapStop(bool value) {
     }
 }
 
+bool SettingsHardware::primeFirstFrame() const {
+    return m_settings.value("calibration/primeFirstFrame", false).toBool();
+}
+
+void SettingsHardware::setPrimeFirstFrame(bool value) {
+    if (primeFirstFrame() != value) {
+        m_settings.setValue("calibration/primeFirstFrame", value);
+        emit primeFirstFrameChanged();
+    }
+}
+
 int SettingsHardware::fanThreshold() const {
     int val = m_settings.value("calibration/fanThreshold", 60).toInt();
     return qBound(0, val, 60);

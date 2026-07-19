@@ -83,6 +83,7 @@ ShotProjection ShotHistoryStorage::convertShotRecord(const ShotRecord& record)
     p.yieldAnchorValue = record.yieldAnchorValue;
     p.stoppedBy = record.stoppedBy;
     p.profileJson = record.profileJson;
+    p.preFillInjected = record.preFillInjected;
     p.profileKbId = record.profileKbId;
     p.beanBaseJson = record.beanBaseJson;
     p.bagId = record.bagId;
@@ -138,7 +139,7 @@ ShotProjection ShotHistoryStorage::convertShotRecord(const ShotRecord& record)
         if (record.cachedAnalysis.has_value()) {
             analysisPtr = &record.cachedAnalysis.value();
         } else {
-            const AnalysisInputs inputs = prepareAnalysisInputs(record.profileKbId, record.profileJson);
+            const AnalysisInputs inputs = prepareAnalysisInputs(record.profileKbId, record.profileJson, record.preFillInjected);
             // KB-resolved bit gates grind Arm 1 — see openspec change
             // skip-grind-arm1-when-kb-unresolved.
             const bool profileKbResolved = !record.profileKbId.isEmpty();
@@ -150,7 +151,7 @@ ShotProjection ShotHistoryStorage::convertShotRecord(const ShotRecord& record)
                 inputs.analysisFlags, inputs.firstFrameSeconds,
                 record.targetWeight, record.summary.finalWeight,
                 inputs.frameCount, inputs.expertBand,
-                profileKbResolved);
+                profileKbResolved, inputs.preFillInjected);
             analysisPtr = &analysisOwned;
         }
         const ShotAnalysis::AnalysisResult& analysis = *analysisPtr;

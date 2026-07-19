@@ -360,6 +360,41 @@ KeyboardAwareContainer {
                             wrapMode: Text.WordWrap
                             Accessible.ignored: true
                         }
+
+                        // [prime-first-frame] Opt-in workaround for the DE1 "skip first
+                        // step" firmware bug: prepend a short sacrificial priming frame to
+                        // every uploaded profile. Default off.
+                        RowLayout {
+                            Layout.fillWidth: true
+
+                            Text {
+                                text: TranslationManager.translate("settings.preferences.primeFirstFrame", "Prime first frame")
+                                color: Theme.textColor
+                                font.family: Theme.bodyFont.family
+                                font.pixelSize: Theme.scaled(14)
+
+                                Accessible.ignored: true
+                            }
+
+                            Item { Layout.fillWidth: true }
+
+                            StyledSwitch {
+                                id: primeFirstFrameSwitch
+                                checked: Settings.hardware.primeFirstFrame
+                                accessibleName: TranslationManager.translate("settings.preferences.primeFirstFrame", "Prime first frame")
+                                onClicked: Settings.hardware.primeFirstFrame = checked
+                            }
+                        }
+
+                        Text {
+                            Layout.fillWidth: true
+                            text: TranslationManager.translate("settings.preferences.primeFirstFrameDesc", "Prepends a ~1s priming step to each shot, working around DE1 firmware that skips the first profile step (affecting initial pressure). Default off; if the firmware runs it you spend ~1s priming.")
+                            color: Theme.textSecondaryColor
+                            font.family: Theme.bodyFont.family
+                            font.pixelSize: Theme.scaled(12)
+                            wrapMode: Text.WordWrap
+                            Accessible.ignored: true
+                        }
                     }
                 }
 

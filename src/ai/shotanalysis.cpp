@@ -744,7 +744,8 @@ ShotAnalysis::AnalysisResult ShotAnalysis::analyzeShot(
     double finalWeightG,
     int expectedFrameCount,
     const std::optional<ExpertBand>& expertBand,
-    bool profileKbResolved)
+    bool profileKbResolved,
+    bool preFillInjected)
 {
     AnalysisResult result;
     QVariantList& lines = result.lines;
@@ -1073,8 +1074,14 @@ ShotAnalysis::AnalysisResult ShotAnalysis::analyzeShot(
     // never executed frame 0) or profile first step running far shorter than
     // configured. firstFrameConfiguredSeconds (when known) avoids false-positives
     // on profiles with frame[0].seconds == 2.
-    const bool skipFirstFrame = detectSkipFirstFrame(
-        phases, expectedFrameCount, firstFrameConfiguredSeconds);
+    // [prime-first-frame] On a primed shot a sacrificial priming frame runs as
+    // firmware frame 0 and is DESIGNED to be skipped by the firmware bug; the real
+    // first frame runs as firmware frame 1 and is already protected. Skip-detection
+    // is therefore meaningless here, so suppress it. (Residual: if the firmware
+    // skips TWO frames the real first is also skipped and won't be flagged — rare.)
+    const bool skipFirstFrame = preFillInjected
+        ? false
+        : detectSkipFirstFrame(phases, expectedFrameCount, firstFrameConfiguredSeconds);
     d.skipFirstFrame = skipFirstFrame;
     if (skipFirstFrame) {
         QVariantMap line;

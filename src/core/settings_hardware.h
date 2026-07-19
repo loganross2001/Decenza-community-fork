@@ -14,6 +14,9 @@ class SettingsHardware : public QObject {
     Q_PROPERTY(int heaterWarmupTimeout READ heaterWarmupTimeout WRITE setHeaterWarmupTimeout NOTIFY heaterWarmupTimeoutChanged)
     Q_PROPERTY(int hotWaterFlowRate READ hotWaterFlowRate WRITE setHotWaterFlowRate NOTIFY hotWaterFlowRateChanged)
     Q_PROPERTY(bool steamTwoTapStop READ steamTwoTapStop WRITE setSteamTwoTapStop NOTIFY steamTwoTapStopChanged)
+    // Opt-in workaround for the DE1 firmware "skip first profile step" bug: prepend
+    // a short sacrificial priming frame to every uploaded profile. Default off.
+    Q_PROPERTY(bool primeFirstFrame READ primeFirstFrame WRITE setPrimeFirstFrame NOTIFY primeFirstFrameChanged)
     Q_PROPERTY(int fanThreshold READ fanThreshold WRITE setFanThreshold NOTIFY fanThresholdChanged)
 
 public:
@@ -36,6 +39,9 @@ public:
 
     bool steamTwoTapStop() const;
     void setSteamTwoTapStop(bool value);
+
+    bool primeFirstFrame() const;
+    void setPrimeFirstFrame(bool value);
 
     int fanThreshold() const;
     void setFanThreshold(int value);
@@ -77,6 +83,7 @@ signals:
     void heaterWarmupTimeoutChanged();
     void hotWaterFlowRateChanged();
     void steamTwoTapStopChanged();
+    void primeFirstFrameChanged();
     void fanThresholdChanged();
 
 private:

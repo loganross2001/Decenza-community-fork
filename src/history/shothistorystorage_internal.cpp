@@ -31,7 +31,8 @@ ProfileFrameInfo profileFrameInfoFromJson(const QString& profileJson)
 }
 
 AnalysisInputs prepareAnalysisInputs(const QString& profileKbId,
-                                     const QString& profileJson)
+                                     const QString& profileJson,
+                                     bool preFillInjected)
 {
     AnalysisInputs inputs;
     // analysisFlags / UGS keep using the persisted profileKbId — unchanged
@@ -41,6 +42,10 @@ AnalysisInputs prepareAnalysisInputs(const QString& profileKbId,
     const ProfileFrameInfo frameInfo = profileFrameInfoFromJson(profileJson);
     inputs.firstFrameSeconds = frameInfo.firstFrameSeconds;
     inputs.frameCount = frameInfo.frameCount;
+    // Primed shots suppress skip-first-frame detection entirely (see analyzeShot):
+    // the sacrificial pre-fill frame is DESIGNED to be skipped, so the scalars stay
+    // the plain profile_json values and the detector is gated off downstream.
+    inputs.preFillInjected = preFillInjected;
 
     // Expert band: re-resolve canonical identity from the CURRENT KB by
     // title+editorType — mirrors the save-time computeProfileKbId() call

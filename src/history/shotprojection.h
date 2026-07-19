@@ -184,6 +184,9 @@ public:
     double yieldAnchorValue = 0.0; // grams (absolute) or dose multiplier (ratio)
     QString stoppedBy;  // #1161: "weight"|"volume"|"manual"|"profileEnd"|""
     QString profileJson;
+    // [prime-first-frame] carried from ShotRecord → ShotSummary so the AI-summary
+    // path suppresses skip-first-frame detection on primed shots (see analyzeShot).
+    bool preFillInjected = false;
     QString profileKbId;
     // Compact-JSON linked-bean snapshot ("" = unlinked) — Visualizer canonical
     // or Bean Base sourced; see ShotRecord::beanBaseJson.

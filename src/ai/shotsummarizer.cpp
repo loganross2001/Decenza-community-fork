@@ -153,7 +153,7 @@ void ShotSummarizer::runShotAnalysisAndPopulate(ShotSummary& summary,
         pressureGoal, flowGoal, analysisFlags,
         firstFrameSeconds, targetWeightG, summary.finalWeight,
         frameCount, expertBandForKbId(summary.profileKbId),
-        profileKbResolved);
+        profileKbResolved, summary.preFillInjected);
     summary.summaryLines = analysis.lines;
     summary.pourTruncatedDetected = analysis.detectors.pourTruncated;
 }
@@ -179,6 +179,7 @@ ShotSummary ShotSummarizer::summarizeFromHistory(const ShotProjection& shotData)
     summary.beverageType = shotData.beverageType.isEmpty() ? QStringLiteral("espresso") : shotData.beverageType;
     summary.profileNotes = shotData.profileNotes;
     summary.profileKbId = shotData.profileKbId;
+    summary.preFillInjected = shotData.preFillInjected;   // [prime-first-frame]
     summary.targetWeight = shotData.targetWeightG;
     if (!shotData.profileJson.isEmpty())
         summary.profileRecipe = Profile::describeFramesFromJson(shotData.profileJson);

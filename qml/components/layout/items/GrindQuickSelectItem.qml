@@ -33,6 +33,7 @@ Item {
     property var modelData: ({})
     property color zoneTextColor: Theme.textColor
     property bool zoneValueBold: false
+    property string zoneStyle: "standard"
 
     // Active grinder identity (both carry NOTIFY, so rpmCapable stays reactive
     // when the user switches equipment — mirrors BrewDialog.equipmentRpmCapable).
@@ -339,14 +340,15 @@ Item {
                                    + Theme.spacingMedium * 2
             Layout.preferredHeight: Theme.scaled(32)
             radius: height / 2
-            // Over a background image the solid capsule reads as an opaque white
-            // chip on the photo; render it transparent so the value sits on the
-            // background like the Beans/Milk widgets. Without a background image
-            // keep the existing solid pill (zone-color fill, accent text).
+            // Always a visible chip: this pill is tappable (opens the grind chooser),
+            // so it must read as a button — not a plain readout like Beans/Milk. Over
+            // a background image use the same neutral glass scrim as the Sleep/Quit
+            // buttons (Theme.actionButtonFill); otherwise a zone-appropriate solid
+            // chip (Theme.zoneChipColor): a light capsule on the accentBar, a themed
+            // surface chip elsewhere so it isn't a white capsule in dark mode.
             readonly property bool hasBackgroundImage: Settings.theme.backgroundImagePath.length > 0
-            color: hasBackgroundImage
-                ? "transparent"
-                : (grindMa.pressed ? Qt.darker(root.zoneTextColor, 1.15) : root.zoneTextColor)
+            readonly property color pillFill: Theme.actionButtonFill(Theme.zoneChipColor(root.zoneStyle))
+            color: grindMa.pressed ? Qt.darker(pillFill, 1.15) : pillFill
 
             Accessible.role: Accessible.Button
             Accessible.name: root.labelText + " " + root.accessibleValue + ". "
@@ -367,9 +369,9 @@ Item {
                 id: grindValue
                 anchors.centerIn: parent
                 text: root.valueText
-                // Accent text reads on the solid pill; over a background image the
-                // pill is transparent, so the value uses the zone text color to
-                // read against the photo (matching Beans/Milk).
+                // Accent-blue value reads on the solid chip; over a background image
+                // the chip is the neutral glass scrim, so the value uses the light
+                // zone text color (like the Sleep/Quit labels on their glass).
                 color: parent.hasBackgroundImage ? root.zoneTextColor : Theme.primaryColor
                 font.pixelSize: Theme.scaled(20)
                 font.bold: true

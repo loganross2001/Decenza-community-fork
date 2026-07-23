@@ -29,7 +29,7 @@ namespace {
 // [barista-fork] Levenshtein edit distance (small strings — names). Used to fold a misheard-name variant onto
 // an existing roster entry so set_active_user doesn't create "Ana"/"Anna" duplicates.
 int editDistance(const QString& a, const QString& b) {
-    const int n = a.size(), m = b.size();
+    const int n = static_cast<int>(a.size()), m = static_cast<int>(b.size());
     QVector<int> prev(m + 1), cur(m + 1);
     for (int j = 0; j <= m; ++j) prev[j] = j;
     for (int i = 1; i <= n; ++i) {
@@ -1875,12 +1875,12 @@ void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage*
                     result[QStringLiteral("note")] = QStringLiteral("not enough shots at this setting to judge drift (need ~6+)");
                     return;
                 }
-                const int half = durs.size() / 2;
+                const int half = static_cast<int>(durs.size() / 2);
                 const auto mean = [](const QVector<double>& v, int lo, int hi) {
                     double s = 0; for (int i = lo; i < hi; ++i) s += v[i]; return (hi > lo) ? s / (hi - lo) : 0.0;
                 };
                 const double olderMean  = mean(durs, 0, half);
-                const double recentMean = mean(durs, durs.size() - half, durs.size());
+                const double recentMean = mean(durs, static_cast<int>(durs.size()) - half, static_cast<int>(durs.size()));
                 const double shift = recentMean - olderMean;
                 const double spanDays = (ts.last() - ts.first()) / 86400.0;
                 result[QStringLiteral("spanDays")]              = QString::number(spanDays, 'f', 1).toDouble();

@@ -87,8 +87,8 @@ void CoachPhrasebook::onReady(const QString& token, const QString& json) {
 
     // Strip any ```json fences / prose the model added around the object.
     QString body = json.trimmed();
-    const int b = body.indexOf('{');
-    const int e = body.lastIndexOf('}');
+    const int b = static_cast<int>(body.indexOf('{'));
+    const int e = static_cast<int>(body.lastIndexOf('}'));
     if (b >= 0 && e > b)
         body = body.mid(b, e - b + 1);
 

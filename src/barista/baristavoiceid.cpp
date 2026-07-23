@@ -88,7 +88,7 @@ void BaristaVoiceId::onCaptured(const QByteArray& pcm, int sampleRate, const QSt
     if (label == QLatin1String("engage_v2")) {
         m_identifyInFlight = false;
         double rms = 0.0;
-        const int n = pcm.size() / 2;
+        const int n = static_cast<int>(pcm.size() / 2);
         if (n > 0) {
             const auto* s = reinterpret_cast<const qint16*>(pcm.constData());
             double acc = 0.0;
@@ -227,7 +227,7 @@ void BaristaVoiceId::startEngageCaptureTest() {
 void BaristaVoiceId::identify(const QByteArray& pcm, int sampleRate, bool testOnly) {
     // Capture-quality diagnostic (RMS so a silent/muted turn is visible; duration to spot too-short clips).
     double rms = 0.0;
-    const int n = pcm.size() / 2;
+    const int n = static_cast<int>(pcm.size() / 2);
     if (n > 0) {
         const auto* s = reinterpret_cast<const qint16*>(pcm.constData());
         double acc = 0.0;

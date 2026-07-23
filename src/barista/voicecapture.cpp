@@ -88,7 +88,7 @@ void VoiceCapture::finish() {
 
     // RMS over int16 samples so a dead / muted mic (all-zero, RMS≈0) is visible in the log.
     double rms = 0.0;
-    const int n = m_buffer.size() / 2;
+    const int n = static_cast<int>(m_buffer.size() / 2);
     if (n > 0) {
         const auto* s = reinterpret_cast<const qint16*>(m_buffer.constData());
         double acc = 0.0;

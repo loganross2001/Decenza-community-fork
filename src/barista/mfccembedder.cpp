@@ -16,7 +16,7 @@ MfccEmbedder::MfccEmbedder() = default;
 
 // Iterative radix-2 Cooley-Tukey FFT (in-place, decimation-in-time). re/im are length kFftSize (power of two).
 void MfccEmbedder::fftRadix2(QVector<float>& re, QVector<float>& im) {
-    const int n = re.size();
+    const int n = static_cast<int>(re.size());  // length is kFftSize (power of two), fits int
     // Bit-reversal permutation.
     for (int i = 1, j = 0; i < n; ++i) {
         int bit = n >> 1;
@@ -83,7 +83,7 @@ QVector<float> MfccEmbedder::embed(const QByteArray& pcm16leMono, int sampleRate
         return {};
 
     // int16 LE → double samples in [-1, 1].
-    const int nSamples = pcm16leMono.size() / 2;
+    const int nSamples = static_cast<int>(pcm16leMono.size() / 2);
     const auto* raw = reinterpret_cast<const qint16*>(pcm16leMono.constData());
     QVector<double> x(nSamples);
     for (int i = 0; i < nSamples; ++i)

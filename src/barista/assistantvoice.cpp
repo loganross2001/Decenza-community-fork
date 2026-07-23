@@ -81,7 +81,8 @@ void registerAndroidAudioPlayerNatives() {
     if (done)
         return;
     QJniEnvironment env;
-    JNINativeMethod methods[] = {
+    // const → selects the non-deprecated registerNativeMethods overload (mirrors voiceinput.cpp).
+    const JNINativeMethod methods[] = {
         {"nativeOnStarted",  "(JII)V", reinterpret_cast<void*>(jniOnStarted)},
         {"nativeOnFinished", "(JI)V", reinterpret_cast<void*>(jniOnFinished)},
     };

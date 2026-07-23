@@ -16,7 +16,7 @@ QByteArray vecToBlob(const QVector<float>& v) {
     return QByteArray(reinterpret_cast<const char*>(v.constData()), int(v.size() * sizeof(float)));
 }
 QVector<float> blobToVec(const QByteArray& b) {
-    const int n = b.size() / int(sizeof(float));
+    const int n = static_cast<int>(b.size() / int(sizeof(float)));
     QVector<float> v(n);
     if (n > 0)
         memcpy(v.data(), b.constData(), n * sizeof(float));
@@ -63,7 +63,7 @@ void VoiceprintStore::upsert(const QString& name, const QVector<float>& vector, 
     const QString path = m_dbPath;
     const QString n = name.trimmed();
     const QByteArray blob = vecToBlob(vector);
-    const int dims = vector.size();
+    const int dims = static_cast<int>(vector.size());
     QPointer<VoiceprintStore> self(this);
     QThread* thread = QThread::create([self, path, n, blob, dims, embedder, done]() {
         bool ok = false;

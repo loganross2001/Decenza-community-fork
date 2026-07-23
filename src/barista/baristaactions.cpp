@@ -254,7 +254,7 @@ void BaristaActions::enqueueGrind(const QString& value, qint64 anchorShotId) {
     // parsed on every greeting, can't grow without bound.
     {
         const QDateTime cutoffNow = QDateTime::currentDateTime();
-        for (int i = list.size() - 1; i >= 0; --i) {
+        for (qsizetype i = list.size() - 1; i >= 0; --i) {
             const QVariantMap m = list.at(i).toMap();
             if (m.value("status").toString() == QStringLiteral("pending")) continue;
             const QString stamp = !m.value("resolvedAt").toString().isEmpty()

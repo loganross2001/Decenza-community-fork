@@ -5,6 +5,7 @@
 #include <QVariantList>
 #include <QMap>
 #include <QHash>
+#include <QJsonArray>
 #include "../profile/profile.h"
 
 class Settings;
@@ -187,6 +188,13 @@ public:
     Q_INVOKABLE void markProfileClean();
     Q_INVOKABLE QString titleToFilename(const QString& title) const;
     Q_INVOKABLE QString findProfileByTitle(const QString& title) const;
+    // [barista-fork] Resolve a spoken/typed profile name to its CANONICAL title (exact, then case-insensitive;
+    // no fuzzy matching so it can't pick the wrong profile). Empty when nothing matches — the barista then uses
+    // list_profiles. Returns the title (unlike findProfileByTitle, which returns the filename).
+    Q_INVOKABLE QString resolveProfileTitle(const QString& spoken) const;
+    // [barista-fork] Compact [{title, editor, drink}] list of every usable profile, optional case-insensitive
+    // title substring filter — backs the barista's list_profiles tool.
+    QJsonArray profileListForBarista(const QString& query) const;
     // Installed-catalog metadata for a profile title, for read-only display
     // surfaces (e.g. the recipe wizard's Profile summary card) that want the
     // scan-time metadata without a per-call file read. Returns an empty map

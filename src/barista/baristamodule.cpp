@@ -315,15 +315,15 @@ BaristaModule::BaristaModule(MainController* mainController, MachineState* machi
                 QVariantMap f = fields;
                 const QString newProfile = f.value(QStringLiteral("profileTitle")).toString().trimmed();
                 if (!newProfile.isEmpty()) {
-                    // findProfileByTitle returns the canonical title (empty if no installed profile matches).
+                    // resolveProfileTitle returns the canonical TITLE (exact/case-insensitive), empty on no match.
                     const QString canonical = (mc && mc->profileManager())
-                        ? mc->profileManager()->findProfileByTitle(newProfile) : QString();
+                        ? mc->profileManager()->resolveProfileTitle(newProfile) : QString();
                     if (canonical.isEmpty()) {
                         reply(QJsonObject{{QStringLiteral("updated"), false},
                             {QStringLiteral("failure_reason"), QStringLiteral("profile_not_found")},
                             {QStringLiteral("detail"), QStringLiteral(
-                                "No installed profile matches '%1' — nothing changed. Check the exact profile name.")
-                                .arg(newProfile)}});
+                                "No profile matches '%1' — nothing changed. Call list_profiles to find the exact "
+                                "title, then try again.").arg(newProfile)}});
                         return;
                     }
                     f.insert(QStringLiteral("profileTitle"), canonical);
@@ -385,12 +385,13 @@ BaristaModule::BaristaModule(MainController* mainController, MachineState* machi
                         return;
                     }
                     const QString canonical = (mc && mc->profileManager())
-                        ? mc->profileManager()->findProfileByTitle(profTitle) : QString();
+                        ? mc->profileManager()->resolveProfileTitle(profTitle) : QString();
                     if (canonical.isEmpty()) {
                         reply(QJsonObject{{QStringLiteral("created"), false},
                             {QStringLiteral("failure_reason"), QStringLiteral("profile_not_found")},
                             {QStringLiteral("detail"), QStringLiteral(
-                                "No installed profile matches '%1'. Check the exact profile name.").arg(profTitle)}});
+                                "No profile matches '%1'. Call list_profiles to find the exact title, then try again.")
+                                .arg(profTitle)}});
                         return;
                     }
                     recipe.insert(QStringLiteral("profileTitle"), canonical);
@@ -572,6 +573,13 @@ BaristaModule::BaristaModule(MainController* mainController, MachineState* machi
                 reply(QJsonObject{{QStringLiteral("success"), false},
                     {QStringLiteral("failure_reason"), QStringLiteral("unsupported_op")},
                     {QStringLiteral("detail"), QStringLiteral("That recipe operation isn't supported yet.")}});
+            });
+            // [barista-fork] list_profiles seam: hand back the app's usable profiles (main-thread ProfileManager
+            // read). The barista uses this to show what's available AND to resolve a spoken profile name to its
+            // exact title for the recipe tools.
+            ai->setListProfilesHandler([mc](const QString& query) -> QJsonArray {
+                ProfileManager* pm = mc ? mc->profileManager() : nullptr;
+                return pm ? pm->profileListForBarista(query) : QJsonArray{};
             });
         }
     }

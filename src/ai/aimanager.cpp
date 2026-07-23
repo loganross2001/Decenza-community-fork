@@ -306,6 +306,7 @@ void AIManager::createProviders()
                                       m_getActiveRecipeHandler, m_activateRecipeHandler, m_deactivateRecipeHandler,
                                       m_updateRecipeHandler,
                                       m_recipeOpHandler,
+                                      m_listProfilesHandler,
                                       m_setActiveUserHandler,
                                       anchor,
                                       name, input, std::move(done));

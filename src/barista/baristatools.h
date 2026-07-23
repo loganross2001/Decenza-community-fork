@@ -89,6 +89,9 @@ public:
                             // types, so DB-only tests still compile it. Empty = those tools unavailable.
                             const std::function<void(const QString&, const QVariantMap&,
                                                      std::function<void(QJsonObject)>)>& recipeOp,
+                            // [barista-fork] list_profiles seam: return the app's usable profiles ([{title,editor,
+                            // drink}], optional title substring filter). Sync, main-thread ProfileManager read.
+                            const std::function<QJsonArray(const QString&)>& listProfiles,
                             const std::function<void(const QString&)>& setActiveUser,
                             const QVariantMap& anchorSnapshot,
                             const QString& name, const QJsonObject& input,

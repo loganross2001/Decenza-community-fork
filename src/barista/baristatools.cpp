@@ -566,8 +566,9 @@ QJsonArray BaristaTools::toolDefinitions()
                                       "target follows the weighed dose. Mutually exclusive with yield_g; 0 clears "
                                       "the yield. Sending this replaces any stored absolute yield.");
     rupdProps["profile_title"] = strProp("Change the recipe's PROFILE to this exact profile name (the pressure/flow "
-                                      "curve the machine runs). It MUST be an installed profile — resolve the exact "
-                                      "title from the user's profiles first; a name that doesn't match is rejected. "
+                                      "curve the machine runs). It MUST be a profile the app has — if unsure of the "
+                                      "exact title, call list_profiles first and pass the exact title it returns; a "
+                                      "name that doesn't match is rejected. "
                                       "The recipe's temperature_offset_c is relative to the profile, so a big profile "
                                       "change may want a fresh temp — mention that. Does NOT reactivate the machine.");
     rupdProps["drink_type"] = strProp("Change the recipe's drink type: one of espresso, filter, americano, "
@@ -595,8 +596,8 @@ QJsonArray BaristaTools::toolDefinitions()
     rnew["description"] = QString(
         "Create a NEW saved recipe — a whole-drink preset. This ONLY saves the design; it does NOT activate it or "
         "change the machine (tell the user to activate it when they want to use it). Requires a name and a "
-        "profile_title (an installed profile — resolve the exact title first; an unknown or missing profile is "
-        "rejected). For 'same beans as X, different profile', set copy_beans_from_active "
+        "profile_title (a profile the app has — if unsure of the exact title, call list_profiles first and pass "
+        "the exact title; an unknown or missing profile is rejected). For 'same beans as X, different profile', set copy_beans_from_active "
         "true (or pass roaster_name/coffee_name explicitly) so the new recipe carries the beans. Send the dial "
         "fields you know (dose, yield OR ratio, temp offset, grind); omit what you don't. Confirm the details with "
         "the user BEFORE calling (approve-then-apply). The result is ground truth: report created:true + the new "
@@ -687,6 +688,26 @@ QJsonArray BaristaTools::toolDefinitions()
     rdelSchema["required"] = QJsonArray{ QString("recipe_id") };
     rdel["input_schema"] = rdelSchema;
     tools.append(rdel);
+
+    // [barista-fork] list_profiles — see every profile the app can use, and resolve a spoken profile name to its
+    // EXACT title for the recipe tools.
+    QJsonObject rlp;
+    rlp["name"] = QString("list_profiles");
+    rlp["description"] = QString(
+        "List the PROFILES the app can use (a profile is the pressure/flow curve the machine runs — e.g. a lever "
+        "emulation, a filter profile, a flow profile). Use this to (a) tell the user what profiles are available, "
+        "and (b) find the EXACT title to pass to create_recipe / update_recipe / activate. Spoken profile names "
+        "are often close but not exact (e.g. the user says 'Londinium' but the stored title is 'Londonium'), so "
+        "when the user names a profile, look it up here and use the exact title returned — do NOT guess. Pass a "
+        "query to search by a title substring. Read-only. Returns count + [{title, editor, drink}].");
+    QJsonObject rlpSchema;
+    rlpSchema["type"] = QString("object");
+    QJsonObject rlpProps;
+    rlpProps["query"] = strProp("Optional case-insensitive substring to filter profile titles by "
+                                "(e.g. 'lond', 'lever', 'filter', 'flow'). Omit to list them all.");
+    rlpSchema["properties"] = rlpProps;
+    rlp["input_schema"] = rlpSchema;
+    tools.append(rlp);
 
     QJsonObject rdeact;
     rdeact["name"] = QString("deactivate_recipe");
@@ -923,6 +944,7 @@ void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage*
                                                         std::function<void(QJsonObject)>)>& updateRecipe,
                                const std::function<void(const QString&, const QVariantMap&,
                                                         std::function<void(QJsonObject)>)>& recipeOp,
+                               const std::function<QJsonArray(const QString&)>& listProfiles,
                                const std::function<void(const QString&)>& setActiveUser,
                                const QVariantMap& anchorSnapshot,
                                const QString& name, const QJsonObject& input,
@@ -1203,6 +1225,18 @@ void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage*
         recipeOp(QStringLiteral("delete"),
                  QVariantMap{{QStringLiteral("recipeId"), recipeId}},
                  [done](QJsonObject result) { done(result); });
+        return;
+    }
+
+    // [barista-fork] list_profiles (READ) — the app's usable profiles, optional title-substring filter.
+    if (name == QLatin1String("list_profiles")) {
+        if (!listProfiles) {
+            done(QJsonObject{{QStringLiteral("error"), QStringLiteral("Profile listing is unavailable.")}});
+            return;
+        }
+        const QJsonArray profiles = listProfiles(input.value(QStringLiteral("query")).toString());
+        done(QJsonObject{{QStringLiteral("count"), profiles.size()},
+                         {QStringLiteral("profiles"), profiles}});
         return;
     }
 

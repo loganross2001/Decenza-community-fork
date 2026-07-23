@@ -936,6 +936,41 @@ QString ProfileManager::findProfileByTitle(const QString& title) const {
     return QString();
 }
 
+QString ProfileManager::resolveProfileTitle(const QString& spoken) const {
+    // Returns the CANONICAL profile title (not the filename) for a spoken/typed name, or empty when nothing
+    // matches. Exact first, then case-insensitive — deliberately NO fuzzy/edit-distance matching, so it can
+    // never silently pick the wrong profile into a recipe. A near-miss (e.g. "Londinium" vs the stored
+    // "Londonium") returns empty; the caller then points the model at list_profiles to find the exact title.
+    const QString s = spoken.trimmed();
+    if (s.isEmpty())
+        return QString();
+    for (const ProfileInfo& info : m_allProfiles)
+        if (info.title == s)
+            return info.title;
+    for (const ProfileInfo& info : m_allProfiles)
+        if (info.title.compare(s, Qt::CaseInsensitive) == 0)
+            return info.title;
+    return QString();
+}
+
+QJsonArray ProfileManager::profileListForBarista(const QString& query) const {
+    // Compact list of every profile the app can use, for the barista's list_profiles tool. Optional
+    // case-insensitive substring filter on the title. Returns [{title, editor, drink}] — enough for the model
+    // to show the user and to pick an EXACT title to pass to the recipe tools.
+    const QString q = query.trimmed();
+    QJsonArray out;
+    for (const ProfileInfo& info : m_allProfiles) {
+        if (!q.isEmpty() && !info.title.contains(q, Qt::CaseInsensitive))
+            continue;
+        QJsonObject o;
+        o["title"] = info.title;
+        o["editor"] = info.editorType;
+        o["drink"] = info.beverageType;
+        out.append(o);
+    }
+    return out;
+}
+
 QVariantMap ProfileManager::profileCatalogInfoForTitle(const QString& title) const {
     for (const ProfileInfo& info : m_allProfiles) {
         if (info.title != title)

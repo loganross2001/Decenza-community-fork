@@ -206,6 +206,10 @@ public:
                                                std::function<void(QJsonObject)>)> handler) {
         m_recipeOpHandler = std::move(handler);
     }
+    // [barista-fork] list_profiles seam: return the app's usable profiles (query = optional title filter).
+    void setListProfilesHandler(std::function<QJsonArray(const QString&)> handler) {
+        m_listProfilesHandler = std::move(handler);
+    }
     // [barista-fork] Phase 1 identity: set_active_user's seam — sets the active roster user (dyeBarista) on main.
     void setSetActiveUserHandler(std::function<void(const QString&)> handler) {
         m_setActiveUserHandler = std::move(handler);
@@ -469,6 +473,7 @@ private:
     std::function<void(qint64, std::function<void(QJsonObject)>)> m_activateRecipeHandler;
     std::function<void(qint64, const QVariantMap&, std::function<void(QJsonObject)>)> m_updateRecipeHandler;
     std::function<void(const QString&, const QVariantMap&, std::function<void(QJsonObject)>)> m_recipeOpHandler;
+    std::function<QJsonArray(const QString&)> m_listProfilesHandler;
     std::function<void(const QString&)> m_setActiveUserHandler;   // [barista-fork] Phase 1 set_active_user seam
     ProfileManager* m_profileManager = nullptr;
 

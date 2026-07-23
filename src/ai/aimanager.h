@@ -84,6 +84,11 @@ public:
     // One-line guidance comparing the provider's catalog models (see
     // AIProvider::modelHint). Empty when the provider has no hint.
     Q_INVOKABLE QString modelHint(const QString& providerId) const;
+    // [barista-fork] Capability of the CURRENTLY selected provider — the barista UI (AssistantOverlay) gates
+    // client tools / web on these instead of a hardcoded "anthropic" id, so Gemini (and any future tool-capable
+    // provider) drives grind/recipe/taste/memory the same as Claude. See AIProvider::supportsClientTools/WebSearch.
+    Q_INVOKABLE bool currentProviderSupportsTools() const;
+    Q_INVOKABLE bool currentProviderSupportsWebSearch() const;
     AIConversation* conversation() const { return m_conversation; }
     bool hasAnyConversation() const { return !m_conversationIndex.isEmpty(); }
     QList<ConversationEntry> conversationIndex() const { return m_conversationIndex; }

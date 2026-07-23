@@ -1108,20 +1108,25 @@ GeminiProvider::GeminiProvider(QNetworkAccessManager* networkManager,
 
 QList<AIProvider::ModelOption> GeminiProvider::availableModels() const
 {
-    // Order = UI order; first entry is the recommended default. 2.5 Flash leads
-    // as the lowest-cost sensible default for shot analysis — thinking adds
-    // little here and 2.5 can disable it entirely (thinkingBudget 0), plus it
-    // has more provisioned capacity (fewer 503s). 3.5 Flash is the opt-in
-    // "more capable" choice. Revisit as new models / pricing land.
+    // Order = UI order; first entry is the recommended default. 3.6 Flash leads:
+    // it is the current GA flagship Flash — stronger on agentic/tool-driving work
+    // (which the barista's function-calling relies on) at a lower price than 3.5,
+    // and it takes the 3.x thinkingLevel knob (see sendRequest). 3.5 Flash-Lite is
+    // the fastest/cheapest 3.5 option; 2.5 Flash stays as the most-provisioned
+    // fallback (fewer 503s, and the known-good id that predates this catalog bump —
+    // if a newer id ever fails to resolve, this one still works). Revisit as new
+    // models / pricing land.
     return {
+        { "gemini-3.6-flash", "3.6 Flash" },
+        { "gemini-3.5-flash-lite", "3.5 Flash-Lite" },
         { "gemini-2.5-flash", "2.5 Flash" },
-        { "gemini-3.5-flash", "3.5 Flash" },
     };
 }
 
 QString GeminiProvider::modelHint() const
 {
-    return QStringLiteral("3.5 Flash is the most capable. 2.5 Flash is more available (fewer busy errors).");
+    return QStringLiteral("3.6 Flash is the recommended default — best at the tool-driven barista. "
+                          "3.5 Flash-Lite is the fastest and cheapest. 2.5 Flash is the most available (fewer busy errors).");
 }
 
 void GeminiProvider::setModel(const QString& modelId)
@@ -1159,8 +1164,22 @@ void GeminiProvider::sendRequest(const QJsonObject& requestBody)
     QNetworkRequest req;
     req.setUrl(url);
     req.setHeader(QNetworkRequest::ContentTypeHeader, QVariant(QString("application/json")));
-    req.setRawHeader("x-goog-api-key", m_apiKey.toUtf8());
-    req.setTransferTimeout(ANALYSIS_TIMEOUT_MS);
+    // trimmed(): a key pasted on a tablet often carries a trailing newline/space; an invalid character in the
+    // header value makes Qt drop the header, so Google sees NO credential and returns "unregistered callers".
+    req.setRawHeader("x-goog-api-key", m_apiKey.trimmed().toUtf8());
+    // Disable HTTP/2 — same fix as AnthropicProvider: Qt's HTTP/2 layer intercepts the 401 on a custom
+    // auth-header scheme (here x-goog-api-key) as an auth challenge and re-drives the request WITHOUT the header,
+    // so a valid key still comes back "method doesn't allow unregistered callers". HTTP/1.1 passes it through.
+    req.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
+    // [barista-fork] Interactive barista turns pass a shorter timeout (RequestOptions.timeoutMs, ~30s) so a
+    // stalled request fails+recovers fast; deep-analysis/advisor/analyzeUrl leave it 0 → the 60s default. Persists
+    // across a turn's tool-round re-POSTs (m_currentTimeoutMs is set once per turn in analyzeConversation).
+    req.setTransferTimeout(m_currentTimeoutMs > 0 ? m_currentTimeoutMs : ANALYSIS_TIMEOUT_MS);
+
+    // [barista-fork] Basis for a functionCall continuation re-POST (see onAnalysisReply's tool loop). Stored
+    // WITHOUT generationConfig — sendRequest re-adds it below on every call, so the loop appends to `contents`
+    // and calls sendRequest() again, keeping the thinking/token config consistent across rounds.
+    m_pendingRequestBody = requestBody;
 
     // Thinking config differs by model family: the 2.5 family uses the integer
     // thinkingBudget (0 disables thinking), while 3.x+ uses the thinkingLevel
@@ -1201,6 +1220,9 @@ void GeminiProvider::analyze(const QString& systemPrompt, const QString& userPro
 
     setStatus(Status::Busy);
     m_retryCount = 0;
+    m_currentTimeoutMs = 0;   // [barista-fork] single-shot analyze uses the default timeout (not a barista turn)
+    m_toolRounds = 0;         // [barista-fork] clear tool-loop state so a prior failed barista turn can't leak into
+    m_accumulatedText.clear();// this shared onAnalysisReply path (stale text / false friendly-fallback message)
     ++m_reqGen;
 
     // Gemini uses a different format
@@ -1239,6 +1261,9 @@ void GeminiProvider::analyzeUrl(const QString& systemPrompt, const QString& user
 
     setStatus(Status::Busy);
     m_retryCount = 0;
+    m_currentTimeoutMs = 0;   // [barista-fork] URL extraction uses the default timeout (not a barista turn)
+    m_toolRounds = 0;         // [barista-fork] clear tool-loop state so a prior failed barista turn can't leak into
+    m_accumulatedText.clear();// this shared onAnalysisReply path (stale text / false friendly-fallback message)
     ++m_reqGen;
 
     // Same body as analyze() plus the url_context server tool: the API
@@ -1273,13 +1298,46 @@ void GeminiProvider::analyzeUrl(const QString& systemPrompt, const QString& user
 
 void GeminiProvider::analyzeConversation(const QString& systemPrompt, const QJsonArray& messages)
 {
+    // [barista-fork] Forward to the options-aware overload with defaults (no tools) — mirrors AnthropicProvider,
+    // so advisor/coach turns produce a byte-identical toolless request.
+    analyzeConversation(systemPrompt, messages, RequestOptions{});
+}
+
+QJsonArray GeminiProvider::toGeminiFunctionDeclarations(const QJsonArray& defs)
+{
+    // Anthropic tool def: { name, description, input_schema: {type, properties, required} }
+    // Gemini functionDeclaration: { name, description, parameters: <same JSON-Schema object> }.
+    // The JSON-Schema subset the barista uses (object/string/integer/array + properties/required/description/items)
+    // is accepted verbatim as Gemini `parameters`. The one incompatibility: Gemini rejects a parameters object
+    // whose `properties` is empty, so a no-argument tool (get_active_recipe, deactivate_recipe, list_due_reminders,
+    // dismiss_maintenance_doc_change) omits `parameters` entirely.
+    QJsonArray out;
+    for (const QJsonValue& v : defs) {
+        const QJsonObject def = v.toObject();
+        QJsonObject decl;
+        decl["name"] = def["name"];
+        decl["description"] = def["description"];
+        const QJsonObject schema = def["input_schema"].toObject();
+        if (!schema["properties"].toObject().isEmpty())
+            decl["parameters"] = schema;
+        out.append(decl);
+    }
+    return out;
+}
+
+void GeminiProvider::analyzeConversation(const QString& systemPrompt, const QJsonArray& messages,
+                                         const RequestOptions& options)
+{
     if (!isConfigured()) {
         emit analysisFailed(tr_("ai.gemini.keyMissing", "Gemini API key not configured"));
         return;
     }
 
     setStatus(Status::Busy);
+    m_currentTimeoutMs = options.timeoutMs;   // [barista-fork] this turn's transfer timeout (used in sendRequest)
     m_retryCount = 0;
+    m_toolRounds = 0;             // [barista-fork] reset the client-tool loop counter per turn
+    m_accumulatedText.clear();    // [barista-fork]
     ++m_reqGen;
 
     QJsonObject requestBody;
@@ -1312,6 +1370,28 @@ void GeminiProvider::analyzeConversation(const QString& systemPrompt, const QJso
         contents.append(content);
     }
     requestBody["contents"] = contents;
+
+    // [barista-fork] Function-calling tools. The client tools (setClientTools) and the fast-path web tools
+    // (setWebTools) are BOTH client-executed via the same m_toolExecutor (dispatched by name) and the same
+    // functionCall loop in onAnalysisReply — the only difference is the gate: client tools ship on
+    // options.clientTools, the keyless web tools on options.webSearch (the "may reach the internet" toggle).
+    // Every declaration goes into ONE tools:[{functionDeclarations:[...]}] entry, as Gemini requires. When
+    // neither option is set (advisor/coach) the array stays empty and "tools" is omitted — byte-identical to the
+    // original toolless request.
+    QJsonArray functionDeclarations;
+    if (options.clientTools && m_toolExecutor && !m_clientToolDefs.isEmpty()) {
+        for (const QJsonValue& d : toGeminiFunctionDeclarations(m_clientToolDefs))
+            functionDeclarations.append(d);
+    }
+    if (options.webSearch && m_toolExecutor && !m_webToolDefs.isEmpty()) {
+        for (const QJsonValue& d : toGeminiFunctionDeclarations(m_webToolDefs))
+            functionDeclarations.append(d);
+    }
+    if (!functionDeclarations.isEmpty()) {
+        QJsonObject toolEntry;
+        toolEntry["functionDeclarations"] = functionDeclarations;
+        requestBody["tools"] = QJsonArray{ toolEntry };
+    }
 
     sendRequest(requestBody);
 }
@@ -1362,23 +1442,104 @@ void GeminiProvider::onAnalysisReply(QNetworkReply* reply)
         return;
     }
 
-    QJsonArray parts = candidates[0].toObject()["content"].toObject()["parts"].toArray();
+    const QJsonObject modelContent = candidates[0].toObject()["content"].toObject();
+    const QJsonArray parts = modelContent["parts"].toArray();
     if (parts.isEmpty()) {
+        // [barista-fork] After a tool round already ran, an empty terminal turn is not an error — complete
+        // gracefully with whatever prose we accumulated (usually a short reply the model already committed to).
+        if (m_toolRounds > 0) {
+            const QString done = m_accumulatedText;
+            m_accumulatedText.clear();
+            emit analysisComplete(done);
+            return;
+        }
         emit analysisFailed(tr_("ai.gemini.emptyContent2", "Gemini returned empty content"));
         return;
     }
 
-    // Join every non-thought text part: plain replies have exactly one, but
-    // a url_context response (analyzeUrl) may split the answer across parts;
-    // thought parts are hidden reasoning and must not leak into the answer.
+    // Split the parts into prose (non-thought text) and functionCall requests. Plain replies have exactly one
+    // text part; a url_context response (analyzeUrl) may split the answer across several; thought parts are
+    // hidden reasoning and must not leak into the answer; functionCall parts drive the client-tool loop below.
     QString text;
+    QVector<QJsonObject> functionCalls;
     for (const QJsonValue& partVal : parts) {
         const QJsonObject part = partVal.toObject();
+        if (part.contains(QLatin1String("functionCall"))) {
+            functionCalls.append(part["functionCall"].toObject());
+            continue;
+        }
         if (part["thought"].toBool())
             continue;
         text += part["text"].toString();
     }
-    if (text.isEmpty()) {
+
+    // [barista-fork] CLIENT tools: the model asked us to run one or more functions. Execute each via the
+    // registered executor (see setClientTools), append the model turn (verbatim) + a user turn carrying our
+    // functionResponse parts, and re-POST — the standard Gemini function-calling loop, bounded by
+    // MAX_TOOL_ROUNDS. Only callers that enable tools carry them, so the advisor (which never sends tools) never
+    // sees a functionCall and this branch is inert for it.
+    if (!functionCalls.isEmpty() && m_toolExecutor && m_toolRounds < MAX_TOOL_ROUNDS) {
+        ++m_toolRounds;
+        // Any prose written alongside the call is a natural lead-in; buffer it and prepend to the final answer.
+        m_accumulatedText += text;
+        setStatus(Status::Busy);            // stay Busy while the tools run (top of this fn set Ready)
+        const int gen = m_reqGen;            // guard: a superseded turn's late callback must NOT re-POST
+        auto pending = std::make_shared<int>(functionCalls.size());
+        // Place each result at its call's index — Gemini matches functionResponse to functionCall by ORDER
+        // (there is no tool_use_id like Anthropic), so completion-order appends would mismatch two parallel calls
+        // to the same tool. Pre-sized; each callback writes its own slot.
+        auto responses = std::make_shared<QVector<QJsonObject>>(functionCalls.size());
+        for (qsizetype i = 0; i < functionCalls.size(); ++i) {
+            const QJsonObject call = functionCalls[i];
+            const QString toolName = call["name"].toString();
+            const QString callId = call["id"].toString();   // present only on newer parallel-call responses
+            m_toolExecutor(toolName, call["args"].toObject(),
+                [this, gen, i, toolName, callId, pending, responses, modelContent](QJsonValue result) {
+                    if (gen != m_reqGen) return;   // a newer turn started — drop this stale result
+                    // Gemini functionResponse.response must be a JSON object; wrap non-objects under "result".
+                    QJsonObject responseObj;
+                    if (result.isObject())      responseObj = result.toObject();
+                    else if (result.isArray())  responseObj = QJsonObject{{ QStringLiteral("result"), result.toArray() }};
+                    else                        responseObj = QJsonObject{{ QStringLiteral("result"), result }};
+                    QJsonObject fr;
+                    fr["name"] = toolName;
+                    if (!callId.isEmpty())
+                        fr["id"] = callId;   // echo the id back so the API pairs it precisely (parallel calls)
+                    fr["response"] = responseObj;
+                    QJsonObject part;
+                    part["functionResponse"] = fr;
+                    (*responses)[i] = part;
+                    if (--(*pending) > 0)
+                        return;              // wait for the remaining calls in this turn
+                    // All results in — append the model's functionCall turn + our functionResponse turn, re-POST.
+                    QJsonArray responseParts;
+                    for (const QJsonObject& p : *responses)
+                        responseParts.append(p);
+                    QJsonObject body = m_pendingRequestBody;
+                    QJsonArray contents = body["contents"].toArray();
+                    contents.append(modelContent);              // model turn (functionCall parts), verbatim
+                    QJsonObject userTurn;
+                    userTurn["role"] = QString("user");
+                    userTurn["parts"] = responseParts;
+                    contents.append(userTurn);
+                    body["contents"] = contents;
+                    setStatus(Status::Busy);
+                    sendRequest(body);
+                });
+        }
+        return;   // async — the completion callback re-POSTs once every call has returned
+    }
+
+    // Terminal turn — assemble the answer, prepending any lead-in prose buffered across prior tool rounds.
+    text = m_accumulatedText + text;
+    m_accumulatedText.clear();
+    if (text.trimmed().isEmpty()) {
+        // [barista-fork] The tool loop hit MAX_TOOL_ROUNDS (or the model returned only a call with no prose) —
+        // degrade to a friendly message instead of surfacing an error to the user.
+        if (!functionCalls.isEmpty() || m_toolRounds > 0) {
+            emit analysisComplete(QStringLiteral("I dug through your shot history but couldn't quite finish that — ask me again?"));
+            return;
+        }
         emit analysisFailed(tr_("ai.gemini.emptyContent", "Gemini returned empty response content"));
         return;
     }
@@ -1409,7 +1570,10 @@ void GeminiProvider::testConnection()
     QNetworkRequest req;
     req.setUrl(url);
     req.setHeader(QNetworkRequest::ContentTypeHeader, QVariant(QString("application/json")));
-    req.setRawHeader("x-goog-api-key", m_apiKey.toUtf8());
+    // trimmed(): a key pasted on a tablet often carries a trailing newline/space. Qt 6 refuses to set a raw
+    // header whose value contains a newline, so the header is silently dropped and Google sees NO credential →
+    // "method doesn't allow unregistered callers" (403), which looks like a bad key but is actually a missing one.
+    req.setRawHeader("x-goog-api-key", m_apiKey.trimmed().toUtf8());
     req.setTransferTimeout(TEST_TIMEOUT_MS);
     // Disable HTTP/2 -- Qt's HTTP/2 layer intercepts 401 as an auth challenge
     // instead of passing the response body through, breaking custom auth schemes

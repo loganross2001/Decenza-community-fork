@@ -56,8 +56,11 @@ QString SettingsAI::geminiApiKey() const {
 }
 
 void SettingsAI::setGeminiApiKey(const QString& key) {
-    if (geminiApiKey() != key) {
-        m_settings.setValue("ai/geminiKey", key);
+    // Trim on save: a key pasted on a tablet often carries a trailing newline/space, which Qt 6 then refuses to
+    // put in the x-goog-api-key request header (it silently drops the header → Google 403 "unregistered callers").
+    const QString trimmed = key.trimmed();
+    if (geminiApiKey() != trimmed) {
+        m_settings.setValue("ai/geminiKey", trimmed);
         emit geminiApiKeyChanged();
         emit configurationChanged();
     }

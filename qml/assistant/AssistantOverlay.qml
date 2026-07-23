@@ -796,12 +796,19 @@ Item {
         // roster + honest-attribution rules.
         var name = root._activeUserName.length > 0 ? root._activeUserName : ""
 
+        // [barista-fork] Provider capabilities (agnostic — NOT a hardcoded id). _supportsTools: the selected
+        // provider runs the client-tool loop (Anthropic, Gemini) → grind/recipe/taste/memory apply via tools.
+        // _supportsWebSearch: real server-side GENERAL web search (Anthropic). See AIManager::currentProvider*.
+        var _supportsTools = typeof MainController !== "undefined" && MainController.aiManager
+                             && MainController.aiManager.currentProviderSupportsTools()
+        var _supportsWebSearch = typeof MainController !== "undefined" && MainController.aiManager
+                             && MainController.aiManager.currentProviderSupportsWebSearch()
+
         // [barista-fork] Ask→approve→apply flow. The barista PROPOSES a dial change and asks; only after the
-        // user approves does it apply. On Anthropic it applies via the apply_dial_change tool; on other providers
-        // there's no tool, so the app watches for the user's affirmative and applies the last proposal itself
-        // (see the fenced-block fallback in _send). The persona differs so the model phrases things correctly.
-        var _canApplyTool = typeof MainController !== "undefined" && MainController.aiManager
-                            && MainController.aiManager.selectedProvider === "anthropic"
+        // user approves does it apply. On a tool-capable provider it applies via the apply_dial_change tool; on
+        // providers without tools there's none, so the app watches for the user's affirmative and applies the last
+        // proposal itself (see the fenced-block fallback in _send). The persona differs so the model phrases things correctly.
+        var _canApplyTool = _supportsTools
         var applyInstruction = _canApplyTool
             ? ("HOW CHANGES GET MADE — when you want to change the dial (grind, dose, ratio, or temp), or the "
                + "user asks for a specific value, FIRST propose it in your reply and ask for the go-ahead ('Want me to "
@@ -1058,11 +1065,12 @@ Item {
                 + "dismiss_maintenance_doc_change so it's not brought up again. For descaling, still defer to "
                 + "their water rather than asserting a fixed interval."
 
-        // Web search (Anthropic only) — keep the persona truthful about what it can/can't reach.
-        var webOn = !!(root._settings && root._settings.webSearchEnabled)
-                    && typeof MainController !== "undefined" && MainController.aiManager
-                    && MainController.aiManager.selectedProvider === "anthropic"
-        if (webOn)
+        // Web tools — keep the persona truthful about what it can/can't reach. webOn (attach the keyless
+        // get_weather/get_stock_quote/get_local_news tools) rides the tool loop, so it needs a tool-capable
+        // provider AND the toggle. General web SEARCH is a stronger capability only some providers have
+        // (_supportsWebSearch); a tool-capable provider WITHOUT it (Gemini) still gets the three fast tools.
+        var webOn = !!(root._settings && root._settings.webSearchEnabled) && _supportsTools
+        if (_supportsWebSearch && webOn)
             persona += "\nYou have live web search. AUTOMATICALLY use it for any real-time or factual question "
                 + "you don't already know — current events, 'what is X', 'who is Y', a bean or roaster's tasting "
                 + "notes, roast dates, brewing guides, gear — instead of guessing or saying you can't check. Do "
@@ -1084,16 +1092,25 @@ Item {
                 // unrequested lookup adds a silent startup delay. Only reach for get_weather / get_stock_quote /
                 // get_local_news / web search when the user EXPLICITLY asks for that information. When they do ask,
                 // answer freely (this is about not volunteering lookups, never about refusing them)."
+        else if (webOn)
+            // Tool-capable provider without general web search (e.g. Gemini): it still has the three FAST keyless
+            // tools, but NOT general web search — say so honestly so it never claims to have looked something up.
+            persona += "\nFor three common real-time questions you have FAST, dedicated tools — use them when the "
+                + "user asks: get_weather for the CURRENT WEATHER of a city (extract the city; omit it for 'weather "
+                + "around here' and it uses the saved home location), get_stock_quote for a STOCK/ETF PRICE (you "
+                + "supply the ticker symbol — map a company name yourself), and get_local_news for NEWS / HEADLINES "
+                + "(pass a topic, or a city for local news; omit both for home-location local news). Do NOT volunteer "
+                + "these unprompted (especially on the greeting). You do NOT have general web search, so for other "
+                + "real-time or factual questions outside what you already know, say so briefly rather than guessing."
         else
-            persona += "\nYou do NOT have web search in this session (it needs the Anthropic provider and the "
+            persona += "\nYou do NOT have web search in this session (it needs a provider that supports it and the "
                 + "web-search toggle on in settings). If asked about the weather, current events, or anything else "
                 + "outside what you already know, say so briefly rather than guessing — for coffee questions, work "
                 + "from the data block above."
 
-        // query_shots client tool (Anthropic only) — the barista can pull ANY shot from the user's FULL local
-        // history on demand, so it's never limited to the recent summary in the data block.
-        var toolsOn = typeof MainController !== "undefined" && MainController.aiManager
-                      && MainController.aiManager.selectedProvider === "anthropic"
+        // query_shots client tool — the barista can pull ANY shot from the user's FULL local history on demand
+        // (tool-capable providers only), so it's never limited to the recent summary in the data block.
+        var toolsOn = _supportsTools
         if (toolsOn)
             persona += "\nYou can look up the user's espresso shots from their FULL history at any time using the "
                 + "query_shots tool — well beyond the recent summary in the data block. Use it whenever they ask "
@@ -1273,8 +1290,13 @@ Item {
         var hasActions = (typeof Barista !== "undefined" && Barista.actions)
         // [barista-fork] CLEAR whole-string farewell ("that's it for now", "bye", …). Conservative exact match
         // (like _isUndo) so a mid-chat "thanks" that's followed by more never trips it.
+        // [barista-fork] _sendIsAnthropic is kept ONLY for the parallel Haiku quick-filler below (an Anthropic
+        // helper that no-ops without an Anthropic key). Tool-driven behavior (self-dismiss, taste, apply) gates on
+        // _sendSupportsTools so Gemini takes the same tool paths as Claude.
         var _sendIsAnthropic = typeof MainController !== "undefined" && MainController.aiManager
                                && MainController.aiManager.selectedProvider === "anthropic"
+        var _sendSupportsTools = typeof MainController !== "undefined" && MainController.aiManager
+                               && MainController.aiManager.currentProviderSupportsTools()
         var _f = t.toLowerCase().replace(/[^a-z0-9'\s]/g, " ").replace(/\s+/g, " ").trim()
         var _isFarewell = _f === "bye" || _f === "bye bye" || _f === "goodbye"
                           || _f === "see you" || _f === "see ya" || _f === "see you later"
@@ -1287,7 +1309,7 @@ Item {
                           || _f === "thanks that's all" || _f === "thanks thats all"
                           || _f === "got it thanks" || _f === "ok got it thanks" || _f === "okay got it thanks"
         if (_isFarewell) {
-            if (_sendIsAnthropic) {
+            if (_sendSupportsTools) {
                 // [barista-fork] The "that's it for now" HANG fix: let the model speak its OWN natural sign-off
                 // (owner's no-canned-strings rule), but ARM the session close so it ends after that reply even if
                 // the model forgets to call end_conversation. Armed after the clear above; onResponseReceived /
@@ -1342,8 +1364,8 @@ Item {
         // undiscussed-shot cue on BOTH provider paths and (b) on the NON-Anthropic path, write the taste
         // onto the shot record. On the Anthropic path the model calls log_tasting_feedback itself (the
         // feedback→KB tool), so we must NOT double-write the shot note — only clear the cue.
-        var _isAnthropic = typeof MainController !== "undefined" && MainController.aiManager
-                           && MainController.aiManager.selectedProvider === "anthropic"
+        // Reuse the tool capability computed above (_sendSupportsTools): a tool-capable provider (Anthropic or
+        // Gemini) calls log_tasting_feedback itself, so the app must NOT double-write the shot note.
         if (root._hasUndiscussedShot && !root._closeOutRated && root._orch && root._orch.lastShotId > 0
                 && typeof MainController !== "undefined" && MainController.shotHistory) {
             // Only capture from a SUBSTANTIVE reply (not "ok"/"hang on") and match whole words, so "no good"
@@ -1363,7 +1385,7 @@ Item {
                 // The shot has been discussed → clear the undiscussed-shot cue (both provider paths).
                 if (root._orch && typeof root._orch.markShotDiscussed === "function")
                     root._orch.markShotDiscussed()
-                if (!_isAnthropic) {   // non-Anthropic has no log_tasting_feedback tool → write the shot note here
+                if (!_sendSupportsTools) {   // no-tool provider has no log_tasting_feedback tool → write the shot note here
                     var neg = w.indexOf("no") >= 0 || w.indexOf("not") >= 0 || w.indexOf("bad") >= 0
                     var enj = (w.indexOf("sour") >= 0) ? 45
                             : (w.indexOf("bitter") >= 0 || w.indexOf("burnt") >= 0) ? 55
@@ -1600,9 +1622,9 @@ Item {
             // double-apply on "yes"). On NON-tool providers there's no tool, so we keep the app-side fallback:
             // hold the proposed structuredNext as pending; if the user's next utterance is a clear affirmative,
             // _send applies it. Require an ACTIONABLE field (not a bare "expectation" / an echo of current dial).
-            var _anthropic = typeof MainController !== "undefined" && MainController.aiManager
-                             && MainController.aiManager.selectedProvider === "anthropic"
-            if (!_anthropic) {
+            var _respSupportsTools = typeof MainController !== "undefined" && MainController.aiManager
+                             && MainController.aiManager.currentProviderSupportsTools()
+            if (!_respSupportsTools) {
                 var nx = root._conv ? root._conv.structuredNextForLastAssistantTurnMap() : null
                 if (root._nextDiffersFromCurrent(nx)) {
                     root._pendingNext = nx        // a real proposal → arm voice-approve ("yes" → apply)

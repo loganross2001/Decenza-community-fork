@@ -114,8 +114,9 @@ private slots:
     {
         QNetworkAccessManager nam;
         checkProvider<GeminiProvider>(nam, {
+            { "gemini-3.6-flash", "3.6 Flash" },
+            { "gemini-3.5-flash-lite", "3.5 Flash-Lite" },
             { "gemini-2.5-flash", "2.5 Flash" },
-            { "gemini-3.5-flash", "3.5 Flash" },
         });
     }
 

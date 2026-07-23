@@ -50,6 +50,15 @@ public:
     virtual bool isConfigured() const = 0;
     virtual bool isLocal() const { return false; }
 
+    // [barista-fork] Provider capability flags for the barista's provider-agnostic UI gating (AssistantOverlay).
+    // supportsClientTools: the provider runs the registered client-tool function-calling loop (grind/recipe/
+    // taste/memory/end_conversation) — Anthropic and Gemini. supportsWebSearch: the provider offers real
+    // server-side GENERAL web search — Anthropic only (Gemini has just the keyless get_weather/stock/news tools,
+    // which ship as client tools). Default false; the barista gates tools/web/persona on these, never on a
+    // hardcoded provider id, so any future tool-capable provider lights up automatically.
+    virtual bool supportsClientTools() const { return false; }
+    virtual bool supportsWebSearch() const { return false; }
+
     // Models the user may pick between for this provider. Default empty = the
     // provider has a single fixed model and shows no model picker. Providers
     // override this to opt into user-selectable models; the catalog is the
@@ -200,6 +209,8 @@ public:
     QString modelName() const override { return m_model; }
     QString shortModelName() const override;  // catalog display for m_model
     bool isConfigured() const override { return !m_apiKey.isEmpty(); }
+    bool supportsClientTools() const override { return true; }  // [barista-fork] tool_use loop
+    bool supportsWebSearch() const override { return true; }    // [barista-fork] server web_search
     QList<ModelOption> availableModels() const override;
     QString modelHint() const override;
 
@@ -310,6 +321,9 @@ public:
     QString modelName() const override { return m_model; }
     QString shortModelName() const override;  // catalog display for m_model
     bool isConfigured() const override { return !m_apiKey.isEmpty(); }
+    bool supportsClientTools() const override { return true; }  // [barista-fork] functionCall loop
+    // supportsWebSearch stays false: Gemini has no server-side GENERAL web search here, only the keyless
+    // get_weather/get_stock_quote/get_local_news client tools (attached under the same webSearch gate).
     QList<ModelOption> availableModels() const override;
     QString modelHint() const override;
 
@@ -321,12 +335,35 @@ public:
 
     void analyze(const QString& systemPrompt, const QString& userPrompt) override;
     void analyzeConversation(const QString& systemPrompt, const QJsonArray& messages) override;
+    // [barista-fork] Options-aware overload — mirrors AnthropicProvider so the barista's per-call
+    // client-tools / web config threads through when Gemini is the selected provider. Base 2-arg forwards here.
+    void analyzeConversation(const QString& systemPrompt, const QJsonArray& messages,
+                             const RequestOptions& options) override;
     // Gemini url_context server tool: the API fetches URLs named in the
     // prompt during generateContent (supported by every catalog model —
-    // 2.5 and 3.5 families).
+    // 2.5 and 3.x families).
     bool supportsUrlAnalysis() const override { return true; }
     void analyzeUrl(const QString& systemPrompt, const QString& userPrompt) override;
     void testConnection() override;
+
+    // [barista-fork] Generic client-side-tool seam — the exact counterpart of AnthropicProvider::setClientTools.
+    // A feature module (the barista) registers BOTH the tool JSON definitions (Anthropic {name, description,
+    // input_schema} shape — converted to Gemini functionDeclarations here) and the executor. Appended to the
+    // request when RequestOptions.clientTools is set; the generic functionCall loop in onAnalysisReply drives the
+    // executor OFF the main thread and re-POSTs with the functionResponse. Set once at construction; callers that
+    // never enable clientTools (advisor/coach) are entirely unaffected — no tools ship and the request is
+    // byte-identical to the original.
+    void setClientTools(const QJsonArray& defs,
+                        std::function<void(const QString&, const QJsonObject&,
+                                           std::function<void(QJsonValue)>)> exec) {
+        m_clientToolDefs = defs;
+        m_toolExecutor = std::move(exec);
+    }
+    // [barista-fork] Fast-path web-tool definitions (get_weather/get_stock_quote/get_local_news — keyless,
+    // client-executed via the SAME executor). Registered separately and appended only when RequestOptions.webSearch
+    // is on. Gemini has no server-side general web search here, so these keyless tools are the web surface it
+    // offers; a broad "search the web" request degrades gracefully to whatever these cover.
+    void setWebTools(const QJsonArray& defs) { m_webToolDefs = defs; }
 
 private slots:
     void onAnalysisReply(QNetworkReply* reply);
@@ -335,12 +372,27 @@ private slots:
 private:
     void sendRequest(const QJsonObject& requestBody);
 
+    // [barista-fork] Convert Anthropic-format tool defs ({name, description, input_schema}) to a Gemini
+    // functionDeclarations array ({name, description, parameters}). Tools whose input_schema has no properties
+    // (e.g. get_active_recipe) omit `parameters` entirely — Gemini rejects an empty properties object.
+    static QJsonArray toGeminiFunctionDeclarations(const QJsonArray& defs);
+
     QString m_apiKey;
     // Selected wire model. Defaulted in the constructor to the first
     // availableModels() entry (the recommended default), so the C++ default and
     // the UI's "unset → index 0" fallback reference the same fact and can't drift.
     QString m_model;
     QString apiUrl() const;
+
+    // [barista-fork] client-side tool loop state (see setClientTools). Mirrors the AnthropicProvider members.
+    QJsonArray m_clientToolDefs;   // registered client-tool defs, appended (as functionDeclarations) when clientTools on
+    QJsonArray m_webToolDefs;      // fast-path web-tool defs, appended when RequestOptions.webSearch on
+    std::function<void(const QString&, const QJsonObject&, std::function<void(QJsonValue)>)> m_toolExecutor;
+    QJsonObject m_pendingRequestBody;  // basis for a functionCall continuation re-POST
+    QString m_accumulatedText;         // prose accumulated across tool rounds, prepended to the final answer
+    int m_toolRounds = 0;              // reset per turn in the options-aware analyzeConversation
+    int m_currentTimeoutMs = 0;        // this turn's transfer timeout (RequestOptions.timeoutMs; 0 → default)
+    static constexpr int MAX_TOOL_ROUNDS = 4;
 };
 
 // OpenRouter provider (multiple models via OpenAI-compatible API)

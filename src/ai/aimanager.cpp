@@ -266,7 +266,11 @@ void AIManager::createProviders()
     // [barista-fork] Register the barista's private client-side tools (definitions + executor) behind the
     // provider's generic seam. The executor reads m_shotHistory lazily (it's wired after construction via
     // setShotHistoryStorage), so capturing `this` and forwarding at call time preserves the original behavior.
-    anthropic->setClientTools(BaristaTools::toolDefinitions(),
+    // [barista-fork] Shared client-tool executor. Registered on EVERY provider that runs the barista's
+    // function-calling loop (Anthropic + Gemini) so switching the provider keeps the full tool surface — the
+    // barista drives shots/recipes/taste/memory identically on either. Captures `this` and forwards at call time
+    // (m_shotHistory etc. are wired after construction via setShotHistoryStorage), so a copy per provider is safe.
+    auto baristaToolExecutor =
         [this](const QString& name, const QJsonObject& input, std::function<void(QJsonValue)> done) {
             // [barista-fork] Closed-loop bridge (issue #1053 regression): when the model APPLIES a dial change by
             // CALLING apply_dial_change (instead of emitting a fenced ```json structuredNext block), capture the
@@ -302,7 +306,8 @@ void AIManager::createProviders()
                                       m_setActiveUserHandler,
                                       anchor,
                                       name, input, std::move(done));
-        });
+        };
+    anthropic->setClientTools(BaristaTools::toolDefinitions(), baristaToolExecutor);
     // [barista-fork] Register the fast-path web-tool DEFINITIONS separately. They ship under the webSearch gate
     // (umbrella "may reach the internet" toggle), not the clientTools gate — but flow through the SAME executor
     // above (dispatched by tool name). See AnthropicProvider::setWebTools / analyzeConversation.
@@ -330,6 +335,13 @@ void AIManager::createProviders()
     connect(gemini, &AIProvider::analysisComplete, this, &AIManager::onAnalysisComplete);
     connect(gemini, &AIProvider::analysisFailed, this, &AIManager::onAnalysisFailed);
     connect(gemini, &AIProvider::testResult, this, &AIManager::onTestResult);
+    // [barista-fork] Give Gemini the SAME barista tool surface as Anthropic — the client tools (shots/recipes/
+    // taste/memory) via the shared executor, and the keyless fast-path web tools. Gemini's own function-calling
+    // loop (GeminiProvider::analyzeConversation/onAnalysisReply) drives them. So selecting Gemini in Settings ▸ AI
+    // now runs the full interactive barista, not just plain chat. (Gemini has no server-side general web search
+    // here, so a broad "search the web" degrades to whatever the keyless weather/stock/news tools cover.)
+    gemini->setClientTools(BaristaTools::toolDefinitions(), baristaToolExecutor);
+    gemini->setWebTools(BaristaTools::webToolDefinitions());
     m_geminiProvider.reset(gemini);
 
     // Create OpenRouter provider
@@ -449,6 +461,18 @@ AIProvider* AIManager::currentProvider() const
 {
     AIProvider* provider = providerById(selectedProvider());
     return provider ? provider : m_openaiProvider.get();  // Default
+}
+
+bool AIManager::currentProviderSupportsTools() const
+{
+    AIProvider* p = currentProvider();
+    return p && p->supportsClientTools();
+}
+
+bool AIManager::currentProviderSupportsWebSearch() const
+{
+    AIProvider* p = currentProvider();
+    return p && p->supportsWebSearch();
 }
 
 std::optional<QJsonObject> AIManager::parseStructuredNext(const QString& assistantMessage)

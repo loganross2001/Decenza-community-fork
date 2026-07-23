@@ -2197,6 +2197,25 @@ ApplicationWindow {
                               Barista.orchestrator.dismiss()
     }
 
+    // [barista-fork] "How to describe a shot" cheat sheet — auto-shows once over the idle screen after a shot the
+    // user hasn't described yet, so they know the words to SPEAK to the barista. Dismissal is keyed to the shot id
+    // so it appears at most once per shot; a new shot re-arms it. Only when the barista is enabled and the machine
+    // is idle (never mid-shot/steam).
+    property int tasteTipDismissedShotId: -1
+    readonly property bool tasteHelpDue:
+        typeof Barista !== "undefined" && Barista.enabled && Barista.orchestrator
+        && Barista.orchestrator.lastShotId > 0 && !Barista.orchestrator.shotDiscussed
+        && Barista.orchestrator.lastShotId !== root.tasteTipDismissedShotId
+        && pageStack.currentItem && pageStack.currentItem.objectName === "idlePage"
+        && !root.isActiveOperation(MachineState.phase)
+    onTasteHelpDueChanged: if (tasteHelpDue) tasteHelpCard.open()
+
+    TasteHelpCard {
+        id: tasteHelpCard
+        onClosed: if (typeof Barista !== "undefined" && Barista.orchestrator)
+                      root.tasteTipDismissedShotId = Barista.orchestrator.lastShotId
+    }
+
     // SAW bypassed warning (untared cup detected during extraction)
     property bool sawBypassedVisible: false
 

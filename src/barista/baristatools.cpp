@@ -572,6 +572,18 @@ QJsonArray BaristaTools::toolDefinitions()
                                       "change may want a fresh temp — mention that. Does NOT reactivate the machine.");
     rupdProps["drink_type"] = strProp("Change the recipe's drink type: one of espresso, filter, americano, "
                                       "long_black, latte, tea, tea_hotwater.");
+    rupdProps["has_milk"] = QJsonObject{{"type", QString("boolean")},
+        {"description", QString("Turn the recipe's milk/steam on (true) or off (false). Setting any milk field "
+                                "REPLACES the whole steam block, so it drops a saved pitcher preset — for a latte "
+                                "recipe.")}};
+    rupdProps["milk_weight_g"] = numProp("Target milk weight in grams (implies has_milk).");
+    rupdProps["steam_temperature_c"] = numProp("Steam/milk target temperature in Celsius (optional).");
+    rupdProps["has_water"] = QJsonObject{{"type", QString("boolean")},
+        {"description", QString("Turn the recipe's hot-water block on (true) or off (false) — for americano/long "
+                                "black. Setting any water field REPLACES the whole water block.")}};
+    rupdProps["water_volume_ml"] = numProp("Hot-water volume in mL (implies has_water).");
+    rupdProps["water_temperature_c"] = numProp("Hot-water temperature in Celsius (optional).");
+    rupdProps["water_order"] = strProp("'before' the shot (long black) or 'after' (americano). Optional.");
     rupdSchema["properties"] = rupdProps;
     rupdSchema["required"] = QJsonArray{ QString("recipe_id") };
     rupd["input_schema"] = rupdSchema;
@@ -609,10 +621,72 @@ QJsonArray BaristaTools::toolDefinitions()
     rnewProps["yield_g"]       = numProp("Absolute yield target in grams (optional). Mutually exclusive with ratio.");
     rnewProps["ratio"]         = numProp("Yield as a multiple of the dose, e.g. 2.0 = 1:2 (optional; clamped 0.5-6.0). "
                                          "Mutually exclusive with yield_g.");
+    rnewProps["has_milk"] = QJsonObject{{"type", QString("boolean")},
+        {"description", QString("true adds a milk/steam block (a latte-style drink).")}};
+    rnewProps["milk_weight_g"] = numProp("Target milk weight in grams (implies has_milk).");
+    rnewProps["steam_temperature_c"] = numProp("Steam/milk target temperature in Celsius (optional).");
+    rnewProps["has_water"] = QJsonObject{{"type", QString("boolean")},
+        {"description", QString("true adds a hot-water block (americano / long black).")}};
+    rnewProps["water_volume_ml"] = numProp("Hot-water volume in mL (implies has_water).");
+    rnewProps["water_temperature_c"] = numProp("Hot-water temperature in Celsius (optional).");
+    rnewProps["water_order"] = strProp("'before' the shot (long black) or 'after' (americano). Optional.");
     rnewSchema["properties"] = rnewProps;
     rnewSchema["required"] = QJsonArray{ QString("name") };
     rnew["input_schema"] = rnewSchema;
     tools.append(rnew);
+
+    // [barista-fork] clone_recipe — duplicate an existing recipe under a new name (a starting point to tweak).
+    QJsonObject rclone;
+    rclone["name"] = QString("clone_recipe");
+    rclone["description"] = QString(
+        "Duplicate an existing recipe under a NEW name — copies all its settings (profile, beans, dial, steam/"
+        "water) so the user can tweak the copy without touching the original. Does NOT activate anything. Resolve "
+        "recipe_id first. Confirm the new name with the user before calling. Reports created:true + the new recipe_id.");
+    QJsonObject rcloneSchema;
+    rcloneSchema["type"] = QString("object");
+    QJsonObject rcloneProps;
+    rcloneProps["recipe_id"] = intProp("The id of the recipe to copy (from list_recipes / get_active_recipe).");
+    rcloneProps["new_name"]  = strProp("Name for the new copy (must be unique among active recipes).");
+    rcloneSchema["properties"] = rcloneProps;
+    rcloneSchema["required"] = QJsonArray{ QString("recipe_id"), QString("new_name") };
+    rclone["input_schema"] = rcloneSchema;
+    tools.append(rclone);
+
+    // [barista-fork] archive_recipe — hide/unhide a recipe from the main inventory (reversible; keeps history).
+    QJsonObject rarch;
+    rarch["name"] = QString("archive_recipe");
+    rarch["description"] = QString(
+        "Archive a recipe (hide it from the main recipe list) or, with archived=false, restore it. Reversible and "
+        "keeps all shot history — use this instead of deleting when a recipe has shots or the user just wants it "
+        "out of the way. Resolve recipe_id first. Reports updated:true.");
+    QJsonObject rarchSchema;
+    rarchSchema["type"] = QString("object");
+    QJsonObject rarchProps;
+    rarchProps["recipe_id"] = intProp("The id of the recipe to archive/restore.");
+    rarchProps["archived"]  = QJsonObject{{"type", QString("boolean")},
+        {"description", QString("true (default) archives; false restores an archived recipe.")}};
+    rarchSchema["properties"] = rarchProps;
+    rarchSchema["required"] = QJsonArray{ QString("recipe_id") };
+    rarch["input_schema"] = rarchSchema;
+    tools.append(rarch);
+
+    // [barista-fork] delete_recipe — permanently remove a recipe (ONLY if it has no shot history).
+    QJsonObject rdel;
+    rdel["name"] = QString("delete_recipe");
+    rdel["description"] = QString(
+        "Permanently delete a recipe. This ONLY works when the recipe has NO shots recorded against it (a mistaken "
+        "creation); if it has history the delete is refused — archive it instead. Destructive and irreversible, so "
+        "confirm clearly with the user before calling. Resolve recipe_id first. Reports deleted:true, or "
+        "deleted:false with a reason (e.g. has history) — report that honestly and never claim a delete that "
+        "didn't return deleted:true.");
+    QJsonObject rdelSchema;
+    rdelSchema["type"] = QString("object");
+    QJsonObject rdelProps;
+    rdelProps["recipe_id"] = intProp("The id of the recipe to delete.");
+    rdelSchema["properties"] = rdelProps;
+    rdelSchema["required"] = QJsonArray{ QString("recipe_id") };
+    rdel["input_schema"] = rdelSchema;
+    tools.append(rdel);
 
     QJsonObject rdeact;
     rdeact["name"] = QString("deactivate_recipe");
@@ -799,6 +873,43 @@ static QString baristaTasteBody(const QJsonObject& input)
 // the JSON result to `done` on the main thread. query_shots is a READ-ONLY lookup across the user's FULL shot
 // history (any roaster/bean, any date range) — the "access to everything" the barista promised. Kept off the
 // main thread because withTempDb opens a fresh connection each call and the target is a slow tablet.
+namespace {
+// [barista-fork] Build the native steamJson from the barista's flat steam params. Returns "" when NO steam field
+// is present (→ leave the recipe's steam block untouched). hasMilk defaults true when any steam field is set. The
+// block is intentionally minimal (hasMilk drives steam-heater intent; the pitcher program isn't set by voice) —
+// the same partial shape the MCP recipe tools accept.
+QString baristaBuildSteamJson(const QJsonObject& in) {
+    const bool any = in.contains(QStringLiteral("has_milk")) || in.contains(QStringLiteral("milk_weight_g"))
+                     || in.contains(QStringLiteral("steam_temperature_c"));
+    if (!any) return QString();
+    QJsonObject s;
+    s[QStringLiteral("hasMilk")] = in.contains(QStringLiteral("has_milk"))
+        ? in.value(QStringLiteral("has_milk")).toBool() : true;
+    if (in.contains(QStringLiteral("milk_weight_g")))
+        s[QStringLiteral("milkWeightG")] = in.value(QStringLiteral("milk_weight_g")).toDouble();
+    if (in.contains(QStringLiteral("steam_temperature_c")))
+        s[QStringLiteral("temperatureC")] = in.value(QStringLiteral("steam_temperature_c")).toDouble();
+    return QString::fromUtf8(QJsonDocument(s).toJson(QJsonDocument::Compact));
+}
+// [barista-fork] Native hotWaterJson from flat params. "" when no water field present. order = "before"|"after"
+// (long black vs americano). Minimal block; matches the partial shape the MCP recipe tools accept.
+QString baristaBuildHotWaterJson(const QJsonObject& in) {
+    const bool any = in.contains(QStringLiteral("has_water")) || in.contains(QStringLiteral("water_volume_ml"))
+                     || in.contains(QStringLiteral("water_temperature_c")) || in.contains(QStringLiteral("water_order"));
+    if (!any) return QString();
+    QJsonObject w;
+    w[QStringLiteral("hasWater")] = in.contains(QStringLiteral("has_water"))
+        ? in.value(QStringLiteral("has_water")).toBool() : true;
+    if (in.contains(QStringLiteral("water_volume_ml")))
+        w[QStringLiteral("volume")] = in.value(QStringLiteral("water_volume_ml")).toInt();
+    if (in.contains(QStringLiteral("water_temperature_c")))
+        w[QStringLiteral("temperatureC")] = in.value(QStringLiteral("water_temperature_c")).toDouble();
+    if (in.contains(QStringLiteral("water_order")))
+        w[QStringLiteral("order")] = in.value(QStringLiteral("water_order")).toString();
+    return QString::fromUtf8(QJsonDocument(w).toJson(QJsonDocument::Compact));
+}
+} // namespace
+
 void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage* feedback,
                                TasksStorage* tasks,
                                const std::function<QVariantMap(const QVariantMap&, qint64)>& applyDial,
@@ -975,6 +1086,12 @@ void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage*
             fields.insert(QStringLiteral("profileTitle"), input.value(QStringLiteral("profile_title")).toString());
         if (input.contains(QStringLiteral("drink_type")))
             fields.insert(QStringLiteral("drinkType"), input.value(QStringLiteral("drink_type")).toString());
+        {
+            const QString steamJson = baristaBuildSteamJson(input);
+            if (!steamJson.isEmpty()) fields.insert(QStringLiteral("steamJson"), steamJson);
+            const QString waterJson = baristaBuildHotWaterJson(input);
+            if (!waterJson.isEmpty()) fields.insert(QStringLiteral("hotWaterJson"), waterJson);
+        }
         if (hasYieldG) {
             const double g = input.value(QStringLiteral("yield_g")).toDouble();
             fields.insert(QStringLiteral("yieldValue"), g > 0 ? g : 0.0);
@@ -1044,7 +1161,48 @@ void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage*
             args.insert(QStringLiteral("yieldValue"), r > 0 ? YieldSpec::clampRatio(r) : 0.0);
             args.insert(QStringLiteral("yieldMode"), r > 0 ? QStringLiteral("ratio") : QStringLiteral("none"));
         }
+        {
+            const QString steamJson = baristaBuildSteamJson(input);
+            if (!steamJson.isEmpty()) args.insert(QStringLiteral("steamJson"), steamJson);
+            const QString waterJson = baristaBuildHotWaterJson(input);
+            if (!waterJson.isEmpty()) args.insert(QStringLiteral("hotWaterJson"), waterJson);
+        }
         recipeOp(QStringLiteral("create"), args, [done](QJsonObject result) { done(result); });
+        return;
+    }
+
+    // [barista-fork] clone_recipe / archive_recipe / delete_recipe — all ride the recipeOp seam (app-side).
+    if (name == QLatin1String("clone_recipe")) {
+        if (!recipeOp) { done(QJsonObject{{QStringLiteral("error"), QStringLiteral("Recipe cloning is unavailable.")}}); return; }
+        const qint64 sourceId = input.value(QStringLiteral("recipe_id")).toVariant().toLongLong();
+        const QString newName = input.value(QStringLiteral("new_name")).toString().trimmed();
+        if (sourceId <= 0 || newName.isEmpty()) {
+            done(QJsonObject{{QStringLiteral("error"), QStringLiteral("clone_recipe needs recipe_id and new_name")}});
+            return;
+        }
+        recipeOp(QStringLiteral("clone"),
+                 QVariantMap{{QStringLiteral("sourceId"), sourceId}, {QStringLiteral("newName"), newName}},
+                 [done](QJsonObject result) { done(result); });
+        return;
+    }
+    if (name == QLatin1String("archive_recipe")) {
+        if (!recipeOp) { done(QJsonObject{{QStringLiteral("error"), QStringLiteral("Recipe archiving is unavailable.")}}); return; }
+        const qint64 recipeId = input.value(QStringLiteral("recipe_id")).toVariant().toLongLong();
+        if (recipeId <= 0) { done(QJsonObject{{QStringLiteral("error"), QStringLiteral("archive_recipe needs recipe_id")}}); return; }
+        const bool archived = input.contains(QStringLiteral("archived"))
+                              ? input.value(QStringLiteral("archived")).toBool() : true;
+        recipeOp(QStringLiteral("archive"),
+                 QVariantMap{{QStringLiteral("recipeId"), recipeId}, {QStringLiteral("archived"), archived}},
+                 [done](QJsonObject result) { done(result); });
+        return;
+    }
+    if (name == QLatin1String("delete_recipe")) {
+        if (!recipeOp) { done(QJsonObject{{QStringLiteral("error"), QStringLiteral("Recipe deletion is unavailable.")}}); return; }
+        const qint64 recipeId = input.value(QStringLiteral("recipe_id")).toVariant().toLongLong();
+        if (recipeId <= 0) { done(QJsonObject{{QStringLiteral("error"), QStringLiteral("delete_recipe needs recipe_id")}}); return; }
+        recipeOp(QStringLiteral("delete"),
+                 QVariantMap{{QStringLiteral("recipeId"), recipeId}},
+                 [done](QJsonObject result) { done(result); });
         return;
     }
 

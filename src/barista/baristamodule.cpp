@@ -445,6 +445,114 @@ BaristaModule::BaristaModule(MainController* mainController, MachineState* machi
                     rs->requestCreateRecipe(recipe);
                     return;
                 }
+                // Shared one-shot correlation scaffold (10s timeout + double-reply guard) for the remaining ops.
+                auto makeFinish = [reply](std::shared_ptr<QMetaObject::Connection> conn, QTimer* timer,
+                                          std::shared_ptr<bool> done) {
+                    return [reply, conn, timer, done](QJsonObject r) {
+                        if (*done) return;
+                        *done = true;
+                        if (*conn) QObject::disconnect(*conn);
+                        timer->stop(); timer->deleteLater();
+                        reply(r);
+                    };
+                };
+                if (op == QLatin1String("clone")) {
+                    const qint64 sourceId = args.value(QStringLiteral("sourceId")).toLongLong();
+                    const QString newName = args.value(QStringLiteral("newName")).toString().trimmed();
+                    if (sourceId <= 0 || newName.isEmpty()) {
+                        reply(QJsonObject{{QStringLiteral("created"), false},
+                            {QStringLiteral("failure_reason"), QStringLiteral("bad_args")},
+                            {QStringLiteral("detail"), QStringLiteral("Cloning needs a source recipe and a new name.")}});
+                        return;
+                    }
+                    auto done = std::make_shared<bool>(false);
+                    auto conn = std::make_shared<QMetaObject::Connection>();
+                    QTimer* timer = new QTimer(rs); timer->setSingleShot(true);
+                    auto finish = makeFinish(conn, timer, done);
+                    *conn = QObject::connect(rs, &RecipeStorage::recipeCreated, rs,
+                        [finish, newName](qint64 newId, const QVariantMap& created) {
+                            if (created.value(QStringLiteral("name")).toString() != newName) return;   // not ours
+                            if (newId > 0)
+                                finish(QJsonObject{{QStringLiteral("created"), true},
+                                    {QStringLiteral("recipe_id"), static_cast<double>(newId)},
+                                    {QStringLiteral("name"), newName}});
+                            else
+                                finish(QJsonObject{{QStringLiteral("created"), false},
+                                    {QStringLiteral("failure_reason"), QStringLiteral("clone_failed")},
+                                    {QStringLiteral("detail"), QStringLiteral("The recipe could not be cloned.")}});
+                        });
+                    QObject::connect(timer, &QTimer::timeout, rs, [finish]() {
+                        finish(QJsonObject{{QStringLiteral("created"), false},
+                            {QStringLiteral("failure_reason"), QStringLiteral("timeout")},
+                            {QStringLiteral("detail"), QStringLiteral("No confirmation the clone was created within 10s.")}});
+                    });
+                    timer->start(10000);
+                    rs->requestCloneRecipe(sourceId, newName, QString());
+                    return;
+                }
+                if (op == QLatin1String("archive")) {
+                    const qint64 recipeId = args.value(QStringLiteral("recipeId")).toLongLong();
+                    const bool archived = args.value(QStringLiteral("archived"), true).toBool();
+                    if (recipeId <= 0) {
+                        reply(QJsonObject{{QStringLiteral("updated"), false},
+                            {QStringLiteral("failure_reason"), QStringLiteral("bad_args")}});
+                        return;
+                    }
+                    auto done = std::make_shared<bool>(false);
+                    auto conn = std::make_shared<QMetaObject::Connection>();
+                    QTimer* timer = new QTimer(rs); timer->setSingleShot(true);
+                    auto finish = makeFinish(conn, timer, done);
+                    *conn = QObject::connect(rs, &RecipeStorage::recipeUpdated, rs,
+                        [finish, recipeId, archived](qint64 id, bool success) {
+                            if (id != recipeId) return;
+                            if (success)
+                                finish(QJsonObject{{QStringLiteral("updated"), true},
+                                    {QStringLiteral("recipe_id"), static_cast<double>(recipeId)},
+                                    {QStringLiteral("archived"), archived}});
+                            else
+                                finish(QJsonObject{{QStringLiteral("updated"), false},
+                                    {QStringLiteral("failure_reason"), QStringLiteral("not_found_or_failed")}});
+                        });
+                    QObject::connect(timer, &QTimer::timeout, rs, [finish]() {
+                        finish(QJsonObject{{QStringLiteral("updated"), false},
+                            {QStringLiteral("failure_reason"), QStringLiteral("timeout")}});
+                    });
+                    timer->start(10000);
+                    if (archived) rs->requestArchiveRecipe(recipeId);
+                    else          rs->requestUnarchiveRecipe(recipeId);
+                    return;
+                }
+                if (op == QLatin1String("delete")) {
+                    const qint64 recipeId = args.value(QStringLiteral("recipeId")).toLongLong();
+                    if (recipeId <= 0) {
+                        reply(QJsonObject{{QStringLiteral("deleted"), false},
+                            {QStringLiteral("failure_reason"), QStringLiteral("bad_args")}});
+                        return;
+                    }
+                    auto done = std::make_shared<bool>(false);
+                    auto conn = std::make_shared<QMetaObject::Connection>();
+                    QTimer* timer = new QTimer(rs); timer->setSingleShot(true);
+                    auto finish = makeFinish(conn, timer, done);
+                    *conn = QObject::connect(rs, &RecipeStorage::recipeDeleted, rs,
+                        [finish, recipeId](qint64 id, bool success) {
+                            if (id != recipeId) return;
+                            if (success)
+                                finish(QJsonObject{{QStringLiteral("deleted"), true},
+                                    {QStringLiteral("recipe_id"), static_cast<double>(recipeId)}});
+                            else
+                                finish(QJsonObject{{QStringLiteral("deleted"), false},
+                                    {QStringLiteral("failure_reason"), QStringLiteral("has_history")},
+                                    {QStringLiteral("detail"), QStringLiteral(
+                                        "This recipe has shot history, so it can't be deleted — offer to archive it instead.")}});
+                        });
+                    QObject::connect(timer, &QTimer::timeout, rs, [finish]() {
+                        finish(QJsonObject{{QStringLiteral("deleted"), false},
+                            {QStringLiteral("failure_reason"), QStringLiteral("timeout")}});
+                    });
+                    timer->start(10000);
+                    rs->requestDeleteRecipe(recipeId);
+                    return;
+                }
                 reply(QJsonObject{{QStringLiteral("success"), false},
                     {QStringLiteral("failure_reason"), QStringLiteral("unsupported_op")},
                     {QStringLiteral("detail"), QStringLiteral("That recipe operation isn't supported yet.")}});

@@ -1178,6 +1178,7 @@ set(QML_FILES
     qml/components/ValueInput.qml
     qml/components/RatingInput.qml
     qml/components/TastePicker.qml
+    qml/components/TasteHelpCard.qml
     qml/components/ShotGraph.qml
     qml/components/SteamGraph.qml
     qml/components/StatusBar.qml

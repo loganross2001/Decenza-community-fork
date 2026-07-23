@@ -57,7 +57,7 @@ Settings::Settings(QObject* parent)
     , m_visualizer(new SettingsVisualizer(this))
     , m_mcp(new SettingsMcp(this))
     , m_brew(new SettingsBrew(this))
-    , m_dye(new SettingsDye(m_visualizer, this))
+    , m_dye(new SettingsDye(this))
     , m_network(new SettingsNetwork(this))
     , m_app(new SettingsApp(this))
     , m_calibration(new SettingsCalibration(this, this))
@@ -76,6 +76,32 @@ Settings::Settings(QObject* parent)
     // blocks below write keys. Used by one-shot migrations that need to behave
     // differently for new users vs upgrades.
     const bool freshInstall = m_settings.allKeys().isEmpty();
+
+    // Evict the dead shot-rating keys. Both are orphans of the removed
+    // default-shot-rating feature: shot/defaultRating was the setting itself,
+    // and dye/espressoEnjoyment was the sticky field it fed, which kept
+    // stamping a rating onto freshly pulled shots for one shot after the
+    // feature was deleted. Nothing reads either one now — migration 16 was the
+    // last reader and no longer needs it — but a stale rating sitting in the
+    // store is the shape of thing that leaks back into something, so it does
+    // not get to stay.
+    //
+    // Deliberately AFTER the freshInstall snapshot: eviction would otherwise
+    // make a store holding only these two keys look like a new install and
+    // skip the upgrade-only seeding below. Unreachable today (any real store
+    // carries profile/* too), but it is a trap for whoever extends this list.
+    //
+    // contains() first because remove() does not check: on the Apple native
+    // backend it issues an unconditional CFPreferencesSetValue(key, nullptr)
+    // and dirties the store, so an unguarded pair would queue a settings
+    // write on every launch forever. Guarded, a clean store costs two lookups.
+    // A store that cannot be written stays dirty and the keys survive — which
+    // is inert, since no reader for either one exists any more.
+    for (const auto& deadKey : {QStringLiteral("shot/defaultRating"),
+                                QStringLiteral("dye/espressoEnjoyment")}) {
+        if (m_settings.contains(deadKey))
+            m_settings.remove(deadKey);
+    }
 
     // Initialize default favorite profiles if none exist
     if (!m_settings.contains("profile/favorites")) {
@@ -366,18 +392,6 @@ Settings::Settings(QObject* parent)
         m_settings.setValue("mcp/apiKey", QUuid::createUuid().toString(QUuid::WithoutBraces));
     }
 
-    // Cross-domain wiring: when the user changes the default shot rating
-    // (Visualizer settings tab, MCP, settings import), also overwrite the
-    // persisted dye/espressoEnjoyment so the new value is reflected in the
-    // BrewDialog and on the next shot save — both in-progress and future
-    // shots see the change. Pre-split this was a side effect inside
-    // Settings::setDefaultShotRating(); it now lives here so any caller
-    // of SettingsVisualizer::setDefaultShotRating gets the same behaviour.
-    // Bean-modified tracking lives entirely inside SettingsDye now.
-    connect(m_visualizer, &SettingsVisualizer::defaultShotRatingChanged, this, [this]() {
-        m_dye->setDyeEspressoEnjoyment(m_visualizer->defaultShotRating());
-    });
-
     // Cross-domain wiring: SettingsCalibration::resetSawLearning() emits
     // sawLearningResetRequested so SettingsBrew can reset the hot-water SAW
     // offset state. Sub-objects do not call into other domains directly.
@@ -385,6 +399,35 @@ Settings::Settings(QObject* parent)
         m_brew->setHotWaterSawOffset(2.0);  // Back to default
         m_brew->setHotWaterSawSampleCount(0);
     });
+
+    // Cross-domain wiring: profile auto-load and recipe auto-load are
+    // mutually exclusive (recipe-auto-load) — setting one clears the other.
+    // Each setter already no-ops when the value is unchanged, so clearing the
+    // *other* domain's already-cleared value here does not re-enter or emit
+    // a spurious changed signal.
+    connect(m_app, &SettingsApp::autoLoadProfileFilenameChanged, this, [this]() {
+        if (!m_app->autoLoadProfileFilename().isEmpty())
+            m_dye->setAutoLoadRecipeId(-1);
+    });
+    connect(m_dye, &SettingsDye::autoLoadRecipeIdChanged, this, [this]() {
+        if (m_dye->autoLoadRecipeId() != -1)
+            m_app->setAutoLoadProfileFilename("");
+    });
+
+    // Load-time reconciliation: the reactive cross-clear above only fires on
+    // a live changed signal, so if both sides were ever simultaneously
+    // persisted on disk (hand-edited config, an import bundle predating this
+    // feature's export exclusion, or a future bug writing QSettings directly
+    // instead of through the setters), nothing would otherwise notice — and
+    // qml/main.qml fires both loadAutoLoadProfileIfNeeded() and
+    // loadAutoLoadRecipeIfNeeded() unconditionally on every trigger, so both
+    // would silently race. Recipe wins, matching the tests' restore-order
+    // convention (SettingsDye::autoLoadRecipeId restored last so it wins).
+    if (!m_app->autoLoadProfileFilename().isEmpty() && m_dye->autoLoadRecipeId() != -1) {
+        qWarning() << "Settings: both profile and recipe auto-load were persisted "
+                      "simultaneously - clearing the profile side (recipe wins)";
+        m_app->setAutoLoadProfileFilename("");
+    }
 }
 
 // Domain sub-object QML accessors. Each sub-object IS-A QObject; the upcast

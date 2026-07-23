@@ -460,6 +460,18 @@ KeyboardAwareContainer {
                         }
                     }
 
+                    AccessibleButton {
+                        visible: Settings.ai.aiProvider === "openai" || Settings.ai.aiProvider === "anthropic"
+                        text: TranslationManager.translate("settings.ai.advanced", "Advanced")
+                        accessibleName: TranslationManager.translate("settings.ai.advancedAccessible", "Configure custom API endpoint")
+                        onClicked: {
+                            endpointField.text = Settings.ai.aiProvider === "openai"
+                                ? Settings.ai.openaiEndpoint
+                                : Settings.ai.anthropicEndpoint
+                            advancedEndpointDialog.open()
+                        }
+                    }
+
                     Text {
                         visible: aiTab.testResultMessage.length > 0
                         text: aiTab.testResultMessage
@@ -1144,7 +1156,7 @@ KeyboardAwareContainer {
                                 id: claudeConnectorsArea
                                 anchors.fill: parent
                                 cursorShape: Qt.PointingHandCursor
-                                onClicked: Qt.openUrlExternally("https://claude.ai/settings/connectors")
+                                onClicked: Qt.openUrlExternally("https://claude.ai/customize/connectors")
                             }
                             Accessible.onPressAction: claudeConnectorsArea.clicked(null)
                         }
@@ -1372,6 +1384,80 @@ KeyboardAwareContainer {
     }
 
     // Discuss Shot app selector
+    // Advanced endpoint dialog (OpenAI / Anthropic custom endpoint)
+    Dialog {
+        id: advancedEndpointDialog
+        parent: Overlay.overlay
+        anchors.centerIn: parent
+        width: Math.min(parent ? parent.width - Theme.scaled(32) : Theme.scaled(360), Theme.scaled(420))
+        modal: true
+        closePolicy: Dialog.CloseOnEscape | Dialog.CloseOnPressOutside
+
+        onOpened: AccessibilityManager.announce(endpointDialogTitle.text)
+
+        background: Rectangle {
+            color: Theme.surfaceColor
+            radius: Theme.scaled(12)
+            border.color: Theme.borderColor
+            border.width: 1
+        }
+
+        contentItem: ColumnLayout {
+            spacing: Theme.scaled(12)
+
+            Text {
+                id: endpointDialogTitle
+                Layout.fillWidth: true
+                text: TranslationManager.translate("settings.ai.customEndpoint", "Custom Endpoint")
+                color: Theme.textColor
+                font.family: Theme.subtitleFont.family
+                font.pixelSize: Theme.subtitleFont.pixelSize
+                font.bold: true
+            }
+
+            Text {
+                Layout.fillWidth: true
+                text: TranslationManager.translate("settings.ai.customEndpointHint", "Leave empty for default. Set to use an OpenAI/Anthropic-compatible API endpoint.")
+                color: Theme.textSecondaryColor
+                font.pixelSize: Theme.scaled(12)
+                wrapMode: Text.Wrap
+            }
+
+            StyledTextField {
+                id: endpointField
+                Layout.fillWidth: true
+                placeholderText: Settings.ai.aiProvider === "openai"
+                    ? "https://api.openai.com"
+                    : "https://api.anthropic.com"
+                inputMethodHints: Qt.ImhNoPredictiveText | Qt.ImhNoAutoUppercase | Qt.ImhUrlCharactersOnly
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: Theme.scaled(8)
+                Item { Layout.fillWidth: true }
+                AccessibleButton {
+                    text: TranslationManager.translate("common.button.cancel", "Cancel")
+                    accessibleName: TranslationManager.translate("common.button.cancel", "Cancel")
+                    onClicked: advancedEndpointDialog.close()
+                }
+                AccessibleButton {
+                    primary: true
+                    text: TranslationManager.translate("common.button.save", "Save")
+                    accessibleName: TranslationManager.translate("settings.ai.saveEndpointAccessible", "Save custom endpoint")
+                    onClicked: {
+                        Qt.inputMethod.commit()
+                        switch(Settings.ai.aiProvider) {
+                            case "openai": Settings.ai.openaiEndpoint = endpointField.text; break
+                            case "anthropic": Settings.ai.anthropicEndpoint = endpointField.text; break
+                        }
+                        advancedEndpointDialog.close()
+                    }
+                }
+            }
+        }
+    }
+
     // MCP Help Dialog
     // Confirm rotating the remote-access token (revokes the current URL).
     Dialog {
@@ -1605,8 +1691,20 @@ KeyboardAwareContainer {
                         anchors.margins: Theme.scaled(8)
                         text: tailscaleSetupDialog.aclSnippet
                         color: Theme.textColor
-                        font.family: "monospace"
-                        font.pixelSize: Theme.scaled(11)
+                        // Real family names, not the generic "monospace" alias:
+                        // no platform provides a family by that name, so Qt ran
+                        // a full font-alias sweep (~66 ms, with a warning) and
+                        // fell back to a host font anyway. Ordered macOS /
+                        // Windows / Linux; Qt takes the first that exists.
+                        //
+                        // Built with Qt.font() rather than `font.families:`,
+                        // which is not assignable as a grouped property — that
+                        // spelling fails at load with "Cannot assign to
+                        // non-existent property". Same pattern as Theme.qml.
+                        font: Qt.font({
+                            families: ["Menlo", "Consolas", "DejaVu Sans Mono", "Courier New"],
+                            pixelSize: Theme.scaled(11)
+                        })
                         wrapMode: Text.WrapAnywhere
                         Accessible.name: TranslationManager.translate("settings.ai.remoteMcp.setup.snippetAccessible", "Tailscale ACL rule to grant Funnel")
                     }
@@ -1826,7 +1924,7 @@ KeyboardAwareContainer {
 
                     AccessibleButton {
                         text: TranslationManager.translate("common.close", "Close")
-                        accessibleName: TranslationManager.translate("common.accessibility.dismissDialog", "Close dialog")
+                        accessibleName: TranslationManager.translate("common.accessibility.dismissDialog", "Dismiss dialog")
                         onClicked: mcpHelpDialog.close()
                     }
                 }

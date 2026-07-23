@@ -7,10 +7,14 @@ import "../components"
 
 Page {
     id: settingsPage
+    // Declarative so it re-evaluates on a language change. This used to be an
+    // imperative assignment in onCompleted/onActivated, which ran once and left
+    // page titles in the previous language until you navigated away and back.
+    readonly property string pageTitle: TranslationManager.translate("settings.title", "Settings")
+
     objectName: "settingsPage"
     background: ThemedPageBackground {}
 
-    Component.onCompleted: root.currentPageTitle = TranslationManager.translate("settings.title", "Settings")
 
     // Requested tab to switch to (set before pushing page). Symbolic id from SettingsTabs.
     property string requestedTabId: ""
@@ -38,7 +42,6 @@ Page {
 
     // Switch to requested tab after page transition completes (page is fully laid out)
     StackView.onActivated: {
-        root.currentPageTitle = TranslationManager.translate("settings.title", "Settings")
         var idx = requestedTabId.length > 0 ? SettingsTabs.indexOf(requestedTabId) : -1
         if (idx >= 0) {
             markTabLoaded(idx)
@@ -67,11 +70,14 @@ Page {
         Accessible.focusable: true
         Accessible.onPressAction: searchMouseArea.clicked(null)
 
-        Image {
+        // ThemedIcon, not a bare Image: search.svg strokes white, and this button's
+        // background is Theme.surfaceColor — which is #ffffff in light mode. As a plain
+        // Image the icon was white-on-white and completely INVISIBLE in light mode.
+        // Found by looking at the running app in light mode, not by reading the code.
+        ThemedIcon {
             anchors.centerIn: parent
             source: "qrc:/icons/search.svg"
-            sourceSize.width: Theme.scaled(20)
-            sourceSize.height: Theme.scaled(20)
+            iconSize: Theme.scaled(20)
             Accessible.ignored: true
         }
 
@@ -125,7 +131,7 @@ Page {
             // Scrim the whole bar (not just the active tab) when a custom background
             // image is set — unselected tab labels otherwise sit directly on the photo
             // with no surface behind them, hurting legibility.
-            color: Settings.theme.backgroundImagePath.length > 0 ? Theme.cardBackgroundColor : "transparent"
+            color: Theme.glassChrome ? Theme.cardBackgroundColor : "transparent"
 
             // Bottom border line (active tab extends below to cover its portion)
             Rectangle {
@@ -245,6 +251,15 @@ Page {
                     if (tabId === "themes" && item) {
                         item.openSaveThemeDialog.connect(function() {
                             saveThemeDialog.open()
+                        })
+                    }
+                    // Machine tab's Maintenance card forwards to global navigation
+                    if (tabId === "machine" && item) {
+                        item.openDescaling.connect(function() {
+                            root.goToDescaling()
+                        })
+                        item.openTransport.connect(function() {
+                            root.goToTransport()
                         })
                     }
                 }

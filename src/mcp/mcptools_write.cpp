@@ -3,6 +3,7 @@
 #include "mcptoolregistry.h"
 #include "../history/shothistorystorage.h"
 #include "../history/shotprojection.h"
+#include "../history/recipestorage.h"
 #include "../history/coffeebagstorage.h"
 #include "../history/equipmentstorage.h"
 #include "../core/basketaliases.h"
@@ -10,6 +11,7 @@
 #include "../core/yieldspec.h"
 #include "../history/bagid.h"
 #include "../network/beanbase_blob.h"
+#include "../network/beanbaseclient.h"
 #include "../network/visualizeruploader.h"
 #include "../controllers/profilemanager.h"
 #include "../ai/aimanager.h"
@@ -33,6 +35,9 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QPointer>
+#include <functional>
+#include <limits>
 #include <QSet>
 #include <QDebug>
 #include <QSqlDatabase>
@@ -51,7 +56,8 @@ void registerWriteTools(McpToolRegistry* registry, ProfileManager* profileManage
                         ScreensaverVideoManager* screensaver,
                         TranslationManager* translation,
                         BatteryManager* battery,
-                        AIManager* aiManager)
+                        AIManager* aiManager,
+                        BeanBaseClient* beanbase)
 {
     // shots_update — replaces shots_set_feedback with full metadata editing (same as QML)
     registry->registerAsyncTool(
@@ -522,7 +528,6 @@ void registerWriteTools(McpToolRegistry* registry, ProfileManager* profileManage
                 {"dyeDrinkWeight", QJsonObject{{"type", "number"}, {"description", "Drink weight in grams"}}},
                 {"dyeDrinkTds", QJsonObject{{"type", "number"}, {"description", "TDS measurement"}}},
                 {"dyeDrinkEy", QJsonObject{{"type", "number"}, {"description", "Extraction yield percentage"}}},
-                {"dyeEspressoEnjoyment", QJsonObject{{"type", "integer"}, {"description", "Enjoyment rating 0-100"}}},
                 {"dyeShotNotes", QJsonObject{{"type", "string"}, {"description", "Shot notes"}}},
                 {"dyeBarista", QJsonObject{{"type", "string"}, {"description", "Barista name"}}},
                 // Machine
@@ -536,7 +541,6 @@ void registerWriteTools(McpToolRegistry* registry, ProfileManager* profileManage
                 {"waterLevelDisplayUnit", QJsonObject{{"type", "string"}, {"description", "Water level display unit"}}},
                 {"useFlowScale", QJsonObject{{"type", "boolean"}, {"description", "Use virtual flow scale"}}},
                 {"screenBrightness", QJsonObject{{"type", "number"}, {"description", "Screen brightness 0.0-1.0"}}},
-                {"defaultShotRating", QJsonObject{{"type", "integer"}, {"description", "Default shot enjoyment rating 0-100"}}},
                 {"launcherMode", QJsonObject{{"type", "boolean"}, {"description", "Enable kiosk/launcher mode (Android only)"}}},
                 {"flowCalibrationMultiplier", QJsonObject{{"type", "number"}, {"description", "Flow calibration multiplier"}}},
                 {"autoFlowCalibration", QJsonObject{{"type", "boolean"}, {"description", "Enable automatic flow calibration"}}},
@@ -584,6 +588,8 @@ void registerWriteTools(McpToolRegistry* registry, ProfileManager* profileManage
                 {"discussShotCustomUrl", QJsonObject{{"type", "string"}, {"description", "Custom URL for Discuss Shot"}}},
                 {"ollamaEndpoint", QJsonObject{{"type", "string"}, {"description", "Ollama endpoint URL"}}},
                 {"ollamaModel", QJsonObject{{"type", "string"}, {"description", "Ollama model name"}}},
+                {"openaiEndpoint", QJsonObject{{"type", "string"}, {"description", "Custom OpenAI-compatible endpoint URL (empty for default)"}}},
+                {"anthropicEndpoint", QJsonObject{{"type", "string"}, {"description", "Custom Anthropic-compatible endpoint URL (empty for default)"}}},
                 {"openrouterModel", QJsonObject{{"type", "string"}, {"description", "OpenRouter model name"}}},
                 // MQTT
                 {"mqttEnabled", QJsonObject{{"type", "boolean"}, {"description", "Enable MQTT"}}},
@@ -895,11 +901,9 @@ void registerWriteTools(McpToolRegistry* registry, ProfileManager* profileManage
             // — writing them via settings_set is a footgun, since the value
             // gets snapshotted into whatever shot completes next. To patch
             // a saved shot, use shots_update with drinkTds/drinkEy instead.
-            if (args.contains("dyeEspressoEnjoyment")) {
-                int v = qBound(0, args["dyeEspressoEnjoyment"].toInt(), 100);
-                addSetter([settings, v]() { settings->dye()->setDyeEspressoEnjoyment(v); });
-                updated << "dyeEspressoEnjoyment";
-            }
+            // There is no enjoyment key for the same reason, made permanent —
+            // see settings_dye.h. Rate a shot with shots_update
+            // enjoyment0to100.
             if (args.contains("dyeShotNotes")) {
                 QString v = args["dyeShotNotes"].toString();
                 addSetter([settings, v]() { settings->dye()->setDyeShotNotes(v); });
@@ -961,11 +965,6 @@ void registerWriteTools(McpToolRegistry* registry, ProfileManager* profileManage
                 double v = args["screenBrightness"].toDouble();
                 addSetter([settings, v]() { settings->theme()->setScreenBrightness(v); });
                 updated << "screenBrightness";
-            }
-            if (args.contains("defaultShotRating")) {
-                int v = qBound(0, args["defaultShotRating"].toInt(), 100);
-                addSetter([settings, v]() { settings->visualizer()->setDefaultShotRating(v); });
-                updated << "defaultShotRating";
             }
             if (args.contains("launcherMode")) {
                 bool v = args["launcherMode"].toBool();
@@ -1170,6 +1169,16 @@ void registerWriteTools(McpToolRegistry* registry, ProfileManager* profileManage
                     QString v = args["ollamaEndpoint"].toString();
                     addSetter([a, v]() { a->setOllamaEndpoint(v); });
                     updated << "ollamaEndpoint";
+                }
+                if (args.contains("openaiEndpoint")) {
+                    QString v = args["openaiEndpoint"].toString();
+                    addSetter([a, v]() { a->setOpenaiEndpoint(v); });
+                    updated << "openaiEndpoint";
+                }
+                if (args.contains("anthropicEndpoint")) {
+                    QString v = args["anthropicEndpoint"].toString();
+                    addSetter([a, v]() { a->setAnthropicEndpoint(v); });
+                    updated << "anthropicEndpoint";
                 }
                 if (args.contains("ollamaModel")) {
                     QString v = args["ollamaModel"].toString();
@@ -1447,7 +1456,9 @@ void registerWriteTools(McpToolRegistry* registry, ProfileManager* profileManage
         "profiles_set_auto_load",
         "Pin a profile as the auto-load target. The pinned profile is reloaded "
         "on app start, DE1 wake-from-sleep, and after `revertMinutes` of "
-        "inactivity on the Idle page. Replaces any prior auto-load. The "
+        "inactivity on the Idle page. Replaces any prior auto-load AND clears "
+        "any recipe auto-load (see recipe_set_auto_load) — a profile and a "
+        "recipe auto-load are mutually exclusive. The "
         "filename must exist and be in the Selected list.",
         QJsonObject{
             {"type", "object"},
@@ -1504,7 +1515,8 @@ void registerWriteTools(McpToolRegistry* registry, ProfileManager* profileManage
         "profiles_clear_auto_load",
         "Disable auto-load by clearing the pinned filename. Does not modify "
         "`revertMinutes` — the configured timeout is preserved across "
-        "enable/disable cycles.",
+        "enable/disable cycles. Only clears the profile side; a configured "
+        "recipe auto-load (see recipe_clear_auto_load) is unaffected.",
         QJsonObject{{"type", "object"}, {"properties", QJsonObject{}}},
         [settings](const QJsonObject&, std::function<void(QJsonObject)> respond) {
             if (!settings) {
@@ -1513,6 +1525,182 @@ void registerWriteTools(McpToolRegistry* registry, ProfileManager* profileManage
             }
             QMetaObject::invokeMethod(qApp, [settings, respond]() {
                 settings->app()->setAutoLoadProfileFilename("");
+                respond(QJsonObject{{"success", true}});
+            }, Qt::QueuedConnection);
+        },
+        "settings");
+
+    // recipe_get_auto_load — mirrors profiles_get_auto_load (recipe-auto-load).
+    // Lives here rather than mcptools_recipes.cpp: that file's
+    // recipe_activate/recipe_archive call real MainController methods, so
+    // linking it at all (even for tools that don't need MainController) pulls
+    // in MainController's full subsystem closure — this file already tests
+    // cleanly without it.
+    registry->registerAsyncTool(
+        "recipe_get_auto_load",
+        "Get the configured auto-load recipe id and the shared revert timeout. Auto-load "
+        "reloads the pinned recipe on app start, DE1 wake-from-sleep, and after "
+        "`revertMinutes` of inactivity on the Idle page. A profile and a recipe auto-load "
+        "are mutually exclusive — pinning one clears the other (see profiles_get_auto_load).",
+        QJsonObject{{"type", "object"}, {"properties", QJsonObject{}}},
+        [shotHistory, settings](const QJsonObject&, std::function<void(QJsonObject)> respond) {
+            if (!settings) {
+                respond(QJsonObject{{"error", "Settings not available"}});
+                return;
+            }
+            const qint64 recipeId = settings->dye()->autoLoadRecipeId();
+            const int revertMinutes = settings->app()->autoLoadRevertMinutes();
+            if (recipeId < 0) {
+                // Genuinely unconfigured — nothing pinned, no verification needed.
+                QJsonObject result;
+                result["recipeId"] = QJsonValue(QJsonValue::Null);
+                result["revertMinutes"] = revertMinutes;
+                respond(result);
+                return;
+            }
+            if (!shotHistory || !shotHistory->isReady()) {
+                // A recipe IS configured but its existence/archived state can't be
+                // verified right now — report that distinctly rather than as
+                // "unconfigured" (recipeId: null), which would misinform a caller
+                // into thinking nothing is pinned.
+                respond(QJsonObject{{"error", "Storage not available"}});
+                return;
+            }
+            const QString dbPath = shotHistory->databasePath();
+            QThread* thread = QThread::create([dbPath, recipeId, revertMinutes, respond]() {
+                QString name;
+                bool found = false;
+                const bool opened = withTempDb(dbPath, "mcp_recipe_get_auto_load", [&](QSqlDatabase& db) {
+                    const Recipe r = RecipeStorage::loadRecipeStatic(db, recipeId);
+                    if (r.isValid()) {
+                        name = r.name;
+                        found = true;
+                    }
+                });
+                QMetaObject::invokeMethod(qApp, [opened, found, name, recipeId, revertMinutes, respond]() {
+                    if (!opened) {
+                        // A DB-open failure is a transient error, not proof the row
+                        // is gone — distinct from the stale-id case below, which
+                        // deliberately reports as unconfigured rather than an error
+                        // (this read is a snapshot; the next auto-load trigger will
+                        // discover and clear a genuinely stale id the same way).
+                        respond(QJsonObject{{"error", "Could not open shot database"}});
+                        return;
+                    }
+                    QJsonObject result;
+                    result["recipeId"] = found ? QJsonValue(recipeId) : QJsonValue(QJsonValue::Null);
+                    if (found)
+                        result["name"] = name;
+                    result["revertMinutes"] = revertMinutes;
+                    respond(result);
+                }, Qt::QueuedConnection);
+            });
+            QObject::connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+            thread->start();
+        },
+        "read");
+
+    // recipe_set_auto_load — pin a recipe as the auto-load target. Mirrors
+    // profiles_set_auto_load; validates recipeId against the DB on a
+    // background thread (existence + not archived), then hops to the GUI
+    // thread for the settings write. Setting this clears any profile
+    // auto-load (SettingsApp::autoLoadProfileFilename), wired via Settings'
+    // cross-domain connections (see settings.cpp) — not duplicated here.
+    registry->registerAsyncTool(
+        "recipe_set_auto_load",
+        "Pin a recipe as the auto-load target. The pinned recipe is reactivated on app start, "
+        "DE1 wake-from-sleep, and after `revertMinutes` of inactivity on the Idle page. "
+        "Replaces any prior recipe auto-load AND clears any profile auto-load (the two are "
+        "mutually exclusive). The recipeId must exist and not be archived.",
+        QJsonObject{
+            {"type", "object"},
+            {"properties", QJsonObject{
+                {"recipeId", QJsonObject{{"type", "integer"}, {"description", "Recipe ID (from recipe_list)"}}},
+                {"revertMinutes", QJsonObject{{"type", "integer"}, {"description", "Optional. Minutes of idle inactivity on the Idle page before reverting to the auto-load recipe. Range 0..60 (clamped); 0 disables the idle trigger but keeps the startup and wake-from-sleep triggers. Shared with the profile auto-load timeout."}}}
+            }},
+            {"required", QJsonArray{"recipeId"}}
+        },
+        [shotHistory, settings](const QJsonObject& args, std::function<void(QJsonObject)> respond) {
+            if (!settings) {
+                respond(QJsonObject{{"error", "Settings not available"}});
+                return;
+            }
+            if (!args.contains("recipeId")) {
+                respond(QJsonObject{{"error", "recipeId is required"}});
+                return;
+            }
+            const qint64 recipeId = args["recipeId"].toInteger();
+            if (recipeId <= 0) {
+                respond(QJsonObject{{"error", "recipeId must be a positive integer"}});
+                return;
+            }
+            if (recipeId > std::numeric_limits<int>::max()) {
+                respond(QJsonObject{{"error", "recipeId is out of range"}});
+                return;
+            }
+            if (!shotHistory || !shotHistory->isReady()) {
+                respond(QJsonObject{{"error", "Storage not available"}});
+                return;
+            }
+            const bool hasRevert = args.contains("revertMinutes");
+            const int revertMinutes = hasRevert ? args["revertMinutes"].toInt() : -1;
+            const QString dbPath = shotHistory->databasePath();
+            QThread* thread = QThread::create([dbPath, recipeId, hasRevert, revertMinutes, settings, respond]() {
+                QString name;
+                bool found = false;
+                bool archived = false;
+                const bool opened = withTempDb(dbPath, "mcp_recipe_set_auto_load", [&](QSqlDatabase& db) {
+                    const Recipe r = RecipeStorage::loadRecipeStatic(db, recipeId);
+                    if (r.isValid()) {
+                        found = true;
+                        name = r.name;
+                        archived = r.archived;
+                    }
+                });
+                QMetaObject::invokeMethod(qApp, [opened, found, archived, name, recipeId, hasRevert, revertMinutes, settings, respond]() {
+                    if (!opened) {
+                        respond(QJsonObject{{"error", "Could not open shot database"}});
+                        return;
+                    }
+                    if (!found) {
+                        respond(QJsonObject{{"error", QString("Recipe not found: %1").arg(recipeId)}});
+                        return;
+                    }
+                    if (archived) {
+                        respond(QJsonObject{{"error", "Recipe is archived"}});
+                        return;
+                    }
+                    settings->dye()->setAutoLoadRecipeId(static_cast<int>(recipeId));
+                    if (hasRevert)
+                        settings->app()->setAutoLoadRevertMinutes(revertMinutes);
+                    QJsonObject result;
+                    result["success"] = true;
+                    result["recipeId"] = recipeId;
+                    result["name"] = name;
+                    result["revertMinutes"] = settings->app()->autoLoadRevertMinutes();
+                    respond(result);
+                }, Qt::QueuedConnection);
+            });
+            QObject::connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+            thread->start();
+        },
+        "settings");
+
+    // recipe_clear_auto_load — disable auto-load without affecting the
+    // shared revert timeout. Mirrors profiles_clear_auto_load.
+    registry->registerAsyncTool(
+        "recipe_clear_auto_load",
+        "Disable auto-load by clearing the pinned recipe id. Does not modify `revertMinutes` "
+        "— the configured timeout (shared with the profile side) is preserved across "
+        "enable/disable cycles.",
+        QJsonObject{{"type", "object"}, {"properties", QJsonObject{}}},
+        [settings](const QJsonObject&, std::function<void(QJsonObject)> respond) {
+            if (!settings) {
+                respond(QJsonObject{{"error", "Settings not available"}});
+                return;
+            }
+            QMetaObject::invokeMethod(qApp, [settings, respond]() {
+                settings->dye()->setAutoLoadRecipeId(-1);
                 respond(QJsonObject{{"success", true}});
             }, Qt::QueuedConnection);
         },
@@ -1694,7 +1882,7 @@ void registerWriteTools(McpToolRegistry* registry, ProfileManager* profileManage
             }},
             {"required", QJsonArray{"bagId"}}
         },
-        [shotHistory, bagToJson, bagStorage](const QJsonObject& args, std::function<void(QJsonObject)> respond) {
+        [shotHistory, bagToJson, bagStorage, beanbase](const QJsonObject& args, std::function<void(QJsonObject)> respond) {
             if (!shotHistory || !shotHistory->isReady()) {
                 respond(QJsonObject{{"error", "Storage not available"}});
                 return;
@@ -1777,7 +1965,38 @@ void registerWriteTools(McpToolRegistry* registry, ProfileManager* profileManage
             const QString dbPath = shotHistory->databasePath();
 
             // Load the just-updated bag on a background thread and respond.
+            // Always create the reader thread ON THE MAIN THREAD.
+            //
+            // This lambda is invoked from THREE places: :1842 (bagUpdated
+            // handler, main thread), :1857 (the headless fallback path, from
+            // INSIDE a QThread::create worker — the leak), and :1969 (the
+            // idempotent-merge early return, main thread via invokeMethod).
+            // Only the middle one runs off the main thread.
+            //
+            // In that second case the QThread built below inherited the
+            // WORKER's thread affinity, so deleteLater() on its finished()
+            // signal posted a DeferredDelete to the WORKER's event queue. A
+            // QThread::create thread never calls exec(), and has usually exited
+            // by then, so nothing ever processed that event: the QThread and
+            // its internals were never freed.
+            //
+            // Measured as 6,540 bytes / 70 allocations leaked in
+            // tst_mcptools_write. It survived a 250 ms drain of the MAIN
+            // thread's event queue — because the pending delete was never on
+            // the main thread's queue at all, which is what made two earlier
+            // explanations of this leak wrong. Confirmed by probe: on the
+            // fallback path this lambda reported
+            // currentThread() != qApp->thread() on every call.
+            //
+            // The hop makes affinity identical on all three paths, so the
+            // deferred delete always lands on an event loop that actually runs.
+            //
+            // Confirmed, not assumed: the nightly Linux ASan job reported
+            // 6,540 bytes / 70 allocations here before this change and ZERO
+            // after (run 29707910438, 84/84, no LeakSanitizer reports).
+            // LeakSanitizer is Linux-only, so no local run could have shown it.
             auto respondWithBag = [dbPath, bagId, bagToJson, respond]() {
+              QMetaObject::invokeMethod(qApp, [dbPath, bagId, bagToJson, respond]() {
                 QThread* t = QThread::create([dbPath, bagId, bagToJson, respond]() {
                     CoffeeBag updated;
                     withTempDb(dbPath, "mcp_bagupd_read", [&](QSqlDatabase& db) {
@@ -1797,9 +2016,17 @@ void registerWriteTools(McpToolRegistry* registry, ProfileManager* profileManage
                 });
                 QObject::connect(t, &QThread::finished, t, &QObject::deleteLater);
                 t->start();
+              }, Qt::QueuedConnection);
             };
 
-            auto proceed = [dbPath, bagId, bagStorage, respondWithBag, respond](const QVariantMap& finalFields) {
+            // onSuccess runs ONLY after the write is confirmed. Anything with
+            // side effects outside this bag — evicting a bag photo whose cache
+            // key is shared by every bag on the same canonical bean — belongs
+            // there, not before the write, where a failed or nonexistent update
+            // would still have changed what other bags display.
+            auto proceed = [dbPath, bagId, bagStorage, respondWithBag, respond](
+                               const QVariantMap& finalFields,
+                               std::function<void()> onSuccess = {}) {
                 if (bagStorage) {
                     // Route through the storage INSTANCE so the write fires
                     // bagsChanged (open inventory views refresh), bagVisualizer-
@@ -1808,10 +2035,10 @@ void registerWriteTools(McpToolRegistry* registry, ProfileManager* profileManage
                     // handler. That refresh is a no-op re-apply, so it does NOT
                     // reset the user's brew overrides — unlike the old
                     // setActiveBagId(-1) toggle, which fired clearBrewOverrides.
-                    QMetaObject::invokeMethod(qApp, [bagStorage, bagId, finalFields, respondWithBag, respond]() {
+                    QMetaObject::invokeMethod(qApp, [bagStorage, bagId, finalFields, respondWithBag, respond, onSuccess]() {
                         auto conn = std::make_shared<QMetaObject::Connection>();
                         *conn = QObject::connect(bagStorage, &CoffeeBagStorage::bagUpdated, bagStorage,
-                            [conn, bagId, respondWithBag, respond](qint64 updatedId, bool success) {
+                            [conn, bagId, respondWithBag, respond, onSuccess](qint64 updatedId, bool success) {
                                 if (updatedId != bagId)
                                     return;  // a concurrent update of a different bag
                                 QObject::disconnect(*conn);
@@ -1820,6 +2047,8 @@ void registerWriteTools(McpToolRegistry* registry, ProfileManager* profileManage
                                                                   + QString::number(bagId)}});
                                     return;
                                 }
+                                if (onSuccess)
+                                    onSuccess();
                                 respondWithBag();
                             });
                         bagStorage->requestUpdateBag(bagId, finalFields);
@@ -1829,12 +2058,14 @@ void registerWriteTools(McpToolRegistry* registry, ProfileManager* profileManage
 
                 // Fallback (no storage instance — e.g. headless tests): direct
                 // static write. Skips the in-app refresh/sync signals.
-                QThread* thread = QThread::create([dbPath, bagId, finalFields, respondWithBag, respond]() {
+                QThread* thread = QThread::create([dbPath, bagId, finalFields, respondWithBag, respond, onSuccess]() {
                     bool success = false;
                     withTempDb(dbPath, "mcp_bagupd", [&](QSqlDatabase& db) {
                         success = CoffeeBagStorage::updateBagFieldsStatic(db, bagId, finalFields);
                     });
                     if (success) {
+                        if (onSuccess)
+                            QMetaObject::invokeMethod(qApp, onSuccess, Qt::QueuedConnection);
                         respondWithBag();
                     } else {
                         QMetaObject::invokeMethod(qApp, [bagId, respond]() {
@@ -1866,10 +2097,12 @@ void registerWriteTools(McpToolRegistry* registry, ProfileManager* profileManage
             }
 
             // Read the current blob, merge, then run the normal update.
-            QThread* mergeThread = QThread::create([dbPath, bagId, fields, blobEdits, proceed, respondWithBag, respond]() {
+            QPointer<BeanBaseClient> safeBeanbase(beanbase);
+            QThread* mergeThread = QThread::create([dbPath, bagId, fields, blobEdits, safeBeanbase,
+                                                   proceed, respondWithBag, respond]() {
                 bool found = false;
                 bool isTea = false;
-                QString currentBlob, curRoaster, curCoffee, curLevel;
+                QString currentBlob, curRoaster, curCoffee, curLevel, curBeanBaseId;
                 withTempDb(dbPath, "mcp_bagupd_blob", [&](QSqlDatabase& db) {
                     const CoffeeBag bag = CoffeeBagStorage::loadBagStatic(db, bagId);
                     found = bag.isValid();
@@ -1878,8 +2111,10 @@ void registerWriteTools(McpToolRegistry* registry, ProfileManager* profileManage
                     curRoaster = bag.roasterName;
                     curCoffee = bag.coffeeName;
                     curLevel = bag.roastLevel;
+                    curBeanBaseId = bag.beanBaseId;
                 });
                 QMetaObject::invokeMethod(qApp, [found, isTea, currentBlob, curRoaster, curCoffee, curLevel,
+                                                 curBeanBaseId, safeBeanbase,
                                                  bagId, fields, blobEdits, proceed, respondWithBag, respond]() {
                     if (!found) {
                         respond(QJsonObject{{"error", "Bag not found: " + QString::number(bagId)}});
@@ -1942,6 +2177,34 @@ void registerWriteTools(McpToolRegistry* registry, ProfileManager* profileManage
                     const QString merged = BeanBaseBlob::mergeBeanDetails(currentBlob, edits);
                     if (merged != currentBlob)
                         finalFields.insert("beanBaseData", merged);
+
+                    // `link` is an editable blob key, so this tool can change a
+                    // bag's product URL — and the cached photo describes the OLD
+                    // page. The bag editor and the web /beans editor both
+                    // re-resolve on this edit; without it MCP was the remaining
+                    // way to change the URL and keep the wrong picture.
+                    //
+                    // Deferred to the write's success handler, NOT run here. The
+                    // comparison itself is race-free (the pre-read put the old
+                    // blob in hand), but the cache key is shared by every bag on
+                    // the same canonical bean, so refreshing for an update that
+                    // then fails would change the photo other bags display for a
+                    // link change that was never persisted.
+                    const auto linkOf = [](const QString& blob) {
+                        return QJsonDocument::fromJson(blob.toUtf8())
+                            .object().value(QStringLiteral("link")).toString().trimmed();
+                    };
+                    const QString newLink = linkOf(merged);
+                    std::function<void()> refreshPhoto;
+                    if (safeBeanbase && !newLink.isEmpty() && newLink != linkOf(currentBlob)) {
+                        const QString imageKey = curBeanBaseId.isEmpty()
+                            ? QStringLiteral("bag-%1").arg(bagId) : curBeanBaseId;
+                        const QString roastName = fields.value("coffeeName", curCoffee).toString();
+                        refreshPhoto = [safeBeanbase, imageKey, roastName, newLink]() {
+                            if (safeBeanbase)
+                                safeBeanbase->refreshBagImage(imageKey, roastName, newLink);
+                        };
+                    }
                     if (finalFields.isEmpty()) {
                         // Everything merged to its current value (idempotent
                         // re-apply, or clearing an already-absent key): a
@@ -1950,7 +2213,7 @@ void registerWriteTools(McpToolRegistry* registry, ProfileManager* profileManage
                         respondWithBag();
                         return;
                     }
-                    proceed(finalFields);
+                    proceed(finalFields, refreshPhoto);
                 }, Qt::QueuedConnection);
             });
             QObject::connect(mergeThread, &QThread::finished, mergeThread, &QObject::deleteLater);
@@ -2305,7 +2568,25 @@ void registerWriteTools(McpToolRegistry* registry, ProfileManager* profileManage
                 bool ok = false;
                 qint64 resultId = packageId;
                 EquipmentPackageView view;
+                // Active-name uniqueness (block-duplicate-active-names). This tool
+                // writes the name through updatePackageFieldsStatic on its own
+                // connection and never reaches EquipmentStorage::requestUpdatePackage,
+                // so the guard has to be repeated here or MCP is the one surface
+                // that can still mint a duplicate. Same rule as the storage path:
+                // only an actual RENAME can collide (a derived name that already
+                // matches another package must stay editable), and it is checked
+                // before anything is written so a refusal is a clean no-op.
+                bool nameInUse = false;
                 withTempDb(dbPath, "mcp_equip_upd", [&](QSqlDatabase& db) {
+                    if (pkgFields.contains(QStringLiteral("name"))) {
+                        const QString newName = pkgFields.value(QStringLiteral("name")).toString().trimmed();
+                        const QString oldName = EquipmentStorage::loadPackageStatic(db, packageId).name.trimmed();
+                        if (QString::compare(newName, oldName, Qt::CaseInsensitive) != 0
+                            && EquipmentStorage::findPackageByNameStatic(db, newName, packageId) > 0) {
+                            nameInUse = true;
+                            return;
+                        }
+                    }
                     if (touchesGrinder || touchesBasket || touchesPuckPrep) {
                         // Copy-on-write/merge over the full (grinder + basket + puck
                         // prep) identity; an untouched side defaults from the current
@@ -2320,16 +2601,50 @@ void registerWriteTools(McpToolRegistry* registry, ProfileManager* profileManage
                                 haveBasketBrand ? basketBrand : curBasket.brand,
                                 haveBasketModel ? basketModel : curBasket.model,
                                 PuckPrep::canonicalMerged(curPuck.model, puckOverrides));
-                        ok = (resultId > 0);
+                        // -1 = the identity edit rolled back. Stop rather than
+                        // applying the rest against a sentinel id and reporting a
+                        // partial save (see supersedeOrEditStatic).
+                        if (resultId <= 0) {
+                            ok = false;
+                            return;
+                        }
+                        ok = true;
                     }
-                    if (!pkgFields.isEmpty())
-                        ok = EquipmentStorage::updatePackageFieldsStatic(db, resultId, pkgFields) || ok;
+                    if (!pkgFields.isEmpty()) {
+                        // The `ok = update(...) || ok` this replaced did TWO jobs:
+                        // it masked a failed rename behind a successful identity
+                        // edit (the bug), and it set ok on a successful rename (not
+                        // the bug). Dropping the whole expression dropped both, so
+                        // a name-only update — no identity fields, ok never set by
+                        // the block above — committed the rename and then reported
+                        // "update failed". Both halves are spelled out now.
+                        if (!EquipmentStorage::updatePackageFieldsStatic(db, resultId, pkgFields)) {
+                            ok = false;
+                            return;
+                        }
+                        ok = true;
+                    }
                     view.package = EquipmentStorage::loadPackageStatic(db, resultId);
                     view.grinder = EquipmentStorage::loadGrinderItemStatic(db, resultId);
                     view.basket = EquipmentStorage::loadBasketItemStatic(db, resultId);
                     view.puckPrep = EquipmentStorage::loadPuckPrepItemStatic(db, resultId);
+                    // shotCount is a per-query aggregate, not a package column, so
+                    // it defaults to 0 unless filled in — and this response was
+                    // reporting every edited package as having no history, however
+                    // many shots it held. An assistant reading that would conclude
+                    // the package is disposable.
+                    QSqlQuery shots(db);
+                    shots.prepare("SELECT COUNT(*) FROM shots WHERE equipment_id = :id");
+                    shots.bindValue(":id", resultId);
+                    if (shots.exec() && shots.next())
+                        view.shotCount = shots.value(0).toLongLong();
                 });
-                QMetaObject::invokeMethod(qApp, [ok, view, activeId, packageId, packageToJson, respond]() {
+                QMetaObject::invokeMethod(qApp, [ok, nameInUse, view, activeId, packageId, packageToJson, respond]() {
+                    if (nameInUse) {
+                        respond(QJsonObject{{"error", "That name is already in use by another equipment "
+                                                      "package — choose a different name"}});
+                        return;
+                    }
                     if (!ok || !view.package.isValid()) {
                         respond(QJsonObject{{"error", "Package not found or update failed: "
                                                       + QString::number(packageId)}});

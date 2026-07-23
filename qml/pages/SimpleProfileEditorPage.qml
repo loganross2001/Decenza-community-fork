@@ -14,8 +14,15 @@ import "../components"
  */
 Page {
     id: editorPage
+    // Declarative so it re-evaluates on a language change. This used to be an
+    // imperative assignment in onCompleted/onActivated, which ran once and left
+    // page titles in the previous language until you navigated away and back.
+    readonly property string pageTitle: ProfileManager.currentProfileName || editorTitle
+
     objectName: isFlow ? "flowEditorPage" : "pressureEditorPage"
-    background: ThemedPageBackground {}
+    // suppressShotChart: this page draws its own graph, and the last-shot chart
+    // background would put a second set of curves behind it.
+    background: ThemedPageBackground { suppressShotChart: true }
 
     required property string profileType
     readonly property bool isFlow: profileType === "flow"
@@ -1262,7 +1269,6 @@ Page {
             ProfileManager.markProfileClean()
         }
         var editorTitle = isFlow ? tr("title", "Flow Profile Editor") : tr("title", "Pressure Profile Editor")
-        root.currentPageTitle = ProfileManager.currentProfileName || editorTitle
         Qt.callLater(function() {
             if (profile && profile.steps) {
                 profileGraph.frames = profile.steps.slice()

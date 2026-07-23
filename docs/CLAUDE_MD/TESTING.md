@@ -6,6 +6,13 @@ Qt Test (QTest) — ships with Qt, no external dependencies, integrates with CMa
 
 ## Building and Running
 
+> **Assistants: use the Qt Creator MCP, not the commands below.** `mcp__qtcreator__run_tests`
+> (`scope: "all"`, or `scope: "named"` for one test) builds and runs, and returns a pass/fail
+> summary; `mcp__qtcreator__build` is the build half. The `cmake`/`ctest`/`./tests/tst_*` lines
+> in this file are reference for **humans and CI**. Never run them from a shell — including for
+> the full pre-PR suite, a single target, or after an MCP call times out. If the MCP path is
+> blocked, stop and ask. See the Building section of the root `CLAUDE.md`.
+
 Tests are **auto-enabled in Debug builds** (single-config generators like Ninja/Make) and **in Linux CI releases**. Multi-config generators (Visual Studio, Xcode) require `-DBUILD_TESTS=ON` explicitly since `CMAKE_BUILD_TYPE` is empty at configure time.
 
 ```bash
@@ -33,9 +40,65 @@ When seeding raw pre-construction settings state in a test, write through the **
 
 `--repeat until-pass:3` covers two clock-cadence tests — `tst_settling` (feeds samples at real `qWait` intervals and asserts plateau detection over time windows) and `tst_decentscalewifi` — that can occasionally miss a timing window under heavy CPU contention when many tests run at once. The retry re-runs only a failed test; a genuine regression fails all three attempts. In Qt Creator's CTest settings you can add the same flag, or just re-run a lone flaky result.
 
+### Running under UBSan
+
+Debug builds instrument automatically (see below). To run an explicit instrumented suite the way nightly CI does:
+
+```bash
+# Separate build dir — sanitized objects don't mix with your normal build
+mkdir build-ubsan && cd build-ubsan
+cmake -G Ninja -DCMAKE_PREFIX_PATH=~/Qt/6.11.1/macos -DCMAKE_BUILD_TYPE=Release \
+      -DBUILD_TESTS=ON -DENABLE_UBSAN=ON ..
+ninja
+
+# halt_on_error=1 is essential: without it UBSan prints the diagnostic and the
+# test still exits 0, so a green run can hide findings.
+UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 \
+  ctest --output-on-failure -j$(sysctl -n hw.ncpu) --repeat until-pass:3
+```
+
+**Debug builds instrument themselves.** A Debug configure turns on ASan *and* UBSan on every desktop platform including macOS (Android is excluded — its ASan needs `wrap.sh` packaging this project does not do). UBSan runs in **recovering** mode there: it prints a diagnostic and the app keeps going, so you are told about undefined behaviour without losing your session.
+
+**LeakSanitizer is Linux-only — your local run cannot detect leaks.** This is worth stating plainly because the natural inference from "ASan is on locally" is wrong, and it has already been drawn:
+
+```
+$ ASAN_OPTIONS=detect_leaks=1 ./tests/tst_mcptools_write
+==11353==AddressSanitizer: detect_leaks is not supported on this platform.
+```
+
+The runtime refuses the option; there is no flag that turns it on. On macOS, ASan covers use-after-free, heap-buffer-overflow, stack-use-after-return and double-free — a leak is invisible to it. So "84/84 passed under ASan" on a Mac means *no memory errors*, never *no leaks*.
+
+The nightly Linux ASan job (`ASAN_OPTIONS=detect_leaks=1`) is the only place leaks are caught. Its first run found two that the local suite had been passing over: `tst_decentscalewifi` (131,068 bytes / 1,372 allocations) and `tst_mcptools_write` (6,540 bytes / 70 allocations), byte-identical across all three retry attempts.
+
+To chase a leak on macOS, use the platform tools instead: `leaks <pid>`, or `MallocStackLogging=1` for allocation stacks.
+
+A **Release** build carries no instrumentation unless you ask. `-DENABLE_UBSAN=ON` gives the **halting** mode CI uses, where a finding aborts. `-DENABLE_ASAN=ON` does the same for memory errors, and the two combine. UBSan is not supported with MSVC (configure fails fast).
+
+**What the instrumented build turns on beyond plain UBSan**, and why each one is there:
+
+| Setting | Catches |
+|---|---|
+| `-fno-sanitize-recover=all` | Makes a finding *abort*. UBSan's default is report-and-continue, so without this a run prints undefined behaviour and still exits 0. Baked into the build so it does not depend on `UBSAN_OPTIONS` being set. |
+| `local-bounds`, `float-divide-by-zero` | Array overrun on locals; division by zero in flow/pressure/ratio maths (defined as inf by IEEE 754, but a bug every time here). |
+| `_LIBCPP_HARDENING_MODE` / `_GLIBCXX_ASSERTIONS` | Out-of-bounds `vector`/`QVector` `operator[]` **inside** the allocation — invisible to *both* sanitizers (ASan: memory is validly owned; UBSan: no language-level UB), and it silently returns garbage. |
+| `QT_FORCE_ASSERTS` | Keeps `Q_ASSERT` live. The sanitizer job is a Release-type build, where assertions would otherwise compile to nothing in the very run built to check invariants. |
+
+The `integer` group (unsigned overflow, implicit conversions) is deliberately **not** enabled: that is legal C++ which CRC and hashing code wraps on purpose, so it would report intent as a defect.
+
+Two exclusions are forced rather than chosen, and both were found by a Linux/GCC build failing on a tree that was clean on macOS:
+
+- **`vptr` is off** (`-fno-sanitize=vptr`). It instruments downcasts through a polymorphic hierarchy and needs the target's typeinfo at link time; `decentscalewifi.cpp` downcasts `QObjectPrivate*` to `QWebSocketPrivate*`, and Qt does not export typeinfo for private classes on Linux. The cost: bad-downcast detection is off everywhere, including for that downcast, whose validity rests on a convention the code's own comment says to re-verify on each Qt upgrade.
+- **Optional checks are probed, not assumed.** `local-bounds` is clang-only and GCC rejects the entire compile. `CMakeLists.txt` uses `check_cxx_compiler_flag` so unsupported checks are dropped per-toolchain — which also covers iOS, Android and Windows without predicting their compilers. If you add a check, add it to that probe list rather than to the flag string.
+
+**ThreadSanitizer does not work here.** Qt ships uninstrumented (`nm -u` on QtCore shows zero `__tsan` symbols), so TSan cannot see the mutexes inside Qt's event queue that establish happens-before between a `Qt::QueuedConnection` poster and its worker. A trial run produced 10,194 reports, 94% of them through Qt's queued-connection machinery — every *correct* cross-thread handoff reads as a race. Making it usable means rebuilding Qt with `-fsanitize=thread`. Don't wire it to CI without that.
+
+**The `sanitizer_canary` test.** Registered only under `ENABLE_UBSAN`, it commits deliberate signed overflow and fails unless the sanitizer both kills the process *and* prints a diagnostic. It exists because a silently-unapplied sanitizer produces exactly the same green suite as a clean codebase — so without it, a gate that has rotted into a no-op is invisible by construction. If it fails, the instrumentation is not reaching the compile/link line; fix that before trusting any other green result.
+
 ### CI
 
-The Linux release workflow (`linux-release.yml`) builds and runs all tests before packaging the AppImage. Tests run on every tag push (releases and pre-releases) and manual workflow dispatch. Other platform workflows (Windows, macOS, Android, iOS) do not currently run the test suite.
+**There is no pull-request CI gate** — the suite is run locally before opening a PR, and that is the gate. `nightly-sanitizers.yml` runs the suite nightly on `main` under UBSan and ASan as two independent Linux builds. On **tag push**, `linux-release.yml` builds and runs all tests (uninstrumented) before packaging the AppImage. Other platform workflows do not run the suite.
+
+See `docs/CLAUDE_MD/CI_CD.md` for why there is no PR gate: the detectors found no pre-existing defects on their first run across eight months of code, so they were moved off the critical path of every push.
 
 ## Architecture
 
@@ -218,7 +281,7 @@ Run this after any changes to `src/mcp/`, `src/controllers/profilemanager.cpp`, 
 1. Create `tests/tst_yourtest.cpp` with `QTEST_GUILESS_MAIN(tst_YourTest)` and `#include "tst_yourtest.moc"`
 2. Add to `tests/CMakeLists.txt` using `add_decenza_test(tst_yourtest tst_yourtest.cpp ...source files...)`
 3. If accessing private members, add `friend class tst_YourTest;` behind `#ifdef DECENZA_TESTING` in the production header
-4. Run `ctest` to verify
+4. Run `mcp__qtcreator__run_tests` to verify (`scope: "named"`, `names: ["tst_YourTest"]`; if a freshly added target isn't in the Autotest model yet, just retry — it re-parses)
 
 ## Handling Warnings
 

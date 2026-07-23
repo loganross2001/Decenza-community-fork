@@ -319,6 +319,14 @@ void RecipeStorage::requestArchived()
 
 void RecipeStorage::requestRecipe(qint64 recipeId)
 {
+    // Terminal emit even when uninitialized — runAsync() silently drops the
+    // job on an empty dbPath, which would leave a caller waiting on this
+    // specific id (recipe-auto-load) hanging forever on a pending flag.
+    if (m_dbPath.isEmpty()) {
+        qWarning() << "RecipeStorage: requestRecipe on uninitialized storage, recipe" << recipeId;
+        emit recipeCheckFailed(recipeId);
+        return;
+    }
     auto result = std::make_shared<QVariantMap>();
     runAsync("recipes_get",
         [recipeId, result](QSqlDatabase& db) {
@@ -326,10 +334,19 @@ void RecipeStorage::requestRecipe(qint64 recipeId)
             if (recipe.isValid())
                 *result = recipe.toVariantMap();
         },
-        // Read: skip the emit on open failure. An empty result would be read
-        // as "active recipe vanished" by SettingsDye; only a genuine
-        // not-found (db opened, row absent) should do that.
-        [this, recipeId, result](bool dbOpened) { if (dbOpened) emit recipeReady(recipeId, *result); });
+        // An empty result on a successful open would be read as "active
+        // recipe vanished" by SettingsDye; only a genuine not-found (db
+        // opened, row absent) should do that. A failed open instead fires
+        // recipeCheckFailed so a caller needing a terminal signal (recipe-
+        // auto-load) isn't left waiting; the pre-existing active-recipe
+        // cache-refresh caller ignores it and simply retries on the next
+        // refresh.
+        [this, recipeId, result](bool dbOpened) {
+            if (dbOpened)
+                emit recipeReady(recipeId, *result);
+            else
+                emit recipeCheckFailed(recipeId);
+        });
 }
 
 void RecipeStorage::requestLastEquipmentForDrinkType(const QString& drinkType)
@@ -473,6 +490,13 @@ void RecipeStorage::requestCreateRecipe(const QVariantMap& recipeMap)
                         recipe.rpmPinned = bag.rpm;
                 }
             }
+            // Active-name uniqueness (block-duplicate-active-names): a new recipe
+            // (archived = false) may not duplicate another non-archived recipe's
+            // name. Reject with an "error" the surfaces read (mirrors equipment).
+            if (findRecipeByNameStatic(db, recipe.name, 0) > 0) {
+                created->insert(QStringLiteral("error"), QStringLiteral("nameInUse"));
+                return;  // *newId stays -1
+            }
             *newId = insertRecipeStatic(db, recipe);
             if (*newId > 0) {
                 *created = loadRecipeStatic(db, *newId).toVariantMap();
@@ -499,6 +523,8 @@ void RecipeStorage::requestUpdateRecipe(qint64 recipeId, const QVariantMap& fiel
         return;
     }
     auto success = std::make_shared<bool>(false);
+    // Set when the failure has a caller-actionable cause (see recipeUpdateFailed).
+    auto failReason = std::make_shared<QString>();
     // Transient hint, not a column: the surface's resolved beverage_type for
     // an installed profileTitle in this patch (installed profiles embed no
     // JSON, and the profile catalog isn't reachable on the DB thread).
@@ -514,29 +540,46 @@ void RecipeStorage::requestUpdateRecipe(qint64 recipeId, const QVariantMap& fiel
         return;
     }
     runAsync("recipes_update",
-        [recipeId, patchFields = std::move(patch), hintedBev, success](QSqlDatabase& db) {
+        [recipeId, patchFields = std::move(patch), hintedBev, success, failReason](QSqlDatabase& db) {
             // The whole update is transactional so the validity check below
-            // can reject the patch without leaving a half-applied row.
-            if (!db.transaction()) {
-                qWarning() << "RecipeStorage: update transaction begin failed for recipe"
-                           << recipeId << "-" << db.lastError().text();
+            // can reject the patch without leaving a half-applied row. It reads
+            // (loadRecipeStatic) before it writes, so it must take the write
+            // lock up front — see DbWriteTxn, which this is the
+            // bug report for: a plain BEGIN cost a real save here, twice.
+            //
+            // Nested is treated as a failure rather than tolerated: the
+            // rejection paths below roll back, which would discard an outer
+            // caller's work too. No such caller exists today.
+            DbWriteTxn txn = DbWriteTxn::begin(db, "recipe update");
+            if (!txn.ok()) {
+                qWarning() << "RecipeStorage: update transaction begin failed for recipe" << recipeId;
+                // "busy" is the one failure here the user can act on — pressing
+                // Save again works. Without it every surface reports the generic
+                // string, and MCP's is "Recipe N not found or update failed",
+                // which reads as "your recipe is gone".
+                if (txn.lockTimedOut())
+                    *failReason = QStringLiteral("busy");
                 return;
             }
-            QVariantMap fields = patchFields;
+            // Pre-update state, captured inside the transaction: the name-uniqueness
+            // guard below must know whether this patch actually CHANGES the name (or
+            // brings an archived recipe back), not merely that it mentions them.
+            const Recipe before = loadRecipeStatic(db, recipeId);
+            QVariantMap mergedFields = patchFields;
             // A patch that re-points the bag link adopts the bag's bean
             // identity unless the caller set it explicitly — the identity
             // fields are the display fallback and relink matching key, and
             // must follow the bag (manual re-point to a different bean).
-            const qint64 patchBagId = fields.value(QStringLiteral("bagId")).toLongLong();
+            const qint64 patchBagId = mergedFields.value(QStringLiteral("bagId")).toLongLong();
             if (patchBagId > 0) {
                 const CoffeeBag bag = CoffeeBagStorage::loadBagStatic(db, patchBagId);
                 if (bag.isValid()) {
-                    if (!fields.contains(QStringLiteral("beanBaseId")))
-                        fields.insert(QStringLiteral("beanBaseId"), bag.beanBaseId);
-                    if (!fields.contains(QStringLiteral("roasterName")))
-                        fields.insert(QStringLiteral("roasterName"), bag.roasterName);
-                    if (!fields.contains(QStringLiteral("coffeeName")))
-                        fields.insert(QStringLiteral("coffeeName"), bag.coffeeName);
+                    if (!mergedFields.contains(QStringLiteral("beanBaseId")))
+                        mergedFields.insert(QStringLiteral("beanBaseId"), bag.beanBaseId);
+                    if (!mergedFields.contains(QStringLiteral("roasterName")))
+                        mergedFields.insert(QStringLiteral("roasterName"), bag.roasterName);
+                    if (!mergedFields.contains(QStringLiteral("coffeeName")))
+                        mergedFields.insert(QStringLiteral("coffeeName"), bag.coffeeName);
                 } else {
                     // Same rule as create: a dangling bag id drops the LINK
                     // KEY, not the whole patch — the web editor re-sends the
@@ -547,24 +590,20 @@ void RecipeStorage::requestUpdateRecipe(qint64 recipeId, const QVariantMap& fiel
                     qWarning() << "RecipeStorage: update for recipe" << recipeId
                                << "carried unknown bag id" << patchBagId
                                << "- dropping the bag-link field, applying the rest";
-                    fields.remove(QStringLiteral("bagId"));
-                    if (fields.isEmpty()) {
+                    mergedFields.remove(QStringLiteral("bagId"));
+                    if (mergedFields.isEmpty()) {
                         // The patch was ONLY the dangling link: nothing left
                         // to apply — succeed as a no-op rather than failing.
-                        db.rollback();
                         *success = true;
                         return;
                     }
                 }
             }
-            *success = updateRecipeFieldsStatic(db, recipeId, fields);
-            if (!*success) {
-                db.rollback();
-                return;
-            }
+            *success = updateRecipeFieldsStatic(db, recipeId, mergedFields);
+            if (!*success)
+                return;  // txn rolls back on the way out
             const Recipe updated = loadRecipeStatic(db, recipeId);
             if (!updated.isValid()) {
-                db.rollback();
                 *success = false;
                 return;
             }
@@ -578,8 +617,29 @@ void RecipeStorage::requestUpdateRecipe(qint64 recipeId, const QVariantMap& fiel
                                               updated.hotWaterJson)) {
                 qWarning() << "RecipeStorage: rejecting update that would strand recipe"
                            << recipeId << "(name/profile/hot-water invariant)";
-                db.rollback();
                 *success = false;
+                return;
+            }
+            // Active-name uniqueness (block-duplicate-active-names): a rename, or
+            // an unarchive, must not leave two non-archived recipes sharing a name.
+            //
+            // Gated on what actually CHANGED, not on which keys the patch mentions:
+            // both save paths send `name` on every save, so testing `contains(name)`
+            // fired on every edit of a recipe that already shared a name with
+            // another, disabling Save on both and locking the user out of editing
+            // them at all. Pre-existing duplicates stay editable; only a change that
+            // newly introduces a collision is refused.
+            const bool renamed = QString::compare(updated.name.trimmed(),
+                                                  before.name.trimmed(),
+                                                  Qt::CaseInsensitive) != 0;
+            const bool restored = before.archived && !updated.archived;
+            if ((renamed || restored) && !updated.archived
+                && findRecipeByNameStatic(db, updated.name, recipeId) > 0) {
+                qWarning() << "RecipeStorage: rejecting update of recipe" << recipeId
+                           << "- name" << updated.name.trimmed()
+                           << "is already used by another active recipe";
+                *success = false;
+                *failReason = QStringLiteral("nameInUse");
                 return;
             }
             // drink_type follows the blocks when the caller changed them
@@ -589,10 +649,10 @@ void RecipeStorage::requestUpdateRecipe(qint64 recipeId, const QVariantMap& fiel
             // from the embedded JSON when present (installed-profile lookup
             // isn't available on this thread — the wizard stores the exact
             // type on its own saves anyway).
-            const bool touchesBlocks = fields.contains(QStringLiteral("steamJson"))
-                || fields.contains(QStringLiteral("hotWaterJson"))
-                || fields.contains(QStringLiteral("profileTitle"));
-            if (touchesBlocks && !fields.contains(QStringLiteral("drinkType"))) {
+            const bool touchesBlocks = mergedFields.contains(QStringLiteral("steamJson"))
+                || mergedFields.contains(QStringLiteral("hotWaterJson"))
+                || mergedFields.contains(QStringLiteral("profileTitle"));
+            if (touchesBlocks && !mergedFields.contains(QStringLiteral("drinkType"))) {
                 QString bev = hintedBev;
                 if (bev.isEmpty() && !updated.profileJson.isEmpty())
                     bev = QJsonDocument::fromJson(updated.profileJson.toUtf8())
@@ -602,7 +662,7 @@ void RecipeStorage::requestUpdateRecipe(qint64 recipeId, const QVariantMap& fiel
                 // steam-settings stamp on an active TEA recipe would
                 // re-derive it into "latte" (beverage_type unresolvable
                 // on this thread for installed profiles).
-                if (bev.isEmpty() && !fields.contains(QStringLiteral("profileTitle"))) {
+                if (bev.isEmpty() && !mergedFields.contains(QStringLiteral("profileTitle"))) {
                     if (updated.drinkType == QLatin1String("tea"))
                         bev = QStringLiteral("tea_portafilter");
                     else if (updated.drinkType == QLatin1String("filter"))
@@ -613,16 +673,18 @@ void RecipeStorage::requestUpdateRecipe(qint64 recipeId, const QVariantMap& fiel
                     qWarning() << "RecipeStorage: drink-type re-derivation stamp failed for recipe"
                                << recipeId << "- stored type may be stale";
             }
-            if (!db.commit()) {
+            if (!txn.commit()) {
                 qWarning() << "RecipeStorage: update commit failed for recipe" << recipeId
-                           << "-" << db.lastError().text();
-                db.rollback();
+                           << "-" << txn.commitError();
                 *success = false;
             }
         },
         // Write: emit regardless — *success is false on open failure, the
         // terminal status callers wait on.
-        [this, recipeId, success](bool) {
+        [this, recipeId, success, failReason](bool) {
+            // Reason first, so a listener can record it before the terminal status.
+            if (!*success && !failReason->isEmpty())
+                emit recipeUpdateFailed(recipeId, *failReason);
             emit recipeUpdated(recipeId, *success);
             if (*success)
                 emit recipesChanged();
@@ -660,6 +722,12 @@ void RecipeStorage::requestCloneRecipe(qint64 sourceId, const QString& newName,
             copy.clonedFromRecipeId = sourceId;
             copy.createdFromShotId = 0;
             copy.lastUsedEpoch = QDateTime::currentSecsSinceEpoch();
+            // Active-name uniqueness (block-duplicate-active-names): the clone name
+            // may not duplicate another non-archived recipe.
+            if (findRecipeByNameStatic(db, copy.name, 0) > 0) {
+                created->insert(QStringLiteral("error"), QStringLiteral("nameInUse"));
+                return;  // *newId stays -1
+            }
             *newId = insertRecipeStatic(db, copy);
             if (*newId > 0) {
                 *created = loadRecipeStatic(db, *newId).toVariantMap();
@@ -824,6 +892,33 @@ Recipe RecipeStorage::loadRecipeStatic(QSqlDatabase& db, qint64 recipeId)
     if (!query.exec() || !query.next())
         return Recipe();
     return recipeFromQueryRow(query);
+}
+
+// static
+bool RecipeStorage::isRecipeStale(const QVariantMap& recipe)
+{
+    return recipe.isEmpty() || recipe.value("archived").toBool();
+}
+
+qint64 RecipeStorage::findRecipeByNameStatic(QSqlDatabase& db, const QString& name, qint64 excludeId)
+{
+    const QString target = name.trimmed();
+    if (target.isEmpty())
+        return 0;
+    // Compared in C++, not SQL: SQLite's LOWER() folds ASCII only, so it would
+    // disagree with the QML gate's full-Unicode toLowerCase() on any non-ASCII
+    // name. See EquipmentStorage::findPackageByNameStatic for the full rationale.
+    QSqlQuery query(db);
+    query.prepare("SELECT id, IFNULL(name,'') FROM recipes "
+                  "WHERE archived = 0 AND id != :exclude ORDER BY id");
+    query.bindValue(":exclude", excludeId);
+    if (!query.exec())
+        return 0;
+    while (query.next()) {
+        if (QString::compare(query.value(1).toString().trimmed(), target, Qt::CaseInsensitive) == 0)
+            return query.value(0).toLongLong();
+    }
+    return 0;
 }
 
 QVector<InventoryRecipe> RecipeStorage::loadInventoryStatic(QSqlDatabase& db, bool archived)

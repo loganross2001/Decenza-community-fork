@@ -201,7 +201,7 @@ public:
     // falls back to the active package). Emits lastEquipmentForDrinkTypeReady.
     Q_INVOKABLE void requestLastEquipmentForDrinkType(const QString& drinkType);
     static qint64 lastEquipmentForDrinkTypeStatic(QSqlDatabase& db, const QString& drinkType);
-    Q_INVOKABLE void requestRecipe(qint64 recipeId);       // recipeReady()
+    Q_INVOKABLE void requestRecipe(qint64 recipeId);       // recipeReady() or recipeCheckFailed()
     // Activation bundle: the recipe row, its LINKED bag id, and that bag's
     // full map, loaded in ONE background pass so activation applies a
     // consistent snapshot. The linked bag is applied whether or not it is
@@ -247,7 +247,19 @@ public:
 
     static qint64 insertRecipeStatic(QSqlDatabase& db, const Recipe& recipe);
     static Recipe loadRecipeStatic(QSqlDatabase& db, qint64 recipeId);
+    // True when a recipeReady()-shaped map represents a row that no longer
+    // qualifies as an auto-load/activation target: not found (empty map) or
+    // archived. Pure and side-effect-free — used by MainController's
+    // recipe-auto-load stale-check and unit-testable directly, without
+    // constructing a MainController (which needs its full subsystem
+    // closure — BLE, MQTT, ShotServer, etc. — that recipe logic alone does
+    // not).
+    static bool isRecipeStale(const QVariantMap& recipe);
     static QVector<InventoryRecipe> loadInventoryStatic(QSqlDatabase& db, bool archived = false);
+    // The id of a NON-ARCHIVED recipe whose name matches `name` (trimmed,
+    // case-insensitive), excluding `excludeId`, or 0. Backs the active-name
+    // uniqueness guard (block-duplicate-active-names). A blank name never matches.
+    static qint64 findRecipeByNameStatic(QSqlDatabase& db, const QString& name, qint64 excludeId = 0);
     // Update only the columns named in `fields` (camelCase Recipe keys).
     static bool updateRecipeFieldsStatic(QSqlDatabase& db, qint64 recipeId, const QVariantMap& fields);
 
@@ -346,6 +358,16 @@ signals:
     void archivedReady(const QVariantList& recipes);
     void lastEquipmentForDrinkTypeReady(const QString& drinkType, qint64 equipmentId);
     void recipeReady(qint64 recipeId, const QVariantMap& recipe); // map empty if not found
+    // Terminal failure signal for requestRecipe(), emitted instead of
+    // recipeReady when the DB connection itself failed to open (or the
+    // storage isn't initialized yet) — as opposed to a genuine open-but-
+    // not-found, which recipeReady's empty-map contract already covers.
+    // Only requestRecipe() emits this; the other read-only refreshes
+    // (inventory/archived) still silently skip on open failure since a
+    // background list refresh can safely retry next cycle, but a caller
+    // waiting on one specific id (recipe-auto-load) needs a terminal signal
+    // either way so it doesn't hang forever on a pending flag.
+    void recipeCheckFailed(qint64 recipeId);
     // recipe empty when the id was not found (activation must fail cleanly).
     void recipeActivationReady(qint64 recipeId, const QVariantMap& recipe,
                                qint64 linkedBagId, const QVariantMap& linkedBag);
@@ -356,6 +378,15 @@ signals:
     // (transient — never stored on the row).
     void recipeCreated(qint64 recipeId, const QVariantMap& recipe);
     void recipeUpdated(qint64 recipeId, bool success);
+    // Emitted immediately BEFORE recipeUpdated(id, false) when the update failed
+    // for a reason the caller can act on — currently only "nameInUse"
+    // (block-duplicate-active-names). Additive: recipeUpdated stays the terminal
+    // status every caller waits on; this only lets a surface report WHY, so the
+    // app, MCP and ShotServer can each name the SAME cause for a rename collision.
+    // The cause code and the emission ordering are what is shared — the wording of
+    // each surface's message is its own (a REST body and an inline form label do
+    // not read alike).
+    void recipeUpdateFailed(qint64 recipeId, const QString& reason);
     void recipeDeleted(qint64 recipeId, bool success);
     // An automatic relink moved `movedRecipeIds` onto bag `targetBagId`
     // (roll-on-finish or wake-on-restock). Drives the courtesy toast —

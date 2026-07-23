@@ -7,11 +7,14 @@ import "../components"
 
 Page {
     id: profileSelectorPage
+    // Declarative so it re-evaluates on a language change. This used to be an
+    // imperative assignment in onCompleted/onActivated, which ran once and left
+    // page titles in the previous language until you navigated away and back.
+    readonly property string pageTitle: TranslationManager.translate("profileselector.title", "Profiles")
+
     objectName: "profileSelectorPage"
     background: ThemedPageBackground {}
 
-    Component.onCompleted: root.currentPageTitle = TranslationManager.translate("profileselector.title", "Profiles")
-    StackView.onActivated: root.currentPageTitle = TranslationManager.translate("profileselector.title", "Profiles")
 
     RowLayout {
         anchors.fill: parent
@@ -235,14 +238,11 @@ Page {
 
                     Item { Layout.fillWidth: true; visible: viewFilter.currentIndex !== 5 }
 
-                    AccessibleButton {
-                        visible: viewFilter.currentIndex === 1  // Cleaning/Descale view
-                        text: TranslationManager.translate("profileselector.button.descaling_wizard", "Descaling Wizard")
-                        accessibleName: TranslationManager.translate("profileSelector.openDescalingWizard", "Open descaling wizard to clean your machine")
-                        primary: true
-                        Layout.preferredHeight: Theme.scaled(44)
-                        onClicked: root.goToDescaling()
-                    }
+                    // The Descaling Wizard launch button moved to Settings → Machine →
+                    // Maintenance card (see add-maintenance-card). The Cleaning/Descale
+                    // view still lists the cleaning profiles (forward flush, spring
+                    // clean); descaling itself is now a built-in machine routine launched
+                    // from the wizard, no longer a profile in this list.
 
                     AccessibleButton {
                         visible: viewFilter.currentIndex !== 1 && viewFilter.currentIndex !== 5
@@ -598,11 +598,6 @@ Page {
                             z: -1
                             onClicked: {
                                 if (!modelData) return
-                                // Check if this is the descale wizard (special profile)
-                                if (modelData.name === "descale_wizard.json" || modelData.beverageType === "descale") {
-                                    root.goToDescaling()
-                                    return
-                                }
                                 ProfileManager.loadProfile(modelData.name)
                             }
                         }

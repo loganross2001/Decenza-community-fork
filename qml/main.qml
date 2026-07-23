@@ -400,7 +400,8 @@ ApplicationWindow {
                phase === MachineStateType.Phase.HotWater ||
                phase === MachineStateType.Phase.Flushing ||
                phase === MachineStateType.Phase.Descaling ||
-               phase === MachineStateType.Phase.Cleaning
+               phase === MachineStateType.Phase.Cleaning ||
+               phase === MachineStateType.Phase.Transport
     }
 
     // Sleep countdown timer - ticks every minute
@@ -450,6 +451,7 @@ ApplicationWindow {
                 if (pageName === "idlePage") {
                     console.log("[AutoLoad] Idle countdown expired — invoking auto-load")
                     ProfileManager.loadAutoLoadProfileIfNeeded()
+                    MainController.loadAutoLoadRecipeIfNeeded()
                 }
                 root.autoLoadIdleCountdown = root.autoLoadCountdownReload()
             }
@@ -459,8 +461,10 @@ ApplicationWindow {
     function autoLoadCountdownReload() {
         var pageName = pageStack.currentItem ? pageStack.currentItem.objectName : ""
         // 0 disables the idle-revert trigger only — startup and wake-from-sleep
-        // still fire via their own paths.
-        if (Settings.app.autoLoadProfileFilename === ""
+        // still fire via their own paths. Nothing configured on EITHER side
+        // (recipe-auto-load: the two are mutually exclusive, so at most one
+        // of these is ever non-default) also disables it.
+        if ((Settings.app.autoLoadProfileFilename === "" && Settings.dye.autoLoadRecipeId === -1)
             || Settings.app.autoLoadRevertMinutes <= 0
             || pageName !== "idlePage") {
             return -1
@@ -476,6 +480,11 @@ ApplicationWindow {
         target: Settings.app
         function onAutoLoadProfileFilenameChanged() { root.autoLoadResetCountdown() }
         function onAutoLoadRevertMinutesChanged() { root.autoLoadResetCountdown() }
+    }
+
+    Connections {
+        target: Settings.dye
+        function onAutoLoadRecipeIdChanged() { root.autoLoadResetCountdown() }
     }
 
     // Trigger: DE1 wake from Sleep → Idle. Tracks previous state in QML since
@@ -503,6 +512,7 @@ ApplicationWindow {
             if (prev === root.de1StateSleep && curr === root.de1StateIdle) {
                 console.log("[AutoLoad] DE1 Sleep -> Idle — invoking auto-load")
                 ProfileManager.loadAutoLoadProfileIfNeeded()
+                MainController.loadAutoLoadRecipeIfNeeded()
             }
         }
     }
@@ -513,10 +523,27 @@ ApplicationWindow {
     Connections {
         target: ProfileManager
         function onAutoLoadStaleCleared() {
+            autoLoadStaleToast.message = trAutoLoadStaleToast.text
             autoLoadStaleToast.opacity = 1
             autoLoadStaleToastTimer.restart()
             if (AccessibilityManager.enabled) {
                 AccessibilityManager.announce(trAutoLoadStaleToast.text, true)
+            }
+        }
+    }
+
+    // Trigger: recipe-auto-load stale-target toast — MainController clears
+    // Settings.dye.autoLoadRecipeId and emits this signal when the pinned
+    // recipe no longer exists or was archived. Shares the toast surface
+    // below with the profile version (message property swapped per-trigger).
+    Connections {
+        target: MainController
+        function onAutoLoadRecipeStaleCleared() {
+            autoLoadStaleToast.message = trAutoLoadRecipeStaleToast.text
+            autoLoadStaleToast.opacity = 1
+            autoLoadStaleToastTimer.restart()
+            if (AccessibilityManager.enabled) {
+                AccessibilityManager.announce(trAutoLoadRecipeStaleToast.text, true)
             }
         }
     }
@@ -671,8 +698,23 @@ ApplicationWindow {
         goToScreensaver()
     }
 
-    // Current page title - set by each page
-    property string currentPageTitle: ""
+    // Current page title — BOUND to the current page's own `pageTitle` property.
+    //
+    // Pages used to PUSH this value with `root.currentPageTitle = translate(...)` in
+    // Component.onCompleted and StackView.onActivated. That is an imperative assignment, not a
+    // binding, so it ran once and never re-evaluated: after a language change every page title
+    // stayed in the old language until you navigated away and back. It was the visible remnant
+    // of the staleness bug after `translate` became a notifying property, because there was no
+    // binding for that mechanism to re-run.
+    //
+    // Pulling instead of pushing makes it a real binding: it re-evaluates when the page changes
+    // AND when the page's own pageTitle does — which is itself a binding over translate().
+    //
+    // Any page without a `pageTitle` property yields "" rather than an error.
+    readonly property string currentPageTitle: {
+        var it = pageStack.currentItem
+        return (it && it.pageTitle !== undefined) ? it.pageTitle : ""
+    }
 
     // Flag to prevent premature UI display
     property bool appInitialized: false
@@ -913,6 +955,7 @@ ApplicationWindow {
         // so the load sees the fully-initialised profile catalog.
         Qt.callLater(function() {
             ProfileManager.loadAutoLoadProfileIfNeeded()
+            MainController.loadAutoLoadRecipeIfNeeded()
             root.autoLoadResetCountdown()
         })
     }
@@ -1079,6 +1122,20 @@ ApplicationWindow {
         return true
     }
 
+    // Renders the last shot's chart to an image for the background, once per change.
+    // Lives here because grabToImage() needs a live scene graph and a window; it draws
+    // nothing on screen (it sits outside the window) and takes no input.
+    //
+    // Behind a Loader so nothing is built for users who never choose this background. The
+    // renderer holds a HistoryShotGraph — a GraphsView with a dozen series — as a direct
+    // child, so without this it was constructed at startup on every device, including the
+    // tablets, for a feature most people will not turn on.
+    Loader {
+        id: lastShotChartRenderer
+        active: Settings.theme.backgroundSource === "shot"
+        source: "components/LastShotChartRenderer.qml"
+    }
+
     // Page stack for navigation
     StackView {
         id: pageStack
@@ -1197,6 +1254,11 @@ ApplicationWindow {
         }
 
         Component {
+            id: transportPage
+            TransportPage {}
+        }
+
+        Component {
             id: visualizerBrowserPage
             VisualizerBrowserPage {}
         }
@@ -1277,6 +1339,7 @@ ApplicationWindow {
             "flowEditorPage": TranslationManager.translate("main.pageFlowEditor", "Flow profile editor"),
             "shotHistoryPage": TranslationManager.translate("main.pageShotHistory", "Shot history"),
             "descalingPage": TranslationManager.translate("main.pageDescalingScreen", "Descaling screen"),
+            "transportPage": TranslationManager.translate("main.pageTransportScreen", "Transport mode screen"),
             "visualizerBrowserPage": TranslationManager.translate("main.pageVisualizerBrowser", "Visualizer browser"),
             "profileImportPage": TranslationManager.translate("main.pageImportProfiles", "Import profiles"),
             "postShotReviewPage": TranslationManager.translate("main.pageShotReview", "Shot review"),
@@ -3265,7 +3328,7 @@ ApplicationWindow {
             if (phase === MachineStateType.Phase.Disconnected) {
                 root.startupGracePeriod = true
                 // If we're on an operation page, navigate to idle (#575)
-                if (currentPage === "espressoPage" || currentPage === "steamPage" || currentPage === "hotWaterPage" || currentPage === "flushPage" || currentPage === "descalingPage") {
+                if (currentPage === "espressoPage" || currentPage === "steamPage" || currentPage === "hotWaterPage" || currentPage === "flushPage" || currentPage === "descalingPage" || currentPage === "transportPage") {
                     console.log("Disconnected while on operation page (" + currentPage + ") - navigating to idle")
                     if (!pageStack.busy) {
                         pageStack.replace(null, idlePage)
@@ -3379,6 +3442,10 @@ ApplicationWindow {
             } else if (phase === MachineStateType.Phase.Descaling) {
                 if (currentPage !== "descalingPage" && !pageStack.busy) {
                     pageStack.replace(null, descalingPage)
+                }
+            } else if (phase === MachineStateType.Phase.Transport) {
+                if (currentPage !== "transportPage" && !pageStack.busy) {
+                    pageStack.replace(null, transportPage)
                 }
             } else if (phase === MachineStateType.Phase.Cleaning) {
                 // For now, cleaning uses the built-in machine routine
@@ -3541,6 +3608,11 @@ ApplicationWindow {
     function goToDescaling() {
         if (!startNavigation()) return
         pageStack.push(descalingPage)
+    }
+
+    function goToTransport() {
+        if (!startNavigation()) return
+        pageStack.push(transportPage)
     }
 
     function goToFlush() {
@@ -4176,11 +4248,16 @@ ApplicationWindow {
     // ============ AUTO-LOAD STALE TOAST ============
     // Shown when ProfileManager.loadAutoLoadProfileIfNeeded() finds the pinned
     // filename no longer resolves to a Selected-list profile (deleted, hidden,
-    // or imported from another device). Setting is cleared automatically.
+    // or imported from another device), or when MainController's recipe-side
+    // equivalent finds the pinned recipe no longer exists or was archived
+    // (recipe-auto-load). Setting is cleared automatically in both cases;
+    // this one toast surface is shared, with `message` swapped per-trigger.
     Tr { id: trAutoLoadStaleToast; key: "profileselector.toast.auto_load_stale"; fallback: "Auto-load profile is no longer available"; visible: false }
+    Tr { id: trAutoLoadRecipeStaleToast; key: "recipes.toast.auto_load_stale"; fallback: "Auto-load recipe is no longer available"; visible: false }
 
     Rectangle {
         id: autoLoadStaleToast
+        property string message: trAutoLoadStaleToast.text
         anchors.bottom: parent.bottom
         anchors.bottomMargin: Theme.scaled(40)
         anchors.horizontalCenter: parent.horizontalCenter
@@ -4200,7 +4277,7 @@ ApplicationWindow {
         Text {
             id: autoLoadStaleToastLabel
             anchors.centerIn: parent
-            text: trAutoLoadStaleToast.text
+            text: autoLoadStaleToast.message
             color: Theme.textColor
             font.pixelSize: Theme.scaled(13)
             Accessible.ignored: true
@@ -4322,6 +4399,7 @@ ApplicationWindow {
     Tr { id: trAnnounceFlushing; key: "main.accessibility.flushing"; fallback: "Flushing"; visible: false }
     Tr { id: trAnnounceDescaling; key: "main.accessibility.descaling"; fallback: "Descaling in progress"; visible: false }
     Tr { id: trAnnounceCleaning; key: "main.accessibility.cleaning"; fallback: "Cleaning in progress"; visible: false }
+    Tr { id: trAnnounceTransport; key: "main.accessibility.transport"; fallback: "Draining water for transport"; visible: false }
 
     Connections {
         target: MachineState
@@ -4373,6 +4451,9 @@ ApplicationWindow {
                     break
                 case MachineStateType.Phase.Cleaning:
                     announcement = trAnnounceCleaning.text
+                    break
+                case MachineStateType.Phase.Transport:
+                    announcement = trAnnounceTransport.text
                     break
             }
 

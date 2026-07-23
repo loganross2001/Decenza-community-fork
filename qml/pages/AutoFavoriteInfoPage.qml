@@ -6,8 +6,15 @@ import "../components"
 
 Page {
     id: autoFavoriteInfoPage
+    // Declarative so it re-evaluates on a language change. This used to be an
+    // imperative assignment in onCompleted/onActivated, which ran once and left
+    // page titles in the previous language until you navigated away and back.
+    readonly property string pageTitle: TranslationManager.translate("autofavoriteinfo.title", "Favorite Details")
+
     objectName: "autoFavoriteInfoPage"
-    background: ThemedPageBackground {}
+    // suppressShotChart: this page draws its own graph, and the last-shot chart
+    // background would put a second set of curves behind it.
+    background: ThemedPageBackground { suppressShotChart: true }
 
     // Properties passed from AutoFavoritesPage
     property int shotId: 0
@@ -33,11 +40,9 @@ Page {
     // Re-assert on every activation, not just creation — returning here after a
     // page was pushed on top would otherwise keep that page's header title.
     StackView.onActivated: {
-        root.currentPageTitle = TranslationManager.translate("autofavoriteinfo.title", "Favorite Details")
     }
 
     Component.onCompleted: {
-        root.currentPageTitle = TranslationManager.translate("autofavoriteinfo.title", "Favorite Details")
         loadData()
     }
 

@@ -12,8 +12,15 @@ import "../components"
  */
 Page {
     id: recipeEditorPage
+    // Declarative so it re-evaluates on a language change. This used to be an
+    // imperative assignment in onCompleted/onActivated, which ran once and left
+    // page titles in the previous language until you navigated away and back.
+    readonly property string pageTitle: ProfileManager.currentProfileName || TranslationManager.translate("recipeEditor.title", "Recipe Editor")
+
     objectName: "recipeEditorPage"
-    background: ThemedPageBackground {}
+    // suppressShotChart: this page draws its own graph, and the last-shot chart
+    // background would put a second set of curves behind it.
+    background: ThemedPageBackground { suppressShotChart: true }
 
     property var profile: null
     property var recipe: ProfileManager.getOrConvertRecipeParams()
@@ -1028,7 +1035,6 @@ Page {
         if (freshConversion) {
             ProfileManager.markProfileClean()
         }
-        root.currentPageTitle = ProfileManager.currentProfileName || TranslationManager.translate("recipeEditor.title", "Recipe Editor")
         // Deferred refresh to ensure chart is ready (per CLAUDE.md: no timer guards)
         Qt.callLater(deferredGraphRefresh)
     }

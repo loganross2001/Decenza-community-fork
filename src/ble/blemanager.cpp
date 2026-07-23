@@ -110,8 +110,16 @@ BLEManager::BLEManager(QObject* parent)
     m_adapterRecoverySafetyTimer = new QTimer(this);
     m_adapterRecoverySafetyTimer->setSingleShot(true);
     m_adapterRecoverySafetyTimer->setInterval(kAdapterRecoverySafetyMs);
-    connect(m_adapterRecoverySafetyTimer, &QTimer::timeout, this, [this]() {
+    // The connect is guarded, not the lambda body.
+    //
+    // An earlier version kept one lambda with Q_UNUSED(this), justified by
+    // "the timer is still constructed and armed on every platform". That was
+    // simply wrong — both start() calls are themselves inside #ifndef
+    // Q_OS_IOS, so on iOS the timer is constructed and never started. There is
+    // no timer firing into nothing to protect against, and the workaround was
+    // guarding a hazard that did not exist.
 #ifndef Q_OS_IOS
+    connect(m_adapterRecoverySafetyTimer, &QTimer::timeout, this, [this]() {
         if (!m_adapterRecoveryInFlight || !m_localDevice) return;
         const bool adapterOff = m_localDevice->hostMode() == QBluetoothLocalDevice::HostPoweredOff;
         if (adapterOff) {
@@ -129,8 +137,8 @@ BLEManager::BLEManager(QObject* parent)
                           "HostConnectable event; treating as recovered (#1309)";
             finishAdapterRecovery(true);
         }
-#endif
     });
+#endif
 
     // Eagerly run the Linux capability check so any qWarning lands early in
     // startup logs; subsequent calls hit the cached result.
@@ -903,11 +911,21 @@ void BLEManager::startScan() {
 
     if (!isBluetoothAvailable()) {
         qDebug() << "BLEManager: Scan request ignored (Bluetooth is powered off)";
+        // Callers (tryDirectConnectToRefractometer, scanForDevices) set the
+        // scan flags before calling here on the assumption a scan will run.
+        // A scan that never starts must not leave them latched — they are
+        // only cleared by scan finished/error/stop, none of which will fire.
+        clearScanRequestFlags();
         return;
     }
 
     // Check and request Bluetooth permission on Android
     requestBluetoothPermission();
+}
+
+void BLEManager::clearScanRequestFlags() {
+    m_scanningForScales = false;
+    m_userInitiatedScaleScan = false;
 }
 
 void BLEManager::requestBluetoothPermission() {
@@ -927,6 +945,7 @@ void BLEManager::requestBluetoothPermission() {
                 requestBluetoothPermission();  // Continue with Bluetooth permission
             } else {
                 emit de1LogMessage("Location permission denied");
+                clearScanRequestFlags();  // No scan will start; don't latch the request flags
                 emit errorOccurred(translateUiString("ble.error.locationPermissionDeniedForBluetooth",
                     "Location permission denied - required for Bluetooth scanning"));
             }
@@ -934,6 +953,7 @@ void BLEManager::requestBluetoothPermission() {
         return;
     } else if (qApp->checkPermission(locationPermission) == Qt::PermissionStatus::Denied) {
         emit de1LogMessage("Location permission denied");
+        clearScanRequestFlags();  // No scan will start; don't latch the request flags
         emit errorOccurred(translateUiString("ble.error.locationPermissionRequired",
             "Location permission required. Please enable in Settings."));
         return;
@@ -960,6 +980,7 @@ void BLEManager::requestBluetoothPermission() {
                 // Transition Undetermined → Denied also flips isBluetoothAvailable()
                 // from true to false (via the hostMode() fall-through).
                 emit bluetoothAvailableChanged();
+                clearScanRequestFlags();  // No scan will start; don't latch the request flags
                 emit errorOccurred(translateUiString("ble.error.bluetoothPermissionDenied",
                     "Bluetooth permission denied"));
             }
@@ -967,6 +988,7 @@ void BLEManager::requestBluetoothPermission() {
         return;
     case Qt::PermissionStatus::Denied:
         emit de1LogMessage("Bluetooth permission denied");
+        clearScanRequestFlags();  // No scan will start; don't latch the request flags
         emit errorOccurred(translateUiString("ble.error.bluetoothPermissionRequired",
             "Bluetooth permission required. Please enable in Settings."));
         return;
@@ -1199,6 +1221,18 @@ void BLEManager::onScanFinished() {
     emit de1LogMessage("Scan complete");
     appendScaleLog("Scan complete");
     emit scanningChanged();
+
+    // Hunt mode (post-shot review page): restart the scan back-to-back so a
+    // refractometer powered on at an arbitrary moment is seen within one scan
+    // cycle instead of waiting out the background reconnect tick's dead window.
+    // Scan-finished is the continuation event — no polling timer. Deliberately
+    // not restarted from onScanError: the background tick recovers from errors.
+    if (m_refractometerHunt && !m_savedRefractometerAddress.isEmpty()
+        && !isRefractometerConnected() && !m_disabled && isBluetoothAvailable()) {
+        qDebug().noquote() << "[R2-diag] hunt active — restarting scan";
+        m_scanningForScales = true;
+        startScan();
+    }
 }
 
 void BLEManager::onScanError(QBluetoothDeviceDiscoveryAgent::Error error) {
@@ -1753,6 +1787,16 @@ void BLEManager::tryDirectConnectToRefractometer() {
                  m_disabled ? QStringLiteral("true") : QStringLiteral("false"));
         return;
     }
+    // Check availability BEFORE setting the scan flag (as tryDirectConnectToDE1
+    // does): with Bluetooth off, startScan() returns without starting anything,
+    // and a flag set here would never be cleared — scan finished/error/stop are
+    // the only clearers and none would fire — turning every later reconnect
+    // attempt into a "scan flag already set" no-op even after Bluetooth returns.
+    if (!isBluetoothAvailable()) {
+        qDebug().noquote() << "[R2-diag] tryDirectConnectToRefractometer no-op (Bluetooth unavailable) "
+                              "— background reconnect tick will retry";
+        return;
+    }
     // Piggyback on the scale scan infrastructure — set the flag so
     // onDeviceDiscovered processes refractometer advertisements
     qDebug().noquote() << QString("[R2-diag] tryDirectConnectToRefractometer scanningForScales=%1 scanning=%2 -> %3")
@@ -1763,6 +1807,19 @@ void BLEManager::tryDirectConnectToRefractometer() {
     if (!m_scanningForScales) {
         m_scanningForScales = true;
         startScan();
+    }
+}
+
+void BLEManager::setRefractometerHunt(bool active) {
+    if (m_refractometerHunt == active) {
+        return;
+    }
+    m_refractometerHunt = active;
+    qDebug().noquote() << QString("[R2-diag] refractometer hunt %1")
+        .arg(active ? QStringLiteral("ON — scans will chain back-to-back while a saved refractometer is disconnected")
+                    : QStringLiteral("OFF — background reconnect cadence resumes"));
+    if (active && !isRefractometerConnected()) {
+        tryDirectConnectToRefractometer();
     }
 }
 

@@ -10,11 +10,15 @@ import "../components"
 // mistaken creation and deletes outright — same lifecycle as bags.
 Page {
     id: recipesPage
+    // Declarative so it re-evaluates on a language change. This used to be an
+    // imperative assignment in onCompleted/onActivated, which ran once and left
+    // page titles in the previous language until you navigated away and back.
+    readonly property string pageTitle: TranslationManager.translate("recipes.title", "Recipes")
+
     objectName: "recipesPage"
     background: ThemedPageBackground {}
 
     StackView.onActivated: {
-        root.currentPageTitle = TranslationManager.translate("recipes.title", "Recipes")
         // Search is transient — clear it whenever the page becomes active.
         searchField.text = ""
         recipesPage.searchQuery = ""
@@ -170,7 +174,6 @@ Page {
     }
 
     Component.onCompleted: {
-        root.currentPageTitle = TranslationManager.translate("recipes.title", "Recipes")
         MainController.recipeStorage.requestInventory()
         MainController.recipeStorage.requestArchived()
         MainController.bagStorage.requestInventory()
@@ -201,18 +204,58 @@ Page {
         // failure (bag deleted between snapshot and tap, DB error) must not
         // look like the tap was ignored.
         function onRecipeUpdated(recipeId, success) {
+            if (recipeId === recipesPage._restorePendingId) {
+                recipesPage._restorePendingId = -1
+                if (!success) {
+                    // Restoring can now be refused: an active recipe may have
+                    // taken this name while it was archived. Say which fix works.
+                    recipesPage.showToast(
+                        recipesPage._restoreFailReason === "nameInUse"
+                            ? trRestoreNameInUse.text : trRestoreFailed.text)
+                }
+                recipesPage._restoreFailReason = ""
+                return
+            }
             if (recipeId !== recipesPage._repointPendingId)
                 return
             recipesPage._repointPendingId = -1
-            if (!success) {
-                repointFailedToast.opacity = 1
-                repointFailedToastTimer.restart()
-                if (AccessibilityManager.enabled)
-                    AccessibilityManager.announce(trRepointFailed.text, true)
-            }
+            if (!success)
+                recipesPage.showToast(trRepointFailed.text)
+        }
+        function onRecipeUpdateFailed(recipeId, reason) {
+            // Lands just before recipeUpdated(false) and names the cause.
+            if (recipeId === recipesPage._restorePendingId)
+                recipesPage._restoreFailReason = reason
         }
     }
     property int _repointPendingId: -1
+    // Text currently shown in the toast (see showToast).
+    property string _toastMessage: ""
+    // Restore is fire-and-forget from the archived card; these track the one in
+    // flight so a refusal can be explained instead of looking like a dead button.
+    property int _restorePendingId: -1
+    property string _restoreFailReason: ""
+
+    function showToast(message) {
+        recipesPage._toastMessage = message
+        repointFailedToast.opacity = 1
+        repointFailedToastTimer.restart()
+        if (AccessibilityManager.enabled)
+            AccessibilityManager.announce(message, true)
+    }
+
+    Tr {
+        id: trRestoreFailed
+        key: "recipes.restore.failed"
+        fallback: "Couldn't restore that recipe"
+        visible: false
+    }
+    Tr {
+        id: trRestoreNameInUse
+        key: "recipes.restore.nameInUse"
+        fallback: "An active recipe already uses this name — rename that one first"
+        visible: false
+    }
     Tr {
         id: trRepointFailed
         key: "recipes.repoint.failed"
@@ -238,7 +281,7 @@ Page {
         Text {
             id: repointFailedLabel
             anchors.centerIn: parent
-            text: trRepointFailed.text
+            text: recipesPage._toastMessage
             color: Theme.textColor
             font.pixelSize: Theme.scaled(13)
             Accessible.ignored: true
@@ -348,6 +391,9 @@ Page {
         readonly property bool selected: recipe && recipe.id !== undefined
             && recipe.id === Settings.dye.activeRecipeId
         readonly property bool hasShots: recipe && (recipe.shotCount ?? 0) > 0
+        // recipe-auto-load: this card is the current auto-load target.
+        readonly property bool isAutoLoad: recipe && recipe.id !== undefined
+            && recipe.id === Settings.dye.autoLoadRecipeId
 
         active: selected
         stale: recipe && recipe.stale === true
@@ -424,6 +470,87 @@ Page {
                 Layout.fillWidth: true
                 spacing: Theme.scaled(6)
 
+                // recipe-auto-load: pin this recipe as the auto-load target.
+                // Reuses pin.svg (ProfileSelectorPage's auto-load glyph) and
+                // StyledIconButton's built-in active/inactive tint — no
+                // confirmation, immediate toggle + toast, matching the
+                // profile card's pattern. Setting this silently clears any
+                // prior profile OR recipe auto-load (mutual exclusion is
+                // wired in Settings; see settings.cpp).
+                StyledIconButton {
+                    visible: !card.archivedCard
+                    width: Theme.scaled(36)
+                    height: Theme.scaled(36)
+                    icon.source: "qrc:/icons/pin.svg"
+                    active: card.isAutoLoad
+                    accessibleName: card.isAutoLoad
+                        ? TranslationManager.translate("recipes.accessible.autoLoadDisable", "Disable auto-load")
+                        : TranslationManager.translate("recipes.accessible.autoLoadSet", "Set auto-load")
+                    onClicked: {
+                        if (card.isAutoLoad) {
+                            Settings.dye.autoLoadRecipeId = -1
+                            recipesPage.showToast(TranslationManager.translate("recipes.toast.auto_load_disabled", "Auto-load disabled"))
+                        } else {
+                            var displaced = Settings.app.autoLoadProfileFilename !== ""
+                                || Settings.dye.autoLoadRecipeId !== -1
+                            Settings.dye.autoLoadRecipeId = card.recipe.id
+                            recipesPage.showToast(displaced
+                                ? TranslationManager.translate("recipes.toast.auto_load_set_displaced", "Auto-load set for %1 (replaced the previous auto-load)").arg(card.recipe.name || "")
+                                : TranslationManager.translate("recipes.toast.auto_load_set", "Auto-load set for %1").arg(card.recipe.name || ""))
+                        }
+                    }
+                }
+
+                // recipe-auto-load: on-card status for the current auto-load
+                // target only. Spells out "Auto-load" in words (a bare pin
+                // icon doesn't communicate its meaning on its own) plus the
+                // revert-minutes stepper shared with the profile side. No
+                // recipe name (redundant with the card's own title) and no
+                // clear button (redundant with the toggle button above,
+                // which already clears on a second tap).
+                Row {
+                    visible: card.isAutoLoad
+                    height: Theme.scaled(36)
+                    spacing: Theme.scaled(4)
+
+                    ColoredIcon {
+                        anchors.verticalCenter: parent.verticalCenter
+                        source: "qrc:/icons/pin.svg"
+                        iconWidth: Theme.scaled(14)
+                        iconHeight: Theme.scaled(14)
+                        iconColor: Theme.primaryColor
+                    }
+
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: TranslationManager.translate("recipes.autoLoad.label", "Auto-load")
+                        color: Theme.textSecondaryColor
+                        font: Theme.captionFont
+                        Accessible.ignored: true
+                    }
+
+                    ValueInput {
+                        id: cardAutoLoadRevertInput
+                        anchors.verticalCenter: parent.verticalCenter
+                        height: Math.round(Theme.captionFont.pixelSize * 1.9)
+                        valueFontPixelSize: Theme.captionFont.pixelSize
+                        value: Settings.app.autoLoadRevertMinutes
+                        from: 0
+                        to: 60
+                        stepSize: 1
+                        suffix: TranslationManager.translate("recipes.autoLoad.minutesShort", "min")
+                        displayText: value === 0
+                            ? TranslationManager.translate("recipes.autoLoad.off", "off")
+                            : value + " " + TranslationManager.translate("recipes.autoLoad.minutesShort", "min")
+                        accessibleName: TranslationManager.translate("recipes.accessible.autoLoadRevertAfter", "Auto-load revert after, minutes")
+                        // main.qml's Connections on Settings.app.autoLoadRevertMinutesChanged
+                        // resets the idle countdown reactively — no extra call needed here.
+                        onValueModified: function(newValue) {
+                            Settings.app.autoLoadRevertMinutes = newValue
+                        }
+                    }
+                }
+
                 StyledIconButton {
                     visible: !card.archivedCard
                     width: Theme.scaled(36)
@@ -486,7 +613,11 @@ Page {
                     rightPadding: Theme.scaled(10)
                     text: TranslationManager.translate("recipes.action.restore", "Restore")
                     accessibleName: TranslationManager.translate("recipes.accessible.restore", "Restore this archived recipe")
-                    onClicked: MainController.recipeStorage.requestUnarchiveRecipe(card.recipe.id)
+                    onClicked: {
+                        recipesPage._restorePendingId = card.recipe.id
+                        recipesPage._restoreFailReason = ""
+                        MainController.recipeStorage.requestUnarchiveRecipe(card.recipe.id)
+                    }
                 }
             }
     }

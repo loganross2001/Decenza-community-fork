@@ -1,6 +1,7 @@
 #include "settings_theme.h"
 
 #include <algorithm>
+#include "backgroundpresets.h"
 #include "settings.h"
 
 #include <QStandardPaths>
@@ -14,6 +15,15 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
+
+// The four background kinds. Spelled once here rather than as literals at each comparison
+// so a typo is a link error rather than a source that silently never matches.
+namespace {
+constexpr const char* kBackgroundSourceNone = "none";
+constexpr const char* kBackgroundSourceColour = "colour";
+constexpr const char* kBackgroundSourceImage = "image";
+constexpr const char* kBackgroundSourceShot = "shot";
+}  // namespace
 
 #ifdef Q_OS_IOS
 #include "screensaver/iosbrightness.h"
@@ -33,6 +43,17 @@ SettingsTheme::SettingsTheme(QObject* parent)
 {
 }
 
+bool SettingsTheme::glassChrome() const {
+    return m_settings.value("theme/glassChrome", false).toBool();
+}
+
+void SettingsTheme::setGlassChrome(bool enabled) {
+    if (glassChrome() != enabled) {
+        m_settings.setValue("theme/glassChrome", enabled);
+        emit glassChromeChanged();
+    }
+}
+
 QString SettingsTheme::skin() const {
     return m_settings.value("ui/skin", "default").toString();
 }
@@ -49,10 +70,238 @@ QString SettingsTheme::backgroundImagePath() const {
 }
 
 void SettingsTheme::setBackgroundImagePath(const QString& path) {
+    const QString before = backgroundSource();
     if (backgroundImagePath() != path) {
         m_settings.setValue("theme/backgroundImagePath", path);
         emit backgroundImagePathChanged();
     }
+    // Image, colour and shot chart are one choice in one chooser, so picking an image
+    // clears the others. Done outside the != guard: re-selecting the image already set
+    // must still clear a colour, or the two could both be live.
+    if (!path.isEmpty()) {
+        storeBackgroundSource(kBackgroundSourceImage);
+        clearBackgroundPreset("a background image was chosen instead");
+    }
+    notifyBackgroundSourceChanged(before);
+}
+
+QString SettingsTheme::backgroundPreset() const {
+    const QString id = m_settings.value("theme/backgroundPreset", "").toString();
+    // An id we do not recognise — a downgrade, a hand-edited ini, a colour removed in a
+    // later release — reads back as "none" rather than rendering an undefined background.
+    if (!id.isEmpty() && !BackgroundPresets::hasColour(id)) {
+        // Say so. The WRITE path was hardened against unknown ids and logs; the read path
+        // did not, so upgrading past a removed colour made the background silently vanish
+        // with nothing in the log to connect the two — and field diagnosis of this app
+        // starts from the log.
+        if (!m_warnedUnknownIds.contains(id)) {
+            m_warnedUnknownIds.insert(id);
+            qWarning() << "[Theme] Stored background colour" << id
+                       << "is not in this build's catalogue - showing no background colour."
+                          " Pick one again in Settings > Machine > Theme Mode.";
+        }
+        return QString();
+    }
+    return id;
+}
+
+void SettingsTheme::setBackgroundPreset(const QString& id) {
+    const QString before = backgroundSource();
+    // An unrecognised id is a caller bug, not a request to clear. Erasing on it meant a
+    // restore from a backup naming a colour this build does not know silently wiped the
+    // colour the device already had — and reported success. Empty is how a caller asks
+    // for none; anything else unknown is refused and logged, as setFontSize does.
+    if (!id.isEmpty() && !BackgroundPresets::hasColour(id)) {
+        qWarning() << "[Theme] Ignoring unknown background colour id:" << id
+                   << "- keeping" << (backgroundPreset().isEmpty() ? QStringLiteral("none")
+                                                                   : backgroundPreset());
+        return;
+    }
+    if (backgroundPreset() != id) {
+        if (!id.isEmpty() || !backgroundPreset().isEmpty()) {
+            qInfo() << "[Theme] Background colour:"
+                    << (id.isEmpty() ? QStringLiteral("none") : id);
+        }
+        m_settings.setValue("theme/backgroundPreset", id);
+        emit backgroundPresetChanged();
+    }
+    if (!id.isEmpty()) {
+        storeBackgroundSource(kBackgroundSourceColour);
+        setBackgroundImagePath(QString());
+    }
+    notifyBackgroundSourceChanged(before);
+}
+
+// --- Which KIND of background is active -------------------------------------------
+//
+// The source is stored, but a stored value is only believed when its PARAMETER backs it
+// up: "colour" with no colour, or "image" with no path, describes something no renderer
+// can draw. Rather than trust it, fall through to deriving the source from the values
+// that are actually set — which is also exactly what an install predating this key needs,
+// so the migration and the self-healing are one code path instead of two.
+//
+// Nothing is rewritten on read. The derivation is unambiguous, and rewriting stored
+// user-set values is a thing this project deliberately does not do.
+QString SettingsTheme::backgroundSource() const {
+    const QString stored = m_settings.value("theme/backgroundSource", "").toString();
+    if (stored == kBackgroundSourceShot)
+        return stored;
+    if (stored == kBackgroundSourceColour && !backgroundPreset().isEmpty())
+        return stored;
+    if (stored == kBackgroundSourceImage && !backgroundImagePath().isEmpty())
+        return stored;
+    if (stored == kBackgroundSourceNone && backgroundPreset().isEmpty()
+        && backgroundImagePath().isEmpty())
+        return stored;
+
+    const QString derived = !backgroundPreset().isEmpty()
+        ? QString::fromLatin1(kBackgroundSourceColour)
+        : (!backgroundImagePath().isEmpty() ? QString::fromLatin1(kBackgroundSourceImage)
+                                            : QString::fromLatin1(kBackgroundSourceNone));
+    // Overriding a stored value is correct — but silently overriding one is how "my
+    // background keeps resetting" becomes undiagnosable. clearBackgroundPreset() names its
+    // reason for exactly this purpose; the read path should not undercut it. Once per value.
+    if (!stored.isEmpty() && stored != derived) {
+        const QString note = stored + QStringLiteral("->") + derived;
+        if (!m_warnedUnknownIds.contains(note)) {
+            m_warnedUnknownIds.insert(note);
+            qInfo() << "[Theme] Stored background source" << stored
+                    << "is not backed by a value this build can draw - using" << derived;
+        }
+    }
+    return derived;
+}
+
+bool SettingsTheme::backgroundShotAdvanced() const {
+    return m_settings.value("theme/backgroundShotAdvanced", false).toBool();
+}
+
+// Writes the stored key ONLY. The signal is the other half, and it is deliberately not
+// emitted here — see notifyBackgroundSourceChanged.
+void SettingsTheme::storeBackgroundSource(const QString& source) {
+    if (source != kBackgroundSourceNone && source != kBackgroundSourceColour
+        && source != kBackgroundSourceImage && source != kBackgroundSourceShot) {
+        // Same stance as an unknown colour id: a bad value is a caller bug, not a request
+        // to wipe the user's background.
+        qWarning() << "[Theme] Ignoring unknown background source:" << source
+                   << "- keeping" << backgroundSource();
+        return;
+    }
+    m_settings.setValue("theme/backgroundSource", source);
+}
+
+// Emit if the DERIVED source moved, comparing against a snapshot taken before the change.
+//
+// It has to be the derived value, not the stored key, because the two move independently:
+// clearing an image path leaves the key saying "image" while the getter correctly derives
+// "none". A previous version guarded on the stored key and so never fired on any clear —
+// and since Theme.hasBackgroundImage and Theme.glassChrome were rewired onto this property,
+// roughly seventy chrome call sites would have stayed in translucent-over-a-photo mode with
+// no photo. Deleting the personal image you were using as a background reached exactly that
+// state, which is the case ScreensaverVideoManager's own clearing code exists to prevent.
+void SettingsTheme::notifyBackgroundSourceChanged(const QString& before) {
+    if (backgroundSource() != before)
+        emit backgroundSourceChanged();
+}
+
+void SettingsTheme::selectShotChartBackground(bool advanced) {
+    const QString before = backgroundSource();
+    const bool advancedChanged = backgroundShotAdvanced() != advanced;
+    if (advancedChanged)
+        m_settings.setValue("theme/backgroundShotAdvanced", advanced);
+
+    qInfo() << "[Theme] Background: last shot chart" << (advanced ? "(advanced)" : "(basic)");
+    storeBackgroundSource(QString::fromLatin1(kBackgroundSourceShot));
+    clearBackgroundPreset("the last-shot chart was chosen instead");
+    setBackgroundImagePath(QString());
+
+    // The advanced flag NOTIFYs on backgroundSourceChanged, and flipping it while already on
+    // the chart moves no source — so without this the Advanced entry would be a silent no-op
+    // forever: the cache key would never change, the renderer would never re-grab, and the
+    // picker would still show it as selected.
+    if (advancedChanged && backgroundSource() == before)
+        emit backgroundSourceChanged();
+    else
+        notifyBackgroundSourceChanged(before);
+}
+
+void SettingsTheme::clearBackground() {
+    const QString before = backgroundSource();
+    // Parameters first, source last, so that when the signal fires the getter already
+    // reports the final answer. The other order emits while the old image path is still
+    // set, and a binding reading backgroundSource inside its own change handler — which is
+    // what every QML binding does — latches the value being cleared.
+    clearBackgroundPreset("the background was cleared");
+    setBackgroundImagePath(QString());
+    storeBackgroundSource(QString::fromLatin1(kBackgroundSourceNone));
+    notifyBackgroundSourceChanged(before);
+}
+
+// Clearing the colour is a SIDE EFFECT of several unrelated actions, so it says which one
+// did it. A field report of "my background keeps resetting" is otherwise undiagnosable
+// from a log, and users' AI assistants read these logs.
+void SettingsTheme::clearBackgroundPreset(const char* reason) {
+    if (backgroundPreset().isEmpty())
+        return;
+    qInfo() << "[Theme] Clearing background colour" << backgroundPreset() << "-" << reason;
+    setBackgroundPreset(QString());
+}
+
+QString SettingsTheme::backgroundPattern() const {
+    const QString id = m_settings.value("theme/backgroundPattern", "").toString();
+    return BackgroundPresets::hasPattern(id) ? id : QString();
+}
+
+void SettingsTheme::setBackgroundPattern(const QString& id) {
+    if (!id.isEmpty() && !BackgroundPresets::hasPattern(id)) {
+        qWarning() << "[Theme] Ignoring unknown background pattern id:" << id;
+        return;
+    }
+    if (backgroundPattern() != id) {
+        m_settings.setValue("theme/backgroundPattern", id);
+        emit backgroundPatternChanged();
+    }
+}
+
+QVariantList SettingsTheme::backgroundPresets() const {
+    return BackgroundPresets::coloursAsVariantList();
+}
+
+QVariantList SettingsTheme::backgroundPatterns() const {
+    return BackgroundPresets::patternsAsVariantList();
+}
+
+QVariantMap SettingsTheme::activeBackgroundPreset() const {
+    return BackgroundPresets::colourToVariantMap(BackgroundPresets::colourById(backgroundPreset()));
+}
+
+QVariantMap SettingsTheme::activeBackgroundPattern() const {
+    return BackgroundPresets::patternToVariantMap(BackgroundPresets::patternById(backgroundPattern()));
+}
+
+QVariantMap SettingsTheme::deriveColorsFor(const QString& colourId) const {
+    const BackgroundPresets::Colour c = BackgroundPresets::colourById(colourId);
+    return c.id.isEmpty() ? QVariantMap()
+                          : BackgroundPresets::deriveAsVariantMap(QColor(c.value));
+}
+
+QString SettingsTheme::adjustedForContrast(const QString& foreground, const QString& background) const {
+    const QColor fg(foreground);
+    const QColor bg(background);
+    // An unreadable input is not something to guess at — hand the caller back exactly what
+    // it passed so a bad colour shows up as itself rather than as a silent black.
+    if (!fg.isValid() || !bg.isValid())
+        return foreground;
+    // Against the page as the densest pattern renders it, so the palette does not move when
+    // the pattern does — see pageUnderDensestPattern().
+    return BackgroundPresets::adjustForContrast(
+               fg, BackgroundPresets::pageUnderDensestPattern(bg)).name();
+}
+
+QVariantMap SettingsTheme::derivedBackgroundColors() const {
+    const BackgroundPresets::Colour c = BackgroundPresets::colourById(backgroundPreset());
+    return c.id.isEmpty() ? QVariantMap()
+                          : BackgroundPresets::deriveAsVariantMap(QColor(c.value));
 }
 
 QString SettingsTheme::skinPath() const {
@@ -232,8 +481,8 @@ void SettingsTheme::updateResolvedMode() {
 
     if (wasDark != m_isDarkMode) {
         emit isDarkModeChanged();
-        emit customThemeColorsChanged();  // Active palette changed
-        emit activeThemeNameChanged();    // Derived from dark/lightThemeName
+        emit customThemeColorsChanged();       // Active palette changed
+        emit activeThemeNameChanged();         // Derived from dark/lightThemeName
     }
 #ifdef Q_OS_IOS
     ios_setStatusBarStyle(m_isDarkMode);
@@ -273,8 +522,21 @@ void SettingsTheme::setEditingPaletteColor(const QString& colorName, const QStri
     if (!data.isEmpty()) {
         obj = QJsonDocument::fromJson(data).object();
     }
+    // A background preset overrides exactly the value being set here, so an explicit
+    // later choice of that colour wins — otherwise the user drags a colour in the theme
+    // editor and nothing happens, which is an expensive bug to reproduce. Compared
+    // against the previous value so that re-writing the same colour (a no-op edit, or a
+    // palette round-trip) does not silently drop the preset.
+    const bool backgroundColorChanged =
+        colorName == QLatin1String("backgroundColor") && obj.value(colorName).toString() != colorValue;
+
     obj[colorName] = colorValue;
     m_settings.setValue(key, QJsonDocument(obj).toJson());
+
+    // Only when the palette being edited is the one on screen — the theme editor can edit
+    // the inactive palette, and that must not drop a background the user is looking at.
+    if (backgroundColorChanged && (m_editingPalette == "dark") == m_isDarkMode)
+        clearBackgroundPreset("its background colour was edited in the theme editor");
 
     // If editing the active palette, notify QML
     bool editingActive = (m_editingPalette == "dark") == m_isDarkMode;
@@ -313,8 +575,18 @@ QVariantMap SettingsTheme::customThemeColors() const {
 void SettingsTheme::setCustomThemeColors(const QVariantMap& colors) {
     // Write to the active palette
     const QString key = m_isDarkMode ? "theme/customColorsDark" : "theme/customColorsLight";
+    // Same rule as setEditingPaletteColor: an explicit new background colour wins over an
+    // active preset, which would otherwise override it and make the edit look inert.
+    const bool backgroundColorChanged =
+        colors.contains("backgroundColor") &&
+        colors.value("backgroundColor").toString() != customThemeColors().value("backgroundColor").toString();
+
     QJsonObject obj = QJsonObject::fromVariantMap(colors);
     m_settings.setValue(key, QJsonDocument(obj).toJson());
+
+    if (backgroundColorChanged)
+        clearBackgroundPreset("the palette's background colour was set directly");
+
     emit customThemeColorsChanged();
 }
 
@@ -423,7 +695,19 @@ void SettingsTheme::applyDarkTheme(const QString& name) {
             }
         }
     }
+    const bool changed = (darkThemeName() != name);
     setDarkThemeName(name);
+    // A theme carries its own background colour, so choosing one is an explicit choice of
+    // the value a background colour overrides — the later choice wins. Two guards:
+    //
+    //   changed      — a combo box emits activated() when you re-pick the entry already
+    //                  selected. Without this, opening the dropdown to see what is set and
+    //                  tapping it destroyed the user's background having changed nothing.
+    //   m_isDarkMode — this function only touches the dark palette, so it must not clear a
+    //                  background the user is looking at in light mode. The colour is one
+    //                  global value; the theme slots are not.
+    if (changed && m_isDarkMode)
+        clearBackgroundPreset("dark theme changed, and it carries its own background colour");
     if (m_isDarkMode)
         emit customThemeColorsChanged();
 }
@@ -451,7 +735,10 @@ void SettingsTheme::applyLightTheme(const QString& name) {
             }
         }
     }
+    const bool changed = (lightThemeName() != name);
     setLightThemeName(name);
+    if (changed && !m_isDarkMode)
+        clearBackgroundPreset("light theme changed, and it carries its own background colour");
     if (!m_isDarkMode)
         emit customThemeColorsChanged();
 }
@@ -609,10 +896,13 @@ void SettingsTheme::resetThemeToDefault() {
 namespace {
 // Set from main.cpp before the QML engine is created; read-only thereafter.
 QString g_bundledFontFamily;
+QString g_symbolFontFamily;
 }
 
 void SettingsTheme::setBundledFontFamily(const QString& family) { g_bundledFontFamily = family; }
 QString SettingsTheme::bundledFontFamily() { return g_bundledFontFamily; }
+void SettingsTheme::setSymbolFontFamily(const QString& family) { g_symbolFontFamily = family; }
+QString SettingsTheme::symbolFontFamily() { return g_symbolFontFamily; }
 
 const QMap<QString, SettingsTheme::FontRole>& SettingsTheme::fontRoles() {
     //                          default  min  max
@@ -798,6 +1088,7 @@ void SettingsTheme::applyPresetTheme(const QString& name) {
         m_settings.remove("theme/customColorsDark");
         setActiveShader("");
         setDarkThemeName("Default Dark");
+        clearBackgroundPreset("a theme was applied, and it carries its own background colour");
         // Switch to dark mode (skip if already resolved to dark, e.g. "system" on a dark OS)
         if (!m_isDarkMode) {
             setThemeMode("dark");
@@ -813,6 +1104,7 @@ void SettingsTheme::applyPresetTheme(const QString& name) {
         m_settings.remove("theme/customColorsLight");
         setActiveShader("");
         setLightThemeName("Default Light");
+        clearBackgroundPreset("a theme was applied, and it carries its own background colour");
         // Switch to light mode (skip if already resolved to light, e.g. "system" on a light OS)
         if (m_isDarkMode) {
             setThemeMode("light");
@@ -853,6 +1145,7 @@ void SettingsTheme::applyPresetTheme(const QString& name) {
                 setActiveShader("");
             setDarkThemeName(name);
             setLightThemeName(name);
+            clearBackgroundPreset("a theme was applied, and it carries its own background colour");
             emit customThemeColorsChanged();
             return;
         }

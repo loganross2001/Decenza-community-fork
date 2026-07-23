@@ -399,10 +399,127 @@ QtObject {
     // either spelling correct.
     readonly property bool isDarkMode: Settings.theme.isDarkMode
 
+    // Should the chrome render as translucent "glass" — scrimmed cards, bars, dialogs,
+    // inset controls and action tiles — rather than the opaque fills the app uses on a
+    // flat page?
+    //
+    // On when a background image is set (chrome must go translucent or it reads as a slab
+    // on the photo), or when the user turns the glass option on for any theme. This is ONE
+    // named predicate rather than the expression repeated at every call site, which is
+    // what it used to be — `Settings.theme.backgroundImagePath.length > 0`, spelled out 28
+    // times across 19 files. Every copy is another chance for the next trigger to be missed
+    // at one of them, and none of those sites ever cared that it was an *image*: only that
+    // the chrome should go translucent.
+    //
+    // This is NOT "is a background active" — it is true with the switch on and no
+    // background at all, and false with a colour set and the switch off. For that question
+    // use hasBackgroundPreset or hasBackgroundImage.
+    readonly property bool glassChrome: hasBackgroundImage
+                                        || Settings.theme.glassChrome
+
+    // --- Background colour derivation ----------------------------------------
+    //
+    // A background colour is a KNOWN value, so unlike a photo everything that has to sit
+    // on it can be computed from it. That is what lets every colour be offered under any
+    // theme: a pale background under a dark theme would otherwise leave white text on a
+    // white page, and the previous design avoided that only by hiding the light half of
+    // the catalogue whenever you were in dark mode — so the chooser never showed a light
+    // option at all.
+    //
+    // The ARITHMETIC LIVES IN C++ (BackgroundPresets::derive), not here. It used to live
+    // in this file with a hand-kept copy in the test, which meant the contrast floors
+    // measured the copy: changing a constant here left the suite green. Reading the
+    // derived values means the tests measure what ships.
+    //
+    // While a colour is active these REPLACE the palette's background, text,
+    // secondary-text, surface, border and icon colours. Accents, chart series and status
+    // colours still come from the user's theme. A custom text colour is deliberately
+    // overridden: the background the user just picked decides light-on-dark or
+    // dark-on-light, and no stored preference can be right across the whole ramp.
+    //
+    // NOTE ON WHICH FLAG TO USE — the two are not interchangeable, and confusing them made
+    // the glass switch fail to turn things back off:
+    //
+    //   hasBackgroundPreset — "the page is a known colour, so derive readable values from
+    //       it". Legibility, NOT optional. Text, icons, borders and the recessed inset fill
+    //       must follow the page whatever the user has toggled.
+    //   glassChrome         — "the user asked for the translucent, neutral look". A user
+    //       preference, and it must toggle cleanly: everything it turns on it must turn off.
+    //
+    // A fill that exists to LOOK a certain way belongs to glassChrome. A colour that exists
+    // to stay READABLE belongs to hasBackgroundPreset.
+    readonly property bool hasBackgroundPreset: Settings.theme.backgroundPreset.length > 0
+
+    // Every derived-colour read goes through here, and it reads the C++ property DIRECTLY
+    // rather than through a cached QML intermediate. That is the whole point of the function.
+    //
+    // This used to be `readonly property var _derived: Settings.theme.derivedBackgroundColors`
+    // with call sites reading `_derived.X`. That intermediate was the bug: _derived and
+    // hasBackgroundPreset were two sibling bindings on the same NOTIFY signal
+    // (backgroundPresetChanged), and QML does not order sibling re-evaluation. A consumer like
+    // surfaceColor could re-evaluate first and read _derived's still-stale cached value — the
+    // empty map left over from the previous "none" state. Confirmed live on the PRE-FIX build
+    // (2.0.0 build 3494, macOS, session 133, before this change): every "none" -> preset
+    // transition logged all nine reads as undefined with derivedKeys=0, twice, for both
+    // re-evaluation passes. The fix below (build 3495) was then verified against the same
+    // live transition producing none of that output.
+    //
+    // The C++ side was never at fault: SettingsTheme::setBackgroundPreset writes the new id to
+    // QSettings BEFORE emitting, and derivedBackgroundColors() is a plain uncached getter, so
+    // any fresh call after the emit necessarily returns populated colours. Reading it here
+    // per-evaluation removes the stale cache and the ordering dependency with it. The
+    // dependency is still registered: QML captures notifying-property reads made inside a
+    // called function, which is the same mechanism _c() relies on above.
+    //
+    // The fallback branch is therefore now a should-never-happen guard, kept because without
+    // it an undefined reaches the engine as an opaque "Unable to assign [undefined] to QColor"
+    // warning — or, at _flatInsetTint, as a hard "Qt.colorEqual(): Invalid arguments" Error.
+    function _derivedOr(key, fallback) {
+        var derived = Settings.theme.derivedBackgroundColors
+        if (derived[key] === undefined) {
+            console.warn("Theme: derivedBackgroundColors." + key + " unexpectedly undefined"
+                + " (hasBackgroundPreset=" + hasBackgroundPreset
+                + " backgroundPreset=\"" + Settings.theme.backgroundPreset + "\""
+                + " derivedKeys=" + Object.keys(derived).length + ") — using fallback")
+            return fallback
+        }
+        return derived[key]
+    }
+
+    function _mix(a: color, b: color, t: real): color {
+        return Qt.rgba(a.r + (b.r - a.r) * t,
+                       a.g + (b.g - a.g) * t,
+                       a.b + (b.b - a.b) * t,
+                       1.0)
+    }
+
+    // Keep an accent fill only while the derived text can be read on it; otherwise fall
+    // back to surfaceColor, which resolves to something reasonable either way (the derived
+    // surface when a preset is active, the palette surface otherwise). The bottom bar needs
+    // this: the light palette's bar is #ffffff, and a dark background colour derives text to
+    // white, so the accent would have been white on white.
+    function _fillCarrying(preferred: color): color {
+        return _contrastRatio(textColor, preferred) >= 3.0 ? preferred : _derivedOr("surface", surfaceColor)
+    }
+
     // Dynamic colors - bind to Settings with fallback defaults
     // Wrapped in _c() for flash-to-identify from web theme editor
-    property color backgroundColor: _c("backgroundColor", Settings.theme.customThemeColors.backgroundColor || "#1a1a2e")
-    property color surfaceColor: _c("surfaceColor", Settings.theme.customThemeColors.surfaceColor || "#303048")
+    //
+    // A background preset overrides the palette's own background colour — that is what a
+    // preset IS. Resolution order: preset > custom theme colour > built-in default. The
+    // preset's `color` field arrives already resolved for the current light/dark mode.
+    property color backgroundColor: _c("backgroundColor",
+        Settings.theme.activeBackgroundPreset.value
+            || Settings.theme.customThemeColors.backgroundColor
+            || "#1a1a2e")
+    // Derived while a preset is active, like backgroundColor. This is the one that makes
+    // the BARS follow: StatusBar and the bottom bars fill with surfaceColor (or a scrim of
+    // it), so leaving it at the palette value left them a different hue from the page they
+    // sat on — the theme's navy over a grey page. Deriving it here fixes every consumer at
+    // once instead of special-casing each bar.
+    property color surfaceColor: _c("surfaceColor", hasBackgroundPreset
+        ? _derivedOr("surface", Settings.theme.customThemeColors.surfaceColor || "#303048")
+        : (Settings.theme.customThemeColors.surfaceColor || "#303048"))
 
     // Single translucency level for every "scrim" used when a custom background
     // image is active (cards, bars, inset controls, action-button tiles) — a
@@ -418,7 +535,34 @@ QtObject {
     // this one state instead of just fixing the underlying contrast problem.
     readonly property real backgroundScrimAlpha: 0.4
 
-    // Scrim a color for use over a custom background image: same hue, reduced
+    // True when there is a PICTURE behind the chrome — a photo, or the last shot's chart —
+    // which is the only case where translucency has anything to show through. The name
+    // predates the shot chart and is kept because ~70 call sites read it; what it means is
+    // "something with structure is back there", not "a file on disk is set".
+    //
+    // The shot case additionally requires a RENDER to exist. "shot" is believed as stored
+    // (it has no parameter), so on a fresh install with no shots the source says shot while
+    // BackgroundSurface paints a flat colour — and scrimming chrome over a flat colour is
+    // the exact elevation-cancelling failure chromeFill()'s own comment documents.
+    readonly property bool hasBackgroundImage: Settings.theme.backgroundSource === "image"
+                                               || (Settings.theme.backgroundSource === "shot"
+                                                   && LastShotChartSource.imageSource.length > 0)
+
+    // The fill a piece of chrome should actually paint.
+    //
+    // Over an IMAGE, translucency is the whole point: the photo shows through and that is
+    // what makes the chrome read as glass.
+    //
+    // Over a FLAT colour there is nothing behind to show through, so a scrim is not
+    // translucency — it is just a smaller step away from the page, and it silently undoes
+    // the elevation the fill was given. That is what left the action tiles nearly
+    // invisible: they were lifted 14 L* and then scrimmed back to 5.6. On a flat page the
+    // fill stays opaque and the elevation does the work.
+    function chromeFill(base: color): color {
+        return hasBackgroundImage ? scrimColor(base) : base
+    }
+
+    // Scrim a color for use over a background IMAGE: same hue, reduced
     // opacity so the wallpaper shows through. Use this instead of hand-rolling
     // Qt.rgba(...) at each call site — keeps every scrim in the app at the same
     // translucency level tuned by backgroundScrimAlpha above.
@@ -454,65 +598,197 @@ QtObject {
         return 0.2126 * linearise(c.r) + 0.7152 * linearise(c.g) + 0.0722 * linearise(c.b)
     }
 
-    // Card fill for page-level content cards (NOT dialogs/popups, which already
-    // sit above a dim Overlay and don't need the wallpaper showing through them).
+    // Card fill for page-level content cards. Dialogs/popups use
+    // dialogBackgroundColor below (same value, separately documented).
     // Opaque surfaceColor when no background image is set — zero visual change.
-    readonly property color cardBackgroundColor: Settings.theme.backgroundImagePath.length > 0
-        ? scrimColor(surfaceColor)
+    readonly property color cardBackgroundColor: glassChrome
+        ? chromeFill(surfaceColor)
+        : surfaceColor
+
+    // Frame fill for content dialogs/popups (Brew Settings, Grind Setting, Brew
+    // Ratio, etc.). With the glass chrome on these use the same
+    // tinted-glass scrim as the idle action tiles (Steam/Recipes/Beans) so the
+    // wallpaper shows through and the dialog matches the rest of the chrome
+    // rather than reading as an out-of-place opaque slab; opaque surfaceColor
+    // otherwise, so nothing changes with no background set. The modal Overlay
+    // dim behind the dialog keeps the glass legible over busy photos.
+    readonly property color dialogBackgroundColor: glassChrome
+        ? chromeFill(surfaceColor)
         : surfaceColor
 
     // Recessed/inset fill for controls that use flat backgroundColor to "blend
     // into" the page rather than stand out as a surface — text field boxes,
     // switch tracks, tab-button active states, unselected pills. Opaque
     // backgroundColor otherwise, so nothing changes with no background set.
-    readonly property color insetBackgroundColor: Settings.theme.backgroundImagePath.length > 0
-        ? scrimColor(backgroundColor)
+    // Over a photo this is a dimmed patch: the image shows through at a different
+    // brightness, so a 40% wash of backgroundColor reads as a recess. Over a FLAT page —
+    // a preset, or Glass with no background — the same expression is 40% of a colour
+    // composited over itself, which is that colour exactly, and the control disappears.
+    // (Most inset controls sit on a card, where the scrim lands on surfaceColor and reads
+    // fine either way; this fixes the minority drawn straight onto the page, which is why
+    // it went unnoticed.) On a flat page we scrim toward the contrast direction instead,
+    // so the recessed step survives.
+    readonly property color insetBackgroundColor: hasBackgroundPreset || glassChrome
+        ? (hasBackgroundImage ? scrimColor(backgroundColor) : _flatInsetTint)
         : backgroundColor
-    property color primaryColor: _c("primaryColor", Settings.theme.customThemeColors.primaryColor || "#4e85f4")
+
+    // A translucent white (dark mode) or black (light mode) wash — a step away from
+    // whatever is behind, rather than a wash of that same colour. Alpha is deliberately
+    // well under backgroundScrimAlpha: this marks a recess, it does not fill a surface.
+    // Keyed on what is actually behind the control — the preset colour when there is one,
+    // the theme's polarity otherwise. A preset can be pale under a dark theme, so
+    // isDarkMode is the wrong question once a preset is active.
+    //
+    // Fallback matches textColor/iconColor's own fallback for the same "text" key (a custom
+    // theme's textColor, not a bare default) — the should-never-happen path should agree with
+    // every other reader of this key, not answer differently just because this call site is
+    // the one feeding Qt.colorEqual() instead of a direct property assignment.
+    readonly property color _flatInsetTint: (hasBackgroundPreset ? Qt.colorEqual(_derivedOr("text", Settings.theme.customThemeColors.textColor || "#ffffff"), "#000000") : !isDarkMode)
+        ? Qt.rgba(0, 0, 0, 0.06)
+        : Qt.rgba(1, 1, 1, 0.10)
+    // The semantic palette — primary, accent, success, warning, error — kept readable on
+    // the page a background colour produces.
+    //
+    // Unlike text, borders and card fills, these are NOT derived: their hue is the meaning,
+    // so amber has to stay amber. But they are authored against a dark page and nine of the
+    // catalogue's colours are pale, where they collapse — on Cortado, warning measures
+    // 1.3:1, error 1.4:1 and success 1.2:1 against 4.5:1 needed. That is not a dim caption,
+    // it is a warning banner you cannot see, and it predates the presets: a light theme with
+    // a background photo has always had it. Each colour is nudged along the axis it is
+    // already on, by the smallest step that clears the floor, so a dark page (where they
+    // measure 5:1 to 9:1) is untouched and a pale one gets a deeper version of the same hue.
+    //
+    // Gated on hasBackgroundPreset, not glassChrome: this is the READABILITY branch, and the
+    // page whose luminance we are correcting against is the preset's. See the note at
+    // hasBackgroundPreset for why those two gates are not interchangeable.
+    function _readableOnPage(base: color): color {
+        return hasBackgroundPreset
+            ? Settings.theme.adjustedForContrast(base, _derivedOr("background", backgroundColor))
+            : base
+    }
+    property color primaryColor: _c("primaryColor", _readableOnPage(Settings.theme.customThemeColors.primaryColor || "#4e85f4"))
     // Fill for idle-screen action tiles (Recipes/Beans/Steam/etc.). Over a custom
     // background image they use the neutral surfaceColor so they match the bars and
     // cards (CustomItem scrims it); otherwise the standard primaryColor accent. The
     // blue accent reads as out of place once the rest of the chrome is a neutral scrim.
-    readonly property color actionTileColor: Settings.theme.backgroundImagePath.length > 0
-        ? surfaceColor
-        : primaryColor
+    // Gated on the SWITCH, not on the preset. It was gated on the preset, which meant a
+    // preset pinned the tiles to a neutral fill and turning glass off could not bring the
+    // accent back — the switch appeared to work only for the bottom bar.
+    readonly property color actionTileColor: !glassChrome
+        ? primaryColor
+        : (hasBackgroundPreset ? _derivedOr("actionTile", surfaceColor) : surfaceColor)
+
+    // Colour for text and icons sitting ON a chrome fill.
+    //
+    // With a background preset the fill is derived from the page, so a stored palette
+    // colour need not suit it: white is right on the usual blue action tile and invisible
+    // on one derived from Cortado or Porcelain. But blanket-deriving would also repaint
+    // content on fills that are still the theme's own accent, so the palette colour is kept
+    // whenever it is actually readable on the fill and replaced only when it is not.
+    //
+    // The threshold is 3:1, WCAG's large-text floor, because this is button and tile
+    // labelling. It is deliberately below the 4.5:1 used for body text: white on the
+    // primary blue measures 3.5:1, an existing and intentional choice, and a 4.5 gate
+    // would flip every accent button in the app to black content.
+    function contentColorOn(fill: color, fallback: color): color {
+        // Also when the glass switch is on: it changes actionTileColor and
+        // actionButtonFill() with no colour preset present, and gating only on the preset
+        // left a light theme + glass on painting white content on a white surface.
+        if (!hasBackgroundPreset && !glassChrome)
+            return fallback
+        return _contrastRatio(fallback, fill) >= 3.0 ? fallback : contrastColorFor(fill)
+    }
+
+    function _contrastRatio(a: color, b: color): real {
+        var la = _relativeLuminance(a)
+        var lb = _relativeLuminance(b)
+        return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05)
+    }
 
     // Fill for idle-screen action buttons that render their OWN ActionButton/
     // Rectangle (Sleep/Quit/History/Favorites/Discuss) rather than as a scrimmed
-    // CustomItem tile (Recipes/Beans/Steam). Over a custom background image they
+    // CustomItem tile (Recipes/Beans/Steam). With the glass chrome on they
     // scrim to the same neutral glass as those tiles — so they read as buttons
     // like Steam/Hot Water rather than an opaque colour slab — while keeping
     // their given accent/grey fill when no image is set (zero change). Applies to
     // both the full-mode ActionButton and the compact-mode Rectangle (Sleep/Quit).
     // The image-case fill equals cardBackgroundColor (scrimColor(surfaceColor)).
     function actionButtonFill(baseColor: color): color {
-        return Settings.theme.backgroundImagePath.length > 0 ? cardBackgroundColor : baseColor
+        // Also the switch, not the preset — same reason as actionTileColor.
+        return glassChrome ? cardBackgroundColor : baseColor
+    }
+
+    // actionButtonFill for a host that knows the chrome fill to use: the background
+    // chooser's preview, drawing a candidate colour whose derived fill is not Theme's
+    // (Theme still describes the APPLIED background until Apply is pressed). Needed
+    // because the glass branch above discards baseColor entirely — passing the
+    // candidate in as baseColor does nothing, which is why the preview's Ratio, Grind
+    // and Sleep chips stayed on the applied theme's navy while the page around them
+    // followed the candidate. Transparent override = no host opinion, behave exactly
+    // as actionButtonFill.
+    function actionButtonFillOn(baseColor: color, overrideFill: color): color {
+        return (glassChrome && overrideFill.a > 0) ? overrideFill : actionButtonFill(baseColor)
     }
     property color secondaryColor: _c("secondaryColor", Settings.theme.customThemeColors.secondaryColor || "#c0c5e3")
-    property color textColor: _c("textColor", Settings.theme.customThemeColors.textColor || "#ffffff")
-    // Brightened whenever a background image is active. Originally tried scoping
-    // this to only bare-background text (Settings tab bar) on the theory that text
-    // already sitting on a cardBackgroundColor/insetBackgroundColor scrim had
+    // Derived from the background while a preset is active — see the derivation block
+    // above for why a stored preference cannot be right across the whole ramp.
+    property color textColor: _c("textColor", hasBackgroundPreset
+        ? _derivedOr("text", Settings.theme.customThemeColors.textColor || "#ffffff")
+        : (Settings.theme.customThemeColors.textColor || "#ffffff"))
+    // Pushed AWAY from the page whenever the glass chrome is active. Originally tried
+    // scoping this to only bare-background text (Settings tab bar) on the theory that
+    // text already sitting on a cardBackgroundColor/insetBackgroundColor scrim had
     // enough contrast from that scrim alone — wrong in practice: bean inventory
     // cards (roaster/origin/tasting-note text on a scrimmed card, still over a
     // busy photo) were just as hard to read. Applies everywhere textSecondaryColor
-    // is read, uniformly. Unchanged with no background image set.
-    property color textSecondaryColor: _c("textSecondaryColor", Settings.theme.backgroundImagePath.length > 0
-        ? Qt.lighter(Settings.theme.customThemeColors.textSecondaryColor || "#a0a8b8", 1.4)
-        : (Settings.theme.customThemeColors.textSecondaryColor || "#a0a8b8"))
+    // is read, uniformly. Unchanged when the glass chrome is off.
+    //
+    // The direction is per-mode, and that is a fix, not a refinement: this was
+    // unconditionally `Qt.lighter(..., 1.4)`, which is right against a dark page and
+    // exactly backwards against a light one — it pushed secondary text TOWARD the
+    // background and cut its contrast. Any light theme with a photo has had that since
+    // the background feature shipped; presets ship a full light set, so it stops being
+    // rare. Lighten in dark mode, darken in light mode.
+    //
+    // Factored out (rather than left inline in the property below) so the property's
+    // no-preset branch and _derivedOr's should-never-happen fallback share one expression
+    // instead of two copies that could drift apart.
+    function _textSecondaryFallback(): color {
+        return glassChrome
+            ? (isDarkMode ? Qt.lighter(Settings.theme.customThemeColors.textSecondaryColor || "#a0a8b8", 1.4)
+                          : Qt.darker(Settings.theme.customThemeColors.textSecondaryColor || "#a0a8b8", 1.4))
+            : (Settings.theme.customThemeColors.textSecondaryColor || "#a0a8b8")
+    }
+    property color textSecondaryColor: _c("textSecondaryColor", hasBackgroundPreset
+        // Softened toward the page from the derived text colour, not from the palette.
+        // Derived in C++, where the softening fraction and its justification live.
+        ? _derivedOr("textSecondary", _textSecondaryFallback())
+        : _textSecondaryFallback())
 
     // Kept as an alias so call sites that already migrated to the more specific
     // name don't need to churn back — both now resolve to the same brightened value.
     readonly property color textSecondaryOnBackgroundColor: textSecondaryColor
-    property color accentColor: _c("accentColor", Settings.theme.customThemeColors.accentColor || "#e94560")
-    property color successColor: _c("successColor", Settings.theme.customThemeColors.successColor || "#00cc6d")
-    property color warningColor: _c("warningColor", Settings.theme.customThemeColors.warningColor || "#ffaa00")
-    property color highlightColor: _c("highlightColor", Settings.theme.customThemeColors.highlightColor || "#ffaa00")
-    property color errorColor: _c("errorColor", Settings.theme.customThemeColors.errorColor || "#ff4444")
-    property color borderColor: _c("borderColor", Settings.theme.customThemeColors.borderColor || "#3a3a4e")
+    // All five run through _readableOnPage — see the note above primaryColor.
+    property color accentColor: _c("accentColor", _readableOnPage(Settings.theme.customThemeColors.accentColor || "#e94560"))
+    property color successColor: _c("successColor", _readableOnPage(Settings.theme.customThemeColors.successColor || "#00cc6d"))
+    property color warningColor: _c("warningColor", _readableOnPage(Settings.theme.customThemeColors.warningColor || "#ffaa00"))
+    property color highlightColor: _c("highlightColor", _readableOnPage(Settings.theme.customThemeColors.highlightColor || "#ffaa00"))
+    property color errorColor: _c("errorColor", _readableOnPage(Settings.theme.customThemeColors.errorColor || "#ff4444"))
+    // Derived while a colour is active so a border is visible on a pale page as well as a
+    // dark one: a stored dark border vanishes on Porcelain, a stored light one on French
+    // Roast.
+    property color borderColor: _c("borderColor", hasBackgroundPreset
+        ? _derivedOr("border", Settings.theme.customThemeColors.borderColor || "#3a3a4e")
+        : (Settings.theme.customThemeColors.borderColor || "#3a3a4e"))
     property color primaryContrastColor: _c("primaryContrastColor", Settings.theme.customThemeColors.primaryContrastColor || "#ffffff")
-    property color iconColor: _c("iconColor", Settings.theme.customThemeColors.iconColor || "#ffffff")
-    property color bottomBarColor: _c("bottomBarColor", Settings.theme.customThemeColors.bottomBarColor || "#4e85f4")
+    // Icons are monochrome and sit on the page or on a card, both derived from the preset,
+    // so they follow the derived text colour rather than a stored one.
+    property color iconColor: _c("iconColor", hasBackgroundPreset
+        ? _derivedOr("text", Settings.theme.customThemeColors.iconColor || "#ffffff")
+        : (Settings.theme.customThemeColors.iconColor || "#ffffff"))
+    property color bottomBarColor: _c("bottomBarColor", hasBackgroundPreset
+        ? _fillCarrying(Settings.theme.customThemeColors.bottomBarColor || "#4e85f4")
+        : (Settings.theme.customThemeColors.bottomBarColor || "#4e85f4"))
     property color actionButtonContentColor: _c("actionButtonContentColor", Settings.theme.customThemeColors.actionButtonContentColor || "#ffffff")
 
     // --- Layout zone style presets (composable-brew-bar) -----------------
@@ -605,17 +881,33 @@ QtObject {
     // (#1537).
     readonly property string fontFamily: Settings.theme.bundledFontFamily
 
+    // The UI family plus the bundled symbol face, in priority order. Qt consults the
+    // second family only for codepoints the first lacks, so this changes nothing about
+    // how text renders — Decenza Sans still draws every letter — while arrows and
+    // geometric shapes (→ ← ↗ ↕ ▶ ◀ ⧉) come from the bundle instead of whatever the host
+    // happened to offer. That is the whole fix: no QML edits, no icons, no emoji, and the
+    // symbols stay monochrome so they take the element's colour like the text around them.
+    //
+    // Each entry is dropped when empty. A "" in this list is NOT inert — Qt resolves it to
+    // the application default, which would silently reinstate the platform fallback.
+    readonly property var fontFamilies: {
+        var f = []
+        if (fontFamily) f.push(fontFamily)
+        if (Settings.theme.symbolFontFamily) f.push(Settings.theme.symbolFontFamily)
+        return f
+    }
+
     // Scaled fonts. Sizes come from Settings.theme.effectiveFontSizes, which merges the
     // user's overrides over the canonical defaults declared once in SettingsTheme — never
     // re-hardcode a default here, that duplication is what this replaced.
-    readonly property font headingFont: Qt.font({ family: fontFamily, pixelSize: scaled(Settings.theme.effectiveFontSizes.headingSize), bold: true })
-    readonly property font titleFont: Qt.font({ family: fontFamily, pixelSize: scaled(Settings.theme.effectiveFontSizes.titleSize), bold: true })
-    readonly property font subtitleFont: Qt.font({ family: fontFamily, pixelSize: scaled(Settings.theme.effectiveFontSizes.subtitleSize), bold: true })
-    readonly property font bodyFont: Qt.font({ family: fontFamily, pixelSize: scaled(Settings.theme.effectiveFontSizes.bodySize) })
-    readonly property font labelFont: Qt.font({ family: fontFamily, pixelSize: scaled(Settings.theme.effectiveFontSizes.labelSize) })
-    readonly property font captionFont: Qt.font({ family: fontFamily, pixelSize: scaled(Settings.theme.effectiveFontSizes.captionSize) })
-    readonly property font valueFont: Qt.font({ family: fontFamily, pixelSize: scaled(Settings.theme.effectiveFontSizes.valueSize), bold: true })
-    readonly property font timerFont: Qt.font({ family: fontFamily, pixelSize: scaled(Settings.theme.effectiveFontSizes.timerSize), bold: true })
+    readonly property font headingFont: Qt.font({ families: fontFamilies, pixelSize: scaled(Settings.theme.effectiveFontSizes.headingSize), bold: true })
+    readonly property font titleFont: Qt.font({ families: fontFamilies, pixelSize: scaled(Settings.theme.effectiveFontSizes.titleSize), bold: true })
+    readonly property font subtitleFont: Qt.font({ families: fontFamilies, pixelSize: scaled(Settings.theme.effectiveFontSizes.subtitleSize), bold: true })
+    readonly property font bodyFont: Qt.font({ families: fontFamilies, pixelSize: scaled(Settings.theme.effectiveFontSizes.bodySize) })
+    readonly property font labelFont: Qt.font({ families: fontFamilies, pixelSize: scaled(Settings.theme.effectiveFontSizes.labelSize) })
+    readonly property font captionFont: Qt.font({ families: fontFamilies, pixelSize: scaled(Settings.theme.effectiveFontSizes.captionSize) })
+    readonly property font valueFont: Qt.font({ families: fontFamilies, pixelSize: scaled(Settings.theme.effectiveFontSizes.valueSize), bold: true })
+    readonly property font timerFont: Qt.font({ families: fontFamilies, pixelSize: scaled(Settings.theme.effectiveFontSizes.timerSize), bold: true })
 
     // Real monospace family per platform. "monospace" is NOT a registered font
     // family on macOS/iOS/Windows — using it triggers a slow font-alias scan and
@@ -680,8 +972,12 @@ QtObject {
     // UI indicator colors
     property color stopMarkerColor: _c("stopMarkerColor", Settings.theme.customThemeColors.stopMarkerColor || "#FF6B6B")
     property color frameMarkerColor: _c("frameMarkerColor", Settings.theme.customThemeColors.frameMarkerColor || "#66ffffff")
-    property color modifiedIndicatorColor: _c("modifiedIndicatorColor", Settings.theme.customThemeColors.modifiedIndicatorColor || "#FFCC00")
-    property color simulationIndicatorColor: _c("simulationIndicatorColor", Settings.theme.customThemeColors.simulationIndicatorColor || "#E65100")
+    // These two are drawn as text ON THE PAGE, so they take the same treatment as the
+    // semantic palette — see _readableOnPage. The markers above do not: they sit on a
+    // chart's own surface rather than the page, and frameMarkerColor carries an alpha the
+    // adjustment would flatten.
+    property color modifiedIndicatorColor: _c("modifiedIndicatorColor", _readableOnPage(Settings.theme.customThemeColors.modifiedIndicatorColor || "#FFCC00"))
+    property color simulationIndicatorColor: _c("simulationIndicatorColor", _readableOnPage(Settings.theme.customThemeColors.simulationIndicatorColor || "#E65100"))
     property color warningButtonColor: _c("warningButtonColor", Settings.theme.customThemeColors.warningButtonColor || "#FFA500")
     property color successButtonColor: _c("successButtonColor", Settings.theme.customThemeColors.successButtonColor || "#2E7D32")
 

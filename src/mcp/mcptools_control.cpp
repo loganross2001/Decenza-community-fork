@@ -26,7 +26,7 @@ void registerControlTools(McpToolRegistry* registry, DE1Device* device, MachineS
         QJsonObject{{"type", "object"}, {"properties", QJsonObject{
             {"confirmed", QJsonObject{{"type", "boolean"}, {"description", "Set to true after user confirms this action in chat"}}}
         }}},
-        [device, machineState](const QJsonObject&) -> QJsonObject {
+        [device](const QJsonObject&) -> QJsonObject {
             QJsonObject result;
             if (!device || !device->isConnected()) {
                 result["error"] = "Machine not connected";
@@ -248,7 +248,7 @@ void registerControlTools(McpToolRegistry* registry, DE1Device* device, MachineS
                 phase == Phase::Pouring || phase == Phase::Ending ||
                 phase == Phase::Steaming || phase == Phase::HotWater ||
                 phase == Phase::Flushing || phase == Phase::Descaling ||
-                phase == Phase::Cleaning;
+                phase == Phase::Cleaning || phase == Phase::Transport;
             if (!operationRunning) {
                 result["error"] = "No operation in progress";
                 return result;

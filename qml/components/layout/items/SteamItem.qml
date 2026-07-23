@@ -101,13 +101,26 @@ Item {
     }
 
     // --- PRESET POPUP ---
-    Popup {
+    // Dialog (not Popup) so TalkBack/VoiceOver scope traversal to the pill list,
+    // matching BeansItem/EquipmentItem/RecipesItem: Dialog carries the accessible
+    // dialog role that screen readers use to trap focus, which `Popup { modal }`
+    // alone (already set below) does not provide. header/footer null strip the
+    // Dialog chrome so it still renders as the same bare dropdown.
+    Dialog {
         id: presetPopup
-        modal: false
+        modal: true
+        dim: false
+        header: null
+        footer: null
         padding: Theme.spacingMedium
         closePolicy: Popup.CloseOnPressOutside
 
+        onClosed: { if (root.idlePage) root.idlePage.releasePanelClearance() }
         onOpened: {
+            if (root.idlePage) {
+                var rootTopInPage = root.mapToItem(root.idlePage, 0, 0).y
+                root.idlePage.requestPanelClearance(rootTopInPage + presetPopup.y, presetPopup.height)
+            }
             if (typeof MachineState !== "undefined") MachineState.tareScale()
 
             // Full-mode steam path runs IdlePage.onActivePresetFunctionChanged which
@@ -166,14 +179,14 @@ Item {
         }
 
         background: Rectangle {
-            // Over a custom background image, float the pills directly (matching
+            // With the glass chrome on, float the pills directly (matching
             // the center inline preset rows) instead of showing a panel; keep the
-            // opaque surface panel when no background image is set.
-            readonly property bool hasBackgroundImage: Settings.theme.backgroundImagePath.length > 0
-            color: hasBackgroundImage ? "transparent" : Theme.surfaceColor
+            // opaque surface panel when the glass chrome is off.
+            readonly property bool hasGlassChrome: Theme.glassChrome
+            color: hasGlassChrome ? "transparent" : Theme.surfaceColor
             radius: Theme.cardRadius
             border.color: Theme.borderColor
-            border.width: hasBackgroundImage ? 0 : 1
+            border.width: hasGlassChrome ? 0 : 1
         }
 
         contentItem: Item {

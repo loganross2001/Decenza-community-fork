@@ -111,6 +111,10 @@ Dialog {
     // recipeUpdated(recipeId, success) result (RecipesPage's pending-id
     // pattern) so a failure never looks like the tap was ignored.
     property int _pendingRecipeUpdateId: -1
+    // Cause from recipeUpdateFailed, consumed by the recipeUpdated handler that
+    // follows it. Cleared on every read so one failure's reason cannot colour
+    // the next attempt's message.
+    property string _recipeUpdateFailReason: ""
     // Failure banner for the fire-and-forget recipe operations (update /
     // switch). Auto-dismisses — the allowed toast use of a timer.
     property string recipeErrorText: ""
@@ -288,27 +292,6 @@ Dialog {
         }
     }
 
-    // Grinder identity is now chosen via the Switch Equipment dialog, so only the
-    // grind-setting field keeps a suggestion list (scoped to the active grinder).
-    function getGrinderSettingSuggestions() {
-        var suggestions = MainController.shotHistory ? MainController.shotHistory.getDistinctGrinderSettingsForGrinder(root.equipmentModel) : []
-        if (Settings.dye.dyeGrinderSetting.length > 0 && suggestions.indexOf(Settings.dye.dyeGrinderSetting) === -1) {
-            suggestions.unshift(Settings.dye.dyeGrinderSetting)
-        }
-        return suggestions
-    }
-
-    // Incremented when async distinct cache refreshes; referenced in suggestion bindings
-    // to force QML re-evaluation (the >= 0 condition is always true by design)
-    property int _distinctCacheVersion: 0
-
-    Connections {
-        target: MainController.shotHistory
-        function onDistinctCacheReady() {
-            _distinctCacheVersion++
-        }
-    }
-
     // Low dose warning - shown when dose is low OR when scale read failed
     property bool showScaleWarning: false
     property bool lowDoseWarning: doseValue < 3 || showScaleWarning
@@ -465,6 +448,14 @@ Dialog {
             if (root.visible)
                 MainController.recipeStorage.requestInventory()
         }
+        // Lands just before recipeUpdated(false) and names the cause. "busy" is
+        // the database being locked by another write — the one failure here the
+        // user can act on, and this is the path the lock bug was reported from,
+        // so it must not fall back to the generic wording.
+        function onRecipeUpdateFailed(recipeId, reason) {
+            if (recipeId === root._pendingRecipeUpdateId)
+                root._recipeUpdateFailReason = reason
+        }
         // "Update Recipe" is fire-and-forget and, with the auto-stamp gone,
         // the ONLY path a yield/temp value reaches the recipe — a swallowed
         // failure would silently lose the user's dialed value.
@@ -472,8 +463,14 @@ Dialog {
             if (recipeId !== root._pendingRecipeUpdateId)
                 return
             root._pendingRecipeUpdateId = -1
-            if (!success && root.visible)
-                root.showRecipeError(TranslationManager.translate("brewDialog.recipeUpdateFailed", "Couldn't save to the recipe"))
+            const reason = root._recipeUpdateFailReason
+            root._recipeUpdateFailReason = ""
+            if (!success && root.visible) {
+                root.showRecipeError(reason === "busy"
+                    ? TranslationManager.translate("brewDialog.recipeUpdateBusy",
+                          "The database was busy — tap Update Recipe again.")
+                    : TranslationManager.translate("brewDialog.recipeUpdateFailed", "Couldn't save to the recipe"))
+            }
         }
     }
 
@@ -520,7 +517,7 @@ Dialog {
     }
 
     background: Rectangle {
-        color: Theme.surfaceColor
+        color: Theme.dialogBackgroundColor
         radius: Theme.cardRadius
         border.width: 1
         border.color: Theme.borderColor
@@ -533,8 +530,7 @@ Dialog {
         implicitWidth: root._frameWidth
         inOverlay: true
         textFields: [
-            profileInput.textField, recipeInput.textField,
-            grindInput.textField, rpmInput
+            profileInput.textField, recipeInput.textField
         ]
         targetFlickable: brewFlickable
 
@@ -1571,7 +1567,13 @@ Dialog {
                 }
             }
 
-            // Grind setting (+ rpm when the grinder is rpm-adjustable) — dial-in
+            // Grind setting (+ rpm when the grinder is rpm-adjustable) — dial-in.
+            // One tap-to-open control for both halves ("grind · rpm"): tapping
+            // opens the grind picker (wheels + keyboard entry). Commits land on
+            // the dialog's PENDING grindSetting/grindRpm; the dual write-through
+            // (active bag + package) still happens on the dialog's own commit
+            // button, unchanged (brew-settings-equipment). Context is the active
+            // grinder — this dialog edits the live dial-in.
             RowLayout {
                 Layout.fillWidth: true
                 spacing: Theme.scaled(4)
@@ -1585,34 +1587,26 @@ Dialog {
                     Accessible.ignored: true
                 }
 
-                SuggestionField {
-                    id: grindInput
-                    Layout.fillWidth: true
-                    Layout.preferredWidth: Theme.scaled(110)
-                    label: ""
+                GrindField {
+                    // Content-hugging, like the other value controls in this
+                    // dialog — a full-width box around a short grind value
+                    // reads wrong next to the steppers.
+                    Layout.preferredWidth: implicitWidth
+                    presentation: "field"
+                    grinderBrand: root.equipmentBrand
+                    grinderModel: root.equipmentModel
+                    grindSetting: root.grindSetting
+                    rpmValue: root.grindRpm
                     accessibleName: TranslationManager.translate("brewDialog.grinderSetting", "Grinder setting")
-                    text: root.grindSetting
-                    suggestions: _distinctCacheVersion >= 0 ? root.getGrinderSettingSuggestions() : []
-                    onTextEdited: function(t) { root.grindSetting = t }
-                }
-
-                Text {
-                    visible: root.equipmentRpmCapable
-                    text: TranslationManager.translate("brewDialog.rpmLabel", "RPM:")
-                    font: Theme.bodyFont
-                    color: Theme.textSecondaryColor
-                    Layout.alignment: Qt.AlignVCenter
-                    Accessible.ignored: true
-                }
-
-                StyledTextField {
-                    id: rpmInput
-                    visible: root.equipmentRpmCapable
-                    Layout.preferredWidth: Theme.scaled(80)
-                    inputMethodHints: Qt.ImhDigitsOnly
-                    text: root.grindRpm > 0 ? String(root.grindRpm) : ""
-                    Accessible.name: TranslationManager.translate("brewDialog.rpmAccessible", "Grinder rpm")
-                    onTextEdited: root.grindRpm = parseInt(text) || 0
+                    // Clears ARE applied here, unlike the pill. This dialog
+                    // edits PENDING state (root.grindSetting/grindRpm) that the
+                    // user still reviews before OK, and the inline RPM field
+                    // this replaced could be emptied to 0 — swallowing the
+                    // clear would silently regress a working operation. The
+                    // pill stays the sole exception: it writes the live dial-in
+                    // straight through with no review step.
+                    onGrindCommitted: function(v) { root.grindSetting = v }
+                    onRpmCommitted: function(rpm) { root.grindRpm = rpm }
                 }
             }
         }

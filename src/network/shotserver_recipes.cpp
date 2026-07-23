@@ -15,6 +15,7 @@
 #include "../core/dbutils.h"
 #include "../core/settings.h"
 #include "../core/settings_dye.h"
+#include "webtemplates/grind_datalist_js.h"
 #include "../core/yieldspec.h"
 #include "../history/coffeebagstorage.h"
 #include "../history/recipepromotion.h"
@@ -276,7 +277,10 @@ void ShotServer::handleRecipesApi(QTcpSocket* socket, const QString& method,
                     return;  // another surface's create
                 disconnect(*conn);
                 if (recipeId <= 0) {
-                    respondJson(QJsonObject{{"error", "Create failed"}}, 500);
+                    if (recipe.value(QStringLiteral("error")).toString() == QLatin1String("nameInUse"))
+                        respondJson(QJsonObject{{"error", "That name is already in use by another active recipe"}}, 409);
+                    else
+                        respondJson(QJsonObject{{"error", "Create failed"}}, 500);
                 } else {
                     QVariantMap clean = recipe;
                     clean.remove(QStringLiteral("requestToken"));
@@ -305,7 +309,7 @@ void ShotServer::handleRecipesApi(QTcpSocket* socket, const QString& method,
             const bool opened = withTempDb(dbPath, "web_recipe_promote", [&](QSqlDatabase& db) {
                 record = ShotHistoryStorage::loadShotRecordStatic(db, shotId);
             });
-            QMetaObject::invokeMethod(qApp, [opened, record, shotId, name, hasMilkProvided,
+            QMetaObject::invokeMethod(qApp, [opened, record, name, hasMilkProvided,
                                              hasMilk, fallbackSteam, recipeStorage, respondJson]() {
                 if (!opened) {
                     respondJson(QJsonObject{{"error", "Could not open database"}}, 500);
@@ -331,7 +335,10 @@ void ShotServer::handleRecipesApi(QTcpSocket* socket, const QString& method,
                             return;  // another surface's create
                         QObject::disconnect(*conn);
                         if (recipeId <= 0) {
-                            respondJson(QJsonObject{{"error", "Create failed"}}, 500);
+                            if (recipe.value(QStringLiteral("error")).toString() == QLatin1String("nameInUse"))
+                                respondJson(QJsonObject{{"error", "That name is already in use by another active recipe"}}, 409);
+                            else
+                                respondJson(QJsonObject{{"error", "Create failed"}}, 500);
                         } else {
                             QVariantMap clean = recipe;
                             clean.remove(QStringLiteral("requestToken"));
@@ -422,13 +429,25 @@ void ShotServer::handleRecipesApi(QTcpSocket* socket, const QString& method,
                 return;
             }
             auto conn = std::make_shared<QMetaObject::Connection>();
+            // recipeUpdateFailed lands just before recipeUpdated and names the
+            // cause, so a rename collision reads the same here as in the app.
+            auto reasonConn = std::make_shared<QMetaObject::Connection>();
+            auto failReason = std::make_shared<QString>();
+            *reasonConn = connect(recipeStorage, &RecipeStorage::recipeUpdateFailed, this,
+                [reasonConn, recipeId, failReason](qint64 failedId, const QString& reason) {
+                    if (failedId == recipeId)
+                        *failReason = reason;
+                });
             *conn = connect(recipeStorage, &RecipeStorage::recipeUpdated, this,
-                [conn, recipeId, respondJson](qint64 updatedId, bool success) {
+                [conn, reasonConn, recipeId, respondJson, failReason](qint64 updatedId, bool success) {
                     if (updatedId != recipeId)
                         return;
                     disconnect(*conn);
+                    disconnect(*reasonConn);
                     if (success)
                         respondJson(QJsonObject{{"updated", true}, {"recipeId", recipeId}});
+                    else if (*failReason == QLatin1String("nameInUse"))
+                        respondJson(QJsonObject{{"error", "That name is already in use by another active recipe"}}, 409);
                     else
                         respondJson(QJsonObject{{"error", "Recipe not found or update failed"}}, 404);
                 });
@@ -462,7 +481,10 @@ void ShotServer::handleRecipesApi(QTcpSocket* socket, const QString& method,
                         return;  // another surface's create
                     disconnect(*conn);
                     if (newId <= 0) {
-                        respondJson(QJsonObject{{"error", "Clone failed"}}, 500);
+                        if (recipe.value(QStringLiteral("error")).toString() == QLatin1String("nameInUse"))
+                            respondJson(QJsonObject{{"error", "That name is already in use by another active recipe"}}, 409);
+                        else
+                            respondJson(QJsonObject{{"error", "Clone failed"}}, 500);
                     } else {
                         QVariantMap clean = recipe;
                         clean.remove(QStringLiteral("requestToken"));
@@ -497,13 +519,27 @@ void ShotServer::handleRecipesApi(QTcpSocket* socket, const QString& method,
                 return;
             }
             auto conn = std::make_shared<QMetaObject::Connection>();
+            // A restore can now be REFUSED because an active recipe took the name
+            // while this one was archived; reporting that as 404 "not found" sends
+            // the caller looking for a deleted recipe instead of the real fix.
+            auto reasonConn = std::make_shared<QMetaObject::Connection>();
+            auto failReason = std::make_shared<QString>();
+            *reasonConn = connect(recipeStorage, &RecipeStorage::recipeUpdateFailed, this,
+                [reasonConn, recipeId, failReason](qint64 failedId, const QString& reason) {
+                    if (failedId == recipeId)
+                        *failReason = reason;
+                });
             *conn = connect(recipeStorage, &RecipeStorage::recipeUpdated, this,
-                [conn, recipeId, restore, respondJson](qint64 updatedId, bool success) {
+                [conn, reasonConn, recipeId, restore, respondJson, failReason](qint64 updatedId, bool success) {
                     if (updatedId != recipeId)
                         return;
                     disconnect(*conn);
+                    disconnect(*reasonConn);
                     if (success)
                         respondJson(QJsonObject{{restore ? "restored" : "archived", true}});
+                    else if (*failReason == QLatin1String("nameInUse"))
+                        respondJson(QJsonObject{{"error", "An active recipe already uses this name — "
+                                                          "rename that one first"}}, 409);
                     else
                         respondJson(QJsonObject{{"error", "Recipe not found"}}, 404);
                 });
@@ -640,6 +676,11 @@ QString ShotServer::generateRecipesPage() const
                 <option value="before">Before espresso (long black)</option>
             </select>
         </details>
+        <!-- The page-level #status sits behind this modal's backdrop, so a
+             validation error written there leaves the dialog looking simply
+             unresponsive. Same fix as the /beans editor. -->
+        <div id="editorStatus" class="muted" role="status" aria-live="polite"></div>
+
         <div class="dialog-actions">
             <button onclick="el('editor').close()">Cancel</button>
             <button class="primary" onclick="saveEditor()">Save</button>
@@ -660,11 +701,13 @@ QString ShotServer::generateRecipesPage() const
     html += WEB_JS_MENU;
     html += WEB_JS_POWER_CONTROL;
     html += WEB_JS_MANAGEMENT;
+    html += WEB_JS_GRIND_DATALIST;
     html += R"HTML(
         let editingId = null;
         let recipes = [];          // full list (active + archived), as fetched
         let bags = [];
         let bagsLoaded = false;
+        let equipmentList = [];    // grinder identity for the grind candidates
         let filterText = '';
         let showArchived = false;
 
@@ -717,6 +760,11 @@ QString ShotServer::generateRecipesPage() const
                     const sel = el('fBag');
                     const opt = document.createElement('option');
                     opt.value = ''; opt.disabled = true; opt.textContent = '(bags unavailable)';
+                    // Marked like the finished-bag placeholder so the next
+                    // editor open clears it — otherwise one failed load leaves
+                    // "(bags unavailable)" in the picker for the whole session,
+                    // including after a later load succeeds.
+                    opt.dataset.placeholder = '1';
                     sel.appendChild(opt);
                 });
         }
@@ -731,6 +779,10 @@ QString ShotServer::generateRecipesPage() const
             el('fRoaster').value = b.roasterName || '';
             el('fCoffee').value = b.coffeeName || '';
         }
+
+        // Status inside the editor dialog — status() writes the page-level line,
+        // which this modal's backdrop covers.
+        const editorStatus = (msg) => { el('editorStatus').textContent = msg || ''; };
 
         function load() {
             status('Loading…');
@@ -932,13 +984,22 @@ QString ShotServer::generateRecipesPage() const
             el('fName').value = r.name || '';
             el('fDrinkType').value = r.drinkType || '';
             el('fProfile').value = r.profileTitle || '';
+            editorStatus('');   // nothing else clears a message left by the last recipe
             const bagSel = el('fBag');
             bagSel.onchange = onBagChanged;
+            // Drop any placeholder left by a previous open. loadBags() runs
+            // once at page load and never again, so an appended option would
+            // otherwise survive into every later edit — the same recipe opened
+            // twice grew a duplicate, and other recipes' finished bags piled up
+            // in the picker.
+            Array.from(bagSel.querySelectorAll('option[data-placeholder]'))
+                .forEach(o => o.remove());
             // A finished linked bag is not in the open-bag list — add it so
             // editing another field doesn't silently drop the link.
             if (r.bagId > 0 && !bags.some(b => b.id === r.bagId)) {
                 const opt = document.createElement('option');
                 opt.value = r.bagId;
+                opt.dataset.placeholder = '1';
                 opt.textContent = ((r.roasterName || '') + ' ' + (r.coffeeName || '')).trim()
                     + (bagsLoaded ? ' (finished)' : ' (current bag)');
                 bagSel.appendChild(opt);
@@ -953,6 +1014,16 @@ QString ShotServer::generateRecipesPage() const
             el('fTemp').value = (r.tempOffsetC || 0) !== 0 ? r.tempOffsetC : '';
             el('fGrind').value = r.grindPinned || '';
             el('fRpm').value = r.rpmPinned > 0 ? r.rpmPinned : '';
+            // Stepped candidates for the RECIPE's selected package — the
+            // record's own grinder (grind-value-entry). A NEW recipe defaults
+            // to the ACTIVE package (never an empty identity), matching the
+            // app wizard; an existing recipe keeps its own.
+            {
+                const pkg = equipmentList.find(p => p.id === (r.equipmentId || 0))
+                    || (!id ? equipmentList.find(p => p.isActive) : undefined);
+                attachGrindDatalist(el('fGrind'), el('fRpm'),
+                                    pkg ? pkg.grinderBrand : '', pkg ? pkg.grinderModel : '');
+            }
             const steam = r.steam || {};
             el('fHasMilk').checked = !!steam.hasMilk;
             el('fMilk').value = steam.milkWeightG || '';
@@ -971,10 +1042,10 @@ QString ShotServer::generateRecipesPage() const
             const name = el('fName').value.trim();
             const profileTitle = el('fProfile').value.trim();
             const hasWater = el('fHasWater').checked;
-            if (!name) { status('Name is required'); return; }
+            if (!name) { editorStatus('Name is required'); return; }
             // Profile-less recipes are valid only as hot-water drinks (tea).
             if (!profileTitle && !hasWater) {
-                status('Profile title is required (unless the recipe adds hot water)'); return;
+                editorStatus('Profile title is required (unless the recipe adds hot water)'); return;
             }
             const steam = {};
             if (el('fHasMilk').checked) steam.hasMilk = true;
@@ -1022,14 +1093,43 @@ QString ShotServer::generateRecipesPage() const
             // means "clear this recipe's grind".
             if (!editingId && bodyData.grindPinned === '')
                 delete bodyData.grindPinned;
-            const req = editingId ? post('/api/recipe/' + editingId, bodyData)
-                                  : post('/api/recipes', bodyData);
-            req.then(() => { el('editor').close(); load(); })
-               .catch(e => status(e.message));
+            // Create: link the ACTIVE equipment package (never an empty one),
+            // matching the app wizard's default. Awaits the equipment list so a
+            // quick save right after page load, or a failed first fetch, does
+            // not silently produce an unlinked recipe. Update leaves the
+            // recipe's existing link untouched (no equipment editor here).
+            const ready = editingId ? Promise.resolve() : ensureEquipmentList();
+            ready.then(() => {
+                if (!editingId) {
+                    const ap = equipmentList.find(p => p.isActive);
+                    if (ap) bodyData.equipmentId = ap.id;
+                }
+                return editingId ? post('/api/recipe/' + editingId, bodyData)
+                                 : post('/api/recipes', bodyData);
+            })
+            .then(() => { el('editor').close(); load(); })
+            .catch(e => editorStatus('Could not save the recipe: ' + e.message));
         }
 
         load();
         loadBags();
+        // Equipment packages: resolve the RECIPE's grinder for the grind/RPM
+        // candidate lists AND supply the create-time active-package default.
+        // That second use is NOT enhancement-only data — a silently empty list
+        // would create recipes with no equipment link — so keep the promise and
+        // let saveEditor await it rather than racing page load.
+        let equipmentReady = getJson('/api/equipment')
+            .then(d => { equipmentList = d.equipment || []; })
+            .catch(e => { equipmentList = []; console.warn('Equipment list unavailable:', e); });
+        // Retry once on demand when a create needs the list and it came back
+        // empty (failed fetch, or none existed at load).
+        function ensureEquipmentList() {
+            if (equipmentList.length) return Promise.resolve();
+            equipmentReady = getJson('/api/equipment')
+                .then(d => { equipmentList = d.equipment || []; })
+                .catch(e => { equipmentList = []; console.warn('Equipment list unavailable:', e); });
+            return equipmentReady;
+        }
     </script>
 </body>
 </html>)HTML";

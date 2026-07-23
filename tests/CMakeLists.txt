@@ -16,6 +16,14 @@ set(CMAKE_AUTOMOC_PATH_PREFIX OFF)
 # Each test compiles only the source files it needs (no full app build).
 function(add_decenza_test name)
     add_executable(${name} ${ARGN})
+    # Record every test executable so `build_tests` below can depend on the set
+    # without anyone maintaining a second list by hand.
+    #
+    # A target declared with a bare add_executable + add_test does NOT pass
+    # through here and must append to DECENZA_TEST_TARGETS itself — see
+    # tst_shotcorpus. Forgetting that shows up as "(Not Run)" in a clean build,
+    # and ONLY in a clean build.
+    set_property(GLOBAL APPEND PROPERTY DECENZA_TEST_TARGETS ${name})
     set_target_properties(${name} PROPERTIES AUTOMOC_PATH_PREFIX OFF)
     target_compile_definitions(${name} PRIVATE DECENZA_TESTING)
     # Source-tree path, so a test can assert against shipped QML/assets rather than
@@ -69,6 +77,7 @@ set(CORE_SOURCES
     ${CMAKE_SOURCE_DIR}/src/core/settings_hardware.cpp
     ${CMAKE_SOURCE_DIR}/src/core/settings_ai.cpp
     ${CMAKE_SOURCE_DIR}/src/core/settings_theme.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/backgroundpresets.cpp
     ${CMAKE_SOURCE_DIR}/src/core/settings_visualizer.cpp
     ${CMAKE_SOURCE_DIR}/src/core/settings_mcp.cpp
     ${CMAKE_SOURCE_DIR}/src/core/settings_brew.cpp
@@ -349,6 +358,26 @@ add_decenza_test(tst_settings
     ${CMAKE_SOURCE_DIR}/src/core/settingsserializer.cpp
 )
 
+# --- tst_backgroundpresets: background preset catalogue + Glass theme ---
+# Includes the WCAG contrast floors for every colour — against the page, the page under
+# the densest pattern, the card and the action tile — computable here in a way it never
+# was for a photo background, and measured against the shipped derivation in C++.
+add_decenza_test(tst_backgroundpresets
+    tst_backgroundpresets.cpp
+    # For the backup/migration round-trip: the colour and pattern must survive a
+    # settings export/import, which backs every persistence surface in the app.
+    ${CMAKE_SOURCE_DIR}/src/core/settingsserializer.cpp
+)
+# Compile the production qrc so :/backgrounds/*.svg resolve — the catalogue test asserts
+# every pattern asset actually ships, which is the check that catches a catalogue entry
+# pointing at a file nobody added to resources.qrc.
+target_sources(tst_backgroundpresets PRIVATE ${CMAKE_SOURCE_DIR}/resources/resources.qrc)
+set_target_properties(tst_backgroundpresets PROPERTIES AUTORCC ON)
+# Qt6::Svg so the test can RENDER each pattern tile and measure its ink coverage, rather
+# than trusting the hand-entered figure the contrast maths depends on. Two of the six were
+# wrong before this check existed, both understating the shift.
+target_link_libraries(tst_backgroundpresets PRIVATE Qt6::Svg)
+
 # --- tst_saw_settings: per-(profile, scale) SAW learning + batch + bootstrap ---
 add_decenza_test(tst_saw_settings
     tst_saw_settings.cpp
@@ -365,6 +394,18 @@ add_decenza_test(tst_translationreactivity
     tst_translationreactivity.cpp
 )
 target_link_libraries(tst_translationreactivity PRIVATE Qt6::Qml)
+
+# --- tst_translationsourcedrift: what happens when a key's English is rewritten ---
+# Pins the contract that the registry follows the source text while the existing translation is
+# KEPT and merely reported, not dropped. This comment used to say the opposite — that a
+# translation of the previous wording stops being served — which was the first implementation,
+# reverted after it ate 11 German strings on a real run. The old
+# `if (!contains(key))` guard meant a key's English was captured once and never revisited,
+# which a full rescan could not repair either.
+add_decenza_test(tst_translationsourcedrift
+    tst_translationsourcedrift.cpp
+)
+target_link_libraries(tst_translationsourcedrift PRIVATE Qt6::Qml)
 
 # --- tst_markdownrenderer: markdown -> HTML, incl. the raw-HTML security claim ---
 add_decenza_test(tst_markdownrenderer
@@ -402,6 +443,25 @@ add_decenza_test(tst_autowakewindow
     tst_autowakewindow.cpp
     ${CMAKE_SOURCE_DIR}/src/core/autowakemanager.cpp
 )
+
+# --- tst_dbtxn: DbWriteTxn lock discipline shared by the storages ---
+# Header-only (dbutils.h), so no extra sources. Covers the outcomes the storage
+# suites never reach: they all run uncontended and single-connection, so they
+# only ever exercise the successful DbWriteTxn::begin() path.
+add_decenza_test(tst_dbtxn
+    tst_dbtxn.cpp
+)
+
+# --- tst_updatechecker: shared GitHub releases request + connection policy ---
+# Guards ConnectionCacheExpiryTimeoutSecondsAttribute, whose absence is invisible
+# except as an hourly Qt warning in shipped logs. Friend-class access is via
+# `friend class tst_UpdateChecker` under DECENZA_TESTING in updatechecker.h.
+add_decenza_test(tst_updatechecker
+    tst_updatechecker.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/updatechecker.cpp
+    ${CMAKE_BINARY_DIR}/version_code.cpp
+)
+target_include_directories(tst_updatechecker PRIVATE ${CMAKE_BINARY_DIR})
 
 # --- tst_tclimport: TCL profile import round-trip against de1app profiles ---
 add_decenza_test(tst_tclimport
@@ -504,6 +564,17 @@ if(NOT ANDROID AND NOT IOS)
     )
     add_dependencies(tst_shotcorpus shot_eval)
     add_test(NAME tst_shotcorpus COMMAND tst_shotcorpus)
+    # Registered by hand because this target is declared with add_executable
+    # rather than add_decenza_test, so the function that records test targets
+    # never sees it. Omitting it made `ninja build_tests` skip this binary and
+    # ctest report "40 - tst_shotcorpus (Not Run)" — caught only by building in
+    # a CLEAN tree, since an incremental build still had the binary lying around
+    # from a previous `ninja all`.
+    #
+    # This also pulls in shot_eval via add_dependencies above, which is correct:
+    # the test shells out to `shot_eval --validate`, so that tool IS needed even
+    # though the other three (saw_replay, saw_parity, profile_sync) are not.
+    set_property(GLOBAL APPEND PROPERTY DECENZA_TEST_TARGETS tst_shotcorpus)
 endif()
 
 # --- tst_shotsettings: ShotSettings BLE wire format ---
@@ -547,6 +618,11 @@ add_decenza_test(tst_firmwareupdater
 add_decenza_test(tst_profileupload
     tst_profileupload.cpp
     mocks/MockTransport.h
+)
+
+# --- tst_bleserviceerror: QLowEnergyService::ServiceError name mapping (#1586) ---
+add_decenza_test(tst_bleserviceerror
+    tst_bleserviceerror.cpp
 )
 
 # --- tst_blefidelity: BLE encode round-trip for all built-in profiles ---
@@ -822,14 +898,22 @@ add_decenza_test(tst_mcptools_profiles
 )
 target_link_libraries(tst_mcptools_profiles PRIVATE Qt6::Graphs Qt6::Quick paho-mqtt3a-static)
 target_include_directories(tst_mcptools_profiles PRIVATE ${CMAKE_BINARY_DIR})
+# Built-in profiles QRC, as tst_profilemanager and tst_tclimport already do.
+# Without it ProfileManager cannot open ":/profiles/default.json" and falls
+# back to whatever a PREVIOUS test left on disk — so this passed on a developer
+# machine and on CI retry, and failed on the first attempt of every clean run.
+# See the note on the ctest retry in linux-release.yml.
+target_sources(tst_mcptools_profiles PRIVATE ${PROFILES_QRC})
 
 # --- tst_mcptools_write: Write MCP tools (settings_set temp/weight BLE upload) ---
-# mcptools_write.cpp includes all write tools, pulling in Accessibility/Screensaver/Translation/Battery
+# mcptools_write.cpp includes all write tools, pulling in Accessibility/Screensaver/Translation/Battery,
+# and BeanBaseClient since bag_update re-resolves the bag photo when the product URL changes.
 find_package(Qt6 REQUIRED COMPONENTS TextToSpeech Multimedia)
 add_decenza_test(tst_mcptools_write
     tst_mcptools_write.cpp
     ${MCP_MOC_HEADERS}
     ${CMAKE_SOURCE_DIR}/src/mcp/mcptools_write.cpp
+    ${CMAKE_SOURCE_DIR}/src/network/beanbaseclient.cpp
     ${PROFILEMANAGER_SOURCES}
     ${CMAKE_SOURCE_DIR}/src/core/accessibilitymanager.cpp
     ${CMAKE_SOURCE_DIR}/src/screensaver/screensavervideomanager.cpp
@@ -838,6 +922,8 @@ add_decenza_test(tst_mcptools_write
 )
 target_link_libraries(tst_mcptools_write PRIVATE decenza_shotlib Qt6::TextToSpeech Qt6::Multimedia paho-mqtt3a-static)
 target_include_directories(tst_mcptools_write PRIVATE ${CMAKE_BINARY_DIR})
+# Same missing built-in profiles QRC as tst_mcptools_profiles above.
+target_sources(tst_mcptools_write PRIVATE ${PROFILES_QRC})
 
 # --- tst_mcptools_presets: steam-pitcher / water-vessel preset MCP tools ---
 # (unit conversions, partial-update merge, apply-on-select). MainController is
@@ -855,6 +941,35 @@ add_decenza_test(tst_mcptools_presets
 )
 target_link_libraries(tst_mcptools_presets PRIVATE decenza_shotlib Qt6::TextToSpeech Qt6::Multimedia paho-mqtt3a-static)
 target_include_directories(tst_mcptools_presets PRIVATE ${CMAKE_BINARY_DIR})
+
+# --- tst_webdebuglogger: WebDebugLogger session-index cache (improve-mcp-debug-log-search) ---
+add_decenza_test(tst_webdebuglogger
+    tst_webdebuglogger.cpp
+    ${CMAKE_SOURCE_DIR}/src/network/webdebuglogger.cpp
+)
+
+# --- tst_mcplogfilter: shared filter/tail helpers for debug_get_log / shots_get_debug_log ---
+# (mcplogfilter.h is header-only — nothing to link beyond decenza_testlib's Qt Core.)
+add_decenza_test(tst_mcplogfilter
+    tst_mcplogfilter.cpp
+)
+
+# --- tst_mcptools_shots_debuglog: shots_get_debug_log filter/regex/tail (improve-mcp-debug-log-search) ---
+add_decenza_test(tst_mcptools_shots_debuglog
+    tst_mcptools_shots_debuglog.cpp
+    ${MCP_MOC_HEADERS}
+    ${CMAKE_SOURCE_DIR}/src/mcp/mcptools_shots.cpp
+    ${PROFILEMANAGER_SOURCES}
+    ${CMAKE_SOURCE_DIR}/src/core/accessibilitymanager.cpp
+    ${CMAKE_SOURCE_DIR}/src/screensaver/screensavervideomanager.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/batterymanager.cpp
+    ${CMAKE_BINARY_DIR}/version_code.cpp
+)
+target_link_libraries(tst_mcptools_shots_debuglog PRIVATE decenza_shotlib Qt6::TextToSpeech Qt6::Multimedia paho-mqtt3a-static)
+target_include_directories(tst_mcptools_shots_debuglog PRIVATE ${CMAKE_BINARY_DIR})
+# Same missing built-in profiles QRC as tst_mcptools_profiles above — McpTestFixture's
+# ProfileManager falls back to "default" at construction and warns without it.
+target_sources(tst_mcptools_shots_debuglog PRIVATE ${PROFILES_QRC})
 
 # --- tst_mcpserver_session: Session management, ping, subscribe/unsubscribe ---
 # Uses real mcpserver.cpp but stubs out tool/resource registration functions
@@ -949,6 +1064,15 @@ add_decenza_test(tst_maintenancedocsync
     ${CMAKE_SOURCE_DIR}/src/barista/tasksstorage.cpp
 )
 
+# --- tst_exifdate: EXIF date scanning from JPEG bytes.
+# Header-only and dependency-free, which is the point: the same logic inside
+# ShotServer::extractImageDate was untestable without linking a web server, a
+# storage backend, a DE1 device and an AI manager — so it was never tested, and
+# a rename silently made the whole path dead code. Nothing to link here.
+add_decenza_test(tst_exifdate
+    tst_exifdate.cpp
+)
+
 # --- tst_kb_schema: build-time KB validator (tools/validate_kb.py) coverage
 # (change: restructure-kb-as-validated-json, task 5.1). Shells out to the
 # same Python interpreter the root CMakeLists.txt's `validate_kb` build gate
@@ -983,3 +1107,77 @@ add_test(NAME failonwarning_lint
     COMMAND ${CMAKE_COMMAND}
         -DLINT_DIR=${CMAKE_CURRENT_SOURCE_DIR}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/lint_failonwarning.cmake)
+
+# --- Sanitizer canaries: proof that each sanitizer is armed, not merely asked
+# for. A silently-unapplied sanitizer yields the same green suite as a clean
+# codebase, so each canary commits a deliberate defect of its sanitizer's kind
+# and run_sanitizer_canary.cmake fails the test unless it was reported.
+# Registered only under the matching option, so ordinary builds never compile
+# or run them. See the header comments in the two canary sources.
+#
+# The UBSan canary runs in BOTH modes, which it previously did not. It used to
+# be skipped whenever UBSan was in its auto-enabled Debug (recovering) mode, on
+# the reasoning that a recovering sanitizer lets the process exit 0 and the
+# canary would "fail" while everything worked. True as far as it goes — but
+# recovering mode is every developer's local Debug build, i.e. exactly the gate
+# that runs most often, and it was the one configuration with no armed-ness
+# proof at all. The fix is to check the right evidence for the mode: an abort
+# where the build halts, and the diagnostic text alone where it recovers.
+if(ENABLE_UBSAN)
+    add_executable(sanitizer_canary sanitizer_canary.cpp)
+    set_target_properties(sanitizer_canary PROPERTIES AUTOMOC OFF)
+    if(_ubsan_recover)
+        set(_ubsan_expect_abort OFF)
+    else()
+        set(_ubsan_expect_abort ON)
+    endif()
+    add_test(NAME sanitizer_canary
+        COMMAND ${CMAKE_COMMAND}
+            -DCANARY=$<TARGET_FILE:sanitizer_canary>
+            -DSANITIZER=ubsan
+            -DEXPECT_ABORT=${_ubsan_expect_abort}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/run_sanitizer_canary.cmake)
+endif()
+
+# ASan has no recovering mode for this defect class, so it always aborts.
+if(ENABLE_ASAN)
+    add_executable(asan_canary asan_canary.cpp)
+    set_target_properties(asan_canary PROPERTIES AUTOMOC OFF)
+    add_test(NAME asan_canary
+        COMMAND ${CMAKE_COMMAND}
+            -DCANARY=$<TARGET_FILE:asan_canary>
+            -DSANITIZER=asan
+            -DEXPECT_ABORT=ON
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/run_sanitizer_canary.cmake)
+endif()
+
+# --- build_tests: everything ctest needs, and nothing it does not.
+#
+# `ninja` with no target builds `all`, which for this project is dominated by
+# things the test suite never executes. Measured on a nightly sanitizer build:
+# 385 C++ objects for the Decenza app and 36 for the tools (shot_eval,
+# saw_replay, saw_parity, profile_sync), against 318 for the tests themselves —
+# so roughly 56% of the compilation, plus the app's link, is work the job
+# throws away.
+#
+# Safe because no test target links or depends on the app: they link
+# decenza_testlib / decenza_shotlib, which compile the src/ sources they need
+# independently. Sanitizer coverage is unaffected — ASan and UBSan report on
+# code that RUNS, and this job runs only the suite.
+#
+# What this gives up, stated plainly: the nightly no longer compiles
+# app-exclusive code (main.cpp, QML glue) under sanitizer flags. That is not a
+# real loss — those files are already compiled several times a day by the
+# platform builds, and nothing here executed them.
+#
+# Use: `ninja build_tests` instead of `ninja`.
+get_property(_decenza_test_targets GLOBAL PROPERTY DECENZA_TEST_TARGETS)
+if(ENABLE_UBSAN)
+    list(APPEND _decenza_test_targets sanitizer_canary)
+endif()
+if(ENABLE_ASAN)
+    list(APPEND _decenza_test_targets asan_canary)
+endif()
+add_custom_target(build_tests DEPENDS ${_decenza_test_targets})
+list(LENGTH _decenza_test_targets _decenza_test_count)
+message(STATUS "build_tests target covers ${_decenza_test_count} test executables")

@@ -60,6 +60,9 @@ bool MachineState::isFlowing() const {
                subState == DE1::SubState::Pouring;
     }
 
+    // Phase::Transport (air purge) is deliberately excluded: no scale
+    // participates and no shot/purge timer UI reads shotTime, so it needs no
+    // flow tracking. Add it here only if a purge-elapsed readout is introduced.
     return m_phase == Phase::Preinfusion ||
            m_phase == Phase::Pouring ||
            m_phase == Phase::HotWater ||
@@ -309,6 +312,10 @@ void MachineState::updatePhase() {
 
         case DE1::State::Clean:
             m_phase = Phase::Cleaning;
+            break;
+
+        case DE1::State::AirPurge:
+            m_phase = Phase::Transport;
             break;
 
         default:
@@ -582,7 +589,7 @@ void MachineState::updatePhase() {
         // Defer other signal emissions to allow pending BLE notifications to process first.
         // This prevents QML binding updates from blocking the event loop during the BLE callback chain.
         // Note: espressoCycleStarted is emitted immediately above to avoid race conditions.
-        QMetaObject::invokeMethod(this, [this, wasInEspresso, isInEspresso, wasFlowing, oldPhase]() {
+        QMetaObject::invokeMethod(this, [this, wasFlowing, oldPhase]() {
             emit phaseChanged();
 
             if (isFlowing() && !wasFlowing) {

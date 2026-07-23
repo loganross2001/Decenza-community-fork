@@ -97,7 +97,7 @@ Dialog {
     }
 
     background: Rectangle {
-        color: Theme.surfaceColor
+        color: Theme.dialogBackgroundColor
         radius: Theme.cardRadius
         border.width: 1
         border.color: Theme.borderColor
@@ -143,7 +143,7 @@ Dialog {
                         Accessible.role: Accessible.Button
                         Accessible.name: root.editMode
                             ? TranslationManager.translate("ratio.edit.done", "Done editing ratios")
-                            : TranslationManager.translate("ratio.edit.button", "Edit ratios")
+                            : TranslationManager.translate("ratio.edit.button.accessible", "Edit ratios")
                         Accessible.focusable: true
                         Accessible.onPressAction: editMa.clicked(null)
                         Text {

@@ -10,6 +10,7 @@
 #include "core/settings_theme.h"
 #include "core/settings_visualizer.h"
 #include "core/settingsserializer.h"
+#include "network/grindcandidates.h"
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -91,7 +92,6 @@ private:
     double m_origSteamTemp;
     QString m_origScaleAddress;
     QString m_origThemeMode;
-    int m_origShotRating;
     bool m_origIgnoreVolume;
     bool m_origAutoUpdate;
     QString m_origDyeBeanBrand;
@@ -106,6 +106,8 @@ private:
     bool m_origMilkAutoCapture;
     double m_origSteamSecPerGram;
     int m_origActiveRecipeId;
+    int m_origAutoLoadRecipeId;
+    QString m_origLayoutConfiguration;
 
 private slots:
 
@@ -121,7 +123,6 @@ private slots:
         // a trailing reset inside each test — a trailing reset does not run when an
         // assertion fails mid-test, which is exactly when leaked state does most harm.
         m_origCustomFontSizes = m_settings.theme()->customFontSizes();
-        m_origShotRating = m_settings.visualizer()->defaultShotRating();
         m_origIgnoreVolume = m_settings.brew()->ignoreVolumeWithScale();
         m_origAutoUpdate = m_settings.visualizer()->visualizerAutoUpdate();
         m_origDyeBeanBrand = m_settings.dye()->dyeBeanBrand();
@@ -140,10 +141,19 @@ private slots:
           m_origVesselPresets = raw.value("water/vesselPresets").toByteArray();
           m_origPitcherPresets = raw.value("steam/pitcherPresets").toByteArray(); }
         m_origActiveRecipeId = m_settings.dye()->activeRecipeId();
+        m_origAutoLoadRecipeId = m_settings.dye()->autoLoadRecipeId();
+        // Layout: saved/restored here for the same reason as the font sizes
+        // above. The layout tests mutate a shared store and a trailing restore
+        // inside each test is skipped when an assertion fails — leaving a
+        // half-built layout (or, after resetLayoutToDefault(), NO layout key at
+        // all) for every later layout test to trip over, which buries the first
+        // real failure under cascading ones.
+        m_origLayoutConfiguration = m_settings.network()->layoutConfiguration();
     }
 
     void cleanup() {
         // Restore all originals after each test (runs even on assertion failure)
+        m_settings.network()->setLayoutConfiguration(m_origLayoutConfiguration);
         m_settings.theme()->setCustomFontSizes(m_origCustomFontSizes);
         m_settings.brew()->setTargetWeight(m_origTargetWeight);
         m_settings.brew()->setDoseCupTareWeight(m_origDoseCupTare);
@@ -151,7 +161,6 @@ private slots:
         m_settings.brew()->setSteamTemperature(m_origSteamTemp);
         m_settings.setScaleAddress(m_origScaleAddress);
         m_settings.theme()->setThemeMode(m_origThemeMode);
-        m_settings.visualizer()->setDefaultShotRating(m_origShotRating);
         m_settings.brew()->setIgnoreVolumeWithScale(m_origIgnoreVolume);
         m_settings.visualizer()->setVisualizerAutoUpdate(m_origAutoUpdate);
         m_settings.dye()->setDyeBeanBrand(m_origDyeBeanBrand);
@@ -169,6 +178,9 @@ private slots:
           raw.sync(); }
         // Recipe state (add-recipes).
         m_settings.dye()->setActiveRecipeId(m_origActiveRecipeId);
+        // recipe-auto-load: restored last so it wins regardless of what the
+        // autoLoadProfileFilename restore above may have cross-cleared it to.
+        m_settings.dye()->setAutoLoadRecipeId(m_origAutoLoadRecipeId);
     }
 
     // ==========================================
@@ -212,11 +224,6 @@ private slots:
     void themeModeRoundTrip() {
         m_settings.theme()->setThemeMode("light");
         QCOMPARE(m_settings.theme()->themeMode(), QString("light"));
-    }
-
-    void defaultShotRatingRoundTrip() {
-        m_settings.visualizer()->setDefaultShotRating(50);
-        QCOMPARE(m_settings.visualizer()->defaultShotRating(), 50);
     }
 
     void visualizerAutoUpdateDefaultIsTrue() {
@@ -324,23 +331,6 @@ private slots:
     }
 
     // ==========================================
-    // Cross-domain wiring (Visualizer -> Dye)
-    // ==========================================
-
-    void defaultShotRatingPropagatesToDyeEnjoyment() {
-        // Settings::Settings() wires defaultShotRatingChanged -> setDyeEspressoEnjoyment
-        // so any caller of SettingsVisualizer::setDefaultShotRating sees the new
-        // value reflected in dye/espressoEnjoyment without going through Settings.
-        const int origEnjoyment = m_settings.dye()->dyeEspressoEnjoyment();
-        const int newRating = (m_origShotRating == 42) ? 43 : 42;
-        m_settings.visualizer()->setDefaultShotRating(newRating);
-        QCOMPARE(m_settings.dye()->dyeEspressoEnjoyment(), newRating);
-        // Restore (cleanup() also restores defaultShotRating, but enjoyment is
-        // a derived persisted value — leave it consistent for the next test).
-        m_settings.dye()->setDyeEspressoEnjoyment(origEnjoyment);
-    }
-
-    // ==========================================
     // Edge cases
     // ==========================================
 
@@ -348,6 +338,46 @@ private slots:
         // 0 means disabled (no SAW)
         m_settings.brew()->setTargetWeight(0.0);
         QCOMPARE(m_settings.brew()->targetWeight(), 0.0);
+    }
+
+    void deadShotRatingKeysAreEvicted() {
+        // A shot rating is never sourced from settings. It used to be: a sticky
+        // dyeEspressoEnjoyment fed every shot save, so after the default-shot-
+        // rating feature was removed the last value the field ever held (a 50,
+        // in the wild) still leaked onto the next shot saved — which silently
+        // suppressed the AI taste intake, since that gate treats any non-zero
+        // enjoyment as feedback the user already gave.
+        //
+        // Removing the readers was not enough: both keys stayed on disk in
+        // every upgraded store, a bogus rating sitting around waiting to leak
+        // back into something. Constructing Settings evicts them.
+        //
+        // Covers three things: the keys are gone from the store, a backup does
+        // not carry espressoEnjoyment forward into a restored one, and a second
+        // construction against a clean store changes nothing.
+        QSettings raw(Settings::testQSettingsPath(), QSettings::IniFormat);
+        raw.setValue("shot/defaultRating", 50);
+        raw.setValue("dye/espressoEnjoyment", 50);
+        raw.sync();
+
+        {
+            Settings settings;
+            // Backup must not carry the field forward into a restored store.
+            const QJsonObject backup = SettingsSerializer::exportToJson(&settings);
+            QVERIFY(!backup.value("dye").toObject().contains("espressoEnjoyment"));
+        }
+
+        QSettings after(Settings::testQSettingsPath(), QSettings::IniFormat);
+        after.sync();
+        QVERIFY2(!after.contains("shot/defaultRating"),
+                 "shot/defaultRating must be evicted, not merely unread");
+        QVERIFY2(!after.contains("dye/espressoEnjoyment"),
+                 "dye/espressoEnjoyment must be evicted, not merely unread");
+
+        // Idempotent: a second construction against a clean store is a no-op.
+        { Settings settings2; Q_UNUSED(settings2); }
+        after.sync();
+        QVERIFY(!after.contains("shot/defaultRating"));
     }
 
     void emptyScaleAddressIsValid() {
@@ -443,6 +473,115 @@ private slots:
         QVERIFY(SettingsSerializer::importFromJson(&m_settings, bundle));
         QCOMPARE(m_settings.app()->autoLoadProfileFilename(), QString("preferred-profile"));
         QCOMPARE(m_settings.app()->autoLoadRevertMinutes(), 17);
+    }
+
+    // ==========================================
+    // Auto-load recipe settings (recipe-auto-load) + mutual exclusion
+    // ==========================================
+
+    void autoLoadRecipeIdDefaultIsMinusOne() {
+        QSettings raw(Settings::testQSettingsPath(), QSettings::IniFormat);
+        raw.remove("dye/autoLoadRecipeId");
+        raw.sync();
+        Settings fresh;
+        QCOMPARE(fresh.dye()->autoLoadRecipeId(), -1);
+    }
+
+    void autoLoadRecipeIdRoundTrip() {
+        m_settings.dye()->setAutoLoadRecipeId(-1);  // baseline
+        QSignalSpy spy(m_settings.dye(), &SettingsDye::autoLoadRecipeIdChanged);
+        m_settings.dye()->setAutoLoadRecipeId(42);
+        QCOMPARE(m_settings.dye()->autoLoadRecipeId(), 42);
+        QCOMPARE(spy.count(), 1);
+        // Setting the same value again is a no-op (no second signal).
+        m_settings.dye()->setAutoLoadRecipeId(42);
+        QCOMPARE(spy.count(), 1);
+    }
+
+    void autoLoadRecipeIdNotExportedAsDeviceLocalId() {
+        // Device-local DB row ids (activeBagId, activeEquipmentId,
+        // activeRecipeId) are deliberately excluded from settings export —
+        // autoLoadRecipeId is the same kind of value and follows suit. Only
+        // the shared revertMinutes (already exported under the profile
+        // side) round-trips.
+        m_settings.dye()->setAutoLoadRecipeId(7);
+        m_settings.app()->setAutoLoadRevertMinutes(23);
+
+        QJsonObject bundle = SettingsSerializer::exportToJson(&m_settings, false);
+        QVERIFY(!bundle.value("profile").toObject().contains("autoLoadRecipeId"));
+        // Not present anywhere else in the bundle either.
+        QVERIFY(!bundle.contains("autoLoadRecipeId"));
+
+        m_settings.dye()->setAutoLoadRecipeId(-1);
+        m_settings.app()->setAutoLoadRevertMinutes(5);
+
+        QTest::ignoreMessage(QtWarningMsg,
+            QRegularExpression(QStringLiteral("SettingsSerializer: importFromJson replacing .* favorites")));
+        QVERIFY(SettingsSerializer::importFromJson(&m_settings, bundle));
+        // autoLoadRecipeId was never in the bundle, so import leaves it alone.
+        QCOMPARE(m_settings.dye()->autoLoadRecipeId(), -1);
+        // The shared timeout still round-trips.
+        QCOMPARE(m_settings.app()->autoLoadRevertMinutes(), 23);
+    }
+
+    void autoLoadMutualExclusion_recipeClearsProfile() {
+        m_settings.app()->setAutoLoadProfileFilename("some-profile");
+        m_settings.dye()->setAutoLoadRecipeId(-1);  // baseline
+
+        m_settings.dye()->setAutoLoadRecipeId(99);
+
+        QCOMPARE(m_settings.dye()->autoLoadRecipeId(), 99);
+        QCOMPARE(m_settings.app()->autoLoadProfileFilename(), QString());
+    }
+
+    void autoLoadMutualExclusion_profileClearsRecipe() {
+        m_settings.app()->setAutoLoadProfileFilename("");  // baseline
+        m_settings.dye()->setAutoLoadRecipeId(99);
+
+        m_settings.app()->setAutoLoadProfileFilename("some-profile");
+
+        QCOMPARE(m_settings.app()->autoLoadProfileFilename(), QString("some-profile"));
+        QCOMPARE(m_settings.dye()->autoLoadRecipeId(), -1);
+    }
+
+    void autoLoadMutualExclusion_clearingOneDoesNotSpuriouslyTouchOther() {
+        // Both already at their "cleared" defaults — clearing one must not
+        // emit a changed signal on, or otherwise disturb, the other.
+        m_settings.app()->setAutoLoadProfileFilename("");
+        m_settings.dye()->setAutoLoadRecipeId(-1);
+
+        QSignalSpy recipeSpy(m_settings.dye(), &SettingsDye::autoLoadRecipeIdChanged);
+        m_settings.app()->setAutoLoadProfileFilename("");
+        QCOMPARE(recipeSpy.count(), 0);
+        QCOMPARE(m_settings.dye()->autoLoadRecipeId(), -1);
+
+        QSignalSpy profileSpy(m_settings.app(), &SettingsApp::autoLoadProfileFilenameChanged);
+        m_settings.dye()->setAutoLoadRecipeId(-1);
+        QCOMPARE(profileSpy.count(), 0);
+        QCOMPARE(m_settings.app()->autoLoadProfileFilename(), QString());
+    }
+
+    void autoLoadMutualExclusion_reconciledAtConstructionIfBothPersisted() {
+        // The reactive cross-clear above only fires on a live changed signal
+        // — it can't see a conflict that was already on disk before Settings
+        // is even constructed (hand-edited config, a future migration bug).
+        // Settings' constructor must reconcile this once at load time rather
+        // than let both auto-loads silently race on the next trigger.
+        QSettings raw(Settings::testQSettingsPath(), QSettings::IniFormat);
+        raw.setValue("profile/autoLoadFilename", "conflicting-profile");
+        raw.setValue("dye/autoLoadRecipeId", 55);
+        raw.sync();
+
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression(
+            "Settings: both profile and recipe auto-load were persisted simultaneously.*"));
+        Settings fresh;
+        // Recipe wins, matching this file's own restore-order convention.
+        QCOMPARE(fresh.dye()->autoLoadRecipeId(), 55);
+        QCOMPARE(fresh.app()->autoLoadProfileFilename(), QString());
+
+        raw.remove("profile/autoLoadFilename");
+        raw.remove("dye/autoLoadRecipeId");
+        raw.sync();
     }
 
     void recipeSortRoundTrip() {
@@ -1071,7 +1210,7 @@ private slots:
 
         // Calling it again with a plain "settings" item present must not add
         // a second one.
-        const int countBefore = net->getZoneItems("bottomRight").size();
+        const qsizetype countBefore = net->getZoneItems("bottomRight").size();
         net->ensureSettingsAccessible();
         QCOMPARE(net->getZoneItems("bottomRight").size(), countBefore);
 
@@ -1183,16 +1322,21 @@ private slots:
         QCOMPARE(typesOf(net->getZoneItems("bottomRight")),
                  QStringList({"flush", "history", "equipment", "espresso", "settings"}));
         // No Auto-Favorites anywhere in the default.
-        for (const QString& zone : {"centerTop", "centerMiddle", "centerStatus", "bottomLeft",
-                                     "bottomRight", "topLeft", "topRight", "lowerMidBar"})
+        for (const QString& zone : {QStringLiteral("centerTop"), QStringLiteral("centerMiddle"),
+                                    QStringLiteral("centerStatus"), QStringLiteral("bottomLeft"),
+                                    QStringLiteral("bottomRight"), QStringLiteral("topLeft"),
+                                    QStringLiteral("topRight"), QStringLiteral("lowerMidBar")})
             QVERIFY(!typesOf(net->getZoneItems(zone)).contains("autofavorites"));
 
         net->setLayoutConfiguration(orig);
     }
 
-    // The equipment/recipes injection migrations must be no-ops on the new
-    // default: reset, then force a fresh read (reload from storage) and
-    // confirm the composition is unchanged (no injected duplicates).
+    // Reading the layout (getLayoutObject) must never add or duplicate the
+    // equipment/recipes buttons: those injections are now one-time, driven by the
+    // DB schema crossing from MainController (issue #1586), not by this read path.
+    // Reset, then force a fresh read from storage and confirm the composition is
+    // unchanged — the default ships both buttons exactly once and a reload keeps
+    // it that way.
     void resetToDefaultSurvivesReloadUnchanged() {
         SettingsNetwork* net = m_settings.network();
         const QString orig = net->layoutConfiguration();
@@ -1201,9 +1345,9 @@ private slots:
         const QStringList centerTopBefore = typesOf(net->getZoneItems("centerTop"));
         const QStringList bottomRightBefore = typesOf(net->getZoneItems("bottomRight"));
 
-        // A second, independent Settings instance reads the same on-disk
-        // store fresh (mirrors a fresh app start) — the migrations must be
-        // no-ops rather than injecting duplicates on this independent load.
+        // A second, independent Settings instance reads the same on-disk store
+        // fresh (mirrors a fresh app start) — the read must not inject or
+        // duplicate anything.
         Settings reloaded;
         SettingsNetwork* reloadedNet = reloaded.network();
         QCOMPARE(typesOf(reloadedNet->getZoneItems("centerTop")), centerTopBefore);
@@ -1212,6 +1356,174 @@ private slots:
         QCOMPARE(bottomRightBefore.count("equipment"), 1);
 
         net->setLayoutConfiguration(orig);
+    }
+
+    // ==========================================
+    // One-time idle-button injection (issue #1586)
+    // ==========================================
+
+    // Reading the layout no longer resurrects a removed button. A user who
+    // removed Equipment (and Recipes) must NOT get it back on a plain reload —
+    // the old presence-gated inject inside getLayoutObject did exactly that on
+    // every launch. Injection now happens only via the explicit crossing-gated
+    // methods below, which MainController calls once per schema upgrade.
+    void removedButtonsStayRemovedOnReload() {
+        SettingsNetwork* net = m_settings.network();
+
+        // A settled layout with neither Equipment nor Recipes anywhere, but with
+        // Settings still reachable so nothing else repairs it.
+        net->setLayoutConfiguration(QStringLiteral(
+            "{\"version\":1,\"zones\":{"
+            "\"bottomRight\":["
+            "{\"type\":\"history\",\"id\":\"history1\"},"
+            "{\"type\":\"beans\",\"id\":\"beans1\"},"
+            "{\"type\":\"espresso\",\"id\":\"espresso1\"},"
+            "{\"type\":\"settings\",\"id\":\"settings1\"}]"
+            "}}"));
+
+        // setLayoutConfiguration invalidates the cache, so this re-enters
+        // getLayoutObject() with a cold cache and reads from storage — which
+        // under the old code WAS the injection path. These two lines are what
+        // fail if the presence-gated inject is ever reinstated.
+        QVERIFY(!net->hasItemType("equipment"));
+        QVERIFY(!net->hasItemType("recipes"));
+
+        // Fresh read from storage (a new app start) must leave them absent.
+        Settings reloaded;
+        SettingsNetwork* reloadedNet = reloaded.network();
+        QVERIFY(!reloadedNet->hasItemType("equipment"));
+        QVERIFY(!reloadedNet->hasItemType("recipes"));
+    }
+
+    // The one-time inject places Equipment after beans when it is missing, and
+    // the result must survive a restart — the bug class here is "what comes back
+    // on the next launch", so an in-memory-only write would miss the point.
+    void injectEquipmentPlacesAfterBeans() {
+        SettingsNetwork* net = m_settings.network();
+
+        net->setLayoutConfiguration(QStringLiteral(
+            "{\"version\":1,\"zones\":{"
+            "\"bottomRight\":["
+            "{\"type\":\"history\",\"id\":\"history1\"},"
+            "{\"type\":\"beans\",\"id\":\"beans1\"},"
+            "{\"type\":\"settings\",\"id\":\"settings1\"}]"
+            "}}"));
+
+        net->injectEquipmentButtonIfMissing();
+        QCOMPARE(typesOf(net->getZoneItems("bottomRight")),
+                 QStringList({"history", "beans", "equipment", "settings"}));
+
+        // Read back through an independent instance: proves the inject escaped
+        // SettingsNetwork's own m_layoutCache and reached QSettings. (Both
+        // instances share Qt's QConfFile cache for this path in-process, so this
+        // is not evidence of a disk write — the layout-cache distinction is the
+        // one that matters here, since that cache is what a restart discards.)
+        Settings reloaded;
+        QCOMPARE(typesOf(reloaded.network()->getZoneItems("bottomRight")),
+                 QStringList({"history", "beans", "equipment", "settings"}));
+
+        // Second call is a no-op — no duplicate even though the "gate" (a real
+        // schema crossing) is what makes it one-time in production.
+        net->injectEquipmentButtonIfMissing();
+        QCOMPARE(typesOf(net->getZoneItems("bottomRight")).count("equipment"), 1);
+    }
+
+    // The beans anchor is searched across ALL zones, not just the bottom bar, and
+    // zones are visited in QJsonObject::keys() order (alphabetical). In the
+    // CURRENT default layout beans lives in centerTop, so an upgrading user gets
+    // Equipment in the centre row rather than the bottom bar. Pinning it because
+    // it is surprising, and because nothing else in the suite exercises a beans
+    // anchor outside bottomRight.
+    void injectEquipmentFollowsBeansIntoCenterZone() {
+        SettingsNetwork* net = m_settings.network();
+
+        net->setLayoutConfiguration(QStringLiteral(
+            "{\"version\":1,\"zones\":{"
+            "\"centerTop\":["
+            "{\"type\":\"beans\",\"id\":\"beans1\"},"
+            "{\"type\":\"steam\",\"id\":\"steam1\"}],"
+            "\"bottomRight\":["
+            "{\"type\":\"history\",\"id\":\"history1\"},"
+            "{\"type\":\"settings\",\"id\":\"settings1\"}]"
+            "}}"));
+
+        net->injectEquipmentButtonIfMissing();
+        QCOMPARE(typesOf(net->getZoneItems("centerTop")),
+                 QStringList({"beans", "equipment", "steam"}));
+        QCOMPARE(typesOf(net->getZoneItems("bottomRight")),
+                 QStringList({"history", "settings"}));
+    }
+
+    // With no beans anywhere, Equipment falls back to appending to bottomRight.
+    void injectEquipmentFallsBackToBottomRight() {
+        SettingsNetwork* net = m_settings.network();
+
+        net->setLayoutConfiguration(QStringLiteral(
+            "{\"version\":1,\"zones\":{"
+            "\"bottomRight\":["
+            "{\"type\":\"history\",\"id\":\"history1\"},"
+            "{\"type\":\"settings\",\"id\":\"settings1\"}]"
+            "}}"));
+
+        net->injectEquipmentButtonIfMissing();
+        QCOMPARE(typesOf(net->getZoneItems("bottomRight")),
+                 QStringList({"history", "settings", "equipment"}));
+    }
+
+    // Recipes goes immediately left of espresso when missing.
+    void injectRecipesPlacesLeftOfEspresso() {
+        SettingsNetwork* net = m_settings.network();
+
+        net->setLayoutConfiguration(QStringLiteral(
+            "{\"version\":1,\"zones\":{"
+            "\"bottomRight\":["
+            "{\"type\":\"history\",\"id\":\"history1\"},"
+            "{\"type\":\"espresso\",\"id\":\"espresso1\"},"
+            "{\"type\":\"settings\",\"id\":\"settings1\"}]"
+            "}}"));
+
+        net->injectRecipesButtonIfMissing();
+        QCOMPARE(typesOf(net->getZoneItems("bottomRight")),
+                 QStringList({"history", "recipes", "espresso", "settings"}));
+
+        // Idempotent second call.
+        net->injectRecipesButtonIfMissing();
+        QCOMPARE(typesOf(net->getZoneItems("bottomRight")).count("recipes"), 1);
+    }
+
+    // No espresso: Recipes sits beside equipment, else appends to bottomRight.
+    void injectRecipesFallsBackBesideEquipment() {
+        SettingsNetwork* net = m_settings.network();
+
+        net->setLayoutConfiguration(QStringLiteral(
+            "{\"version\":1,\"zones\":{"
+            "\"bottomRight\":["
+            "{\"type\":\"history\",\"id\":\"history1\"},"
+            "{\"type\":\"equipment\",\"id\":\"equipment1\"},"
+            "{\"type\":\"settings\",\"id\":\"settings1\"}]"
+            "}}"));
+
+        net->injectRecipesButtonIfMissing();
+        QCOMPARE(typesOf(net->getZoneItems("bottomRight")),
+                 QStringList({"history", "equipment", "recipes", "settings"}));
+    }
+
+    // Inject is a no-op when the widget already exists. This is the ONLY thing
+    // stopping a double-add on a fresh install: a new DB is seeded at schema 1
+    // and climbs past both 22 and 25, so both gates fire on first launch while
+    // the default layout already ships both buttons.
+    void injectIsNoOpWhenAlreadyPresent() {
+        SettingsNetwork* net = m_settings.network();
+
+        net->resetLayoutToDefault();  // default ships equipment + recipes
+        const QStringList centerTopBefore = typesOf(net->getZoneItems("centerTop"));
+        const QStringList bottomRightBefore = typesOf(net->getZoneItems("bottomRight"));
+
+        net->injectEquipmentButtonIfMissing();
+        net->injectRecipesButtonIfMissing();
+
+        QCOMPARE(typesOf(net->getZoneItems("centerTop")), centerTopBefore);
+        QCOMPARE(typesOf(net->getZoneItems("bottomRight")), bottomRightBefore);
     }
 
     void applyRecipesFirstUpgradePristineGetsFullNewDefault() {
@@ -1704,10 +2016,12 @@ private slots:
         QCOMPARE(dye->stepGrinderSetting("Turin", "DF83V", "20", 2.0), QString("22"));
         QCOMPARE(dye->stepGrinderSetting("Turin", "DF83V", "20", -3.0), QString("17"));
         QCOMPARE(dye->stepGrinderSetting("Turin", "DF83V", "20", 0.5), QString("20.5"));
-        // Below the dial floor → "" (caller falls back / skips the row).
-        QCOMPARE(dye->stepGrinderSetting("Turin", "DF83V", "1", -5.0), QString());
-        // Exactly 0 is a VALID dial position, not below the floor (the guard is
-        // stepped < 0, not <= 0) → returns "0", not "".
+        // Below zero is a VALID candidate on a plain-numeric grinder: a stepless
+        // collar's zero is a user-set calibration reference (Niche Zero) and
+        // finer-than-zero is a real dial position, so nothing is skipped
+        // (replace-grind-inputs-with-picker; previously returned "").
+        QCOMPARE(dye->stepGrinderSetting("Turin", "DF83V", "1", -5.0), QString("-4"));
+        // Zero itself, and formatting on the way down, are unchanged.
         QCOMPARE(dye->stepGrinderSetting("Turin", "DF83V", "2", -2.0), QString("0"));
         // Sub-0.5 step precision is honored, not truncated to a single decimal
         // (the grind widget's history-derived step goes to 2 decimals). Trailing
@@ -1739,6 +2053,166 @@ private slots:
         // A compound grinder whose setting is recorded as a plain number keeps
         // the numeric form (NOT re-notated to "0+3.5") — output follows the input.
         QCOMPARE(dye->stepGrinderSetting("Eureka", "Mignon Specialita", "2.5", 1.0, 2), QString("3.5"));
+    }
+
+    void stepGrinderSetting_negativeCandidates() {
+        SettingsDye* dye = m_settings.dye();
+        // Niche Zero — NumericWithSuffix, stepless collar whose zero is a
+        // user-set calibration reference: finer than zero is a real dial
+        // position, so the full ±window generates (replace-grind-inputs-with-
+        // picker). At 0.25 with a 0.25 step, 5 steps down reaches -1.
+        QCOMPARE(dye->stepGrinderSetting("Niche", "Zero", "0.25", -1.25, 2), QString("-1"));
+        QCOMPARE(dye->stepGrinderSetting("Niche", "Zero", "0.25", -0.25, 2), QString("0"));
+        // A ±5-step probe around a positive anchor stays positive (6.75..9.25
+        // at step 0.25) — the range the WEB datalist offers. The app wheel's
+        // window is ±400 steps and deliberately reaches negatives from any
+        // anchor; that is the guard-removal behaviour the assertions above
+        // cover.
+        QCOMPARE(dye->stepGrinderSetting("Niche", "Zero", "8", -1.25, 2), QString("6.75"));
+        QCOMPARE(dye->stepGrinderSetting("Niche", "Zero", "8", 1.25, 2), QString("9.25"));
+        // Click-indexed (Compound) grinders keep the skip, keyed on the
+        // grinder's REGISTRY notation, not the current value's written form:
+        // a Mignon logging plain "2.5" still refuses a negative candidate —
+        // a negative linear position is meaningless on click-indexed hardware
+        // however it is written.
+        QCOMPARE(dye->stepGrinderSetting("Eureka", "Mignon Specialita", "2.5", -3.0, 2), QString());
+    }
+
+    void grinderIsClickIndexed_followsRegistryNotation() {
+        SettingsDye* dye = m_settings.dye();
+        // The QML numeric fallback re-checks the click-indexed skip through this
+        // (stepGrinderSetting's "" falls through to the JS branch, which would
+        // otherwise resurrect the refused negative for numeric-logging Mignons).
+        QVERIFY(dye->grinderIsClickIndexed("Eureka", "Mignon Specialita"));
+        QVERIFY(!dye->grinderIsClickIndexed("Niche", "Zero"));
+        QVERIFY(!dye->grinderIsClickIndexed("Acme", "NotReal"));
+    }
+
+    // ==========================================
+    // Web <datalist> candidate generation (GrindCandidates::build) — the C++
+    // TWIN of GrindRowSource.qml's stepping, serving /api/grind-candidates.
+    // Extracted from ShotServer so it is testable at all (same reason as
+    // tst_exifdate): a hand-duplicate of the click-indexed negative rule is
+    // exactly the thing that rots silently, and the web helper's deliberately
+    // quiet .catch means a regression would surface as a wrong dropdown, not
+    // an error.
+    // ==========================================
+
+    // Helper: pull the "grind" array out as a QStringList.
+    static QStringList grindOf(const QJsonObject& o) {
+        QStringList out;
+        for (const QJsonValue& v : o.value("grind").toArray())
+            out << v.toString();
+        return out;
+    }
+
+    void grindCandidates_negativesForSteplessCollar() {
+        GrindCandidates::Inputs in;
+        in.brand = "Niche"; in.model = "Zero";
+        in.current = "0.25"; in.grindStep = 0.25;
+        const QStringList g = grindOf(GrindCandidates::build(m_settings.dye(), in));
+        // A stepless collar's zero is a user-set calibration reference, so the
+        // window runs straight through it (5 steps down from 0.25 = -1).
+        QVERIFY(g.contains("-1"));
+        QVERIFY(g.contains("0"));
+        QVERIFY(g.contains("1.5"));
+    }
+
+    void grindCandidates_positiveAnchorHasNoNegatives() {
+        GrindCandidates::Inputs in;
+        in.brand = "Niche"; in.model = "Zero";
+        in.current = "8"; in.grindStep = 0.25;
+        const QStringList g = grindOf(GrindCandidates::build(m_settings.dye(), in));
+        QCOMPARE(g.first(), QString("6.75"));
+        QCOMPARE(g.last(), QString("9.25"));
+        for (const QString& v : g)
+            QVERIFY(!v.startsWith('-'));
+    }
+
+    void grindCandidates_clickIndexedSkipsNegativesInNumericForm() {
+        // THE regression guard: the catalog returns "" for a compound
+        // grinder's below-floor rows, and those fall through to the numeric
+        // fallback — which must re-check the click-indexed rule or it
+        // resurrects the refused negative. A Mignon logging plain "2.5" takes
+        // exactly that path (the notation, not the written form, decides).
+        GrindCandidates::Inputs in;
+        in.brand = "Eureka"; in.model = "Mignon Specialita";
+        in.current = "3"; in.grindStep = 1.0;
+        const QStringList g = grindOf(GrindCandidates::build(m_settings.dye(), in));
+        // The floor holds: 5 steps down from 3 would reach -2.
+        QCOMPARE(g.first(), QString("0"));
+        QCOMPARE(g.last(), QString("8"));
+        for (const QString& v : g)
+            QVERIFY2(!v.startsWith('-'),
+                     qPrintable("negative candidate on a click-indexed grinder: " + v));
+
+        // Same grinder, value written as a PLAIN NUMBER rather than "a+b" —
+        // the path that falls through the catalog into the numeric fallback,
+        // where the skip has to be re-checked. Asserting the rule (no
+        // negatives) rather than a formatted value: at step 1.0 the labels
+        // round to 0 decimals, so the exact strings are a formatting detail,
+        // not the behaviour under test.
+        in.current = "2.5";
+        const QStringList gz = grindOf(GrindCandidates::build(m_settings.dye(), in));
+        QVERIFY(!gz.isEmpty());
+        for (const QString& v : gz)
+            QVERIFY2(!v.startsWith('-'),
+                     qPrintable("negative candidate from the numeric fallback: " + v));
+    }
+
+    void grindCandidates_fallsBackToObservedHistory() {
+        // Too few stepped candidates (an unparseable notation) → the observed
+        // list, with the current value prepended when it is not already in it.
+        GrindCandidates::Inputs in;
+        in.brand = "Acme"; in.model = "NotReal";
+        in.current = "medium-fine"; in.grindStep = 1.0;
+        in.observed = QStringList{"7.5", "8", "8.5"};
+        const QStringList g = grindOf(GrindCandidates::build(m_settings.dye(), in));
+        QCOMPARE(g, (QStringList{"medium-fine", "7.5", "8", "8.5"}));
+
+        // Already present → not duplicated.
+        in.current = "8";
+        QCOMPARE(grindOf(GrindCandidates::build(m_settings.dye(), in)).count("8"), 1);
+
+        // No current value at all (new bag): the history alone, capped.
+        in.current = "";
+        in.observed.clear();
+        for (int i = 0; i < 20; ++i)
+            in.observed << QString::number(i);
+        QCOMPARE(grindOf(GrindCandidates::build(m_settings.dye(), in)).size(),
+                 GrindCandidates::kHistoryCap);
+    }
+
+    void grindCandidates_decimalsFollowTheStep() {
+        QCOMPARE(GrindCandidates::stepDecimals(1.0), 0);
+        QCOMPARE(GrindCandidates::stepDecimals(0.5), 1);
+        QCOMPARE(GrindCandidates::stepDecimals(0.25), 2);
+        // A float-dirty step (0.1 + 0.2 = 0.30000000000000004) must not yield a
+        // 17-decimal label — the 3-decimal round-trip bounds it.
+        QCOMPARE(GrindCandidates::stepDecimals(0.1 + 0.2), 1);
+        // Trailing zeros stripped so labels match the display convention.
+        QCOMPARE(GrindCandidates::formatStepped(7.50, 2), QString("7.5"));
+        QCOMPARE(GrindCandidates::formatStepped(7.00, 2), QString("7"));
+    }
+
+    void grindCandidates_rpmGatedByCapability() {
+        GrindCandidates::Inputs in;
+        in.current = "8"; in.grindStep = 0.25; in.rpmStep = 50;
+
+        // Niche Zero is not RPM-capable: an EMPTY rpm list is the capability
+        // verdict the web helper hides the RPM field on.
+        in.brand = "Niche"; in.model = "Zero";
+        QVERIFY(GrindCandidates::build(m_settings.dye(), in).value("rpm").toArray().isEmpty());
+
+        // An RPM-capable grinder with no recorded RPM seeds from the neutral
+        // anchor, and never offers a non-positive speed (0 is the unset
+        // sentinel, so it must not appear as a pickable row).
+        in.brand = "Eureka"; in.model = "Mignon Turbo";
+        const QJsonArray rpm = GrindCandidates::build(m_settings.dye(), in).value("rpm").toArray();
+        QVERIFY(!rpm.isEmpty());
+        QVERIFY(rpm.contains(QJsonValue(double(GrindCandidates::kRpmDefaultAnchor))));
+        for (const QJsonValue& v : rpm)
+            QVERIFY(v.toDouble() > 0.0);
     }
 
     void stepGrinderSetting_customGrinderFallsBack() {

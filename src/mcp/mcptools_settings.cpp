@@ -128,7 +128,6 @@ void registerSettingsReadTools(McpToolRegistry* registry, Settings* settings,
             if (include("waterRefillPoint", "machine")) result["waterRefillPoint"] = settings->app()->waterRefillPoint();
             if (include("waterLevelDisplayUnit", "machine")) result["waterLevelDisplayUnit"] = settings->app()->waterLevelDisplayUnit();
             if (include("screenBrightness", "machine")) result["screenBrightness"] = settings->theme()->screenBrightness();
-            if (include("defaultShotRating", "machine")) result["defaultShotRating"] = settings->visualizer()->defaultShotRating();
             if (include("launcherMode", "machine")) result["launcherMode"] = settings->app()->launcherMode();
             {
                 auto* aw = settings->autoWake();
@@ -191,6 +190,8 @@ void registerSettingsReadTools(McpToolRegistry* registry, Settings* settings,
                 if (include("aiProvider", "ai")) result["aiProvider"] = a->aiProvider();
                 if (include("ollamaEndpoint", "ai")) result["ollamaEndpoint"] = a->ollamaEndpoint();
                 if (include("ollamaModel", "ai")) result["ollamaModel"] = a->ollamaModel();
+                if (include("openaiEndpoint", "ai")) result["openaiEndpoint"] = a->openaiEndpoint();
+                if (include("anthropicEndpoint", "ai")) result["anthropicEndpoint"] = a->anthropicEndpoint();
                 if (include("openrouterModel", "ai")) result["openrouterModel"] = a->openrouterModel();
                 // Effective model for the active provider (resolves the stored
                 // value or the provider default) + the catalog of selectable
@@ -244,7 +245,6 @@ void registerSettingsReadTools(McpToolRegistry* registry, Settings* settings,
             if (include("dyeBeanWeight", "dye")) result["dyeBeanWeight"] = settings->dye()->dyeBeanWeight();
             if (include("dyeDrinkWeight", "dye")) result["dyeDrinkWeight"] = settings->dye()->dyeDrinkWeight();
             // dyeDrinkTds/dyeDrinkEy are session-scratch and intentionally not exposed via MCP.
-            if (include("dyeEspressoEnjoyment", "dye")) result["dyeEspressoEnjoyment"] = settings->dye()->dyeEspressoEnjoyment();
             if (include("dyeShotNotes", "dye")) result["dyeShotNotes"] = settings->dye()->dyeShotNotes();
             if (include("dyeBarista", "dye")) result["dyeBarista"] = settings->dye()->dyeBarista();
 

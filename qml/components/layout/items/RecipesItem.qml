@@ -5,10 +5,11 @@ import QtQuick.Effects
 import QtQuick.Window
 import Decenza
 import "../.."
+import "../PillFit.js" as PillFit
 
 // Recipes quick-switch (add-recipes): structural mirror of BeansItem. Tap
-// toggles a pill row that pages through the recipe list five at a time
-// (add-idle-pill-pagination, MRU-ordered); a pill tap
+// toggles a pill row that pages through the recipe list, as many as fit in two
+// rows per page (descriptive-recipe-names; MRU-ordered); a pill tap
 // activates the recipe (profile + bag + equipment + dose/yield/temp + the
 // recipe's own grind + steam, via MainController's single activation path). Double-tap
 // or long-press opens the Recipes management page; with zero recipes a plain
@@ -59,14 +60,51 @@ Item {
     }
 
     // The full MRU-ordered non-archived recipe list (inventoryReady is MRU-ordered);
-    // the popup pages through it five at a time (add-idle-pill-pagination). The full
-    // list also lives on the Recipes page.
+    // the popup pages through it so each page occupies at most two rows (see the
+    // live-fit block below). The full list also lives on the Recipes page.
     property var inventoryRecipes: []
-    readonly property int pillPageSize: 5
     property int recipePageIndex: 0
-    readonly property int recipePageCount: Math.max(1, Math.ceil(inventoryRecipes.length / root.pillPageSize))
-    readonly property var visibleRecipes: inventoryRecipes.slice(recipePageIndex * root.pillPageSize,
-                                                                recipePageIndex * root.pillPageSize + root.pillPageSize)
+
+    // Live two-row fit (descriptive-recipe-names): the longer bean+type+profile
+    // names made a fixed "5 per page" spill past two rows, so instead pack the
+    // MRU list into pages that each occupy AT MOST TWO ROWS at the pill row's
+    // real available width. The per-page count varies with name length and from
+    // page to page. Widths are measured with metrics that MIRROR PresetPillRow's
+    // pill metrics (font 16 bold, icon 20+6, padding 40, spacing 12) — keep in
+    // sync with PresetPillRow.qml / PillFit.js. Only the width formula is
+    // mirrored; the available width comes from the row's real effectiveMaxWidth.
+    readonly property real _pillFitAvail: recipesPillRow ? recipesPillRow.effectiveMaxWidth : Theme.scaled(600)
+    // FontMetrics.advanceWidth() (not a mutated TextMetrics.text/.width) so
+    // measuring inside a reactive binding doesn't self-trigger a binding loop.
+    FontMetrics { id: recipePillMetrics; font.pixelSize: Theme.scaled(16); font.bold: true }
+    function _recipePillWidths() {
+        var out = []
+        for (var i = 0; i < inventoryRecipes.length; ++i)
+            // Recipe pills always carry a drink-type icon → always add its width.
+            out.push(recipePillMetrics.advanceWidth(inventoryRecipes[i].name || "")
+                     + Theme.scaled(20) + Theme.scaled(6) + Theme.scaled(40))
+        return out
+    }
+    readonly property var _recipePageSizes: {
+        var widths = _recipePillWidths()
+        var sizes = PillFit.packPageSizes(widths, Theme.scaled(12), _pillFitAvail, 2)
+        if (sizes.length <= 1)
+            return sizes
+        // Paginating → arrows appear → repack against the width minus the
+        // symmetric arrow gutters (matches PresetPillRow.pillsAvailableWidth).
+        return PillFit.packPageSizes(widths, Theme.scaled(12),
+                                     Math.max(0, _pillFitAvail - 2 * Theme.scaled(48)), 2)
+    }
+    readonly property int recipePageCount: Math.max(1, _recipePageSizes.length)
+    readonly property var visibleRecipes: {
+        if (inventoryRecipes.length === 0)
+            return []
+        var idx = Math.max(0, Math.min(recipePageIndex, _recipePageSizes.length - 1))
+        var start = 0
+        for (var p = 0; p < idx; ++p)
+            start += _recipePageSizes[p]
+        return inventoryRecipes.slice(start, start + (_recipePageSizes[idx] || 0))
+    }
 
     Component.onCompleted: MainController.recipeStorage.requestInventory()
 
@@ -173,7 +211,12 @@ Item {
         // full-mode path, which announces via IdlePage).
         onAboutToShow: root.recipePageIndex = 0  // Always open on the most-recent five.
 
+        onClosed: { if (root.idlePage) root.idlePage.releasePanelClearance() }
         onOpened: {
+            if (root.idlePage) {
+                var rootTopInPage = root.mapToItem(root.idlePage, 0, 0).y
+                root.idlePage.requestPanelClearance(rootTopInPage + presetPopup.y, presetPopup.height)
+            }
             if (typeof AccessibilityManager === "undefined" || !AccessibilityManager.enabled) return
             var recipes = root.visibleRecipes
             if (recipes.length === 0) return
@@ -225,14 +268,14 @@ Item {
         }
 
         background: Rectangle {
-            // Over a custom background image, float the pills directly (matching
+            // With the glass chrome on, float the pills directly (matching
             // the center inline preset rows) instead of showing a panel; keep the
-            // opaque surface panel when no background image is set.
-            readonly property bool hasBackgroundImage: Settings.theme.backgroundImagePath.length > 0
-            color: hasBackgroundImage ? "transparent" : Theme.surfaceColor
+            // opaque surface panel when the glass chrome is off.
+            readonly property bool hasGlassChrome: Theme.glassChrome
+            color: hasGlassChrome ? "transparent" : Theme.surfaceColor
             radius: Theme.cardRadius
             border.color: Theme.borderColor
-            border.width: hasBackgroundImage ? 0 : 1
+            border.width: hasGlassChrome ? 0 : 1
         }
 
         contentItem: PresetPillRow {

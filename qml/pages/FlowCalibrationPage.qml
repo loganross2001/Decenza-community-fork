@@ -8,14 +8,19 @@ import "../components/graphs"
 
 Page {
     id: calibrationPage
+    // Declarative so it re-evaluates on a language change. This used to be an
+    // imperative assignment in onCompleted/onActivated, which ran once and left
+    // page titles in the previous language until you navigated away and back.
+    readonly property string pageTitle: TranslationManager.translate("flowCalibration.title", "Flow Calibration")
+
     objectName: "flowCalibrationPage"
-    background: ThemedPageBackground {}
+    // suppressShotChart: this page draws its own graph, and the last-shot chart
+    // background would put a second set of curves behind it.
+    background: ThemedPageBackground { suppressShotChart: true }
 
     Component.onCompleted: {
-        root.currentPageTitle = TranslationManager.translate("flowCalibration.title", "Flow Calibration")
         FlowCalibrationModel.loadRecentShots()
     }
-    StackView.onActivated: root.currentPageTitle = TranslationManager.translate("flowCalibration.title", "Flow Calibration")
 
     ColumnLayout {
         anchors.fill: parent

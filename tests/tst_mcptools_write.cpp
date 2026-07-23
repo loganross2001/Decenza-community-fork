@@ -3,6 +3,7 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QTemporaryDir>
+#include <limits>
 
 #include "mocks/McpTestFixture.h"
 #include "ble/protocol/de1characteristics.h"
@@ -10,6 +11,10 @@
 #include "core/settings_visualizer.h"
 #include "history/shothistorystorage.h"
 #include "history/coffeebagstorage.h"
+#include "history/equipmentstorage.h"
+#include "history/recipestorage.h"
+#include "core/settings_app.h"
+#include "core/settings_dye.h"
 #include "profile/recipeparams.h"
 #include "ai/aimanager.h"
 
@@ -29,6 +34,7 @@ class Settings;
 class VisualizerUploader;
 class AccessibilityManager;
 class ScreensaverVideoManager;
+class BeanBaseClient;
 class TranslationManager;
 class BatteryManager;
 class CoffeeBagStorage;
@@ -40,7 +46,8 @@ void registerWriteTools(McpToolRegistry* registry, ProfileManager* profileManage
                         ScreensaverVideoManager* screensaver,
                         TranslationManager* translation,
                         BatteryManager* battery,
-                        AIManager* aiManager);
+                        AIManager* aiManager,
+                        BeanBaseClient* beanbase);
 
 // Test MCP write tools (settings_set, profiles_set_active) against ProfileManager + MockTransport.
 // Critical regression: settings_set temperature/weight must trigger BLE upload.
@@ -152,7 +159,7 @@ private:
         // Pass nullptr for dependencies not needed by the profile paths under test
         // (visualizer, bagStorage, accessibility, screensaver, translation, battery, aiManager).
         registerWriteTools(&f.registry, &f.profileManager, nullptr, &f.settings,
-                          nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+                          nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
     }
 
 private slots:
@@ -312,7 +319,7 @@ private slots:
         ShotHistoryStorage storage;
         QVERIFY(storage.initialize(f.tempDir.filePath("bagupd.db")));
         registerWriteTools(&f.registry, &f.profileManager, &storage, &f.settings,
-                          nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+                          nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
 
         qint64 bagId = -1;
         withTempDb(storage.databasePath(), "bagupd_seed", [&](QSqlDatabase& db) {
@@ -375,6 +382,58 @@ private slots:
         }
     }
 
+    // equipment_update: a name-only rename must be REPORTED as a success, not
+    // merely performed as one.
+    //
+    // The regression this pins: the success flag used to be set by
+    // `ok = updatePackageFieldsStatic(...) || ok`. Removing that expression to
+    // stop a successful identity edit masking a failed rename also removed the
+    // only place `ok` was set for a rename — so a call carrying just a name
+    // committed the rename and then answered "Package not found or update
+    // failed". Nothing else in the suite inspects this tool's response shape.
+    void equipmentUpdateNameOnlyReportsSuccess()
+    {
+        McpTestFixture f;
+        ShotHistoryStorage storage;
+        QVERIFY(storage.initialize(f.tempDir.filePath("equpd.db")));
+        registerWriteTools(&f.registry, &f.profileManager, &storage, &f.settings,
+                          nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+
+        qint64 packageId = -1;
+        withTempDb(storage.databasePath(), "equpd_seed", [&](QSqlDatabase& db) {
+            EquipmentPackage pkg;
+            pkg.name = QStringLiteral("Bench Grinder");
+            packageId = EquipmentStorage::createPackageWithGrinderStatic(
+                db, pkg, QStringLiteral("Niche"), QStringLiteral("Zero"),
+                QStringLiteral("63mm conical"), QString(), QString(), QString());
+        });
+        QVERIFY2(packageId > 0, "seed package should be created");
+
+        // Name only: no grinder/basket/puckPrep keys at all.
+        QJsonObject args;
+        args["packageId"] = packageId;
+        args["name"] = "Bench Grinder (renamed)";
+        QJsonObject result = f.callAsyncTool("equipment_update", args);
+
+        QVERIFY2(result["success"].toBool(), qPrintable(QJsonDocument(result).toJson()));
+        QCOMPARE(result["package"].toObject()["name"].toString(),
+                 QString("Bench Grinder (renamed)"));
+
+        // And the rename really is on disk, so a green assertion above cannot
+        // mean "reported success without writing".
+        QString stored;
+        withTempDb(storage.databasePath(), "equpd_check", [&](QSqlDatabase& db) {
+            stored = EquipmentStorage::loadPackageStatic(db, packageId).name;
+        });
+        QCOMPARE(stored, QString("Bench Grinder (renamed)"));
+
+        storage.close();
+        for (int i = 0; i < 20; i++) {
+            QCoreApplication::processEvents();
+            QThread::msleep(25);
+        }
+    }
+
     // bag_create (add-recipe-wizard-tea): kind stamped at creation, gated in
     // both directions. Needs a real CoffeeBagStorage (the tool creates via the
     // async instance — there is no static fallback like bag_update).
@@ -386,7 +445,7 @@ private slots:
         CoffeeBagStorage bagStorage;
         bagStorage.initialize(storage.databasePath());
         registerWriteTools(&f.registry, &f.profileManager, &storage, &f.settings,
-                          nullptr, &bagStorage, nullptr, nullptr, nullptr, nullptr, nullptr);
+                          nullptr, &bagStorage, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
 
         // Tea bag with brewing data: kind + tea vocabulary round-trip.
         QJsonObject tea;
@@ -439,7 +498,7 @@ private slots:
         ShotHistoryStorage storage;
         QVERIFY(storage.initialize(f.tempDir.filePath("bagkind.db")));
         registerWriteTools(&f.registry, &f.profileManager, &storage, &f.settings,
-                          nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+                          nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
 
         qint64 coffeeId = -1, teaId = -1;
         withTempDb(storage.databasePath(), "bagkind_seed", [&](QSqlDatabase& db) {
@@ -483,7 +542,7 @@ private slots:
         ShotHistoryStorage storage;
         QVERIFY(storage.initialize(f.tempDir.filePath("bagupd_linked.db")));
         registerWriteTools(&f.registry, &f.profileManager, &storage, &f.settings,
-                          nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+                          nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
 
         qint64 bagId = -1;
         withTempDb(storage.databasePath(), "bagupd_seed3", [&](QSqlDatabase& db) {
@@ -531,6 +590,260 @@ private slots:
             QCoreApplication::processEvents();
             QThread::msleep(25);
         }
+    }
+
+    // ===== recipe_get/set/clear_auto_load (recipe-auto-load) =====
+    // These three tools were relocated here from mcptools_recipes.cpp
+    // specifically so they could be tested without a real MainController —
+    // see the note above their registration in mcptools_write.cpp.
+
+    static qint64 seedRecipe(ShotHistoryStorage& storage, const QString& name, bool archived = false) {
+        qint64 id = -1;
+        withTempDb(storage.databasePath(), "recipe_autoload_seed", [&](QSqlDatabase& db) {
+            Recipe r;
+            r.name = name;
+            r.profileTitle = "Test Profile";
+            r.profileJson = "{\"title\":\"Test Profile\"}";
+            r.archived = archived;
+            id = RecipeStorage::insertRecipeStatic(db, r);
+        });
+        return id;
+    }
+
+    void recipeGetAutoLoadUnconfiguredReturnsNull()
+    {
+        McpTestFixture f;
+        f.settings.dye()->setAutoLoadRecipeId(-1);
+        f.settings.app()->setAutoLoadRevertMinutes(9);
+        registerTools(f);
+
+        QJsonObject result = f.callAsyncTool("recipe_get_auto_load", {});
+        QVERIFY(result["recipeId"].isNull());
+        QCOMPARE(result["revertMinutes"].toInt(), 9);
+        QVERIFY(!result.contains("name"));
+    }
+
+    void recipeGetAutoLoadConfiguredReturnsNameAndId()
+    {
+        McpTestFixture f;
+        ShotHistoryStorage storage;
+        QVERIFY(storage.initialize(f.tempDir.filePath("recipe_get.db")));
+        registerWriteTools(&f.registry, &f.profileManager, &storage, &f.settings,
+                          nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+
+        const qint64 recipeId = seedRecipe(storage, "Morning Latte");
+        QVERIFY(recipeId > 0);
+        f.settings.dye()->setAutoLoadRecipeId(static_cast<int>(recipeId));
+        f.settings.app()->setAutoLoadRevertMinutes(15);
+
+        QJsonObject result = f.callAsyncTool("recipe_get_auto_load", {});
+        QCOMPARE(result["recipeId"].toInteger(), recipeId);
+        QCOMPARE(result["name"].toString(), QString("Morning Latte"));
+        QCOMPARE(result["revertMinutes"].toInt(), 15);
+    }
+
+    void recipeGetAutoLoadStaleIdReturnsNullNotError()
+    {
+        McpTestFixture f;
+        ShotHistoryStorage storage;
+        QVERIFY(storage.initialize(f.tempDir.filePath("recipe_get_stale.db")));
+        registerWriteTools(&f.registry, &f.profileManager, &storage, &f.settings,
+                          nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+
+        // A stale reference (the recipe row no longer exists) is a snapshot,
+        // not an error — the next auto-load trigger discovers and clears it.
+        f.settings.dye()->setAutoLoadRecipeId(99999);
+
+        QJsonObject result = f.callAsyncTool("recipe_get_auto_load", {});
+        QVERIFY(result["recipeId"].isNull());
+        QVERIFY(!result.contains("error"));
+    }
+
+    void recipeGetAutoLoadConfiguredButStorageUnavailableIsError()
+    {
+        // A recipe IS pinned, but the tool can't verify it right now (no
+        // ShotHistoryStorage wired up here) — this must be reported as an
+        // error, not collapsed into the same {"recipeId": null} shape as
+        // "nothing is pinned" (which would misinform a caller).
+        McpTestFixture f;
+        const int before = f.settings.dye()->autoLoadRecipeId();  // shared PID-scoped store
+        f.settings.dye()->setAutoLoadRecipeId(42);
+        registerTools(f);  // shotHistory is nullptr here
+
+        QJsonObject result = f.callAsyncTool("recipe_get_auto_load", {});
+        QCOMPARE(result["error"].toString(), QString("Storage not available"));
+        QVERIFY(!result.contains("recipeId"));
+
+        f.settings.dye()->setAutoLoadRecipeId(before);
+    }
+
+    void recipeSetAutoLoadSuccessSetsSettingsAndClearsProfile()
+    {
+        McpTestFixture f;
+        ShotHistoryStorage storage;
+        QVERIFY(storage.initialize(f.tempDir.filePath("recipe_set.db")));
+        registerWriteTools(&f.registry, &f.profileManager, &storage, &f.settings,
+                          nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+
+        const qint64 recipeId = seedRecipe(storage, "Afternoon Cortado");
+        QVERIFY(recipeId > 0);
+        f.settings.app()->setAutoLoadProfileFilename("some-profile");  // must be cleared
+
+        QJsonObject args;
+        args["recipeId"] = recipeId;
+        QJsonObject result = f.callAsyncTool("recipe_set_auto_load", args);
+
+        QVERIFY2(result["success"].toBool(), qPrintable(QJsonDocument(result).toJson()));
+        QCOMPARE(result["recipeId"].toInteger(), recipeId);
+        QCOMPARE(result["name"].toString(), QString("Afternoon Cortado"));
+        QCOMPARE(f.settings.dye()->autoLoadRecipeId(), static_cast<int>(recipeId));
+        // Mutual exclusion: setting a recipe auto-load clears the profile side.
+        QCOMPARE(f.settings.app()->autoLoadProfileFilename(), QString());
+    }
+
+    void recipeSetAutoLoadMissingRecipeIdIsError()
+    {
+        McpTestFixture f;
+        registerTools(f);
+
+        QJsonObject result = f.callAsyncTool("recipe_set_auto_load", {});
+        QCOMPARE(result["error"].toString(), QString("recipeId is required"));
+    }
+
+    void recipeSetAutoLoadInvalidRecipeIdIsDistinctFromMissing()
+    {
+        // recipeId WAS supplied here, just with an invalid value — the error
+        // must say so rather than repeat the "is required" message used for
+        // the genuinely-absent case above (that message would misleadingly
+        // suggest the field was never sent).
+        McpTestFixture f;
+        registerTools(f);
+
+        QJsonObject zero;
+        zero["recipeId"] = 0;
+        QCOMPARE(f.callAsyncTool("recipe_set_auto_load", zero)["error"].toString(),
+                 QString("recipeId must be a positive integer"));
+
+        QJsonObject negative;
+        negative["recipeId"] = -5;
+        QCOMPARE(f.callAsyncTool("recipe_set_auto_load", negative)["error"].toString(),
+                 QString("recipeId must be a positive integer"));
+    }
+
+    void recipeSetAutoLoadOutOfRangeRecipeIdIsError()
+    {
+        // recipeId is stored as a plain `int` (SettingsDye::autoLoadRecipeId),
+        // so a value past INT_MAX must be rejected before the later
+        // static_cast<int>() truncates it into a bogus, silently-wrong id.
+        McpTestFixture f;
+        registerTools(f);
+
+        QJsonObject args;
+        args["recipeId"] = static_cast<qint64>(std::numeric_limits<int>::max()) + 1;
+        QCOMPARE(f.callAsyncTool("recipe_set_auto_load", args)["error"].toString(),
+                 QString("recipeId is out of range"));
+    }
+
+    void recipeSetAutoLoadNotFoundIsError()
+    {
+        McpTestFixture f;
+        ShotHistoryStorage storage;
+        QVERIFY(storage.initialize(f.tempDir.filePath("recipe_set_notfound.db")));
+        registerWriteTools(&f.registry, &f.profileManager, &storage, &f.settings,
+                          nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+        // Settings::testQSettingsPath() is a single PID-scoped store shared by
+        // every McpTestFixture in this process, so a prior test's write can
+        // still be sitting there — capture the baseline rather than assume -1.
+        const int before = f.settings.dye()->autoLoadRecipeId();
+
+        QJsonObject args;
+        args["recipeId"] = 99999;
+        QJsonObject result = f.callAsyncTool("recipe_set_auto_load", args);
+        QCOMPARE(result["error"].toString(), QString("Recipe not found: 99999"));
+        QCOMPARE(f.settings.dye()->autoLoadRecipeId(), before);
+    }
+
+    void recipeSetAutoLoadArchivedIsError()
+    {
+        McpTestFixture f;
+        ShotHistoryStorage storage;
+        QVERIFY(storage.initialize(f.tempDir.filePath("recipe_set_archived.db")));
+        registerWriteTools(&f.registry, &f.profileManager, &storage, &f.settings,
+                          nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+        const int before = f.settings.dye()->autoLoadRecipeId();  // see note above
+
+        const qint64 recipeId = seedRecipe(storage, "Retired Recipe", /*archived=*/true);
+        QVERIFY(recipeId > 0);
+
+        QJsonObject args;
+        args["recipeId"] = recipeId;
+        QJsonObject result = f.callAsyncTool("recipe_set_auto_load", args);
+        QCOMPARE(result["error"].toString(), QString("Recipe is archived"));
+        QCOMPARE(f.settings.dye()->autoLoadRecipeId(), before);
+    }
+
+    void recipeSetAutoLoadOverwritesExistingPin()
+    {
+        // Pinning a second recipe while one is already pinned must silently
+        // replace it — no error, no double-pin state, no need to clear the
+        // first pin first.
+        McpTestFixture f;
+        ShotHistoryStorage storage;
+        QVERIFY(storage.initialize(f.tempDir.filePath("recipe_set_overwrite.db")));
+        registerWriteTools(&f.registry, &f.profileManager, &storage, &f.settings,
+                          nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+
+        const qint64 first = seedRecipe(storage, "First Pin");
+        const qint64 second = seedRecipe(storage, "Second Pin");
+        QVERIFY(first > 0 && second > 0 && first != second);
+
+        QJsonObject argsFirst;
+        argsFirst["recipeId"] = first;
+        QJsonObject resultFirst = f.callAsyncTool("recipe_set_auto_load", argsFirst);
+        QVERIFY2(resultFirst["success"].toBool(), qPrintable(QJsonDocument(resultFirst).toJson()));
+        QCOMPARE(f.settings.dye()->autoLoadRecipeId(), static_cast<int>(first));
+
+        QJsonObject argsSecond;
+        argsSecond["recipeId"] = second;
+        QJsonObject resultSecond = f.callAsyncTool("recipe_set_auto_load", argsSecond);
+        QVERIFY2(resultSecond["success"].toBool(), qPrintable(QJsonDocument(resultSecond).toJson()));
+        QCOMPARE(resultSecond["recipeId"].toInteger(), second);
+        QCOMPARE(f.settings.dye()->autoLoadRecipeId(), static_cast<int>(second));
+    }
+
+    void recipeSetAutoLoadOptionalRevertMinutesUpdatesSharedSetting()
+    {
+        McpTestFixture f;
+        ShotHistoryStorage storage;
+        QVERIFY(storage.initialize(f.tempDir.filePath("recipe_set_revert.db")));
+        registerWriteTools(&f.registry, &f.profileManager, &storage, &f.settings,
+                          nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+
+        const qint64 recipeId = seedRecipe(storage, "Evening Decaf");
+        QVERIFY(recipeId > 0);
+
+        QJsonObject args;
+        args["recipeId"] = recipeId;
+        args["revertMinutes"] = 33;
+        QJsonObject result = f.callAsyncTool("recipe_set_auto_load", args);
+        QVERIFY2(result["success"].toBool(), qPrintable(QJsonDocument(result).toJson()));
+        QCOMPARE(result["revertMinutes"].toInt(), 33);
+        // Shared with the profile side.
+        QCOMPARE(f.settings.app()->autoLoadRevertMinutes(), 33);
+    }
+
+    void recipeClearAutoLoadSuccessPreservesRevertMinutes()
+    {
+        McpTestFixture f;
+        f.settings.dye()->setAutoLoadRecipeId(42);
+        f.settings.app()->setAutoLoadRevertMinutes(27);
+        registerTools(f);
+
+        QJsonObject result = f.callAsyncTool("recipe_clear_auto_load", {});
+        QVERIFY2(result["success"].toBool(), qPrintable(QJsonDocument(result).toJson()));
+        QCOMPARE(f.settings.dye()->autoLoadRecipeId(), -1);
+        // Timeout is untouched — preserved across enable/disable cycles.
+        QCOMPARE(f.settings.app()->autoLoadRevertMinutes(), 27);
     }
 };
 

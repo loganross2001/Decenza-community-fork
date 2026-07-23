@@ -19,7 +19,6 @@
 #include "history/recipestorage.h"
 #include "history/unifiedbeansearchmodel.h"
 #include "core/settings_dye.h"
-#include "core/settings_visualizer.h"
 #include "network/visualizeruploader.h"
 
 using Tier = UnifiedBeanSearchModel::Tier;
@@ -1862,8 +1861,7 @@ private slots:
         });
         QVERIFY(bagRatio > 0 && bagPlain > 0);
 
-        SettingsVisualizer viz;
-        SettingsDye dye(&viz);
+        SettingsDye dye;
         dye.setBagStorage(&storage);
 
         // Selecting the anchored bag re-applies its spec and exposes it.
@@ -1940,7 +1938,7 @@ private slots:
 
         CoffeeBagStorage bagStorage; bagStorage.initialize(path);
         EquipmentStorage eqStorage; eqStorage.initialize(path);
-        SettingsVisualizer viz; SettingsDye dye(&viz);
+        SettingsDye dye;
         dye.setBagStorage(&bagStorage);
         dye.setEquipmentStorage(&eqStorage);
 
@@ -2013,7 +2011,7 @@ private slots:
         QVERIFY(bagId > 0);
 
         CoffeeBagStorage bagStorage; bagStorage.initialize(path);
-        SettingsVisualizer viz; SettingsDye dye(&viz);
+        SettingsDye dye;
         dye.setBagStorage(&bagStorage);
 
         dye.setActiveBagId(static_cast<int>(bagId));

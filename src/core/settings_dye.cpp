@@ -3,7 +3,6 @@
 #include "../history/bagid.h"
 #include "../history/coffeebagstorage.h"
 #include "../history/equipmentstorage.h"
-#include "settings_visualizer.h"
 #include "grinderaliases.h"
 #include "yieldspec.h"
 #include "basketaliases.h"
@@ -11,21 +10,14 @@
 #include <QtMath>
 #include <QDebug>
 
-SettingsDye::SettingsDye(SettingsVisualizer* visualizer, QObject* parent)
+SettingsDye::SettingsDye(QObject* parent)
     : QObject(parent)
 #ifdef DECENZA_TESTING
     , m_settings(Settings::testQSettingsPath(), QSettings::IniFormat)
 #else
     , m_settings("DecentEspresso", "DE1Qt")
 #endif
-    , m_visualizer(visualizer)
 {
-    // The visualizer pointer is required — dyeEspressoEnjoyment() falls back
-    // to defaultShotRating() when no per-shot value is persisted, and a null
-    // visualizer would crash the getter on first read. Settings::Settings()
-    // always passes a fully-constructed instance.
-    Q_ASSERT(m_visualizer);
-
     // NOTE: do NOT seed bean/presets here. The legacy preset array is
     // consumed by ShotHistoryStorage::importLegacyBeanPresets() — re-seeding
     // an empty array would just create churn for the import to retire.
@@ -400,6 +392,11 @@ bool SettingsDye::grinderRpmCapable(const QString& brand, const QString& model) 
     return EquipmentStorage::deriveRpmCapable(brand, model);
 }
 
+bool SettingsDye::grinderIsClickIndexed(const QString& brand, const QString& model) const {
+    const GrinderAliases::GrinderEntry* entry = GrinderAliases::findEntry(brand, model);
+    return entry && entry->notation == GrinderAliases::SettingNotation::Compound;
+}
+
 QStringList SettingsDye::suggestedBurrs(const QString& brand, const QString& model) const {
     return GrinderAliases::suggestedBurrs(brand, model);
 }
@@ -428,8 +425,15 @@ QString SettingsDye::stepGrinderSetting(const QString& brand, const QString& mod
     if (!linear)
         return QString();  // unparseable (e.g. pure letters) → caller's fallback
     const double stepped = *linear + deltaUnits;
-    if (stepped < 0.0)
-        return QString();  // below the dial floor → skip this row
+    // Below-zero candidates are skipped only on click-indexed (Compound)
+    // grinders, keyed on the grinder's registry notation — NOT the current
+    // value's written form — because a negative linear position is meaningless
+    // there however it is written ("2.5" on a Mignon still skips). A
+    // plain-numeric grinder can be a stepless collar whose zero is a user-set
+    // calibration reference (Niche Zero), where dialling finer than zero is a
+    // real operation, so negatives pass through.
+    if (stepped < 0.0 && entry->notation == GrinderAliases::SettingNotation::Compound)
+        return QString();  // below the click-indexed dial floor → skip this row
 
     // Compound rotation ("a+b") renders in its own notation (rev/position
     // carry-borrow). We gate on the CURRENT value actually being compound: a
@@ -516,17 +520,6 @@ void SettingsDye::setDyeDrinkEy(double value) {
     if (!qFuzzyCompare(1.0 + m_dyeDrinkEy, 1.0 + value)) {
         m_dyeDrinkEy = value;
         emit dyeDrinkEyChanged();
-    }
-}
-
-int SettingsDye::dyeEspressoEnjoyment() const {
-    return m_settings.value("dye/espressoEnjoyment", m_visualizer->defaultShotRating()).toInt();
-}
-
-void SettingsDye::setDyeEspressoEnjoyment(int value) {
-    if (dyeEspressoEnjoyment() != value) {
-        m_settings.setValue("dye/espressoEnjoyment", value);
-        emit dyeEspressoEnjoymentChanged();
     }
 }
 
@@ -617,6 +610,20 @@ void SettingsDye::setActiveRecipeId(int recipeId) {
         return;
     m_settings.setValue("dye/activeRecipeId", recipeId);
     emit activeRecipeIdChanged();
+}
+
+// Auto-load recipe (recipe-auto-load). Mutual exclusion with
+// SettingsApp::autoLoadProfileFilename is wired in Settings, not here.
+
+int SettingsDye::autoLoadRecipeId() const {
+    return m_settings.value("dye/autoLoadRecipeId", -1).toInt();
+}
+
+void SettingsDye::setAutoLoadRecipeId(int recipeId) {
+    if (autoLoadRecipeId() == recipeId)
+        return;
+    m_settings.setValue("dye/autoLoadRecipeId", recipeId);
+    emit autoLoadRecipeIdChanged();
 }
 
 int SettingsDye::activeBagId() const {

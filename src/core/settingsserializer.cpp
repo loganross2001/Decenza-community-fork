@@ -146,9 +146,13 @@ QJsonObject SettingsSerializer::exportToJson(Settings* settings, bool includeSen
 
     // Bean presets were replaced by coffee bags (bean-bag-inventory). Bags
     // live in the shot history database, which transfers via the DB import
-    // path (with id remapping) — not through settings JSON. dye/activeBagId
-    // and dye/activeEquipmentId (the active equipment package) are likewise
-    // deliberately NOT exported: both are device-local DB row ids.
+    // path (with id remapping) — not through settings JSON. dye/activeBagId,
+    // dye/activeEquipmentId (the active equipment package), dye/activeRecipeId,
+    // and dye/autoLoadRecipeId (recipe-auto-load) are likewise deliberately
+    // NOT exported: all are device-local DB row ids, meaningless on another
+    // device unless the referenced row was itself transferred. The profile
+    // side of auto-load (autoLoadFilename below) is portable because a
+    // profile is identified by a stable filename, not a local id.
     // importFromJson still understands the legacy "beans" section from
     // old-version exports.
 
@@ -230,6 +234,19 @@ QJsonObject SettingsSerializer::exportToJson(Settings* settings, bool includeSen
     QJsonObject theme;
     theme["activeThemeName"] = settings->theme()->activeThemeName();
     theme["themeMode"] = settings->theme()->themeMode();
+    // Device-independent, unlike backgroundImagePath (a local filesystem path, which is
+    // deliberately not exported) — a preset id means the same thing on the target device.
+    theme["backgroundPreset"] = settings->theme()->backgroundPreset();
+    // As device-independent as the colour, and half the user's choice — omitting it meant a
+    // migration restored the colour and silently dropped its pattern.
+    theme["backgroundPattern"] = settings->theme()->backgroundPattern();
+    // WHICH KIND of background is chosen. Needed because a shot-chart background has no
+    // parameter of its own to infer it from — omit this and a restore of a device using
+    // one comes back with no background at all, reporting success. Same omission the
+    // pattern suffered above; it is exported for the same reason.
+    theme["backgroundSource"] = settings->theme()->backgroundSource();
+    theme["backgroundShotAdvanced"] = settings->theme()->backgroundShotAdvanced();
+    theme["glassChrome"] = settings->theme()->glassChrome();
 
     // Export active palette as customColors (backward compat) plus both palettes
     QJsonObject customColors;
@@ -275,7 +292,6 @@ QJsonObject SettingsSerializer::exportToJson(Settings* settings, bool includeSen
     visualizer["extendedMetadata"] = settings->visualizer()->visualizerExtendedMetadata();
     visualizer["showAfterShot"] = settings->visualizer()->visualizerShowAfterShot();
     visualizer["clearNotesOnStart"] = settings->visualizer()->visualizerClearNotesOnStart();
-    visualizer["defaultShotRating"] = settings->visualizer()->defaultShotRating();
     root["visualizer"] = visualizer;
 
     // AI settings
@@ -289,6 +305,8 @@ QJsonObject SettingsSerializer::exportToJson(Settings* settings, bool includeSen
     }
     ai["ollamaEndpoint"] = aiSettings->ollamaEndpoint();
     ai["ollamaModel"] = aiSettings->ollamaModel();
+    ai["openaiEndpoint"] = aiSettings->openaiEndpoint();
+    ai["anthropicEndpoint"] = aiSettings->anthropicEndpoint();
     if (includeSensitive) {
         ai["openrouterApiKey"] = aiSettings->openrouterApiKey();
     }
@@ -306,7 +324,6 @@ QJsonObject SettingsSerializer::exportToJson(Settings* settings, bool includeSen
     dye["beanWeight"] = settings->dye()->dyeBeanWeight();
     dye["drinkWeight"] = settings->dye()->dyeDrinkWeight();
     // drinkTds/drinkEy are session-scratch (not persisted), so skip backup/restore.
-    dye["espressoEnjoyment"] = settings->dye()->dyeEspressoEnjoyment();
     dye["shotNotes"] = settings->dye()->dyeShotNotes();
     dye["barista"] = settings->dye()->dyeBarista();
     dye["shotDateTime"] = settings->dye()->dyeShotDateTime();
@@ -723,6 +740,36 @@ bool SettingsSerializer::importFromJson(Settings* settings, const QJsonObject& j
         QJsonObject theme = json["theme"].toObject();
         if (theme.contains("activeThemeName")) settings->theme()->setActiveThemeName(theme["activeThemeName"].toString());
         if (theme.contains("themeMode")) settings->theme()->setThemeMode(theme["themeMode"].toString());
+        if (theme.contains("backgroundPreset")) settings->theme()->setBackgroundPreset(theme["backgroundPreset"].toString());
+        if (theme.contains("backgroundPattern")) settings->theme()->setBackgroundPattern(theme["backgroundPattern"].toString());
+        // AFTER the colour, deliberately: selecting the shot chart clears the colour, so
+        // restoring it last is what makes the imported source win rather than be stomped
+        // by the colour line above.
+        //
+        // Every source is handled, not just "shot". Acting only on "shot" meant a backup
+        // saying "none" restored onto a device using the shot chart left the chart in place
+        // and reported success — the same silent-divergence bug the pattern once had, in the
+        // opposite direction. Gated on contains(): a legacy backup carries no source at all,
+        // and must not be read as a request to clear a device-local image.
+        if (theme.contains("backgroundSource")) {
+            const QString source = theme["backgroundSource"].toString();
+            if (source == QStringLiteral("shot")) {
+                settings->theme()->selectShotChartBackground(theme["backgroundShotAdvanced"].toBool());
+            } else if (source == QStringLiteral("none")) {
+                settings->theme()->clearBackground();
+            } else if (source == QStringLiteral("image")) {
+                // backgroundImagePath is deliberately not exported (a local filesystem path
+                // means nothing on the target), so this one cannot be restored. Clear to a
+                // DEFINED state that matches the message below: log-and-do-nothing left the
+                // device half-applied — the unconditional setBackgroundPreset("") above had
+                // already wiped its colour, while a shot source survived untouched, so the
+                // restore diverged from the backup in a different way per device.
+                settings->theme()->clearBackground();
+                qInfo() << "[Settings] Backup used a background image; image paths are "
+                           "device-local and are not restored. Pick a background again.";
+            }
+        }
+        if (theme.contains("glassChrome")) settings->theme()->setGlassChrome(theme["glassChrome"].toBool());
 
         // Restore dual palettes if present (new format)
         if (theme.contains("customColorsDark")) {
@@ -762,7 +809,6 @@ bool SettingsSerializer::importFromJson(Settings* settings, const QJsonObject& j
         if (visualizer.contains("extendedMetadata")) settings->visualizer()->setVisualizerExtendedMetadata(visualizer["extendedMetadata"].toBool());
         if (visualizer.contains("showAfterShot")) settings->visualizer()->setVisualizerShowAfterShot(visualizer["showAfterShot"].toBool());
         if (visualizer.contains("clearNotesOnStart")) settings->visualizer()->setVisualizerClearNotesOnStart(visualizer["clearNotesOnStart"].toBool());
-        if (visualizer.contains("defaultShotRating")) settings->visualizer()->setDefaultShotRating(visualizer["defaultShotRating"].toInt());
     }
 
     // AI settings
@@ -781,6 +827,8 @@ bool SettingsSerializer::importFromJson(Settings* settings, const QJsonObject& j
         }
         if (ai.contains("ollamaEndpoint")) aiSettings->setOllamaEndpoint(ai["ollamaEndpoint"].toString());
         if (ai.contains("ollamaModel")) aiSettings->setOllamaModel(ai["ollamaModel"].toString());
+        if (ai.contains("openaiEndpoint")) aiSettings->setOpenaiEndpoint(ai["openaiEndpoint"].toString());
+        if (ai.contains("anthropicEndpoint")) aiSettings->setAnthropicEndpoint(ai["anthropicEndpoint"].toString());
         if (ai.contains("openrouterApiKey") && !excludeKeys.contains("openrouterApiKey")) {
             aiSettings->setOpenrouterApiKey(ai["openrouterApiKey"].toString());
         }
@@ -801,7 +849,7 @@ bool SettingsSerializer::importFromJson(Settings* settings, const QJsonObject& j
         if (dye.contains("beanWeight")) settings->dye()->setDyeBeanWeight(dye["beanWeight"].toDouble());
         if (dye.contains("drinkWeight")) settings->dye()->setDyeDrinkWeight(dye["drinkWeight"].toDouble());
         // drinkTds/drinkEy are session-scratch (not persisted); ignore on restore.
-        if (dye.contains("espressoEnjoyment")) settings->dye()->setDyeEspressoEnjoyment(dye["espressoEnjoyment"].toInt());
+        // espressoEnjoyment in an older backup is ignored — see settings_dye.h.
         // Shot notes: try new key first, fall back to old key
         if (dye.contains("shotNotes")) settings->dye()->setDyeShotNotes(dye["shotNotes"].toString());
         else if (dye.contains("espressoNotes")) settings->dye()->setDyeShotNotes(dye["espressoNotes"].toString());

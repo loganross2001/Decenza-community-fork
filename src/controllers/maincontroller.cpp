@@ -69,12 +69,14 @@ MainController::MainController(QNetworkAccessManager* networkManager,
                                ProfileStorage* profileStorage,
                                QObject* parent)
     : QObject(parent)
+    // Order matches the declaration order in the header; members are always
+    // initialised in declaration order regardless of how they are listed here.
+    , m_networkManager(networkManager)
     , m_settings(settings)
     , m_device(device)
     , m_machineState(machineState)
     , m_shotDataModel(shotDataModel)
     , m_profileStorage(profileStorage)
-    , m_networkManager(networkManager)
 {
     // Create ProfileManager — owns all profile lifecycle operations
     m_profileManager = new ProfileManager(m_settings, m_device, m_machineState, m_profileStorage, this);
@@ -248,6 +250,20 @@ MainController::MainController(QNetworkAccessManager* networkManager,
     // its constructor, so the title→temperature snapshot is ready.
     requestRecipeTempOffsetConversion();
     setupRecipeConnections();
+
+    // One-time idle-button injections (issue #1586). What the gate means is
+    // documented on ShotHistoryStorage::crossedSchemaVersion; what the injections
+    // guarantee is documented on their declarations in settings_network.h.
+    //
+    // What is specific to THIS site is the ordering, which is why the calls live
+    // here and not somewhere more obvious: they must run after
+    // m_shotHistory->initialize() above (it is what computes the crossing) and
+    // before the QML engine is created in main.cpp (so the layout is settled by
+    // first paint, with no visible re-arrangement).
+    if (m_shotHistory->crossedSchemaVersion(22))
+        m_settings->network()->injectEquipmentButtonIfMissing();
+    if (m_shotHistory->crossedSchemaVersion(25))
+        m_settings->network()->injectRecipesButtonIfMissing();
 
     // Switching beans resets the brew overrides to the active profile's
     // defaults — a new coffee starts from the profile + bean baseline, not
@@ -954,6 +970,92 @@ void MainController::setupRecipeConnections() {
     // Activation bundles arrive here from the storage worker.
     connect(m_recipeStorage, &RecipeStorage::recipeActivationReady, this,
             &MainController::applyActivatedRecipe);
+
+    // recipe-auto-load: loadAutoLoadRecipeIfNeeded() requests the target
+    // recipe by id to check existence/archived state before activating
+    // (RecipeStorage has no synchronous accessor). Filtered on
+    // m_pendingAutoLoadRecipeId so it only reacts to its own request, not
+    // every recipeReady the app fires (e.g. the active-recipe cache refresh
+    // connection below). m_pendingAutoLoadRecheckId is the edit-time
+    // counterpart below — handled in the same slot since both wait on the
+    // same signal, but it never reaches activateRecipe().
+    connect(m_recipeStorage, &RecipeStorage::recipeReady, this,
+            [this](qint64 recipeId, const QVariantMap& recipe) {
+        if (recipeId == m_pendingAutoLoadRecheckId) {
+            m_pendingAutoLoadRecheckId = -1;
+            // Proactive re-check only ever clears a newly-stale pin — never
+            // activates, or merely editing the pinned recipe while a
+            // different one is active (or none is) would silently switch
+            // the live session onto it.
+            if (RecipeStorage::isRecipeStale(recipe)) {
+                qDebug() << "MainController: auto-load recipe" << recipeId
+                         << "no longer available - clearing";
+                m_settings->dye()->setAutoLoadRecipeId(-1);
+                emit autoLoadRecipeStaleCleared();
+            }
+            return;
+        }
+        if (recipeId != m_pendingAutoLoadRecipeId)
+            return;
+        m_pendingAutoLoadRecipeId = -1;
+        if (RecipeStorage::isRecipeStale(recipe)) {
+            qDebug() << "MainController: auto-load recipe" << recipeId
+                     << "no longer available - clearing";
+            m_settings->dye()->setAutoLoadRecipeId(-1);
+            emit autoLoadRecipeStaleCleared();
+            return;
+        }
+        qDebug() << "MainController: loading auto-load recipe" << recipeId;
+        activateRecipe(recipeId);
+    });
+    // recipe-auto-load: a DB-open failure on either request above leaves its
+    // pending flag set forever unless cleared here — recipeReady never fires
+    // for that id. This does not clear the setting itself (a transient open
+    // failure isn't proof the row is stale); the next trigger, or the next
+    // edit, tries again.
+    connect(m_recipeStorage, &RecipeStorage::recipeCheckFailed, this,
+            [this](qint64 recipeId) {
+        if (recipeId == m_pendingAutoLoadRecipeId) {
+            m_pendingAutoLoadRecipeId = -1;
+            qWarning() << "MainController: auto-load recipe" << recipeId
+                       << "check failed - storage unavailable, will retry next trigger";
+        }
+        if (recipeId == m_pendingAutoLoadRecheckId) {
+            m_pendingAutoLoadRecheckId = -1;
+            qWarning() << "MainController: auto-load recipe" << recipeId
+                       << "re-check failed - storage unavailable";
+        }
+    });
+
+    // recipe-auto-load: proactively re-check the auto-load target the moment
+    // IT is the row that changed, rather than waiting for the next trigger to
+    // discover it was archived out from under the setting — mirrors the
+    // active-recipe recipeUpdated/recipeReady pair below, which re-reads on
+    // update and does its own archived check in the recipeReady half. Never
+    // activates — see the recipeReady handler above.
+    connect(m_recipeStorage, &RecipeStorage::recipeUpdated, this,
+            [this](qint64 recipeId, bool success) {
+        if (!success || !m_settings || recipeId != m_settings->dye()->autoLoadRecipeId())
+            return;
+        m_pendingAutoLoadRecheckId = recipeId;
+        m_recipeStorage->requestRecipe(recipeId);
+    });
+    // Deletion has no row left to re-read — clear directly. Also cancels any
+    // in-flight request for this id so a slower recipeReady/recipeCheckFailed
+    // arrival can't act on a now-stale pending flag and double-fire the
+    // signal below.
+    connect(m_recipeStorage, &RecipeStorage::recipeDeleted, this,
+            [this](qint64 recipeId, bool success) {
+        if (!success || !m_settings || recipeId != m_settings->dye()->autoLoadRecipeId())
+            return;
+        if (m_pendingAutoLoadRecipeId == recipeId)
+            m_pendingAutoLoadRecipeId = -1;
+        if (m_pendingAutoLoadRecheckId == recipeId)
+            m_pendingAutoLoadRecheckId = -1;
+        qDebug() << "MainController: auto-load recipe" << recipeId << "deleted - clearing";
+        m_settings->dye()->setAutoLoadRecipeId(-1);
+        emit autoLoadRecipeStaleCleared();
+    });
 
     // --- Relink lifecycle (recipe-bag-lifecycle): recipes follow bag
     // inventory events, silently and dup-guarded — roll-on-finish when a
@@ -1825,6 +1927,24 @@ void MainController::deactivateRecipe() {
     // eco users go cold).
     if (hadMilk)
         applySteamSettings();
+}
+
+void MainController::loadAutoLoadRecipeIfNeeded() {
+    if (!m_settings || !m_recipeStorage)
+        return;
+
+    const qint64 recipeId = m_settings->dye()->autoLoadRecipeId();
+    if (recipeId < 0)
+        return;
+
+    if (recipeId == m_settings->dye()->activeRecipeId())
+        return; // Already active
+
+    // Existence/archived state is checked via the async recipeReady path
+    // (see setupRecipeConnections) — RecipeStorage has no synchronous
+    // accessor for a single row.
+    m_pendingAutoLoadRecipeId = recipeId;
+    m_recipeStorage->requestRecipe(recipeId);
 }
 
 bool MainController::activeRecipeHasMilk() const {
@@ -3273,7 +3393,8 @@ void MainController::onShotEnded() {
     metadata.drinkWeight = m_settings->dye()->dyeDrinkWeight();
     metadata.drinkTds = m_settings->dye()->dyeDrinkTds();
     metadata.drinkEy = m_settings->dye()->dyeDrinkEy();
-    metadata.espressoEnjoyment = m_settings->dye()->dyeEspressoEnjoyment();
+    // No enjoyment: a just-pulled shot has not been tasted, so it saves
+    // unrated (ShotMetadata defaults to 0). See settings_dye.h.
     metadata.espressoNotes = m_settings->dye()->dyeShotNotes();
     metadata.barista = m_settings->dye()->dyeBarista();
     metadata.beanBaseJson = m_settings->dye()->dyeBeanBaseData();
@@ -3378,12 +3499,11 @@ void MainController::onShotEnded() {
                     qDebug() << "[metadata] Set dyeDrinkWeight to:" << finalWeight;
 
                     // Reset shot-specific metadata for the next shot
-                    // Bean/grinder info persists (sticky), but per-shot fields reset
-                    m_settings->dye()->setDyeEspressoEnjoyment(m_settings->visualizer()->defaultShotRating());
+                    // Bean/grinder info persists (sticky), but per-shot fields reset.
                     m_settings->dye()->setDyeShotNotes("");
                     m_settings->dye()->setDyeDrinkTds(0);
                     m_settings->dye()->setDyeDrinkEy(0);
-                    qDebug() << "[metadata] Reset enjoyment, notes, TDS, EY for next shot";
+                    qDebug() << "[metadata] Reset notes, TDS, EY for next shot";
 
                     // Force QSettings to sync to disk immediately
                     m_settings->sync();
@@ -3542,7 +3662,7 @@ void MainController::uploadPendingShot() {
     metadata.drinkWeight = m_settings->dye()->dyeDrinkWeight();
     metadata.drinkTds = m_settings->dye()->dyeDrinkTds();
     metadata.drinkEy = m_settings->dye()->dyeDrinkEy();
-    metadata.espressoEnjoyment = m_settings->dye()->dyeEspressoEnjoyment();
+    // Unrated on save — see the espresso path above.
     metadata.barista = m_settings->dye()->dyeBarista();
     metadata.beanBaseJson = m_settings->dye()->dyeBeanBaseData();
     metadata.bagId = m_settings->dye()->activeBagId();
@@ -3705,7 +3825,7 @@ void MainController::generateFakeShotData() {
             metadata.drinkWeight = m_settings->dye()->dyeDrinkWeight();
             metadata.drinkTds = m_settings->dye()->dyeDrinkTds();
             metadata.drinkEy = m_settings->dye()->dyeDrinkEy();
-            metadata.espressoEnjoyment = m_settings->dye()->dyeEspressoEnjoyment();
+            // Unrated on save — see the espresso path above.
             metadata.espressoNotes = m_settings->dye()->dyeShotNotes();
             metadata.barista = m_settings->dye()->dyeBarista();
             metadata.beanBaseJson = m_settings->dye()->dyeBeanBaseData();
@@ -3735,7 +3855,6 @@ void MainController::generateFakeShotData() {
                     m_settings->dye()->setDyeDrinkWeight(pendingFinalWeight);
 
                     // Reset shot-specific metadata for next shot
-                    m_settings->dye()->setDyeEspressoEnjoyment(m_settings->visualizer()->defaultShotRating());
                     m_settings->dye()->setDyeShotNotes("");
                     m_settings->dye()->setDyeDrinkTds(0);
                     m_settings->dye()->setDyeDrinkEy(0);

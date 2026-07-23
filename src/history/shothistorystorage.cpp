@@ -121,6 +121,14 @@ bool ShotHistoryStorage::initialize(const QString& dbPath)
     QSqlQuery pragma(m_db);
     pragma.exec("PRAGMA journal_mode=WAL");
     pragma.exec("PRAGMA foreign_keys=ON");
+    // No busy_timeout pragma here on purpose: Qt's SQLite driver already calls
+    // sqlite3_busy_timeout(5000) on every connection it opens, overridable only
+    // by a QSQLITE_BUSY_TIMEOUT connect option this app never sets. Setting it
+    // again would be redundant AND harmful — "PRAGMA busy_timeout = N" returns a
+    // row, and Qt leaves a row-returning statement un-reset, so this reused
+    // QSqlQuery would hold a read transaction open across createTables(),
+    // runMigrations() and the startup WAL checkpoint. foreign_keys returns no
+    // row, which is why ending on it leaves the connection clean.
 
     if (!createTables()) {
         qWarning() << "ShotHistoryStorage: Failed to create tables";
@@ -338,8 +346,27 @@ bool ShotHistoryStorage::runMigrations()
     // If multiple rows exist, keep only the highest version.
     query.exec("DELETE FROM schema_version WHERE version != (SELECT MAX(version) FROM schema_version)");
 
-    query.exec("SELECT version FROM schema_version ORDER BY version DESC LIMIT 1");
-    int currentVersion = query.next() ? query.value(0).toInt() : 1;
+    // The exec() result matters here, where it did not before. A FAILED query
+    // and an empty table both leave next() false, and collapsing the two to
+    // version 1 would tell crossedSchemaVersion() that a fully-migrated DB had
+    // just crossed every version — re-injecting idle buttons the user
+    // deliberately removed, i.e. issue #1586 through the very door that fix
+    // closed. The migrations themselves still tolerate a false-low read (every
+    // step is guarded by hasColumn / IF NOT EXISTS and simply re-runs as a
+    // no-op), so only the crossing signal is suppressed on a read failure.
+    const bool versionReadOk =
+        query.exec("SELECT version FROM schema_version ORDER BY version DESC LIMIT 1");
+    if (!versionReadOk)
+        qWarning() << "ShotHistoryStorage: schema_version read failed -"
+                   << query.lastError().text()
+                   << "- migrations re-run idempotently, but no schema crossing will be reported";
+    int currentVersion = (versionReadOk && query.next()) ? query.value(0).toInt() : 1;
+
+    // Remember where we started so crossedSchemaVersion() can tell a genuine
+    // one-time upgrade (DB was below N, now at/above it) from a machine already
+    // past N. Drives the one-time equipment/recipes idle-button injection.
+    m_schemaVersionAtStart = currentVersion;
+    m_schemaVersionAtStartKnown = versionReadOk;
 
     // Helper: check if a column exists in a table
     auto hasColumn = [&](const QString& table, const QString& column) -> bool {
@@ -861,9 +888,27 @@ bool ShotHistoryStorage::runMigrations()
     //   1) Stash the (shotId, visualizerId) pairs of inferred rows that
     //      were uploaded to Visualizer in a QSettings pending list so
     //      MainController can re-PATCH them with the corrected rating.
-    //   2) Reset every inferred row's enjoyment to the user's configured
-    //      default rating (QSettings shot/defaultRating, fallback 75 —
-    //      matching SettingsVisualizer::defaultShotRating).
+    //   2) Reset every inferred row's enjoyment to 0 (unrated).
+    //
+    // That reset originally wrote the user's configured "Default Shot Rating"
+    // (QSettings shot/defaultRating), to land each row on the value it would
+    // have had if the inferred stamping had never run. There is no such value
+    // any more: the default-rating setting was removed, so reading the key
+    // would write a number sourced from a deleted feature. 0 is what an
+    // untasted shot carries now, so that is what these rows get.
+    //
+    // The back-sync clears them to Unrated rather than "Rated 0/100" because
+    // updateShotOnVisualizer() sends JSON null for enjoyment <= 0. Note this
+    // has been true since #1155 — it is not a behaviour that changed to make
+    // the reset safe, and the create-path builder in the same file omits the
+    // field instead, so check updateShotOnVisualizer() specifically before
+    // concluding otherwise.
+    //
+    // Resetting these rows is not rewriting user data: the whole point of
+    // enjoyment_source='inferred' is that the app computed the value and
+    // nobody chose it. Rows carrying a rating a person set — including one
+    // produced by their configured default while that feature existed — are
+    // left alone.
     if (currentVersion < 16) {
         qDebug() << "ShotHistoryStorage: Running migration to version 16 (drop enjoyment_source)";
 
@@ -874,21 +919,20 @@ bool ShotHistoryStorage::runMigrations()
                 return false;
             }
 
-            // Read user's configured default rating up-front. MUST use
-            // the same QSettings scope the app's Settings object owns
-            // (settings.cpp: QSettings("DecentEspresso","DE1Qt")). A
-            // bare QSettings() resolves to org/app "DecentEspresso"/
-            // "Decenza" (main.cpp setApplicationName) — a DIFFERENT,
-            // empty store — which would silently return the 75 fallback
-            // and no-op the reset for every user whose default ≠ 75.
+            // The back-sync hand-off below MUST use the same QSettings scope
+            // the app's Settings object owns (settings.cpp:
+            // QSettings("DecentEspresso","DE1Qt")), because MainController
+            // reads the pending list from there. A bare QSettings() resolves
+            // to org/app "DecentEspresso"/"Decenza" (main.cpp
+            // setApplicationName) — a DIFFERENT, empty store — so the list
+            // would be written where nothing ever looks for it. This bit the
+            // rating read that used to live here; don't reintroduce it.
 #ifdef DECENZA_TESTING
             QSettings appSettings(Settings::testQSettingsPath(), QSettings::IniFormat);
 #else
             QSettings appSettings(QStringLiteral("DecentEspresso"),
                                   QStringLiteral("DE1Qt"));
 #endif
-            const int defaultRating = appSettings.value(
-                QStringLiteral("shot/defaultRating"), 75).toInt();
 
             // 1) Collect inferred rows that were uploaded to Visualizer so
             //    the cloud copy can be corrected after boot. Append to any
@@ -925,13 +969,11 @@ bool ShotHistoryStorage::runMigrations()
                 }
             }
 
-            // 2) Reset enjoyment on inferred rows to the user's default.
+            // 2) Reset enjoyment on inferred rows to 0 (unrated).
             {
                 QSqlQuery resetQ(m_db);
-                resetQ.prepare("UPDATE shots SET enjoyment = :rating "
-                               "WHERE enjoyment_source = 'inferred'");
-                resetQ.bindValue(":rating", defaultRating);
-                if (!resetQ.exec()) {
+                if (!resetQ.exec("UPDATE shots SET enjoyment = 0 "
+                                 "WHERE enjoyment_source = 'inferred'")) {
                     qWarning() << "ShotHistoryStorage: migration 16 UPDATE failed:"
                                << resetQ.lastError().text();
                     m_db.rollback();
@@ -947,8 +989,19 @@ bool ShotHistoryStorage::runMigrations()
                 return false;
             }
 
-            query.exec("DELETE FROM schema_version");
-            query.exec("INSERT INTO schema_version (version) VALUES (16)");
+            // Checked, unlike the bare exec() pair this replaced: a silent
+            // failure here commits the dropped column while leaving the
+            // version at 15, so the next boot re-enters this block, finds no
+            // column, and falls to the else branch — and migrations 17+ never
+            // run because the version never advances. The app then operates
+            // against a schema it believes is older than it is.
+            if (!query.exec("DELETE FROM schema_version")
+                || !query.exec("INSERT INTO schema_version (version) VALUES (16)")) {
+                qWarning() << "ShotHistoryStorage: migration 16 version bump failed:"
+                           << query.lastError().text();
+                m_db.rollback();
+                return false;
+            }
 
             if (!m_db.commit()) {
                 qWarning() << "ShotHistoryStorage: migration 16 commit failed:"
@@ -958,9 +1011,16 @@ bool ShotHistoryStorage::runMigrations()
             }
         } else {
             // Column already absent (fresh DB or a previously-completed
-            // migration 16). Just record the schema version.
-            query.exec("DELETE FROM schema_version");
-            query.exec("INSERT INTO schema_version (version) VALUES (16)");
+            // migration 16). Just record the schema version — checked for the
+            // same reason as the transactional path above: this is the branch
+            // a half-completed migration 16 lands in, so swallowing a failure
+            // here is what would strand the version at 15 permanently.
+            if (!query.exec("DELETE FROM schema_version")
+                || !query.exec("INSERT INTO schema_version (version) VALUES (16)")) {
+                qWarning() << "ShotHistoryStorage: migration 16 version bump failed:"
+                           << query.lastError().text();
+                return false;
+            }
         }
         currentVersion = 16;
     }
@@ -2114,13 +2174,13 @@ qint64 ShotHistoryStorage::saveShot(ShotDataModel* shotData,
 
         // Capture only the fields needed for logging (avoid copying the large compressedSamples blob)
         QString profileName = data.profileName;
-        double duration = data.duration;
+        double shotDuration = data.duration;
         int sampleCount = data.sampleCount;
         qsizetype compressedSize = data.compressedSamples.size();
 
         if (*destroyed) return;
         QMetaObject::invokeMethod(this, [this, shotId, destroyed,
-                                         profileName, duration, sampleCount, compressedSize]() {
+                                         profileName, shotDuration, sampleCount, compressedSize]() {
             if (*destroyed) {
                 qDebug() << "ShotHistoryStorage: saveShot callback dropped (object destroyed)";
                 return;
@@ -2132,7 +2192,7 @@ qint64 ShotHistoryStorage::saveShot(ShotDataModel* shotData,
 
                 qDebug() << "ShotHistoryStorage: Saved shot" << shotId
                          << "- Profile:" << profileName
-                         << "- Duration:" << duration << "s"
+                         << "- Duration:" << shotDuration << "s"
                          << "- Samples:" << sampleCount
                          << "- Compressed size:" << compressedSize << "bytes";
             } else {
@@ -2155,12 +2215,6 @@ qint64 ShotHistoryStorage::saveShotStatic(const QString& dbPath, const ShotSaveD
 
     qint64 shotId = -1;
     withTempDb(dbPath, "shs_save", [&](QSqlDatabase& db) {
-        auto isLockError = [](const QSqlError& e) {
-            const QString code = e.nativeErrorCode();
-            return code == QLatin1String("5") || code == QLatin1String("6")
-                || e.text().contains(QLatin1String("locked"), Qt::CaseInsensitive)
-                || e.text().contains(QLatin1String("busy"), Qt::CaseInsensitive);
-        };
         // A transient SQLITE_BUSY/locked from a concurrent writer (the post-shot
         // bags_update stamp, reconciliation drain, daily backup, WAL checkpoint)
         // must not drop a real shot. BEGIN IMMEDIATE (below) lets busy_timeout
@@ -2179,7 +2233,7 @@ qint64 ShotHistoryStorage::saveShotStatic(const QString& dbPath, const ShotSaveD
             // handler rides out the brief writer, so the lock no longer surfaces.
             QSqlQuery beginQuery(db);
             if (!beginQuery.exec(QStringLiteral("BEGIN IMMEDIATE"))) {
-                locked = isLockError(beginQuery.lastError());
+                locked = isSqliteLockError(beginQuery.lastError());
                 qWarning() << "ShotHistoryStorage: Failed to start transaction:" << beginQuery.lastError().text();
                 return false;
             }
@@ -2278,7 +2332,7 @@ qint64 ShotHistoryStorage::saveShotStatic(const QString& dbPath, const ShotSaveD
             query.bindValue(":hot_water_json", data.hotWaterJson.isEmpty() ? QVariant() : data.hotWaterJson);
 
             if (!query.exec()) {
-                locked = isLockError(query.lastError());
+                locked = isSqliteLockError(query.lastError());
                 qWarning() << "ShotHistoryStorage: Failed to insert shot:" << query.lastError().text()
                            << "(sqlite code" << query.lastError().nativeErrorCode() << ")";
                 QSqlQuery(db).exec(QStringLiteral("ROLLBACK"));
@@ -2294,7 +2348,7 @@ qint64 ShotHistoryStorage::saveShotStatic(const QString& dbPath, const ShotSaveD
             query.bindValue(":blob", data.compressedSamples);
 
             if (!query.exec()) {
-                locked = isLockError(query.lastError());
+                locked = isSqliteLockError(query.lastError());
                 qWarning() << "ShotHistoryStorage: Failed to insert samples:" << query.lastError().text();
                 QSqlQuery(db).exec(QStringLiteral("ROLLBACK"));
                 shotId = -1;
@@ -2324,7 +2378,7 @@ qint64 ShotHistoryStorage::saveShotStatic(const QString& dbPath, const ShotSaveD
             // falls through to ROLLBACK + a full-transaction retry.)
             QSqlQuery commitQuery(db);
             for (int commitTry = 1; !commitQuery.exec(QStringLiteral("COMMIT")); ++commitTry) {
-                const bool commitLocked = isLockError(commitQuery.lastError());
+                const bool commitLocked = isSqliteLockError(commitQuery.lastError());
                 if (!commitLocked || commitTry >= 4) {
                     locked = commitLocked;
                     qWarning() << "ShotHistoryStorage: Failed to commit shot:"
@@ -4180,8 +4234,17 @@ bool ShotHistoryStorage::importDatabaseStatic(const QString& destDbPath, const Q
             // Wrapped in a transaction to avoid per-UPDATE write lock contention with
             // the main thread's connection (this runs on a background thread).
             {
-                if (!destDb.transaction()) {
-                    qWarning() << "ShotHistoryStorage::importDatabaseStatic: Backfill transaction failed:" << destDb.lastError().text();
+                // destDb is the LIVE shots.db (importDatabaseStatic's destDbPath),
+                // not the imported file — srcDb is the separate one. So this reads
+                // the shot list and then UPDATEs inside the loop, on a background
+                // thread, while the other storages' workers write: the same
+                // read-then-write upgrade that cost a recipe save. Take the write
+                // lock up front. See DbWriteTxn.
+                // No error detail here: begin() already logged the real failure, and
+                // destDb.lastError() would be stale — begin runs on its own QSqlQuery.
+                DbWriteTxn backfillTxn = DbWriteTxn::begin(destDb, "import beverage-type backfill");
+                if (!backfillTxn.ok()) {
+                    qWarning() << "ShotHistoryStorage::importDatabaseStatic: Backfill transaction failed - skipping backfill";
                 } else {
                 QSqlQuery query(destDb);
                 query.prepare("SELECT id, profile_json FROM shots WHERE (beverage_type = 'espresso' OR beverage_type IS NULL) AND profile_json IS NOT NULL AND profile_json != ''");
@@ -4212,10 +4275,8 @@ bool ShotHistoryStorage::importDatabaseStatic(const QString& destDbPath, const Q
                 // Pre-bag sources also have no bag_id — adopt their shots
                 // into existing bags by identity (idempotent, NULL-only).
                 CoffeeBagStorage::linkOrphanShotsStatic(destDb);
-                if (!destDb.commit()) {
-                    qWarning() << "ShotHistoryStorage::importDatabaseStatic: Backfill commit failed:" << destDb.lastError().text();
-                    destDb.rollback();
-                }
+                if (!backfillTxn.commit())
+                    qWarning() << "ShotHistoryStorage::importDatabaseStatic: Backfill commit failed:" << backfillTxn.commitError();
                 }
             }
 
@@ -4251,7 +4312,10 @@ qint64 ShotHistoryStorage::importShotRecord(const ShotRecord& record, bool overw
         qWarning() << "ShotHistoryStorage: Cannot import - not ready";
         return -1;
     }
-    return importShotRecordStatic(m_db, record, overwriteExisting);
+    // beginAttempts = 1: this overload runs synchronously on the GUI thread
+    // (ShotImporter batches it from a timer), and each further attempt can spend
+    // the full busy_timeout blocking the UI with no way to cancel.
+    return importShotRecordStatic(m_db, record, overwriteExisting, 1);
 }
 
 void ShotHistoryStorage::importShotRecordAsync(const ShotRecord& record, bool overwriteExisting,
@@ -4274,8 +4338,27 @@ void ShotHistoryStorage::importShotRecordAsync(const ShotRecord& record, bool ov
 }
 
 qint64 ShotHistoryStorage::importShotRecordStatic(QSqlDatabase& db, const ShotRecord& record,
-                                                  bool overwriteExisting)
+                                                  bool overwriteExisting, int beginAttempts)
 {
+    // The dedupe probes below are READ-ONLY: when they match a shot we are
+    // replacing they only record its id, and the delete happens later, inside
+    // the transaction. That ordering carries the whole correctness argument of
+    // this function, so it is worth stating why it is not either of the two
+    // shapes this code has had before:
+    //
+    //  - Deleting where the probe matches, outside a transaction, autocommits
+    //    the delete. Any later failure then left the user's old shot destroyed
+    //    with no replacement written. That is a real shot loss, reachable on
+    //    shipped builds.
+    //  - Opening the transaction first and probing inside it fixes that, but
+    //    makes every import take the write lock — including the pure-duplicate
+    //    case that writes nothing — which turns a "skipped" result into a
+    //    "failed" one under contention and serialises bulk imports for no gain.
+    //
+    // Probing read-only and deleting inside the transaction gets both: a
+    // duplicate we are not overwriting returns 0 having taken no lock at all,
+    // and everything the import does destroy rolls back with it.
+    QList<qint64> replaceIds;   // shots this import replaces; deleted inside the txn
     QSqlQuery query(db);
 
     // Check for duplicate by Visualizer id first, when the incoming record has
@@ -4292,12 +4375,11 @@ qint64 ShotHistoryStorage::importShotRecordStatic(QSqlDatabase& db, const ShotRe
         query.prepare("SELECT id FROM shots WHERE visualizer_id = ?");
         query.bindValue(0, record.visualizerId);
         if (query.exec() && query.next()) {
-            if (overwriteExisting) {
-                deleteShotStatic(db, query.value(0).toLongLong());
-            } else {
-                // Already have this exact Visualizer shot, skip
-                return 0;
-            }
+            if (!overwriteExisting)
+                return 0;   // already have this exact Visualizer shot, skip
+            const qint64 existingId = query.value(0).toLongLong();
+            if (!replaceIds.contains(existingId))
+                replaceIds.append(existingId);
         }
     }
 
@@ -4305,14 +4387,11 @@ qint64 ShotHistoryStorage::importShotRecordStatic(QSqlDatabase& db, const ShotRe
     query.prepare("SELECT id FROM shots WHERE uuid = ?");
     query.bindValue(0, record.summary.uuid);
     if (query.exec() && query.next()) {
-        if (overwriteExisting) {
-            // Delete existing record to allow re-import
-            qint64 existingId = query.value(0).toLongLong();
-            deleteShotStatic(db, existingId);
-        } else {
-            // Duplicate found, skip
-            return 0;
-        }
+        if (!overwriteExisting)
+            return 0;   // duplicate found, skip
+        const qint64 existingId = query.value(0).toLongLong();
+        if (!replaceIds.contains(existingId))
+            replaceIds.append(existingId);
     }
 
     // Also check by timestamp (within 5 seconds) and profile to catch near-duplicates
@@ -4320,18 +4399,35 @@ qint64 ShotHistoryStorage::importShotRecordStatic(QSqlDatabase& db, const ShotRe
     query.bindValue(0, record.summary.timestamp);
     query.bindValue(1, record.summary.profileName);
     if (query.exec() && query.next()) {
-        if (overwriteExisting) {
-            // Delete existing record to allow re-import
-            qint64 existingId = query.value(0).toLongLong();
-            deleteShotStatic(db, existingId);
-        } else {
-            // Near-duplicate found, skip
-            return 0;
-        }
+        if (!overwriteExisting)
+            return 0;   // near-duplicate found, skip
+        const qint64 existingId = query.value(0).toLongLong();
+        if (!replaceIds.contains(existingId))
+            replaceIds.append(existingId);
     }
 
-    // Begin transaction
-    db.transaction();
+    // Release the probes' statement: it matched a row and was never stepped to
+    // exhaustion, so it is still active, and an active statement holds a read
+    // transaction open — which makes BEGIN IMMEDIATE fail instantly and
+    // unrecoverably. See DbWriteTxn's precondition.
+    query.finish();
+
+    DbWriteTxn txn = DbWriteTxn::begin(db, "shot import", beginAttempts);
+    if (!txn.ok()) {
+        qWarning() << "ShotHistoryStorage: import could not start a transaction, skipping shot"
+                   << record.summary.uuid;
+        return -1;
+    }
+
+    // Now inside the transaction, so these roll back with everything else.
+    for (const qint64 replaceId : std::as_const(replaceIds)) {
+        if (!deleteShotStatic(db, replaceId)) {
+            qWarning() << "ShotHistoryStorage: import could not remove the shot it replaces"
+                       << replaceId << "for" << record.summary.uuid
+                       << "- aborting rather than leaving a duplicate";
+            return -1;
+        }
+    }
 
     // Resolve the parsed grinder identity to an equipment package so the
     // imported shot keeps its grinder (the per-shot grinder_brand/model/burrs
@@ -4436,7 +4532,6 @@ qint64 ShotHistoryStorage::importShotRecordStatic(QSqlDatabase& db, const ShotRe
 
     if (!query.exec()) {
         qWarning() << "ShotHistoryStorage: Failed to import shot:" << query.lastError().text();
-        db.rollback();
         return -1;
     }
 
@@ -4467,7 +4562,6 @@ qint64 ShotHistoryStorage::importShotRecordStatic(QSqlDatabase& db, const ShotRe
 
     if (!query.exec()) {
         qWarning() << "ShotHistoryStorage: Failed to insert imported samples:" << query.lastError().text();
-        db.rollback();
         return -1;
     }
 
@@ -4486,7 +4580,14 @@ qint64 ShotHistoryStorage::importShotRecordStatic(QSqlDatabase& db, const ShotRe
         query.exec();  // Non-critical if markers fail
     }
 
-    db.commit();
+    // A failed COMMIT means nothing was written, so returning shotId here would
+    // report an imported shot that does not exist. (The guard has already rolled
+    // back by this point, so nothing is left open on the connection.)
+    if (!txn.commit()) {
+        qWarning() << "ShotHistoryStorage: import commit failed for" << record.summary.uuid
+                   << "-" << txn.commitError();
+        return -1;
+    }
 
     return shotId;
 }

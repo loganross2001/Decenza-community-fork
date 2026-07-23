@@ -6,14 +6,32 @@
 #include <QStringList>
 #include <QVariantMap>
 
-class SettingsVisualizer;
 class CoffeeBagStorage;
 class EquipmentStorage;
 
 // DYE (Describe Your Espresso) metadata. Split from Settings to keep
-// settings.h's transitive-include footprint small. Holds a non-owning
-// pointer to SettingsVisualizer so dyeEspressoEnjoyment can fall back to the
-// user-configured defaultShotRating when no per-shot value has been written.
+// settings.h's transitive-include footprint small.
+//
+// There is deliberately no enjoyment field here, and none may be added. A
+// rating belongs to one shot and only ever comes from a person, so it is
+// written to that shot's row (the `enjoyment` column) at the moment the person
+// supplies it — by the post-shot review page or the AI taste intake, both via
+// the shot-update path. A freshly saved shot is unrated because nothing
+// assigns the field at all (ShotMetadata::espressoEnjoyment defaults to 0).
+//
+// It was once a sticky setting fed by a "default shot rating", so every
+// freshly pulled shot arrived pre-rated and the taste intake never appeared.
+// Removing the default (#1561) left the sticky field behind, still read at
+// save time and reset only afterwards, so the last value it ever held leaked
+// onto one further shot per upgrading user.
+//
+// Note this prohibition is specific to ratings, not a claim that the class is
+// free of the pattern: dyeShotNotes is persisted and snapshotted onto whatever
+// shot completes next by the same mechanism, and dyeDrinkTds/dyeDrinkEy do the
+// same from memory. Those are tolerated because a person types them in the
+// context of the shot they are about to pull, and nothing else writes them —
+// which is exactly what stopped being true for enjoyment once a *setting* fed
+// it. If anything ever feeds those fields automatically, they become this bug.
 //
 // Bean model (bean-bag-inventory): the active coffee bag IS the bean state.
 // The dye/* QSettings keys act as a synchronous write-through cache of the
@@ -59,7 +77,6 @@ class SettingsDye : public QObject {
     Q_PROPERTY(double dyeDrinkWeight READ dyeDrinkWeight WRITE setDyeDrinkWeight NOTIFY dyeDrinkWeightChanged)
     Q_PROPERTY(double dyeDrinkTds READ dyeDrinkTds WRITE setDyeDrinkTds NOTIFY dyeDrinkTdsChanged)
     Q_PROPERTY(double dyeDrinkEy READ dyeDrinkEy WRITE setDyeDrinkEy NOTIFY dyeDrinkEyChanged)
-    Q_PROPERTY(int dyeEspressoEnjoyment READ dyeEspressoEnjoyment WRITE setDyeEspressoEnjoyment NOTIFY dyeEspressoEnjoymentChanged)
     Q_PROPERTY(QString dyeShotNotes READ dyeShotNotes WRITE setDyeShotNotes NOTIFY dyeShotNotesChanged)
     Q_PROPERTY(QString dyeBarista READ dyeBarista WRITE setDyeBarista NOTIFY dyeBaristaChanged)
     Q_PROPERTY(QString dyeShotDateTime READ dyeShotDateTime WRITE setDyeShotDateTime NOTIFY dyeShotDateTimeChanged)
@@ -80,6 +97,13 @@ class SettingsDye : public QObject {
     // deactivate-on-ingredient-swap are MainController's job (the recipe layer
     // sits above the settings façade, unlike bags whose fields ARE dye state).
     Q_PROPERTY(int activeRecipeId READ activeRecipeId WRITE setActiveRecipeId NOTIFY activeRecipeIdChanged)
+    // The recipe pinned to auto-load (recipe-auto-load), -1 = none. Mutually
+    // exclusive with SettingsApp::autoLoadProfileFilename — setting either one
+    // clears the other; the cross-clear is wired in Settings (the façade that
+    // owns both sub-objects), not here, so this class stays ignorant of
+    // SettingsApp. Shares SettingsApp::autoLoadRevertMinutes with the profile
+    // side rather than having its own timeout.
+    Q_PROPERTY(int autoLoadRecipeId READ autoLoadRecipeId WRITE setAutoLoadRecipeId NOTIFY autoLoadRecipeIdChanged)
     // Lifecycle fields of the active bag, mirrored for QML display and the
     // shot snapshot (read-only here; edited via CoffeeBagStorage).
     Q_PROPERTY(QString activeBagFrozenDate READ activeBagFrozenDate NOTIFY activeBagChanged)
@@ -96,8 +120,7 @@ class SettingsDye : public QObject {
     Q_PROPERTY(QString activeBagYieldMode READ activeBagYieldMode NOTIFY activeBagYieldSpecChanged)
 
 public:
-    // visualizer is non-owning and must outlive this object (Settings owns both).
-    explicit SettingsDye(SettingsVisualizer* visualizer, QObject* parent = nullptr);
+    explicit SettingsDye(QObject* parent = nullptr);
 
     // Non-owning; attached by main.cpp once ShotHistoryStorage has run the
     // migrations. Loads the active bag into the dye cache and subscribes to
@@ -173,11 +196,22 @@ public:
     // (carry-borrow), while a plain-numeric input keeps `decimals` places so a
     // sub-0.5 quick-select step (e.g. 0.25) isn't truncated to the AI-dialing
     // convention's single decimal. Returns "" for a grinder not in the registry,
-    // a value the catalog can't parse, or a step below the dial floor (< 0), so
-    // the caller keeps its own letter / plain-numeric / history fallback.
+    // a value the catalog can't parse, or — click-indexed (Compound) grinders
+    // only — a candidate below the dial floor (< 0), so the caller keeps its own
+    // letter / plain-numeric / history fallback. Plain-numeric grinders step
+    // below zero freely: a stepless collar's zero is a user-set calibration
+    // reference (Niche Zero) and finer-than-zero is a real dial position.
     Q_INVOKABLE QString stepGrinderSetting(const QString& brand, const QString& model,
                                            const QString& current, double deltaUnits,
                                            int decimals = 1) const;
+
+    // True when the grinder's registry notation is click-indexed (Compound,
+    // e.g. Eureka Mignon "a+b", 1Zpresso). Callers whose own numeric stepping
+    // runs after stepGrinderSetting's "" fall-through use this to keep skipping
+    // negative candidates for such grinders — a negative linear position is
+    // meaningless on click-indexed hardware however the value is written —
+    // without also blocking stepless collars (replace-grind-inputs-with-picker).
+    Q_INVOKABLE bool grinderIsClickIndexed(const QString& brand, const QString& model) const;
 
     // Basket registry bridges for the vendor-first picker (add-basket-equipment).
     Q_INVOKABLE QStringList knownBasketBrands() const;
@@ -197,9 +231,6 @@ public:
 
     double dyeDrinkEy() const;
     void setDyeDrinkEy(double value);
-
-    int dyeEspressoEnjoyment() const;
-    void setDyeEspressoEnjoyment(int value);
 
     QString dyeShotNotes() const;
     void setDyeShotNotes(const QString& value);
@@ -238,6 +269,11 @@ public:
     // Active recipe (add-recipes). Persisted id only — see the Q_PROPERTY note.
     int activeRecipeId() const;
     void setActiveRecipeId(int recipeId);
+
+    // Auto-load recipe (recipe-auto-load). See the Q_PROPERTY note above for
+    // the mutual-exclusion contract with SettingsApp::autoLoadProfileFilename.
+    int autoLoadRecipeId() const;
+    void setAutoLoadRecipeId(int recipeId);
 
     // The active bag's own yield spec (add-yield-ratio-anchor): {value, mode}
     // with mode "none" | "absolute" | "ratio". mode "none" = the bag designs
@@ -279,7 +315,6 @@ signals:
     void dyeDrinkWeightChanged();
     void dyeDrinkTdsChanged();
     void dyeDrinkEyChanged();
-    void dyeEspressoEnjoymentChanged();
     void dyeShotNotesChanged();
     void dyeBaristaChanged();
     void dyeShotDateTimeChanged();
@@ -288,6 +323,7 @@ signals:
     void activeBagIdChanged();
     void activeBagChanged();
     void activeRecipeIdChanged();
+    void autoLoadRecipeIdChanged();
     // Emitted only from applyActiveBag (a user bean switch, not a keep-fields
     // historical/favorite load) carrying the new bag's yield spec. The
     // MainController applies it to the session anchor after the switch's
@@ -319,7 +355,6 @@ private:
     void applyEquipmentIdentity(const QVariantMap& pkg);
 
     mutable QSettings m_settings;
-    SettingsVisualizer* m_visualizer = nullptr;  // Non-owning; for default-rating fallback.
     CoffeeBagStorage* m_bagStorage = nullptr;    // Non-owning; attached post-init.
     EquipmentStorage* m_equipmentStorage = nullptr; // Non-owning; attached post-init.
 

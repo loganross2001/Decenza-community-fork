@@ -9,20 +9,27 @@ import "../components/layout/ShotPlanConfig.js" as ShotPlanConfig
 
 Page {
     id: postShotReviewPage
+    // Declarative so it re-evaluates on a language change. This used to be an
+    // imperative assignment in onCompleted/onActivated, which ran once and left
+    // page titles in the previous language until you navigated away and back.
+    readonly property string pageTitle: TranslationManager.translate("postshotreview.title", "Shot Review")
+
     objectName: "postShotReviewPage"
-    background: ThemedPageBackground {}
+    // suppressShotChart: this page draws its own graph, and the last-shot chart
+    // background would put a second set of curves behind it.
+    background: ThemedPageBackground { suppressShotChart: true }
 
     Component.onCompleted: {
-        root.currentPageTitle = TranslationManager.translate("postshotreview.title", "Shot Review")
         if (editShotId > 0) {
             loadShotForEditing()
         }
     }
     StackView.onActivated: {
-        root.currentPageTitle = TranslationManager.translate("postshotreview.title", "Shot Review")
-        // Reconnect refractometer when entering/returning to this page
-        if (Settings.savedRefractometerAddress !== "" && !BLEManager.refractometerConnected) {
-            BLEManager.tryDirectConnectToRefractometer()
+        // Hunt for the refractometer while this page is open: activation kicks
+        // an immediate scan, and BLEManager keeps scans back-to-back until the
+        // refractometer connects (C++ guards handle not-configured/connected).
+        if (Settings.savedRefractometerAddress !== "") {
+            BLEManager.setRefractometerHunt(true)
         }
     }
 
@@ -33,6 +40,10 @@ Page {
     // already flushes on every normal navigation exit, and handleBack() flushes
     // on the explicit back path, so the destruction flush was redundant.
     Component.onDestruction: {
+        // Safety net: onDeactivating already ends the hunt on every normal
+        // navigation exit, but a page destroyed without deactivating (app
+        // teardown) must not leave continuous scanning armed.
+        BLEManager.setRefractometerHunt(false)
         if (Refractometer && Refractometer.connected) {
             Refractometer.disconnectFromDevice()
         }
@@ -48,9 +59,16 @@ Page {
         maybeAutoUpdateVisualizer()
     }
 
-    // Flush whenever the page loses the foreground (back, a child page pushed
-    // on top, app backgrounded) so a deferred/in-progress edit is persisted.
-    StackView.onDeactivating: autosave()
+    // Flush whenever the page loses the foreground within the stack (back, a
+    // child page pushed on top) so a deferred/in-progress edit is persisted.
+    // Note this fires only on stack transitions — NOT on app backgrounding,
+    // where the suspended event loop is what stops scan activity.
+    // Also end the refractometer hunt — continuous scanning is scoped to this
+    // page being the active page.
+    StackView.onDeactivating: {
+        BLEManager.setRefractometerHunt(false)
+        autosave()
+    }
 
     function handleBack() {
         // Every committed edit is already persisted; just flush a possible
@@ -261,6 +279,13 @@ Page {
         target: MainController.shotHistory
         function onShotReady(shotId, shot) {
             if (shotId !== postShotReviewPage.editShotId) return
+            // Ignore a RE-delivery of the shot we already hold. requestShot is a shared
+            // async API and this page is not its only caller — the last-shot background
+            // re-reads the newest shot whenever one is saved, which is this shot, at the
+            // moment this page opens. Re-running the block below would repopulate every
+            // edit field from the database and reset the upload status, which is the same
+            // clobber-an-in-progress-edit hazard onVisualizerInfoUpdated documents below.
+            if (editShotData && editShotData.id === shotId) return
             editShotData = shot
             _profileName = editShotData.profileName || ""
             _visualizerId = editShotData.visualizerId || ""
@@ -1206,7 +1231,7 @@ Page {
         anchors.fill: parent
         targetFlickable: flickable
         textFields: [
-            settingField.textField, rpmField.textField, baristaField.textField,
+            baristaField.textField,
             notesExpandable.textField
         ]
 
@@ -1930,8 +1955,15 @@ Page {
                         }
                     }
 
-                    // Grind (moved from the field grid — the most-adjusted
-                    // dial-in, now beside Dose/Out).
+                    // Grind + RPM (moved from the field grid — the most-adjusted
+                    // dial-in, now beside Dose/Out). One tap-to-open control for
+                    // both halves ("grind · rpm"): tapping opens the grind picker
+                    // (wheels + keyboard entry). Grinder context is the SHOT's
+                    // grinder (editGrinderBrand/Model, seeded from editShotData)
+                    // — step, candidates and notation follow the grinder this
+                    // shot was pulled on, not the currently active one. Commits
+                    // autosave immediately: Done is the commit event (a
+                    // tap-to-open control has no blur).
                     ColumnLayout {
                         Layout.fillWidth: true
                         Layout.preferredWidth: 1
@@ -1943,49 +1975,24 @@ Page {
                             font.pixelSize: Theme.scaled(10)
                             Accessible.ignored: true
                         }
-                        SuggestionField {
-                            id: settingField
+                        GrindField {
                             Layout.fillWidth: true
-                            // No fixed preferredHeight — its implicitHeight is 36 in
-                            // normal mode (matching the steppers) but grows for the
-                            // accessibility button row when a screen reader is on.
+                            Layout.preferredHeight: Theme.scaled(36)
+                            presentation: "field"
                             fieldColor: Theme.cardBackgroundColor   // match the Dose/Out steppers
-                            label: ""
-                            text: editGrinderSetting
-                            suggestions: {
-                                var list = _distinctCacheVersion >= 0 ? MainController.shotHistory.getDistinctGrinderSettingsForGrinder(editGrinderModel) : []
-                                if (editGrinderSetting.length > 0 && list.indexOf(editGrinderSetting) === -1) list = [editGrinderSetting].concat(list)
-                                return list
+                            grinderBrand: postShotReviewPage.editGrinderBrand
+                            grinderModel: postShotReviewPage.editGrinderModel
+                            grindSetting: postShotReviewPage.editGrinderSetting
+                            rpmValue: postShotReviewPage.editRpm
+                            accessibleName: TranslationManager.translate("shotdetail.grind", "Grind")
+                            onGrindCommitted: function(v) {
+                                postShotReviewPage.editGrinderSetting = v
+                                postShotReviewPage.autosave("grinderSetting", true)
                             }
-                            onTextEdited: function(t) { editGrinderSetting = t }
-                            onInputBlurred: postShotReviewPage.autosave("grinderSetting", true)
-                        }
-                    }
-
-                    // RPM (only when the grinder is rpm-adjustable)
-                    ColumnLayout {
-                        visible: postShotReviewPage.editRpmCapable
-                        Layout.fillWidth: true
-                        Layout.preferredWidth: 1
-                        spacing: Theme.scaled(2)
-                        Tr {
-                            key: "postshotreview.label.rpm"
-                            fallback: "RPM"
-                            color: Theme.textSecondaryColor
-                            font.pixelSize: Theme.scaled(10)
-                            Accessible.ignored: true
-                        }
-                        SuggestionField {
-                            id: rpmField
-                            Layout.fillWidth: true
-                            // No fixed preferredHeight — lets the a11y button row
-                            // expand under a screen reader (implicitHeight is 36 otherwise).
-                            fieldColor: Theme.cardBackgroundColor   // match the Dose/Out steppers
-                            label: ""
-                            text: editRpm > 0 ? String(editRpm) : ""
-                            suggestions: []
-                            onTextEdited: function(t) { editRpm = parseInt(t) || 0 }
-                            onInputBlurred: postShotReviewPage.autosave("rpm", true)
+                            onRpmCommitted: function(rpm) {
+                                postShotReviewPage.editRpm = rpm
+                                postShotReviewPage.autosave("rpm", true)
+                            }
                         }
                     }
 
@@ -1999,7 +2006,7 @@ Page {
                             spacing: Theme.scaled(4)
                             Tr {
                                 key: "postshotreview.label.tds"
-                                fallback: "TDS%"
+                                fallback: "TDS"
                                 color: Theme.textSecondaryColor
                                 font.pixelSize: Theme.scaled(10)
                                 Accessible.ignored: true

@@ -289,7 +289,7 @@ KeyboardAwareContainer {
 
                         Tr {
                             key: "settings.visualizer.autoUpload"
-                            fallback: "Auto-Upload Shots"
+                            fallback: "Auto-upload shots"
                             color: Theme.textColor
                             font.pixelSize: Theme.scaled(14)
                         }
@@ -326,7 +326,7 @@ KeyboardAwareContainer {
 
                         Tr {
                             key: "settings.visualizer.autoUpdate"
-                            fallback: "Auto-Update Shots"
+                            fallback: "Auto-update shots"
                             color: Theme.textColor
                             font.pixelSize: Theme.scaled(14)
                         }
@@ -462,46 +462,6 @@ KeyboardAwareContainer {
                         checked: Settings.visualizer.visualizerClearNotesOnStart
                         accessibleName: TranslationManager.translate("settings.visualizer.clearNotesOnStart", "Clear Notes on Start")
                         onToggled: Settings.visualizer.visualizerClearNotesOnStart = checked
-                    }
-                }
-
-                // Default shot rating
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: Theme.scaled(15)
-
-                    ColumnLayout {
-                        spacing: Theme.scaled(2)
-                        Layout.fillWidth: true
-
-                        Tr {
-                            key: "settings.visualizer.defaultRating"
-                            fallback: "Default Shot Rating"
-                            color: Theme.textColor
-                            font.pixelSize: Theme.scaled(14)
-                        }
-
-                        Tr {
-                            Layout.fillWidth: true
-                            key: "settings.visualizer.defaultRatingDesc"
-                            fallback: "Starting rating for new shots (0 = unrated)"
-                            color: Theme.textSecondaryColor
-                            font.pixelSize: Theme.scaled(12)
-                            wrapMode: Text.WordWrap
-                        }
-                    }
-
-                    RatingInput {
-                        id: defaultRatingInput
-                        Layout.preferredWidth: Theme.scaled(220)
-                        height: Theme.scaled(40)
-                        compact: true
-                        value: Settings.visualizer.defaultShotRating
-                        accessibleName: TranslationManager.translate("settings.visualizer.defaultRating", "Default Shot Rating")
-
-                        onValueModified: function(newValue) {
-                            Settings.visualizer.defaultShotRating = newValue
-                        }
                     }
                 }
 

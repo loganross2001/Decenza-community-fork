@@ -28,6 +28,14 @@
         <file>fonts/DecenzaSans-Medium.ttf</file>
         <file>fonts/DecenzaSans-Bold.ttf</file>
         <file>fonts/DecenzaSans-Light.ttf</file>
+        <!-- Symbol fallback (Noto Sans Math, SIL OFL 1.1). Decenza Sans covers Latin/Greek/
+             Cyrillic and 927 glyphs total — no arrows, no geometric shapes. Symbols written
+             in QML therefore came from a per-machine platform fallback. This font supplies
+             every symbol the app actually uses (→ ← ↗ ↕ ▶ ◀ ⧉) from the bundle instead, so
+             they are monochrome, follow Theme colours, and are identical on every platform.
+             Chained after Decenza Sans in Theme's font roles — it is never the primary face.
+             Verify coverage with scripts/check_font_glyph_coverage.py. -->
+        <file>fonts/NotoSansMath-Regular.ttf</file>
         <!-- Splash screens (random on startup) -->
         <file>splash/splash1.png</file>
         <file>splash/splash2.png</file>
@@ -61,6 +69,7 @@
         <file>icons/pin.svg</file>
         <file>icons/profile.svg</file>
         <file>icons/hide-keyboard.svg</file>
+        <file>icons/keyboard.svg</file>
         <file>icons/battery-0.svg</file>
         <file>icons/battery-25.svg</file>
         <file>icons/battery-50.svg</file>
@@ -96,6 +105,7 @@
         <file>icons/Upload.svg</file>
         <file>icons/CloudUpload.svg</file>
         <file>icons/list.svg</file>
+        <file>icons/picker-wheel.svg</file>
         <file>icons/plus.svg</file>
         <file>icons/download.svg</file>
         <file>icons/minus.svg</file>
@@ -142,7 +152,6 @@
         <file>profiles/damian_s_lrv3.json</file>
         <file>profiles/damian_s_q.json</file>
         <file>profiles/default.json</file>
-        <file>profiles/descale_wizard.json</file>
         <file>profiles/e61_classic_gently_up_to_10_bar.json</file>
         <file>profiles/e61_espresso_machine.json</file>
         <file>profiles/e61_rocketing_up_to_10_bar.json</file>
@@ -210,5 +219,11 @@
         <file>profiles/turboturbo.json</file>
         <file>profiles/two_spring_lever_machine_to_9_bar.json</file>
         <file>profiles/weiss_advanced_spring_lever.json</file>
+        <file>backgrounds/dots.svg</file>
+        <file>backgrounds/grain.svg</file>
+        <file>backgrounds/linen.svg</file>
+        <file>backgrounds/pinstripe.svg</file>
+        <file>backgrounds/twill.svg</file>
+        <file>backgrounds/weave.svg</file>
     </qresource>
 </RCC>

@@ -12,10 +12,10 @@ SettingsAI::SettingsAI(QObject* parent)
 }
 
 QString SettingsAI::aiProvider() const {
-    // [barista-fork] Default to Anthropic: the barista's client tools + web search
-    // only run on the Anthropic provider (the overlay gates them on
-    // selectedProvider === "anthropic"), so a fresh install would otherwise get a
-    // degraded, tool-less barista. Existing installs keep their saved choice.
+    // [barista-fork] Default to Anthropic: it's the recommended barista provider (best tool-driving + the only
+    // one with real server-side web search). The barista is provider-agnostic now — Gemini also runs the full
+    // client-tool loop (see AIProvider::supportsClientTools) — but a fresh install defaults here for the best
+    // out-of-box experience. Existing installs keep their saved choice.
     return m_settings.value("ai/provider", "anthropic").toString();
 }
 
@@ -98,6 +98,30 @@ void SettingsAI::setOpenrouterApiKey(const QString& key) {
     if (openrouterApiKey() != key) {
         m_settings.setValue("ai/openrouterKey", key);
         emit openrouterApiKeyChanged();
+        emit configurationChanged();
+    }
+}
+
+QString SettingsAI::openaiEndpoint() const {
+    return m_settings.value("ai/openaiEndpoint", "").toString();
+}
+
+void SettingsAI::setOpenaiEndpoint(const QString& endpoint) {
+    if (openaiEndpoint() != endpoint) {
+        m_settings.setValue("ai/openaiEndpoint", endpoint);
+        emit openaiEndpointChanged();
+        emit configurationChanged();
+    }
+}
+
+QString SettingsAI::anthropicEndpoint() const {
+    return m_settings.value("ai/anthropicEndpoint", "").toString();
+}
+
+void SettingsAI::setAnthropicEndpoint(const QString& endpoint) {
+    if (anthropicEndpoint() != endpoint) {
+        m_settings.setValue("ai/anthropicEndpoint", endpoint);
+        emit anthropicEndpointChanged();
         emit configurationChanged();
     }
 }

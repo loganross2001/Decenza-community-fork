@@ -7,8 +7,15 @@ import "../components"
 
 Page {
     id: espressoPage
+    // Declarative so it re-evaluates on a language change. This used to be an
+    // imperative assignment in onCompleted/onActivated, which ran once and left
+    // page titles in the previous language until you navigated away and back.
+    readonly property string pageTitle: ProfileManager.currentProfileName
+
     objectName: "espressoPage"
-    background: ThemedPageBackground {}
+    // suppressShotChart: this page draws its own graph, and the last-shot chart
+    // background would put a second set of curves behind it.
+    background: ThemedPageBackground { suppressShotChart: true }
 
     // Local weight property - updated directly in signal handler for immediate display
     property real currentWeight: 0.0
@@ -24,7 +31,6 @@ Page {
     focus: true
 
     StackView.onActivated: {
-        root.currentPageTitle = ProfileManager.currentProfileName
         espressoPage.forceActiveFocus()  // Ensure keyboard focus
     }
 

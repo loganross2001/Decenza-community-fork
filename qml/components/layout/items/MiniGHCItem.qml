@@ -17,7 +17,7 @@ Item {
     opacity: ((DE1Device.simulationMode || DE1Device.isHeadless) && MachineState.isReady) ? 1.0 : 0.4
 
     function _effectiveColor(baseColor) {
-        return Settings.theme.backgroundImagePath.length > 0 ? Theme.scrimColor(baseColor) : baseColor
+        return Theme.glassChrome ? Theme.chromeFill(baseColor) : baseColor
     }
 
     implicitWidth: isCompact ? compactContent.implicitWidth : fullContent.implicitWidth
@@ -121,7 +121,7 @@ Item {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     spacing: Theme.scaled(4)
-                    MiniGHCButton { translationKey: "idle.button.hotwater"; translationFallback: "Water"; iconSource: "qrc:/icons/water.svg"; buttonColor: Theme.primaryColor; onTapped: DE1Device.startHotWater() }
+                    MiniGHCButton { translationKey: "idle.button.hotwater.short"; translationFallback: "Water"; iconSource: "qrc:/icons/water.svg"; buttonColor: Theme.primaryColor; onTapped: DE1Device.startHotWater() }
                     MiniGHCButton { translationKey: "idle.button.flush";    translationFallback: "Flush"; iconSource: "qrc:/icons/flush.svg"; buttonColor: Theme.primaryColor; onTapped: DE1Device.startFlush() }
                 }
 
@@ -154,7 +154,7 @@ Item {
                 }
 
                 readonly property color _effectiveButtonColor:
-                    Settings.theme.backgroundImagePath.length > 0 ? Theme.scrimColor(buttonColor) : buttonColor
+                    Theme.glassChrome ? Theme.chromeFill(buttonColor) : buttonColor
 
                 color: btnArea.isPressed ? Qt.darker(_effectiveButtonColor, 1.2) : _effectiveButtonColor
                 Accessible.ignored: true

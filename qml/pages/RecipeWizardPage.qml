@@ -24,6 +24,11 @@ import "../components"
 // ProfileManager) — the single source shared with the ranking helpers.
 Page {
     id: wizardPage
+    // Declarative so it re-evaluates on a language change. This used to be an
+    // imperative assignment in onCompleted/onActivated, which ran once and left
+    // page titles in the previous language until you navigated away and back.
+    readonly property string pageTitle: mode === "edit" ? TranslationManager.translate("recipes.wizard.editTitle", "Edit Recipe") : TranslationManager.translate("recipes.wizard.createTitle", "New Recipe")
+
     objectName: "recipeWizardPage"
     background: ThemedPageBackground {}
 
@@ -226,7 +231,20 @@ Page {
     property string fBagBlob: ""          // selected bag's beanBaseData (tea brewing seeds)
     property real fEquipmentId: 0
     property string fEquipmentName: ""
-    property bool fEquipmentRpmCapable: false
+    // Grinder identity of the recipe's selected package — the grind control's
+    // context (grind-value-entry: the recipe's grinder, never the active one).
+    property string fEquipmentGrinderBrand: ""
+    property string fEquipmentGrinderModel: ""
+    // RPM capability: one function, the RECIPE's package as arguments — not the
+    // stored pkg.rpmCapable flag (which can drift from the catalog) and not the
+    // argument-less active-grinder resolution (which would ignore the package
+    // the equipment window just made the user choose).
+    readonly property bool fEquipmentRpmCapable:
+        Settings.dye.grinderRpmCapable(fEquipmentGrinderBrand, fEquipmentGrinderModel)
+    // The recipe's own dial-in (grind always lives on the recipe —
+    // fix-recipe-grind-integrity). 0 rpm = unset, uniform across surfaces.
+    property string fGrind: ""
+    property int fRpmPinned: 0
     // The linked bag's current dial, read once when the bag is selected and
     // offered as the grind/rpm fields' editable DEFAULT — grind always lives
     // on the recipe (fix-recipe-grind-integrity); there is no live follow.
@@ -247,6 +265,16 @@ Page {
     property string fWaterOrder: "after"
     property string errorMessage: ""
     property string _autoName: ""
+
+    // Lowercased names of existing non-archived recipes (excluding the one being
+    // edited). TWO consumers: suggestName() uses it to disambiguate an auto-name
+    // collision, and `nameInUse` below uses it to GATE SAVE
+    // (block-duplicate-active-names) — so this is no longer cosmetic-only. Filled
+    // asynchronously by requestInventory() → onInventoryReady; empty until it
+    // lands, in which case the collision qualifier degrades to nothing (the plain
+    // descriptive name ships, never worse than before) and the save gate reads as
+    // "no collision", leaving the storage guard to refuse a genuine duplicate.
+    property var _existingRecipeNames: []
 
     // Yield anchor (add-yield-ratio-anchor): which of {yield, ratio} was last
     // written — "none" | "absolute" | "ratio". The non-anchored field shows
@@ -269,8 +297,27 @@ Page {
     }
 
     readonly property bool hasBean: fBeanBaseId !== "" || fRoaster !== "" || fCoffee !== ""
+    // The name this recipe arrived with (edit mode only; empty when creating).
+    property string _originalName: ""
+    // Cause of the last refused save, from recipeUpdateFailed.
+    property string _saveFailReason: ""
+
+    // Active-name uniqueness (block-duplicate-active-names): the entered name may
+    // not match another non-archived recipe. Relies on `_existingRecipeNames`,
+    // which onInventoryReady fills with the lowercased non-archived names minus
+    // the recipe being edited; it is empty until that request lands, so this reads
+    // as "no collision" until then and the storage guard is the real backstop.
+    //
+    // Re-saving the name a recipe already has is never a collision — otherwise a
+    // recipe that already shared a name with another could not be edited at all.
+    readonly property bool nameInUse: {
+        var n = nameField.text.trim().toLowerCase()
+        if (n.length === 0) return false
+        if (n === _originalName.trim().toLowerCase()) return false
+        return _existingRecipeNames.indexOf(n) >= 0
+    }
     readonly property bool canSave: MainController.recipeStorage.isSaveValid(
-        nameField.text, fProfileTitle, buildHotWaterJson())
+        nameField.text, fProfileTitle, buildHotWaterJson()) && !nameInUse
 
     // What the summary hero renders: the wizard state shaped exactly like a
     // stored recipe map, so the shared RecipeDrinkCard shows the card the
@@ -298,43 +345,123 @@ Page {
                     ? fTeaTempC - fProfileTempC : 0)
                 : fLoadedTempOffsetC)
             : (Math.abs(fTempDeltaC) > 0.05 ? fTempDeltaC : 0),
-        grindPinned: (!activeTemplate.grind) ? "" : grindField.text.trim(),
+        grindPinned: (!activeTemplate.grind) ? "" : fGrind.trim(),
         steamJson: buildSteamJson(),
         hotWaterJson: buildHotWaterJson()
     })
 
-    // Auto-suggested name ("<Bean> <DrinkType>"): applied while the field is
-    // empty or still holds the previous suggestion — never over a user edit.
-    // SHORT type labels only ("Gran Bar Latte", never "… Latte / Cappuccino"),
-    // and the type word is skipped when the bean name already ends with it
-    // ("Milk Blend Espresso", not "Milk Blend Espresso Espresso").
+    // Auto-suggested name ("<Bean> <DrinkType> · <Profile>"): applied while the
+    // field is empty or still holds the previous suggestion — never over a
+    // user edit. SHORT type labels only ("Gran Bar Latte", never "… Latte /
+    // Cappuccino"), and the type word is skipped when the bean name already
+    // ends with it ("Milk Blend Espresso", not "Milk Blend Espresso Espresso").
+    // The profile is included from the first recipe (issue #1548: one bean made
+    // many ways needs the profile to be distinguishable AND searchable — users
+    // hunt by profile, e.g. "Crem Yir" = Cremina Yirgacheffe). The profile is
+    // cleaned first (editor prefix stripped, type-word stutter removed).
     function suggestName() {
         var bean = (fCoffee !== "" ? fCoffee : fRoaster).trim()
+        var typeWord = fDrinkType !== "" ? DrinkType.shortLabel(fDrinkType) : ""
         var parts = []
         if (bean !== "") parts.push(bean)
-        if (fDrinkType !== "") {
-            var typeWord = DrinkType.shortLabel(fDrinkType)
+        if (typeWord !== "") {
             var stutter = bean !== ""
                 && bean.toLowerCase().endsWith(" " + typeWord.toLowerCase())
             if (bean.toLowerCase() === typeWord.toLowerCase())
                 stutter = true
             if (!stutter) parts.push(typeWord)
         }
-        var suggestion = parts.join(" ")
+        var base = parts.join(" ")
+        // Append the cleaned profile (a hot-water tea recipe carries none).
+        var profile = cleanProfileForName(fProfileTitle, typeWord)
+        if (profile !== "")
+            base = base === "" ? profile : (base + " · " + profile)
+
+        if (base === "")
+            return
+
+        // When the composed name matches an existing recipe's display name
+        // (a plain name-string match — we cache names, not their identity),
+        // disambiguate by appending the DRAFT's own dial-in value: yield tried
+        // first, else dose. Never a bare counter. Best-effort: with the
+        // inventory not yet loaded (or no usable value) the plain `base` ships.
+        var suggestion = base
+        if (nameCollides(base)) {
+            var yq = yieldQualifierText()
+            var dq = doseQualifierText()
+            if (yq !== "" && !nameCollides(base + " " + yq))
+                suggestion = base + " " + yq
+            else if (dq !== "" && !nameCollides(base + " " + dq))
+                suggestion = base + " " + dq
+            else if (yq !== "")
+                suggestion = base + " " + yq       // best effort — still shown
+            else if (dq !== "")
+                suggestion = base + " " + dq
+        }
+
         if (suggestion === "" || (nameField.text !== "" && nameField.text !== _autoName))
             return
         nameField.text = suggestion
         _autoName = suggestion
     }
 
-    StackView.onActivated: root.currentPageTitle = mode === "edit"
-        ? TranslationManager.translate("recipes.wizard.editTitle", "Edit Recipe")
-        : TranslationManager.translate("recipes.wizard.createTitle", "New Recipe")
+    // Turn a profile title into the token used in a suggested recipe name:
+    // strip the D-Flow/ or A-Flow/ editor-membership prefix (see the project
+    // note "editor membership = title prefix"), then drop a trailing word that
+    // just repeats the drink-type word (the bean stutter rule, for the
+    // profile). Returns "" when no profile or nothing survives.
+    function cleanProfileForName(title, typeWord) {
+        var p = (title || "").trim()
+        if (p === "")
+            return ""
+        var lower = p.toLowerCase()
+        if (lower.indexOf("d-flow/") === 0 || lower.indexOf("a-flow/") === 0)
+            p = p.substring(p.indexOf("/") + 1).trim()
+        if (typeWord && typeWord !== "") {
+            var lp = p.toLowerCase(), lt = typeWord.toLowerCase()
+            if (lp === lt)
+                return ""
+            if (lp.endsWith(" " + lt))
+                p = p.substring(0, p.length - lt.length - 1).trim()
+        }
+        return p
+    }
+
+    // True when an existing non-archived recipe already carries this exact name
+    // (case-insensitive). The set excludes the recipe being edited.
+    function nameCollides(candidate) {
+        var c = (candidate || "").trim().toLowerCase()
+        if (c === "")
+            return false
+        for (var i = 0; i < _existingRecipeNames.length; ++i)
+            if (_existingRecipeNames[i] === c)
+                return true
+        return false
+    }
+
+    // Collision qualifiers from the current dial-in state. Ratio → "1:2.5",
+    // absolute yield / dose → "40g" (trailing ".0" trimmed).
+    function yieldQualifierText() {
+        if (fYieldMode === "ratio") {
+            var r = parseFloat(ratioField.text) || 0
+            return r > 0 ? "1:" + trimNumForName(r) : ""
+        }
+        if (fYieldMode === "absolute") {
+            var y = parseFloat(yieldField.text) || 0
+            return y > 0 ? trimNumForName(y) + "g" : ""
+        }
+        return ""
+    }
+    function doseQualifierText() {
+        var d = parseFloat(doseField.text) || 0
+        return d > 0 ? trimNumForName(d) + "g" : ""
+    }
+    function trimNumForName(v) {
+        return Number(v).toFixed(1).replace(/\.0$/, "")
+    }
+
 
     Component.onCompleted: {
-        root.currentPageTitle = mode === "edit"
-            ? TranslationManager.translate("recipes.wizard.editTitle", "Edit Recipe")
-            : TranslationManager.translate("recipes.wizard.createTitle", "New Recipe")
         if (mode === "edit" && editRecipeId > 0) {
             currentStep = "summary"
             _enteredAtSummary = true
@@ -354,12 +481,32 @@ Page {
             currentStep = "drink"
             captureBaseline()
         }
+        // EVERY entry path needs the existing-name set, not just the blank-create
+        // walk: besides feeding suggestName()'s auto-name disambiguation, it now
+        // backs the duplicate-name gate on Save (block-duplicate-active-names).
+        // Requesting it only for the blank walk left `nameInUse` permanently false
+        // in edit/promote/clone — i.e. inert in edit mode, which is exactly where a
+        // rename collision happens.
+        //
+        // Issued LAST, after each path's own load above, deliberately: runAsync
+        // dispatches to a single FIFO SerialDbWorker, so putting this heavy
+        // full-table scan first would delay the recipe/shot the user is waiting to
+        // see. The gate reads as "no collision" until the scan lands, and the
+        // storage guard is the real backstop either way.
+        MainController.recipeStorage.requestInventory()
     }
 
     // --- ported state <-> JSON helpers (verbatim composer semantics) -------
 
     function applyRecipeMap(r) {
         nameField.text = r.name || ""
+        // Only in EDIT mode does the recipe have a name it already owns. Recording
+        // it lets the duplicate gate fire on an actual rename only, so a recipe
+        // that already shares a name with another stays editable
+        // (block-duplicate-active-names). A clone/promote is a new recipe, so any
+        // collision there IS new and must block.
+        if (mode === "edit" && editRecipeId > 0)
+            _originalName = nameField.text
         fProfileTitle = r.profileTitle || ""
         fProfileJson = r.profileJson || ""
         fBagId = r.bagId || 0
@@ -399,8 +546,8 @@ Page {
         // the save path then preserves fLoadedTempOffsetC instead.
         fTeaTempC = (r.drinkType && String(r.drinkType).indexOf("tea") === 0
                      && fProfileTempC > 0) ? fProfileTempC + (r.tempOffsetC || 0) : 0
-        grindField.text = r.grindPinned || ""
-        rpmField.text = (r.rpmPinned || 0) > 0 ? String(r.rpmPinned) : ""
+        fGrind = r.grindPinned || ""
+        fRpmPinned = r.rpmPinned || 0
         applySteamJson(r.steamJson || "")
         applyHotWaterJson(r.hotWaterJson || "")
         // Drink type: stored value, else derive from the loaded blocks — a
@@ -692,10 +839,10 @@ Page {
             // Grind always lives on the recipe (fix-recipe-grind-integrity):
             // whatever is on the field saves as the recipe's own value. Tea
             // recipes never store grind (nothing to grind).
-            grindPinned: (!activeTemplate.grind) ? "" : grindField.text.trim(),
+            grindPinned: (!activeTemplate.grind) ? "" : fGrind.trim(),
             rpmPinned: (activeTemplate.grind
-                        && (fEquipmentRpmCapable || (parseInt(rpmField.text) || 0) > 0))
-                ? (parseInt(rpmField.text) || 0) : 0,
+                        && (fEquipmentRpmCapable || fRpmPinned > 0))
+                ? fRpmPinned : 0,
             steamJson: buildSteamJson(),
             hotWaterJson: buildHotWaterJson()
         }
@@ -726,6 +873,7 @@ Page {
         }
         var map = buildSaveMap()
         _submitting = true
+        _saveFailReason = ""   // never inherit a previous attempt's cause
         if (mode === "edit" && editRecipeId > 0) {
             MainController.recipeStorage.requestUpdateRecipe(editRecipeId, map)
         } else {
@@ -849,10 +997,10 @@ Page {
             // only over an empty field or the previous bag's untouched
             // default (a swap re-defaults; a typed value stays).
             if (mode !== "edit" && activeTemplate.grind && fBagGrindDefault !== ""
-                && (grindField.text.trim() === "" || grindField.text.trim() === prevDefault)) {
-                grindField.text = fBagGrindDefault
-                rpmField.text = (fEquipmentRpmCapable && fBagRpmDefault > 0)
-                    ? String(fBagRpmDefault) : ""
+                && (fGrind.trim() === "" || fGrind.trim() === prevDefault)) {
+                fGrind = fBagGrindDefault
+                fRpmPinned = (fEquipmentRpmCapable && fBagRpmDefault > 0)
+                    ? fBagRpmDefault : 0
             }
             suggestName()
         }
@@ -919,7 +1067,7 @@ Page {
         if (!pkg || pkg.isNone) {
             fEquipmentId = 0
             fEquipmentName = ""
-            fEquipmentRpmCapable = false
+            fEquipmentGrinderBrand = ""; fEquipmentGrinderModel = ""
             _selectedPackage = ({})
             return
         }
@@ -927,7 +1075,8 @@ Page {
         fEquipmentName = pkg.name
             || ((pkg.grinderBrand || "") + " " + (pkg.grinderModel || "")).trim()
             || ((pkg.basketBrand || "") + " " + (pkg.basketModel || "")).trim()
-        fEquipmentRpmCapable = !!pkg.rpmCapable
+        fEquipmentGrinderBrand = pkg.grinderBrand || ""
+        fEquipmentGrinderModel = pkg.grinderModel || ""
         _selectedPackage = pkg
     }
 
@@ -1083,9 +1232,9 @@ Page {
         if (tempStr !== "")
             parts.push(tempStr)
         if (activeTemplate.grind) {
-            var g = grindField.text.trim()
+            var g = fGrind.trim()
             if (g !== "") {
-                var rpm = parseInt(rpmField.text) || 0
+                var rpm = fRpmPinned
                 var grindStr = TranslationManager.translate("recipes.wizard.summary.grind", "grind %1").arg(g)
                 if (fEquipmentRpmCapable && rpm > 0)
                     grindStr += " · " + TranslationManager.translate("equipment.card.lastRpm", "%1 rpm").arg(rpm)
@@ -1299,6 +1448,10 @@ Page {
         grindHint = ""
         if (activeTemplate.grind && (hasBean || _selectedBagRoastLevel !== ""))
             MainController.shotHistory.requestLatestGrindForBean(fRoaster, fCoffee, _selectedBagRoastLevel)
+        // Dose/yield are now seeded — re-run so a collision qualifier (the rare
+        // same-bean+type+profile case) reflects real numbers. Guarded by
+        // _autoName, so a user-typed name is never touched.
+        suggestName()
     }
 
     // --- profile ranking ----------------------------------------------------
@@ -1552,10 +1705,13 @@ Page {
             // History is the top prefill tier for grind too: the dial that
             // actually worked with this bean+profile beats the bag's default.
             if (wizardPage.activeTemplate.grind && shot.grinderSetting) {
-                grindField.text = shot.grinderSetting
+                wizardPage.fGrind = shot.grinderSetting
                 if (wizardPage.fEquipmentRpmCapable && shot.rpm > 0)
-                    rpmField.text = String(shot.rpm)
+                    wizardPage.fRpmPinned = shot.rpm
             }
+            // History just overwrote dose/yield — refresh a still-auto name so a
+            // collision qualifier reflects the numbers that actually worked.
+            wizardPage.suggestName()
         }
     }
 
@@ -1588,24 +1744,63 @@ Page {
                 if (recipeId > 0) {
                     pageStack.pop()
                 } else {
-                    wizardPage.errorMessage =
-                        TranslationManager.translate("recipes.wizard.errorSave", "Could not save the recipe")
+                    // Name the cause when storage gave one — the generic wording
+                    // leaves the user with nothing to act on, and this is the
+                    // surface where an actionable message matters most.
+                    wizardPage.errorMessage = (recipe && recipe.error === "nameInUse")
+                        ? TranslationManager.translate("recipes.dialog.nameInUse",
+                              "That name is already in use — choose a different name.")
+                        : TranslationManager.translate("recipes.wizard.errorSave", "Could not save the recipe")
                     wizardPage.showSaveError()
                 }
             }
+        }
+        function onRecipeUpdateFailed(recipeId, reason) {
+            // Lands just before recipeUpdated(false) and names the cause. Gated on
+            // _submitting like the terminal handler below: without it, another
+            // surface (MCP/web) failing a rename of THIS recipe while the wizard
+            // merely sits open would latch a reason, and a later save of ours that
+            // failed for an unrelated cause would report it.
+            if (wizardPage.mode === "edit" && wizardPage._submitting
+                && recipeId === wizardPage.editRecipeId)
+                wizardPage._saveFailReason = reason
         }
         function onRecipeUpdated(recipeId, success) {
             if (wizardPage.mode === "edit" && recipeId === wizardPage.editRecipeId
                 && wizardPage._submitting) {
                 wizardPage._submitting = false
                 if (success) {
+                    wizardPage._saveFailReason = ""
                     pageStack.pop()
                 } else {
-                    wizardPage.errorMessage =
-                        TranslationManager.translate("recipes.wizard.errorSave", "Could not save the recipe")
+                    // "busy" means the database was locked by another write — the
+                    // one cause here where trying again actually works, so say so
+                    // rather than showing the generic failure.
+                    wizardPage.errorMessage = wizardPage._saveFailReason === "nameInUse"
+                        ? TranslationManager.translate("recipes.dialog.nameInUse",
+                              "That name is already in use — choose a different name.")
+                        : wizardPage._saveFailReason === "busy"
+                        ? TranslationManager.translate("recipes.wizard.errorSaveBusy",
+                              "The database was busy — tap Save again.")
+                        : TranslationManager.translate("recipes.wizard.errorSave", "Could not save the recipe")
+                    wizardPage._saveFailReason = ""
                     wizardPage.showSaveError()
                 }
             }
+        }
+        function onInventoryReady(list) {
+            // Cache existing recipe names (excluding the one being edited) so
+            // suggestName() can disambiguate a collision synchronously.
+            var names = []
+            for (var i = 0; i < list.length; ++i) {
+                var r = list[i]
+                if (wizardPage.mode === "edit" && (r.id || 0) === wizardPage.editRecipeId)
+                    continue
+                var n = ((r && r.name) || "").trim().toLowerCase()
+                if (n !== "")
+                    names.push(n)
+            }
+            wizardPage._existingRecipeNames = names
         }
         function onLastEquipmentForDrinkTypeReady(drinkType, equipmentId) {
             // Per-drink-type default: only fills an EMPTY equipment choice.
@@ -1667,13 +1862,37 @@ Page {
                         wizardPage.fEquipmentName = packages[i].name
                             || ((packages[i].grinderBrand || "") + " " + (packages[i].grinderModel || "")).trim()
                             || ((packages[i].basketBrand || "") + " " + (packages[i].basketModel || "")).trim()
-                        wizardPage.fEquipmentRpmCapable = !!packages[i].rpmCapable
+                        wizardPage.fEquipmentGrinderBrand = packages[i].grinderBrand || ""
+                        wizardPage.fEquipmentGrinderModel = packages[i].grinderModel || ""
                         wizardPage._selectedPackage = packages[i]
                         return
                     }
                 }
-                wizardPage.fEquipmentRpmCapable = false
+                wizardPage.fEquipmentGrinderBrand = ""
+                wizardPage.fEquipmentGrinderModel = ""
                 wizardPage._selectedPackage = ({})
+            }
+            // Never start the equipment window empty (creation walk only —
+            // edit/clone carry the recipe's own package and a summary-card
+            // jump must always show the window): default to the ACTIVE
+            // package, and when the inventory holds exactly ONE in-inventory
+            // package fill it in and SKIP the window entirely — there is
+            // nothing to ask. Back from the numbers window still reaches it.
+            if (wizardPage.fEquipmentId <= 0 && !wizardPage._fromSummary
+                    && wizardPage.currentStep === "details"
+                    && wizardPage._detailsPage === "equipment") {
+                var inInv = packages.filter(function(p) { return p.inInventory !== false })
+                if (inInv.length === 1) {
+                    wizardPage.selectEquipment(inInv[0])
+                    wizardPage._detailsPage = "numbers"
+                } else if (inInv.length > 1) {
+                    var activeId = Settings.dye.activeEquipmentId
+                    for (var j = 0; j < inInv.length; j++)
+                        if (inInv[j].id === activeId) {
+                            wizardPage.selectEquipment(inInv[j])
+                            break
+                        }
+                }
             }
         }
     }
@@ -2012,7 +2231,7 @@ Page {
         anchors.fill: parent
         anchors.topMargin: Theme.pageTopMargin
         anchors.bottomMargin: Theme.bottomBarHeight
-        textFields: [nameField, doseField.input, yieldField.input, grindField, rpmField,
+        textFields: [nameField, doseField.input, yieldField.input,
                      profileSearchField]
 
         ColumnLayout {
@@ -2997,23 +3216,28 @@ Page {
                                     }
                                 }
                             }
-                            RowLayout {
+                            // One tap-to-open control for both dial-in halves
+                            // ("grind · rpm"); typing lives in the picker's
+                            // text mode. Context is the RECIPE's selected
+                            // package, never the active grinder. Clearing the
+                            // grind RE-ARMS blank-adopts-bag rather than
+                            // refilling immediately: the next bag (re)selection
+                            // on create fills the bag's default back in.
+                            GrindField {
                                 Layout.fillWidth: true
-                                spacing: Theme.spacingMedium
-                                StyledTextField {
-                                    id: grindField
-                                    Layout.fillWidth: true
-                                    placeholder: TranslationManager.translate("recipes.composer.grindPlaceholder", "e.g. 2.4")
-                                    Accessible.name: TranslationManager.translate("recipes.composer.grindLabel", "Grind")
-                                    onTextEdited: wizardPage._detailsUserEdited = true
+                                presentation: "field"
+                                grinderBrand: wizardPage.fEquipmentGrinderBrand
+                                grinderModel: wizardPage.fEquipmentGrinderModel
+                                grindSetting: wizardPage.fGrind
+                                rpmValue: wizardPage.fRpmPinned
+                                accessibleName: TranslationManager.translate("recipes.composer.grindLabel", "Grind")
+                                onGrindCommitted: function(v) {
+                                    wizardPage.fGrind = v
+                                    wizardPage._detailsUserEdited = true
                                 }
-                                StyledTextField {
-                                    id: rpmField
-                                    visible: wizardPage.fEquipmentRpmCapable
-                                    Layout.preferredWidth: Theme.scaled(110)
-                                    inputMethodHints: Qt.ImhFormattedNumbersOnly
-                                    placeholder: TranslationManager.translate("recipes.composer.rpmLabel", "RPM")
-                                    Accessible.name: TranslationManager.translate("recipes.composer.rpmLabel", "RPM")
+                                onRpmCommitted: function(rpm) {
+                                    wizardPage.fRpmPinned = rpm
+                                    wizardPage._detailsUserEdited = true
                                 }
                             }
                         }
@@ -3126,6 +3350,19 @@ Page {
                                 Layout.fillWidth: true
                                 placeholder: TranslationManager.translate("recipes.composer.namePlaceholder", "e.g. Morning cappuccino")
                                 accessibleName: TranslationManager.translate("recipes.composer.nameLabel", "Recipe name")
+                            }
+                            // Blocks Save when the name matches another active recipe
+                            // (block-duplicate-active-names).
+                            Label {
+                                visible: wizardPage.nameInUse
+                                Layout.fillWidth: true
+                                text: TranslationManager.translate("recipes.dialog.nameInUse",
+                                          "That name is already in use — choose a different name.")
+                                font: Theme.captionFont
+                                color: Theme.warningColor
+                                wrapMode: Text.WordWrap
+                                Accessible.role: Accessible.StaticText
+                                Accessible.name: text
                             }
                         }
                         AccessibleButton {
@@ -3346,8 +3583,10 @@ Page {
                                 accessibleName: text
                                 onClicked: {
                                     wizardPage.fHasMilk = !wizardPage.fHasMilk
-                                    if (wizardPage.fHasMilk)
+                                    if (wizardPage.fHasMilk) {
+                                        wizardPage._detailsPage = "steam"
                                         wizardPage.openStep("details")
+                                    }
                                 }
                             }
                             AccessibleButton {
@@ -3357,8 +3596,10 @@ Page {
                                 accessibleName: text
                                 onClicked: {
                                     wizardPage.fHasWater = !wizardPage.fHasWater
-                                    if (wizardPage.fHasWater)
+                                    if (wizardPage.fHasWater) {
+                                        wizardPage._detailsPage = "water"
                                         wizardPage.openStep("details")
+                                    }
                                 }
                             }
                             Item { Layout.fillWidth: true }

@@ -9,6 +9,12 @@ KeyboardAwareContainer {
     textFields: [manualCityField]
     targetFlickable: contentFlickable
 
+    // Maintenance card actions. Tabs load through a Loader, which breaks `root`
+    // id resolution, so we emit signals that SettingsPage forwards to the global
+    // navigation functions (mirrors the themes tab's openSaveThemeDialog).
+    signal openDescaling()
+    signal openTransport()
+
     // Local properties
     property int postShotReviewTimeout: Settings.value("postShotReviewTimeout", 31)
     property bool configurePageScaleEnabled: Theme.configurePageScaleEnabled
@@ -613,6 +619,163 @@ KeyboardAwareContainer {
                     }
                 }
 
+                // Maintenance card
+                Rectangle {
+                    objectName: "maintenance"
+                    Layout.fillWidth: true
+                    implicitHeight: maintenanceContent.implicitHeight + Theme.scaled(30)
+                    color: Theme.cardBackgroundColor
+                    radius: Theme.cardRadius
+
+                    ColumnLayout {
+                        id: maintenanceContent
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.top: parent.top
+                        anchors.margins: Theme.scaled(15)
+                        spacing: Theme.scaled(10)
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.scaled(8)
+
+                            Image {
+                                source: Theme.emojiToImage("🧰")
+                                sourceSize.width: Theme.scaled(20)
+                                sourceSize.height: Theme.scaled(20)
+                                Accessible.ignored: true
+                            }
+
+                            Text {
+                                text: TranslationManager.translate("settings.maintenance.title", "Maintenance")
+                                color: Theme.textColor
+                                font.family: Theme.bodyFont.family
+                                font.pixelSize: Theme.scaled(16)
+                                font.bold: true
+                            }
+                        }
+
+                        Text {
+                            Layout.fillWidth: true
+                            text: TranslationManager.translate("settings.maintenance.description", "Keep your machine clean and ready for storage.")
+                            color: Theme.textSecondaryColor
+                            font.family: Theme.bodyFont.family
+                            font.pixelSize: Theme.scaled(12)
+                            wrapMode: Text.WordWrap
+                        }
+
+                        // Descaling Wizard row
+                        Rectangle {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: Theme.scaled(58)
+                            radius: Theme.scaled(8)
+                            color: descaleRowMouse.isPressed ? Theme.backgroundColor : "transparent"
+                            border.color: Theme.borderColor
+                            border.width: 1
+
+                            RowLayout {
+                                anchors.fill: parent
+                                anchors.leftMargin: Theme.scaled(12)
+                                anchors.rightMargin: Theme.scaled(12)
+                                spacing: Theme.scaled(12)
+
+                                Image {
+                                    source: Theme.emojiToImage("🧽")
+                                    sourceSize.width: Theme.scaled(24)
+                                    sourceSize.height: Theme.scaled(24)
+                                    Accessible.ignored: true
+                                }
+
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    spacing: Theme.scaled(2)
+
+                                    Text {
+                                        text: TranslationManager.translate("settings.maintenance.descale.title", "Descaling Wizard")
+                                        color: Theme.textColor
+                                        font.family: Theme.bodyFont.family
+                                        font.pixelSize: Theme.scaled(14)
+                                        Accessible.ignored: true
+                                    }
+
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: TranslationManager.translate("settings.maintenance.descale.desc", "Remove scale buildup from the boiler")
+                                        color: Theme.textSecondaryColor
+                                        font.family: Theme.bodyFont.family
+                                        font.pixelSize: Theme.scaled(12)
+                                        wrapMode: Text.WordWrap
+                                        Accessible.ignored: true
+                                    }
+                                }
+                            }
+
+                            AccessibleMouseArea {
+                                id: descaleRowMouse
+                                anchors.fill: parent
+                                accessibleName: TranslationManager.translate("settings.maintenance.descale.accessible", "Open descaling wizard")
+                                accessibleItem: parent
+                                onAccessibleClicked: machineTab.openDescaling()
+                            }
+                        }
+
+                        // Transport Mode row
+                        Rectangle {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: Theme.scaled(58)
+                            radius: Theme.scaled(8)
+                            color: transportRowMouse.isPressed ? Theme.backgroundColor : "transparent"
+                            border.color: Theme.borderColor
+                            border.width: 1
+
+                            RowLayout {
+                                anchors.fill: parent
+                                anchors.leftMargin: Theme.scaled(12)
+                                anchors.rightMargin: Theme.scaled(12)
+                                spacing: Theme.scaled(12)
+
+                                Image {
+                                    source: Theme.emojiToImage("🧳")
+                                    sourceSize.width: Theme.scaled(24)
+                                    sourceSize.height: Theme.scaled(24)
+                                    Accessible.ignored: true
+                                }
+
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    spacing: Theme.scaled(2)
+
+                                    Text {
+                                        text: TranslationManager.translate("settings.maintenance.transport.title", "Transport Mode")
+                                        color: Theme.textColor
+                                        font.family: Theme.bodyFont.family
+                                        font.pixelSize: Theme.scaled(14)
+                                        Accessible.ignored: true
+                                    }
+
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: TranslationManager.translate("settings.maintenance.transport.desc", "Drain all water before storage or transport")
+                                        color: Theme.textSecondaryColor
+                                        font.family: Theme.bodyFont.family
+                                        font.pixelSize: Theme.scaled(12)
+                                        wrapMode: Text.WordWrap
+                                        Accessible.ignored: true
+                                    }
+                                }
+                            }
+
+                            AccessibleMouseArea {
+                                id: transportRowMouse
+                                anchors.fill: parent
+                                accessibleName: TranslationManager.translate("settings.maintenance.transport.accessible", "Open transport mode")
+                                accessibleItem: parent
+                                onAccessibleClicked: machineTab.openTransport()
+                            }
+                        }
+                    }
+                }
+
             }
 
             // ========== MIDDLE COLUMN: App Behavior ==========
@@ -629,9 +792,16 @@ KeyboardAwareContainer {
                     color: Theme.cardBackgroundColor
                     radius: Theme.cardRadius
 
+                    // left/right/top, NOT fill — the card's implicitHeight is derived from
+                    // this column, so anchors.fill would also derive the column's height from
+                    // the card. That settles for fixed-height rows but not once a wrapping
+                    // Text is in the column, whose height depends on the width it is given.
+                    // Every other card in this tab already anchors this way.
                     ColumnLayout {
                         id: themeModeColumn
-                        anchors.fill: parent
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.top: parent.top
                         anchors.margins: Theme.scaled(15)
                         spacing: Theme.scaled(10)
 
@@ -649,13 +819,13 @@ KeyboardAwareContainer {
                             spacing: Theme.scaled(15)
 
                             Text {
+                                Layout.fillWidth: true
+                                elide: Text.ElideRight
                                 text: TranslationManager.translate("settings.preferences.followSystem", "Follow system theme")
                                 color: Theme.textColor
                                 font.family: Theme.bodyFont.family
                                 font.pixelSize: Theme.scaled(14)
                             }
-
-                            Item { Layout.fillWidth: true }
 
                             StyledSwitch {
                                 id: followSystemSwitch
@@ -677,17 +847,18 @@ KeyboardAwareContainer {
                             spacing: Theme.scaled(15)
 
                             Text {
+                                Layout.fillWidth: true
+                                elide: Text.ElideRight
                                 text: TranslationManager.translate("settings.preferences.darkTheme", "Dark theme")
                                 color: Theme.textColor
                                 font.family: Theme.bodyFont.family
                                 font.pixelSize: Theme.scaled(14)
                             }
 
-                            Item { Layout.fillWidth: true }
-
                             StyledComboBox {
                                 id: darkThemeCombo
-                                Layout.preferredWidth: Theme.scaled(180)
+                                Layout.preferredWidth: Theme.scaled(170)
+                                Layout.maximumWidth: Theme.scaled(170)
                                 accessibleLabel: TranslationManager.translate("settings.preferences.darkTheme", "Dark theme")
                                 model: Settings.theme.themeNames
                                 currentIndex: Math.max(0, Settings.theme.themeNames.indexOf(Settings.theme.darkThemeName))
@@ -701,17 +872,18 @@ KeyboardAwareContainer {
                             spacing: Theme.scaled(15)
 
                             Text {
+                                Layout.fillWidth: true
+                                elide: Text.ElideRight
                                 text: TranslationManager.translate("settings.preferences.lightTheme", "Light theme")
                                 color: Theme.textColor
                                 font.family: Theme.bodyFont.family
                                 font.pixelSize: Theme.scaled(14)
                             }
 
-                            Item { Layout.fillWidth: true }
-
                             StyledComboBox {
                                 id: lightThemeCombo
-                                Layout.preferredWidth: Theme.scaled(180)
+                                Layout.preferredWidth: Theme.scaled(170)
+                                Layout.maximumWidth: Theme.scaled(170)
                                 accessibleLabel: TranslationManager.translate("settings.preferences.lightTheme", "Light theme")
                                 model: Settings.theme.themeNames
                                 currentIndex: Math.max(0, Settings.theme.themeNames.indexOf(Settings.theme.lightThemeName))
@@ -719,22 +891,60 @@ KeyboardAwareContainer {
                             }
                         }
 
-                        // Background image (applied app-wide, both light and dark mode)
+                        // Glass chrome — an option rather than a theme, because
+                        // translucency is orthogonal to light/dark: any theme can be
+                        // glass. Works with the user's own colours, not just a built-in.
                         RowLayout {
                             Layout.fillWidth: true
                             spacing: Theme.scaled(15)
 
                             Text {
+                                Layout.fillWidth: true
+                                elide: Text.ElideRight
+                                text: TranslationManager.translate("settings.preferences.glassChrome", "Glass chrome")
+                                color: Theme.textColor
+                                font.family: Theme.bodyFont.family
+                                font.pixelSize: Theme.scaled(14)
+                            }
+
+                            StyledSwitch {
+                                checked: Settings.theme.glassChrome
+                                accessibleName: TranslationManager.translate("settings.preferences.glassChrome", "Glass chrome")
+                                onCheckedChanged: Settings.theme.glassChrome = checked
+                            }
+                        }
+
+                        Text {
+                            Layout.fillWidth: true
+                            text: TranslationManager.translate("settings.preferences.glassChromeHint",
+                                "Softens the bars, tiles and controls. With a background image or the last-shot chart set, cards and dialogs also become translucent so the picture shows through — and it is always on in those cases.")
+                            color: Theme.textSecondaryColor
+                            font: Theme.captionFont
+                            wrapMode: Text.Wrap
+                        }
+
+                        // Background (applied app-wide, both light and dark mode)
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.scaled(15)
+
+                            Text {
+                                Layout.fillWidth: true
+                                elide: Text.ElideRight
                                 text: TranslationManager.translate("settings.preferences.background", "Background")
                                 color: Theme.textColor
                                 font.family: Theme.bodyFont.family
                                 font.pixelSize: Theme.scaled(14)
                             }
 
-                            Item { Layout.fillWidth: true }
 
                             AccessibleButton {
-                                text: Settings.theme.backgroundImagePath.length > 0
+                                // "Change" once anything is set — colour, image or shot
+                                // chart; they are one choice made in one chooser. Asked of
+                                // the SOURCE, not the individual parameters: testing the
+                                // two legacy properties said "Choose…" while the shot-chart
+                                // background was active, because that source sets neither.
+                                text: Settings.theme.backgroundSource !== "none"
                                     ? TranslationManager.translate("settings.preferences.backgroundChange", "Change…")
                                     : TranslationManager.translate("settings.preferences.backgroundChoose", "Choose…")
                                 accessibleName: TranslationManager.translate("settings.preferences.background", "Background")
@@ -1202,7 +1412,7 @@ KeyboardAwareContainer {
 
                             StyledSwitch {
                                 checked: Settings.app.waterLevelDisplayUnit === "ml"
-                                accessibleName: TranslationManager.translate("settings.options.showInMl", "Show in milliliters")
+                                accessibleName: TranslationManager.translate("settings.options.showInMl", "Show in milliliters (ml)")
                                 onToggled: {
                                     Settings.app.waterLevelDisplayUnit = checked ? "ml" : "percent"
                                 }

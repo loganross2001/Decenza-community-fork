@@ -200,6 +200,12 @@ public:
                                                    std::function<void(QJsonObject)>)> handler) {
         m_updateRecipeHandler = std::move(handler);
     }
+    // [barista-fork] recipeOp seam: create/clone/archive/delete a recipe (op, args, reply). App-side (needs
+    // RecipeStorage + ProfileManager); wired in baristamodule.cpp.
+    void setRecipeOpHandler(std::function<void(const QString&, const QVariantMap&,
+                                               std::function<void(QJsonObject)>)> handler) {
+        m_recipeOpHandler = std::move(handler);
+    }
     // [barista-fork] Phase 1 identity: set_active_user's seam — sets the active roster user (dyeBarista) on main.
     void setSetActiveUserHandler(std::function<void(const QString&)> handler) {
         m_setActiveUserHandler = std::move(handler);
@@ -462,6 +468,7 @@ private:
     std::function<QVariantMap()> m_deactivateRecipeHandler;
     std::function<void(qint64, std::function<void(QJsonObject)>)> m_activateRecipeHandler;
     std::function<void(qint64, const QVariantMap&, std::function<void(QJsonObject)>)> m_updateRecipeHandler;
+    std::function<void(const QString&, const QVariantMap&, std::function<void(QJsonObject)>)> m_recipeOpHandler;
     std::function<void(const QString&)> m_setActiveUserHandler;   // [barista-fork] Phase 1 set_active_user seam
     ProfileManager* m_profileManager = nullptr;
 

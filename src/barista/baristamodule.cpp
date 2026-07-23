@@ -308,6 +308,25 @@ BaristaModule::BaristaModule(MainController* mainController, MachineState* machi
                                       {QStringLiteral("detail"), QStringLiteral("Recipe editing is unavailable.")}});
                     return;
                 }
+                // [barista-fork] Validate a profile change BEFORE writing — a misheard/unknown profile would leave
+                // the recipe pointing at a missing curve (activation would then fail). ProfileManager is main-thread
+                // and we're on the main thread here. Normalize to the profile's canonical title on a match.
+                QVariantMap f = fields;
+                const QString newProfile = f.value(QStringLiteral("profileTitle")).toString().trimmed();
+                if (!newProfile.isEmpty()) {
+                    // findProfileByTitle returns the canonical title (empty if no installed profile matches).
+                    const QString canonical = (mc && mc->profileManager())
+                        ? mc->profileManager()->findProfileByTitle(newProfile) : QString();
+                    if (canonical.isEmpty()) {
+                        reply(QJsonObject{{QStringLiteral("updated"), false},
+                            {QStringLiteral("failure_reason"), QStringLiteral("profile_not_found")},
+                            {QStringLiteral("detail"), QStringLiteral(
+                                "No installed profile matches '%1' — nothing changed. Check the exact profile name.")
+                                .arg(newProfile)}});
+                        return;
+                    }
+                    f.insert(QStringLiteral("profileTitle"), canonical);
+                }
                 auto done = std::make_shared<bool>(false);
                 auto conn = std::make_shared<QMetaObject::Connection>();
                 QTimer* timer = new QTimer(rs);
@@ -336,7 +355,99 @@ BaristaModule::BaristaModule(MainController* mainController, MachineState* machi
                         {QStringLiteral("detail"), QStringLiteral("No confirmation the recipe saved within 10s.")}});
                 });
                 timer->start(10000);
-                rs->requestUpdateRecipe(recipeId, fields);
+                rs->requestUpdateRecipe(recipeId, f);
+            });
+            // [barista-fork] recipeOp seam: app-side recipe operations needing RecipeStorage + ProfileManager.
+            // Stage 1 handles "create" (build the recipe, resolve/validate the profile, optionally inherit the
+            // active recipe's beans, correlate recipeCreated with a 10s timeout). clone/archive/delete land next.
+            ai->setRecipeOpHandler([mc](const QString& op, const QVariantMap& args,
+                                        std::function<void(QJsonObject)> reply) {
+                RecipeStorage* rs = mc ? mc->recipeStorage() : nullptr;
+                if (!rs) {
+                    reply(QJsonObject{{QStringLiteral("success"), false},
+                                      {QStringLiteral("failure_reason"), QStringLiteral("unavailable")},
+                                      {QStringLiteral("detail"), QStringLiteral("Recipe operations are unavailable.")}});
+                    return;
+                }
+                if (op == QLatin1String("create")) {
+                    QVariantMap recipe = args;
+                    const bool copyBeans = recipe.take(QStringLiteral("copyBeansFromActive")).toBool();
+                    const QString nm = recipe.value(QStringLiteral("name")).toString().trimmed();
+                    // Profile is required here (hot-water-only creation isn't exposed to voice yet). Resolve +
+                    // validate against installed profiles; normalize to the canonical title.
+                    const QString profTitle = recipe.value(QStringLiteral("profileTitle")).toString().trimmed();
+                    if (profTitle.isEmpty()) {
+                        reply(QJsonObject{{QStringLiteral("created"), false},
+                            {QStringLiteral("failure_reason"), QStringLiteral("profile_required")},
+                            {QStringLiteral("detail"), QStringLiteral(
+                                "A new recipe needs a profile — ask the user which profile to use.")}});
+                        return;
+                    }
+                    const QString canonical = (mc && mc->profileManager())
+                        ? mc->profileManager()->findProfileByTitle(profTitle) : QString();
+                    if (canonical.isEmpty()) {
+                        reply(QJsonObject{{QStringLiteral("created"), false},
+                            {QStringLiteral("failure_reason"), QStringLiteral("profile_not_found")},
+                            {QStringLiteral("detail"), QStringLiteral(
+                                "No installed profile matches '%1'. Check the exact profile name.").arg(profTitle)}});
+                        return;
+                    }
+                    recipe.insert(QStringLiteral("profileTitle"), canonical);
+                    // "Same beans, different profile" — inherit bean identity from the active recipe when the model
+                    // asked and didn't pass beans explicitly.
+                    if (copyBeans && mc) {
+                        const QVariantMap active = mc->activeRecipe();
+                        for (const char* k : {"roasterName", "coffeeName", "beanBaseId", "bagId"}) {
+                            const QString key = QLatin1String(k);
+                            if (recipe.value(key).toString().isEmpty() && !active.value(key).toString().isEmpty())
+                                recipe.insert(key, active.value(key));
+                        }
+                    }
+                    if (!rs->isSaveValid(nm, recipe.value(QStringLiteral("profileTitle")).toString(),
+                                         recipe.value(QStringLiteral("hotWaterJson")).toString())) {
+                        reply(QJsonObject{{QStringLiteral("created"), false},
+                            {QStringLiteral("failure_reason"), QStringLiteral("invalid")},
+                            {QStringLiteral("detail"), QStringLiteral(
+                                "The recipe needs at least a name and a valid profile.")}});
+                        return;
+                    }
+                    // recipeCreated is a broadcast — correlate by the echoed name (active-name uniqueness makes
+                    // this safe), with a 10s safety timeout and a shared-flag guard against a double reply.
+                    auto done = std::make_shared<bool>(false);
+                    auto conn = std::make_shared<QMetaObject::Connection>();
+                    QTimer* timer = new QTimer(rs);
+                    timer->setSingleShot(true);
+                    auto finish = [done, conn, timer, reply](QJsonObject r) {
+                        if (*done) return;
+                        *done = true;
+                        if (*conn) QObject::disconnect(*conn);
+                        timer->stop(); timer->deleteLater();
+                        reply(r);
+                    };
+                    *conn = QObject::connect(rs, &RecipeStorage::recipeCreated, rs,
+                        [finish, nm](qint64 newId, const QVariantMap& created) {
+                            if (created.value(QStringLiteral("name")).toString() != nm) return;   // not ours
+                            if (newId > 0)
+                                finish(QJsonObject{{QStringLiteral("created"), true},
+                                                   {QStringLiteral("recipe_id"), static_cast<double>(newId)},
+                                                   {QStringLiteral("name"), nm}});
+                            else
+                                finish(QJsonObject{{QStringLiteral("created"), false},
+                                    {QStringLiteral("failure_reason"), QStringLiteral("create_failed")},
+                                    {QStringLiteral("detail"), QStringLiteral("The recipe could not be saved.")}});
+                        });
+                    QObject::connect(timer, &QTimer::timeout, rs, [finish]() {
+                        finish(QJsonObject{{QStringLiteral("created"), false},
+                            {QStringLiteral("failure_reason"), QStringLiteral("timeout")},
+                            {QStringLiteral("detail"), QStringLiteral("No confirmation the recipe was created within 10s.")}});
+                    });
+                    timer->start(10000);
+                    rs->requestCreateRecipe(recipe);
+                    return;
+                }
+                reply(QJsonObject{{QStringLiteral("success"), false},
+                    {QStringLiteral("failure_reason"), QStringLiteral("unsupported_op")},
+                    {QStringLiteral("detail"), QStringLiteral("That recipe operation isn't supported yet.")}});
             });
         }
     }

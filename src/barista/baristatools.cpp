@@ -541,7 +541,8 @@ QJsonArray BaristaTools::toolDefinitions()
     rupd["name"] = QString("update_recipe");
     rupd["description"] = QString(
         "Change the saved settings of an existing recipe (its stored design — this does NOT activate it or change "
-        "the machine). Use it when the user wants to tweak a recipe: dose, grind, temperature, name, or the yield. "
+        "the machine). Use it when the user wants to tweak a recipe: dose, grind, temperature, name, yield, "
+        "PROFILE, or drink type. "
         "Resolve recipe_id first from get_active_recipe / list_recipes — never invent an id. Send ONLY the fields "
         "you are changing. Yield is ONE anchor: send EITHER yield_g (a fixed gram target) OR ratio (a multiple of "
         "the dose, e.g. 2.0 = 1:2, so the grams follow the weighed dose) — never both, and sending one replaces "
@@ -564,10 +565,54 @@ QJsonArray BaristaTools::toolDefinitions()
     rupdProps["ratio"]      = numProp("Yield as a multiple of the dose (2.0 = 1:2; clamped 0.5-6.0) so the gram "
                                       "target follows the weighed dose. Mutually exclusive with yield_g; 0 clears "
                                       "the yield. Sending this replaces any stored absolute yield.");
+    rupdProps["profile_title"] = strProp("Change the recipe's PROFILE to this exact profile name (the pressure/flow "
+                                      "curve the machine runs). It MUST be an installed profile — resolve the exact "
+                                      "title from the user's profiles first; a name that doesn't match is rejected. "
+                                      "The recipe's temperature_offset_c is relative to the profile, so a big profile "
+                                      "change may want a fresh temp — mention that. Does NOT reactivate the machine.");
+    rupdProps["drink_type"] = strProp("Change the recipe's drink type: one of espresso, filter, americano, "
+                                      "long_black, latte, tea, tea_hotwater.");
     rupdSchema["properties"] = rupdProps;
     rupdSchema["required"] = QJsonArray{ QString("recipe_id") };
     rupd["input_schema"] = rupdSchema;
     tools.append(rupd);
+
+    // [barista-fork] create_recipe — make a NEW saved recipe (its stored design; does NOT activate the machine).
+    QJsonObject rnew;
+    rnew["name"] = QString("create_recipe");
+    rnew["description"] = QString(
+        "Create a NEW saved recipe — a whole-drink preset. This ONLY saves the design; it does NOT activate it or "
+        "change the machine (tell the user to activate it when they want to use it). Requires a name and a "
+        "profile_title (an installed profile — resolve the exact title first; an unknown profile is rejected), "
+        "unless it's a hot-water-only drink. For 'same beans as X, different profile', set copy_beans_from_active "
+        "true (or pass roaster_name/coffee_name explicitly) so the new recipe carries the beans. Send the dial "
+        "fields you know (dose, yield OR ratio, temp offset, grind); omit what you don't. Confirm the details with "
+        "the user BEFORE calling (approve-then-apply). The result is ground truth: report created:true + the new "
+        "recipe_id only when it returns that.");
+    QJsonObject rnewSchema;
+    rnewSchema["type"] = QString("object");
+    QJsonObject rnewProps;
+    rnewProps["name"]          = strProp("Name for the new recipe (required; must be unique among active recipes).");
+    rnewProps["profile_title"] = strProp("The exact installed profile name to run. Required unless the drink is "
+                                         "hot-water-only. A name that doesn't match an installed profile is rejected.");
+    rnewProps["drink_type"]    = strProp("espresso, filter, americano, long_black, latte, tea, or tea_hotwater. "
+                                         "Omit to let the app derive it.");
+    rnewProps["copy_beans_from_active"] = QJsonObject{{"type", QString("boolean")},
+        {"description", QString("When true, inherit the beans (roaster + coffee) from the currently active recipe — "
+                                "use this for 'same beans, different profile'. Ignored if roaster_name/coffee_name given.")}};
+    rnewProps["roaster_name"]  = strProp("Roaster name for the beans (optional; omit to inherit via copy_beans_from_active).");
+    rnewProps["coffee_name"]   = strProp("Coffee/bean name (optional; omit to inherit via copy_beans_from_active).");
+    rnewProps["dose_g"]        = numProp("Dose in grams (optional).");
+    rnewProps["grind_setting"] = strProp("The recipe's own grinder setting (optional).");
+    rnewProps["rpm"]           = intProp("Grinder RPM, if RPM-based (optional; rides with grind_setting).");
+    rnewProps["temperature_offset_c"] = numProp("Signed temp DELTA in Celsius vs the profile (optional; 0 = profile temp).");
+    rnewProps["yield_g"]       = numProp("Absolute yield target in grams (optional). Mutually exclusive with ratio.");
+    rnewProps["ratio"]         = numProp("Yield as a multiple of the dose, e.g. 2.0 = 1:2 (optional; clamped 0.5-6.0). "
+                                         "Mutually exclusive with yield_g.");
+    rnewSchema["properties"] = rnewProps;
+    rnewSchema["required"] = QJsonArray{ QString("name") };
+    rnew["input_schema"] = rnewSchema;
+    tools.append(rnew);
 
     QJsonObject rdeact;
     rdeact["name"] = QString("deactivate_recipe");
@@ -765,6 +810,8 @@ void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage*
                                const std::function<QVariantMap()>& deactivateRecipe,
                                const std::function<void(qint64, const QVariantMap&,
                                                         std::function<void(QJsonObject)>)>& updateRecipe,
+                               const std::function<void(const QString&, const QVariantMap&,
+                                                        std::function<void(QJsonObject)>)>& recipeOp,
                                const std::function<void(const QString&)>& setActiveUser,
                                const QVariantMap& anchorSnapshot,
                                const QString& name, const QJsonObject& input,
@@ -924,6 +971,10 @@ void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage*
             fields.insert(QStringLiteral("tempOffsetC"), input.value(QStringLiteral("temperature_offset_c")).toDouble());
         if (input.contains(QStringLiteral("title")))
             fields.insert(QStringLiteral("name"), input.value(QStringLiteral("title")).toString());
+        if (input.contains(QStringLiteral("profile_title")))
+            fields.insert(QStringLiteral("profileTitle"), input.value(QStringLiteral("profile_title")).toString());
+        if (input.contains(QStringLiteral("drink_type")))
+            fields.insert(QStringLiteral("drinkType"), input.value(QStringLiteral("drink_type")).toString());
         if (hasYieldG) {
             const double g = input.value(QStringLiteral("yield_g")).toDouble();
             fields.insert(QStringLiteral("yieldValue"), g > 0 ? g : 0.0);
@@ -939,6 +990,61 @@ void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage*
             return;
         }
         updateRecipe(recipeId, fields, [done](QJsonObject result) { done(result); });
+        return;
+    }
+
+    // [barista-fork] create_recipe — build a new recipe's fields and hand off to the app-side recipeOp seam
+    // (which resolves the profile, inherits beans if asked, and correlates recipeCreated). No machine mutation.
+    if (name == QLatin1String("create_recipe")) {
+        if (!recipeOp) {
+            done(QJsonObject{{QStringLiteral("success"), false},
+                             {QStringLiteral("failure_reason"), QStringLiteral("unavailable")},
+                             {QStringLiteral("detail"), QStringLiteral("Recipe creation is unavailable.")}});
+            return;
+        }
+        const QString recipeName = input.value(QStringLiteral("name")).toString().trimmed();
+        if (recipeName.isEmpty()) {
+            done(QJsonObject{{QStringLiteral("error"), QStringLiteral("create_recipe needs a name")}});
+            return;
+        }
+        const bool hasYieldG = input.contains(QStringLiteral("yield_g"));
+        const bool hasRatio  = input.contains(QStringLiteral("ratio"));
+        if (hasYieldG && hasRatio) {
+            done(QJsonObject{{QStringLiteral("error"), QStringLiteral(
+                "yield_g and ratio are mutually exclusive — send exactly one.")}});
+            return;
+        }
+        // Translate snake_case → storage field names; the handler resolves profileTitle / bean inheritance.
+        QVariantMap args;
+        args.insert(QStringLiteral("name"), recipeName);
+        if (input.contains(QStringLiteral("profile_title")))
+            args.insert(QStringLiteral("profileTitle"), input.value(QStringLiteral("profile_title")).toString().trimmed());
+        if (input.contains(QStringLiteral("drink_type")))
+            args.insert(QStringLiteral("drinkType"), input.value(QStringLiteral("drink_type")).toString());
+        if (input.value(QStringLiteral("copy_beans_from_active")).toBool())
+            args.insert(QStringLiteral("copyBeansFromActive"), true);
+        if (input.contains(QStringLiteral("roaster_name")))
+            args.insert(QStringLiteral("roasterName"), input.value(QStringLiteral("roaster_name")).toString());
+        if (input.contains(QStringLiteral("coffee_name")))
+            args.insert(QStringLiteral("coffeeName"), input.value(QStringLiteral("coffee_name")).toString());
+        if (input.contains(QStringLiteral("dose_g")))
+            args.insert(QStringLiteral("doseG"), input.value(QStringLiteral("dose_g")).toDouble());
+        if (input.contains(QStringLiteral("grind_setting")))
+            args.insert(QStringLiteral("grindPinned"), input.value(QStringLiteral("grind_setting")).toString());
+        if (input.contains(QStringLiteral("rpm")))
+            args.insert(QStringLiteral("rpmPinned"), input.value(QStringLiteral("rpm")).toVariant().toInt());
+        if (input.contains(QStringLiteral("temperature_offset_c")))
+            args.insert(QStringLiteral("tempOffsetC"), input.value(QStringLiteral("temperature_offset_c")).toDouble());
+        if (hasYieldG) {
+            const double g = input.value(QStringLiteral("yield_g")).toDouble();
+            args.insert(QStringLiteral("yieldValue"), g > 0 ? g : 0.0);
+            args.insert(QStringLiteral("yieldMode"), g > 0 ? QStringLiteral("absolute") : QStringLiteral("none"));
+        } else if (hasRatio) {
+            const double r = input.value(QStringLiteral("ratio")).toDouble();
+            args.insert(QStringLiteral("yieldValue"), r > 0 ? YieldSpec::clampRatio(r) : 0.0);
+            args.insert(QStringLiteral("yieldMode"), r > 0 ? QStringLiteral("ratio") : QStringLiteral("none"));
+        }
+        recipeOp(QStringLiteral("create"), args, [done](QJsonObject result) { done(result); });
         return;
     }
 

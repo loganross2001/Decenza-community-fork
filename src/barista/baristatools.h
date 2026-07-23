@@ -83,6 +83,12 @@ public:
                             // spec), completing `done` on the storage's recipeUpdated. Empty = tool unavailable.
                             const std::function<void(qint64, const QVariantMap&,
                                                      std::function<void(QJsonObject)>)>& updateRecipe,
+                            // [barista-fork] recipeOp seam: the app-side recipe operations that need
+                            // RecipeStorage + ProfileManager (create/clone/archive/delete). One generic
+                            // (op, args, done) seam instead of four params; baristatools.cpp names no app
+                            // types, so DB-only tests still compile it. Empty = those tools unavailable.
+                            const std::function<void(const QString&, const QVariantMap&,
+                                                     std::function<void(QJsonObject)>)>& recipeOp,
                             const std::function<void(const QString&)>& setActiveUser,
                             const QVariantMap& anchorSnapshot,
                             const QString& name, const QJsonObject& input,

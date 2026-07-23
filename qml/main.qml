@@ -2208,7 +2208,7 @@ ApplicationWindow {
         && Barista.orchestrator.lastShotId !== root.tasteTipDismissedShotId
         && pageStack.currentItem && pageStack.currentItem.objectName === "idlePage"
         && !root.isActiveOperation(MachineState.phase)
-    onTasteHelpDueChanged: if (tasteHelpDue) tasteHelpCard.open()
+    onTasteHelpDueChanged: tasteHelpDue ? tasteHelpCard.open() : tasteHelpCard.close()
 
     TasteHelpCard {
         id: tasteHelpCard

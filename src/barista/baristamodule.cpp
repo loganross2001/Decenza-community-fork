@@ -30,6 +30,7 @@
 #include <QJsonDocument>
 #include <QThread>
 #include <QTimer>
+#include <QUuid>
 #include <QCoreApplication>
 #include <memory>
 
@@ -424,17 +425,25 @@ BaristaModule::BaristaModule(MainController* mainController, MachineState* machi
                         timer->stop(); timer->deleteLater();
                         reply(r);
                     };
+                    // Success echoes the full recipe map (name present → match by it). Failure echoes NO name
+                    // (just error/requestToken), so attribute a failure broadcast to us — barista creates are
+                    // serialized, so a -1 while we wait is ours. This turns nameInUse into a fast, correct error
+                    // instead of a 10s timeout.
                     *conn = QObject::connect(rs, &RecipeStorage::recipeCreated, rs,
                         [finish, nm](qint64 newId, const QVariantMap& created) {
-                            if (created.value(QStringLiteral("name")).toString() != nm) return;   // not ours
-                            if (newId > 0)
+                            if (newId > 0) {
+                                if (created.value(QStringLiteral("name")).toString() != nm) return;   // another create
                                 finish(QJsonObject{{QStringLiteral("created"), true},
                                                    {QStringLiteral("recipe_id"), static_cast<double>(newId)},
                                                    {QStringLiteral("name"), nm}});
-                            else
+                            } else {
+                                const QString err = created.value(QStringLiteral("error")).toString();
                                 finish(QJsonObject{{QStringLiteral("created"), false},
-                                    {QStringLiteral("failure_reason"), QStringLiteral("create_failed")},
-                                    {QStringLiteral("detail"), QStringLiteral("The recipe could not be saved.")}});
+                                    {QStringLiteral("failure_reason"), err.isEmpty() ? QStringLiteral("create_failed") : err},
+                                    {QStringLiteral("detail"), err == QLatin1String("nameInUse")
+                                        ? QStringLiteral("A recipe with that name already exists — choose a different name.")
+                                        : QStringLiteral("The recipe could not be saved.")}});
+                            }
                         });
                     QObject::connect(timer, &QTimer::timeout, rs, [finish]() {
                         finish(QJsonObject{{QStringLiteral("created"), false},
@@ -465,21 +474,28 @@ BaristaModule::BaristaModule(MainController* mainController, MachineState* machi
                             {QStringLiteral("detail"), QStringLiteral("Cloning needs a source recipe and a new name.")}});
                         return;
                     }
+                    // requestToken correlates the clone's recipeCreated broadcast unambiguously — echoed in BOTH
+                    // the success and failure maps (unlike name, which failure omits).
+                    const QString token = QUuid::createUuid().toString(QUuid::WithoutBraces);
                     auto done = std::make_shared<bool>(false);
                     auto conn = std::make_shared<QMetaObject::Connection>();
                     QTimer* timer = new QTimer(rs); timer->setSingleShot(true);
                     auto finish = makeFinish(conn, timer, done);
                     *conn = QObject::connect(rs, &RecipeStorage::recipeCreated, rs,
-                        [finish, newName](qint64 newId, const QVariantMap& created) {
-                            if (created.value(QStringLiteral("name")).toString() != newName) return;   // not ours
+                        [finish, token, newName](qint64 newId, const QVariantMap& created) {
+                            if (created.value(QStringLiteral("requestToken")).toString() != token) return;   // not our clone
                             if (newId > 0)
                                 finish(QJsonObject{{QStringLiteral("created"), true},
                                     {QStringLiteral("recipe_id"), static_cast<double>(newId)},
                                     {QStringLiteral("name"), newName}});
-                            else
+                            else {
+                                const QString err = created.value(QStringLiteral("error")).toString();
                                 finish(QJsonObject{{QStringLiteral("created"), false},
-                                    {QStringLiteral("failure_reason"), QStringLiteral("clone_failed")},
-                                    {QStringLiteral("detail"), QStringLiteral("The recipe could not be cloned.")}});
+                                    {QStringLiteral("failure_reason"), err.isEmpty() ? QStringLiteral("clone_failed") : err},
+                                    {QStringLiteral("detail"), err == QLatin1String("nameInUse")
+                                        ? QStringLiteral("A recipe with that name already exists — choose a different name.")
+                                        : QStringLiteral("The recipe could not be cloned.")}});
+                            }
                         });
                     QObject::connect(timer, &QTimer::timeout, rs, [finish]() {
                         finish(QJsonObject{{QStringLiteral("created"), false},
@@ -487,7 +503,7 @@ BaristaModule::BaristaModule(MainController* mainController, MachineState* machi
                             {QStringLiteral("detail"), QStringLiteral("No confirmation the clone was created within 10s.")}});
                     });
                     timer->start(10000);
-                    rs->requestCloneRecipe(sourceId, newName, QString());
+                    rs->requestCloneRecipe(sourceId, newName, token);
                     return;
                 }
                 if (op == QLatin1String("archive")) {

@@ -595,8 +595,8 @@ QJsonArray BaristaTools::toolDefinitions()
     rnew["description"] = QString(
         "Create a NEW saved recipe — a whole-drink preset. This ONLY saves the design; it does NOT activate it or "
         "change the machine (tell the user to activate it when they want to use it). Requires a name and a "
-        "profile_title (an installed profile — resolve the exact title first; an unknown profile is rejected), "
-        "unless it's a hot-water-only drink. For 'same beans as X, different profile', set copy_beans_from_active "
+        "profile_title (an installed profile — resolve the exact title first; an unknown or missing profile is "
+        "rejected). For 'same beans as X, different profile', set copy_beans_from_active "
         "true (or pass roaster_name/coffee_name explicitly) so the new recipe carries the beans. Send the dial "
         "fields you know (dose, yield OR ratio, temp offset, grind); omit what you don't. Confirm the details with "
         "the user BEFORE calling (approve-then-apply). The result is ground truth: report created:true + the new "

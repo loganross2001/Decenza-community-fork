@@ -11,9 +11,11 @@ import Decenza
 Popup {
     id: root
 
-    modal: true
-    dim: true
-    closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+    // Non-modal on purpose: it's a cheat sheet to read WHILE you talk to the barista, so it must not block the
+    // barista tab. Dismiss with the button (or Escape). Auto-hides once the shot is described (see main.qml).
+    modal: false
+    dim: false
+    closePolicy: Popup.CloseOnEscape
     parent: Overlay.overlay
     anchors.centerIn: Overlay.overlay
     width: Math.min(560, Overlay.overlay ? Overlay.overlay.width - 2 * Theme.spacingLarge : 560)

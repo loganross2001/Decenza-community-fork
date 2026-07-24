@@ -195,6 +195,9 @@ public:
     // [barista-fork] Compact [{title, editor, drink}] list of every usable profile, optional case-insensitive
     // title substring filter — backs the barista's list_profiles tool.
     QJsonArray profileListForBarista(const QString& query) const;
+    // [barista-fork] The profile's baseline espresso temperature (0 = unstated). Lets the barista work in ACTUAL
+    // brew temps: a recipe stores tempOffsetC relative to this, so actual = baseline + offset.
+    Q_INVOKABLE double profileBaselineTempC(const QString& title) const;
     // Installed-catalog metadata for a profile title, for read-only display
     // surfaces (e.g. the recipe wizard's Profile summary card) that want the
     // scan-time metadata without a per-call file read. Returns an empty map

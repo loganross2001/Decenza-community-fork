@@ -180,7 +180,19 @@ BaristaModule::BaristaModule(MainController* mainController, MachineState* machi
             // recipeActivated correlation + 10s timeout, all main-thread). mainController outlives AIManager.
             MainController* mc = mainController;
             ai->setGetActiveRecipeHandler([mc]() -> QVariantMap {
-                return mc ? mc->activeRecipe() : QVariantMap{};
+                if (!mc) return QVariantMap{};
+                QVariantMap r = mc->activeRecipe();
+                // [barista-fork] Report the ACTUAL brew temperature, never the profile-relative offset — the
+                // barista and user speak in real degrees. actual = profile baseline + stored offset.
+                if (r.contains(QStringLiteral("tempOffsetC"))) {
+                    const double offset = r.take(QStringLiteral("tempOffsetC")).toDouble();
+                    const double baseline = mc->profileManager()
+                        ? mc->profileManager()->profileBaselineTempC(r.value(QStringLiteral("profileTitle")).toString())
+                        : 0.0;
+                    if (baseline > 0)
+                        r.insert(QStringLiteral("temperatureC"), baseline + offset);
+                }
+                return r;
             });
             // [barista-fork] Phase 1 identity: set_active_user → set the active roster user (dyeBarista). The
             // executor did the roster match/insert off-main and hands us the canonical name on the main thread.
@@ -328,35 +340,79 @@ BaristaModule::BaristaModule(MainController* mainController, MachineState* machi
                     }
                     f.insert(QStringLiteral("profileTitle"), canonical);
                 }
-                auto done = std::make_shared<bool>(false);
-                auto conn = std::make_shared<QMetaObject::Connection>();
-                QTimer* timer = new QTimer(rs);
-                timer->setSingleShot(true);
-                auto finish = [done, conn, timer, reply](QJsonObject r) {
-                    if (*done) return;
-                    *done = true;
-                    if (*conn) QObject::disconnect(*conn);
-                    timer->stop(); timer->deleteLater();
-                    reply(r);
-                };
-                *conn = QObject::connect(rs, &RecipeStorage::recipeUpdated, rs,
-                    [finish, recipeId](qint64 updatedId, bool success) {
-                        if (updatedId != recipeId) return;   // someone else's update
-                        if (success)
-                            finish(QJsonObject{{QStringLiteral("updated"), true},
-                                               {QStringLiteral("recipe_id"), static_cast<double>(recipeId)}});
-                        else
-                            finish(QJsonObject{{QStringLiteral("updated"), false},
-                                {QStringLiteral("failure_reason"), QStringLiteral("not_found_or_failed")},
-                                {QStringLiteral("detail"), QStringLiteral("That recipe could not be updated.")}});
+                // The actual update (correlate recipeUpdated + 10s timeout, then requestUpdateRecipe).
+                auto runUpdate = [rs, recipeId, reply](QVariantMap ff) {
+                    auto done = std::make_shared<bool>(false);
+                    auto conn = std::make_shared<QMetaObject::Connection>();
+                    QTimer* timer = new QTimer(rs);
+                    timer->setSingleShot(true);
+                    auto finish = [done, conn, timer, reply](QJsonObject r) {
+                        if (*done) return;
+                        *done = true;
+                        if (*conn) QObject::disconnect(*conn);
+                        timer->stop(); timer->deleteLater();
+                        reply(r);
+                    };
+                    *conn = QObject::connect(rs, &RecipeStorage::recipeUpdated, rs,
+                        [finish, recipeId](qint64 updatedId, bool success) {
+                            if (updatedId != recipeId) return;   // someone else's update
+                            if (success)
+                                finish(QJsonObject{{QStringLiteral("updated"), true},
+                                                   {QStringLiteral("recipe_id"), static_cast<double>(recipeId)}});
+                            else
+                                finish(QJsonObject{{QStringLiteral("updated"), false},
+                                    {QStringLiteral("failure_reason"), QStringLiteral("not_found_or_failed")},
+                                    {QStringLiteral("detail"), QStringLiteral("That recipe could not be updated.")}});
+                        });
+                    QObject::connect(timer, &QTimer::timeout, rs, [finish]() {
+                        finish(QJsonObject{{QStringLiteral("updated"), false},
+                            {QStringLiteral("failure_reason"), QStringLiteral("timeout")},
+                            {QStringLiteral("detail"), QStringLiteral("No confirmation the recipe saved within 10s.")}});
                     });
-                QObject::connect(timer, &QTimer::timeout, rs, [finish]() {
-                    finish(QJsonObject{{QStringLiteral("updated"), false},
-                        {QStringLiteral("failure_reason"), QStringLiteral("timeout")},
-                        {QStringLiteral("detail"), QStringLiteral("No confirmation the recipe saved within 10s.")}});
+                    timer->start(10000);
+                    rs->requestUpdateRecipe(recipeId, ff);
+                };
+
+                // [barista-fork] The barista speaks ACTUAL brew temps; store them as the profile-relative offset
+                // (offset = desired - profile baseline). The profile is the one being set here, else the recipe's
+                // current one (from the active recipe if it's that, else a quick off-thread load).
+                if (!f.contains(QStringLiteral("_desiredBrewTempC"))) {
+                    runUpdate(f);
+                    return;
+                }
+                const double desired = f.take(QStringLiteral("_desiredBrewTempC")).toDouble();
+                ProfileManager* pm = mc ? mc->profileManager() : nullptr;
+                auto applyTemp = [desired, pm](QVariantMap ff, const QString& title) {
+                    const double baseline = (pm && !title.isEmpty()) ? pm->profileBaselineTempC(title) : 0.0;
+                    if (baseline > 0)
+                        ff.insert(QStringLiteral("tempOffsetC"), desired - baseline);
+                    // baseline unstated (tea/pour-over profile) → leave temp untouched
+                    return ff;
+                };
+                QString profTitle = f.value(QStringLiteral("profileTitle")).toString();
+                if (profTitle.isEmpty() && mc) {
+                    const QVariantMap active = mc->activeRecipe();
+                    if (active.value(QStringLiteral("id")).toLongLong() == recipeId)
+                        profTitle = active.value(QStringLiteral("profileTitle")).toString();
+                }
+                if (!profTitle.isEmpty()) {
+                    runUpdate(applyTemp(f, profTitle));
+                    return;
+                }
+                // Other recipe, no profile in the edit → load its profile off the main thread, then update.
+                const QString dbPath = (mc && mc->shotHistory()) ? mc->shotHistory()->databasePath() : QString();
+                if (dbPath.isEmpty()) { runUpdate(f); return; }   // can't convert; save the rest
+                QThread* thread = QThread::create([dbPath, recipeId, f, applyTemp, runUpdate]() {
+                    QString title;
+                    withTempDb(dbPath, "barista_recipe_temp", [&](QSqlDatabase& db) {
+                        title = RecipeStorage::loadRecipeStatic(db, recipeId).profileTitle;
+                    });
+                    QMetaObject::invokeMethod(qApp, [f, applyTemp, runUpdate, title]() {
+                        runUpdate(applyTemp(f, title));
+                    }, Qt::QueuedConnection);
                 });
-                timer->start(10000);
-                rs->requestUpdateRecipe(recipeId, f);
+                QObject::connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+                thread->start();
             });
             // [barista-fork] recipeOp seam: app-side recipe operations needing RecipeStorage + ProfileManager.
             // Stage 1 handles "create" (build the recipe, resolve/validate the profile, optionally inherit the
@@ -395,6 +451,14 @@ BaristaModule::BaristaModule(MainController* mainController, MachineState* machi
                         return;
                     }
                     recipe.insert(QStringLiteral("profileTitle"), canonical);
+                    // [barista-fork] The barista speaks ACTUAL brew temps → store as the profile-relative offset.
+                    if (recipe.contains(QStringLiteral("_desiredBrewTempC"))) {
+                        const double desired = recipe.take(QStringLiteral("_desiredBrewTempC")).toDouble();
+                        const double baseline = mc->profileManager()->profileBaselineTempC(canonical);
+                        if (baseline > 0)
+                            recipe.insert(QStringLiteral("tempOffsetC"), desired - baseline);
+                        // baseline unstated (tea/pour-over) → leave temp unset
+                    }
                     // "Same beans, different profile" — inherit bean identity from the active recipe when the model
                     // asked and didn't pass beans explicitly.
                     if (copyBeans && mc) {

@@ -557,8 +557,9 @@ QJsonArray BaristaTools::toolDefinitions()
     rupdProps["dose_g"]     = numProp("New dose in grams.");
     rupdProps["grind_setting"] = strProp("New grinder setting (the recipe's own grind); '' clears it.");
     rupdProps["rpm"]        = intProp("New grinder RPM, if the grinder is RPM-based.");
-    rupdProps["temperature_offset_c"] = numProp("Signed temperature DELTA in Celsius against the recipe's profile "
-                                      "(e.g. -1 for 1C cooler); 0 clears it. This is an OFFSET, not an absolute.");
+    rupdProps["temperature_c"] = numProp("The recipe's brew temperature as an ACTUAL temperature in Celsius, e.g. "
+                                      "92. Always speak in real degrees, never offsets — the app stores it relative "
+                                      "to the profile for you.");
     rupdProps["title"]      = strProp("New name/title for the recipe.");
     rupdProps["yield_g"]    = numProp("Absolute yield target in grams. Mutually exclusive with ratio; 0 clears "
                                       "the yield. Sending this replaces any stored ratio.");
@@ -569,8 +570,8 @@ QJsonArray BaristaTools::toolDefinitions()
                                       "curve the machine runs). It MUST be a profile the app has — if unsure of the "
                                       "exact title, call list_profiles first and pass the exact title it returns; a "
                                       "name that doesn't match is rejected. "
-                                      "The recipe's temperature_offset_c is relative to the profile, so a big profile "
-                                      "change may want a fresh temp — mention that. Does NOT reactivate the machine.");
+                                      "The recipe's brew temperature is stored relative to the profile, so a big "
+                                      "profile change may want a fresh temp — mention that. Does NOT reactivate the machine.");
     rupdProps["drink_type"] = strProp("Change the recipe's drink type: one of espresso, filter, americano, "
                                       "long_black, latte, latte_hotwater (a latte with an added hot-water shot), "
                                       "tea, tea_hotwater. Usually you can leave this to derive from the milk/water blocks.");
@@ -620,7 +621,9 @@ QJsonArray BaristaTools::toolDefinitions()
     rnewProps["dose_g"]        = numProp("Dose in grams (optional).");
     rnewProps["grind_setting"] = strProp("The recipe's own grinder setting (optional).");
     rnewProps["rpm"]           = intProp("Grinder RPM, if RPM-based (optional; rides with grind_setting).");
-    rnewProps["temperature_offset_c"] = numProp("Signed temp DELTA in Celsius vs the profile (optional; 0 = profile temp).");
+    rnewProps["temperature_c"] = numProp("The brew temperature as an ACTUAL temperature in Celsius, e.g. 92 "
+                                         "(optional). Speak in real degrees, not offsets — stored relative to the "
+                                         "profile automatically.");
     rnewProps["yield_g"]       = numProp("Absolute yield target in grams (optional). Mutually exclusive with ratio.");
     rnewProps["ratio"]         = numProp("Yield as a multiple of the dose, e.g. 2.0 = 1:2 (optional; clamped 0.5-6.0). "
                                          "Mutually exclusive with yield_g.");
@@ -1102,8 +1105,8 @@ void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage*
             fields.insert(QStringLiteral("grindPinned"), input.value(QStringLiteral("grind_setting")).toString());
         if (input.contains(QStringLiteral("rpm")))
             fields.insert(QStringLiteral("rpmPinned"), input.value(QStringLiteral("rpm")).toVariant().toInt());
-        if (input.contains(QStringLiteral("temperature_offset_c")))
-            fields.insert(QStringLiteral("tempOffsetC"), input.value(QStringLiteral("temperature_offset_c")).toDouble());
+        if (input.contains(QStringLiteral("temperature_c")))  // ACTUAL temp → handler converts to tempOffsetC vs the profile
+            fields.insert(QStringLiteral("_desiredBrewTempC"), input.value(QStringLiteral("temperature_c")).toDouble());
         if (input.contains(QStringLiteral("title")))
             fields.insert(QStringLiteral("name"), input.value(QStringLiteral("title")).toString());
         if (input.contains(QStringLiteral("profile_title")))
@@ -1174,8 +1177,8 @@ void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage*
             args.insert(QStringLiteral("grindPinned"), input.value(QStringLiteral("grind_setting")).toString());
         if (input.contains(QStringLiteral("rpm")))
             args.insert(QStringLiteral("rpmPinned"), input.value(QStringLiteral("rpm")).toVariant().toInt());
-        if (input.contains(QStringLiteral("temperature_offset_c")))
-            args.insert(QStringLiteral("tempOffsetC"), input.value(QStringLiteral("temperature_offset_c")).toDouble());
+        if (input.contains(QStringLiteral("temperature_c")))  // ACTUAL temp → handler converts to tempOffsetC vs the profile
+            args.insert(QStringLiteral("_desiredBrewTempC"), input.value(QStringLiteral("temperature_c")).toDouble());
         if (hasYieldG) {
             const double g = input.value(QStringLiteral("yield_g")).toDouble();
             args.insert(QStringLiteral("yieldValue"), g > 0 ? g : 0.0);

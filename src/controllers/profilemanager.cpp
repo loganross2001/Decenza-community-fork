@@ -953,6 +953,16 @@ QString ProfileManager::resolveProfileTitle(const QString& spoken) const {
     return QString();
 }
 
+double ProfileManager::profileBaselineTempC(const QString& title) const {
+    // The profile's own espresso_temperature — the baseline a recipe's tempOffsetC is relative to. 0 = unstated
+    // (e.g. pour-over / tea profiles). Lets the barista convert between the ACTUAL brew temp a user says and the
+    // stored offset (actual = baseline + offset).
+    for (const ProfileInfo& info : m_allProfiles)
+        if (info.title == title)
+            return info.espressoTemperature;
+    return 0.0;
+}
+
 QJsonArray ProfileManager::profileListForBarista(const QString& query) const {
     // Compact list of every profile the app can use, for the barista's list_profiles tool. Optional
     // case-insensitive substring filter on the title. Returns [{title, editor, drink}] — enough for the model

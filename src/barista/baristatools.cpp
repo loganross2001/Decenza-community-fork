@@ -572,7 +572,8 @@ QJsonArray BaristaTools::toolDefinitions()
                                       "The recipe's temperature_offset_c is relative to the profile, so a big profile "
                                       "change may want a fresh temp — mention that. Does NOT reactivate the machine.");
     rupdProps["drink_type"] = strProp("Change the recipe's drink type: one of espresso, filter, americano, "
-                                      "long_black, latte, tea, tea_hotwater.");
+                                      "long_black, latte, latte_hotwater (a latte with an added hot-water shot), "
+                                      "tea, tea_hotwater. Usually you can leave this to derive from the milk/water blocks.");
     rupdProps["has_milk"] = QJsonObject{{"type", QString("boolean")},
         {"description", QString("Turn the recipe's milk/steam on (true) or off (false). Setting any milk field "
                                 "REPLACES the whole steam block, so it drops a saved pitcher preset — for a latte "
@@ -608,8 +609,9 @@ QJsonArray BaristaTools::toolDefinitions()
     rnewProps["name"]          = strProp("Name for the new recipe (required; must be unique among active recipes).");
     rnewProps["profile_title"] = strProp("The exact installed profile name to run. Required unless the drink is "
                                          "hot-water-only. A name that doesn't match an installed profile is rejected.");
-    rnewProps["drink_type"]    = strProp("espresso, filter, americano, long_black, latte, tea, or tea_hotwater. "
-                                         "Omit to let the app derive it.");
+    rnewProps["drink_type"]    = strProp("espresso, filter, americano, long_black, latte, latte_hotwater (latte + "
+                                         "hot-water shot), tea, or tea_hotwater. Omit to let the app derive it from "
+                                         "the milk/water blocks.");
     rnewProps["copy_beans_from_active"] = QJsonObject{{"type", QString("boolean")},
         {"description", QString("When true, inherit the beans (roaster + coffee) from the currently active recipe — "
                                 "use this for 'same beans, different profile'. Ignored if roaster_name/coffee_name given.")}};

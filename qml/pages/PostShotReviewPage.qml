@@ -66,7 +66,13 @@ Page {
     // Also end the refractometer hunt — continuous scanning is scoped to this
     // page being the active page.
     StackView.onDeactivating: {
+        // The R2 is only used to capture TDS/EY on this page. Leaving it ends the
+        // hunt AND disconnects, so it isn't holding a BLE link (contending with
+        // the DE1/scale) while we're off the page. The hunt reconnects on return.
         BLEManager.setRefractometerHunt(false)
+        if (Refractometer && Refractometer.connected) {
+            Refractometer.disconnectFromDevice()
+        }
         autosave()
     }
 
@@ -1499,6 +1505,10 @@ Page {
                 roasterBrand: editBeanBrand
                 coffeeName: editBeanType
                 roastDate: editRoastDate
+                // THIS shot's frozen recipe (resolved from editShotData.recipeId),
+                // never the live active recipe — same resolver the recipe card
+                // uses. Empty when the shot had no recipe.
+                recipeName: recipeResolver.recipe.name || ""
                 grindSize: editGrinderSetting
                 grindRpm: editRpm
                 // Only show RPM for grinders that actually report it (a Niche

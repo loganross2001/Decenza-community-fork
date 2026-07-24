@@ -71,6 +71,8 @@ set(PROFILE_SOURCES
 set(CORE_SOURCES
     ${CMAKE_SOURCE_DIR}/src/core/emojiassets.cpp
     ${CMAKE_SOURCE_DIR}/src/core/markdownrenderer.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/appsettings.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/settingsstoremigration.cpp
     ${CMAKE_SOURCE_DIR}/src/core/settings.cpp
     ${CMAKE_SOURCE_DIR}/src/core/settings_mqtt.cpp
     ${CMAKE_SOURCE_DIR}/src/core/settings_autowake.cpp
@@ -358,6 +360,23 @@ add_decenza_test(tst_settings
     ${CMAKE_SOURCE_DIR}/src/core/settingsserializer.cpp
 )
 
+# --- tst_appsettings: the single canonical settings store ---
+# Asserts the store-identity assumption the whole consolidation rests on (that the
+# explicit organization/application pair and a default-constructed QSettings address
+# the same file), and scans src/ for handles constructed outside the accessor.
+# Deliberately links nothing: it tests Qt's own store naming plus the source tree.
+add_decenza_test(tst_appsettings
+    tst_appsettings.cpp
+)
+
+# --- tst_settingsstoremigration: the one-time DE1Qt -> canonical store migration ---
+# Drives migrateLegacySettingsStore() over temp IniFormat stores. The source comes
+# from decenza_testlib; nothing here addresses a real store, which matters because
+# this migration destroys what it reads.
+add_decenza_test(tst_settingsstoremigration
+    tst_settingsstoremigration.cpp
+)
+
 # --- tst_backgroundpresets: background preset catalogue + Glass theme ---
 # Includes the WCAG contrast floors for every colour — against the page, the page under
 # the densest pattern, the card and the action tile — computable here in a way it never
@@ -429,6 +448,14 @@ add_decenza_test(tst_textescaping
     tst_textescaping.cpp
 )
 target_link_libraries(tst_textescaping PRIVATE Qt6::Qml)
+
+# --- tst_recipesearch: Recipes-page tokenized search matcher ---
+# Runs the real JS out of qml/components/RecipeSearch.js in a QJSEngine, so it guards
+# shipping source rather than a copy. Needs Qt6::Qml for QJSEngine.
+add_decenza_test(tst_recipesearch
+    tst_recipesearch.cpp
+)
+target_link_libraries(tst_recipesearch PRIVATE Qt6::Qml)
 
 # --- tst_beanbaseclient: Bean Base API client (debounce, rate limit, cache, parse) ---
 add_decenza_test(tst_beanbaseclient
@@ -592,6 +619,12 @@ add_decenza_test(tst_mmrwrite
 # --- tst_de1device_headless: GHC "headless" gate default + disconnect reset (#1470) ---
 add_decenza_test(tst_de1device_headless
     tst_de1device_headless.cpp
+    mocks/MockTransport.h
+)
+
+# --- tst_de1device_mmrreads: one-shot MMR read retry + profile-upload settle window ---
+add_decenza_test(tst_de1device_mmrreads
+    tst_de1device_mmrreads.cpp
     mocks/MockTransport.h
 )
 

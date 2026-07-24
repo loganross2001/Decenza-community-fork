@@ -293,9 +293,10 @@ void BLEManager::onDe1Error(const QString& error)
 
 void BLEManager::onDe1LinkFault(const QString& kind)
 {
-    // de1LinkFault fires only on genuine controller errors, never on plain
-    // device-absence — so this timestamp is the load-bearing "stack in trouble"
-    // signal the wedge detector keys off.
+    // de1LinkFault fires only on genuine trouble — controller errors,
+    // write-retry exhaustion, or a detected zombie link (connected but no
+    // notifications) — never on plain device-absence, so this timestamp is the
+    // load-bearing "stack in trouble" signal the wedge detector keys off.
     m_lastDe1FaultTime = QDateTime::currentDateTime();
     evaluateBleWedge(QStringLiteral("de1-fault:%1").arg(kind));
 }
@@ -709,6 +710,10 @@ void BLEManager::connectToScale(const QString& address) {
         } else if (entry.transport == QStringLiteral("wifi")) {
             // Strip the "wifi:" prefix to get the bare hostname.
             m_pendingWifiHostname = address.mid(QStringLiteral("wifi:").size());
+            // Hand along the IP the scan's mDNS discovery already resolved
+            // (see ScaleEntry::resolvedIp) so main.cpp can seed DecentScaleWifi's
+            // IP cache and skip Qt's own hostname resolver entirely.
+            m_pendingWifiResolvedIp = entry.resolvedIp;
             emit scaleDiscovered(QBluetoothDeviceInfo{}, entry.type);
         } else {
             emit scaleDiscovered(entry.device, entry.type);
@@ -799,7 +804,7 @@ void BLEManager::probeMdnsForManualEntry() {
     m_manualEntryDiscovery->probe();
 }
 
-void BLEManager::connectToWifiScale(const QString& hostnameOrIp) {
+void BLEManager::connectToWifiScale(const QString& hostnameOrIp, const QString& resolvedIp) {
     QString host = hostnameOrIp.trimmed();
     if (host.isEmpty()) return;
 
@@ -832,6 +837,12 @@ void BLEManager::connectToWifiScale(const QString& hostnameOrIp) {
     m_wifiFallbackToBleActive = false;
     m_scaleConnectionTimer->start();
     m_pendingWifiHostname = host;
+    // Callers with a fresh mDNS resolution in hand (the "Add WiFi Scale"
+    // dialog's suggested-scale "Use" button) pass it along so main.cpp can
+    // seed the IP cache and skip re-resolving the hostname. A genuinely typed
+    // address (the dialog's text-field submit) passes nothing — resolvedIp
+    // defaults to empty and there's nothing to seed.
+    m_pendingWifiResolvedIp = resolvedIp;
     emit scaleDiscovered(QBluetoothDeviceInfo{}, QStringLiteral("decent-wifi"));
 }
 
@@ -1682,6 +1693,10 @@ void BLEManager::switchToWifiPrimary() {
     m_scaleConnectionTimer->start();
     emit disconnectScaleRequested();
     m_pendingWifiHostname = hostname;
+    // Nothing fresh to offer here — connectToHost() already dials the
+    // persisted cache directly (that's what probeWifiPrimaryReachable just
+    // validated), so there's no new resolution result to hand along.
+    m_pendingWifiResolvedIp.clear();
     emit scaleDiscovered(QBluetoothDeviceInfo{}, QStringLiteral("decent-wifi"));
 }
 
@@ -1775,12 +1790,34 @@ void BLEManager::setRefractometerDevice(RefractometerDevice* device) {
     m_refractometerDevice = device;
     if (m_refractometerDevice) {
         connect(m_refractometerDevice, &RefractometerDevice::connectedChanged,
-                this, &BLEManager::refractometerConnectedChanged);
+                this, [this]() {
+            emit refractometerConnectedChanged();
+            // Keep the hunt persistent while the review page is open: onScanFinished
+            // only re-chains when a scan is already in flight, and none is once we
+            // were connected. So if the R2 drops mid-page, re-kick the scan chain.
+            if (m_refractometerHunt && !isRefractometerConnected() && !m_scanningForScales) {
+                qDebug().noquote() << "[R2-diag] R2 dropped while hunting — re-kicking scan";
+                tryDirectConnectToRefractometer();
+            }
+        });
     }
     emit refractometerConnectedChanged();
 }
 
 void BLEManager::tryDirectConnectToRefractometer() {
+    // The R2 is only used to read TDS/EY on the post-shot review page, so its
+    // auto-reconnect is scoped to the hunt (review page open). Off that page we
+    // don't need the R2, and keeping it scanning/connecting there was pure BLE
+    // contention noise — endless failed connect attempts that never help. This
+    // is the single chokepoint every auto-reconnect path funnels through (the
+    // reconnect tick, startup, resume, screensaver-exit), so gating it here
+    // scopes them all without touching the scale's separate, always-on
+    // reconnect. Manual pairing from Settings goes through connectToRefractometer()
+    // → refractometerDiscovered and is intentionally unaffected.
+    if (!m_refractometerHunt) {
+        qDebug().noquote() << "[R2-diag] tryDirectConnectToRefractometer no-op (not hunting — review page closed)";
+        return;
+    }
     if (m_savedRefractometerAddress.isEmpty() || m_disabled) {
         qDebug().noquote() << QString("[R2-diag] tryDirectConnectToRefractometer no-op (savedAddrEmpty=%1 disabled=%2)")
             .arg(m_savedRefractometerAddress.isEmpty() ? QStringLiteral("true") : QStringLiteral("false"),
@@ -1817,10 +1854,13 @@ void BLEManager::setRefractometerHunt(bool active) {
     m_refractometerHunt = active;
     qDebug().noquote() << QString("[R2-diag] refractometer hunt %1")
         .arg(active ? QStringLiteral("ON — scans will chain back-to-back while a saved refractometer is disconnected")
-                    : QStringLiteral("OFF — background reconnect cadence resumes"));
+                    : QStringLiteral("OFF — refractometer reconnect stops until the review page reopens"));
     if (active && !isRefractometerConnected()) {
         tryDirectConnectToRefractometer();
     }
+    // Let main.cpp arm/stop the persistent reconnect tick to match the hunt —
+    // the tick is the backoff-paced recovery path if the scan chain dies.
+    emit refractometerHuntChanged(active);
 }
 
 void BLEManager::setSavedDE1Address(const QString& address, const QString& name) {
@@ -1967,24 +2007,29 @@ void BLEManager::ensureWifiDiscovery() {
             // Append to the discovered-scales list if not already present —
             // useful for the user-initiated scan, harmless for the auto-
             // reconnect path (the UI list is hidden during direct-wake).
-            bool alreadyListed = false;
-            for (const auto& entry : m_scales) {
-                if (entry.transport == QStringLiteral("wifi") && entry.address == address) {
-                    alreadyListed = true;
+            qsizetype existingIndex = -1;
+            for (qsizetype i = 0; i < m_scales.size(); ++i) {
+                if (m_scales[i].transport == QStringLiteral("wifi") && m_scales[i].address == address) {
+                    existingIndex = i;
                     break;
                 }
             }
-            if (!alreadyListed) {
+            if (existingIndex < 0) {
                 ScaleEntry entry;
                 entry.type = QStringLiteral("decent-wifi");
                 entry.transport = QStringLiteral("wifi");
                 entry.name = QStringLiteral("Half Decent Scale (WiFi)");
                 entry.address = address;
+                entry.resolvedIp = resolvedAddress;
                 m_scales.append(entry);
                 qDebug() << "[BLE] Added WiFi scale to discovered list; m_scales count=" << m_scales.size();
                 appendScaleLog(QString("Found %1 (%2)").arg(entry.name, entry.address));
                 emit scalesChanged();
             } else {
+                // Refresh the resolved IP even on a repeat find — DHCP may have
+                // moved the scale since the last scan, and connectToScale() reads
+                // this field to seed the connect.
+                m_scales[existingIndex].resolvedIp = resolvedAddress;
                 qDebug() << "[BLE] WiFi scale already in discovered list — not re-adding";
             }
 
@@ -1997,6 +2042,10 @@ void BLEManager::ensureWifiDiscovery() {
             if (!m_savedScaleAddress.isEmpty()
                     && address.compare(m_savedScaleAddress, Qt::CaseInsensitive) == 0) {
                 m_pendingWifiHostname = hostname;
+                // This mDNS resolve just happened — hand the IP along so
+                // main.cpp can seed DecentScaleWifi's cache and dial it
+                // directly instead of re-resolving the hostname itself.
+                m_pendingWifiResolvedIp = resolvedAddress;
                 emit scaleDiscovered(QBluetoothDeviceInfo{}, QStringLiteral("decent-wifi"));
             }
         });
@@ -2062,6 +2111,9 @@ void BLEManager::tryDirectConnectToScale(bool allowDirectConnect) {
         m_wifiFallbackToBleActive = false;          // Reset per attempt
         m_scaleConnectionTimer->start();            // Fires onScaleConnectionTimeout if WiFi doesn't connect
         m_pendingWifiHostname = hostname;
+        // No fresh resolution here — connectToHost() itself reads the
+        // persisted cache (see comment above), so there's nothing new to hand along.
+        m_pendingWifiResolvedIp.clear();
         emit scaleDiscovered(QBluetoothDeviceInfo{}, QStringLiteral("decent-wifi"));
         return;
     }

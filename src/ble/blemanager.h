@@ -36,6 +36,12 @@ struct ScaleEntry {
     QString transport;            // "ble" or "wifi"
     QString name;                 // Display name (carries " (WiFi)" suffix for WiFi entries)
     QString address;              // Routing handle: BLE MAC/UUID, or "wifi:<hostname>"
+    QString resolvedIp;           // WiFi entries only: the IP WifiScaleDiscovery's mDNS
+                                   // query resolved `address`'s hostname to. Empty for BLE/USB.
+                                   // Lets connectToScale() seed DecentScaleWifi's IP cache so
+                                   // the connect dials the already-known IP instead of making
+                                   // Qt's own resolver re-resolve ".local" (unreliable on
+                                   // non-Android — see connectToScale()).
 };
 
 // Helper to get device identifier - iOS uses UUID, others use MAC address
@@ -96,6 +102,13 @@ public:
     // with a default-constructed device + type=="decent-wifi". The main.cpp
     // handler reads this after the factory creates the DecentScaleWifi driver.
     QString pendingWifiHostname() const { return m_pendingWifiHostname; }
+    // Companion to pendingWifiHostname(): the IP a just-completed mDNS
+    // discovery already resolved that hostname to, if any (empty when no
+    // fresh resolution happened at this call site — e.g. the manual-entry and
+    // persisted-cache-driven paths, which have nothing new to offer). main.cpp
+    // seeds DecentScaleWifi's IP cache with it before dialing, so the connect
+    // skips Qt's own (mDNS-unreliable on non-Android) hostname resolver.
+    QString pendingWifiResolvedIp() const { return m_pendingWifiResolvedIp; }
     // True between beginWifiFallbackToBleScan and the next successful connect.
     // main.cpp reads this when a BLE Decent scale connects during the fallback
     // window — in that case the user's saved WiFi primary address is preserved
@@ -364,7 +377,11 @@ public:
     // recognition never arrives, `manualWifiValidationFailed` is emitted and
     // the address is NOT saved as the primary — a typo or wrong IP can't
     // poison the saved state. (#1281)
-    Q_INVOKABLE void connectToWifiScale(const QString& hostnameOrIp);
+    // `resolvedIp`: pass the IP if the caller already has a fresh mDNS
+    // resolution for `hostnameOrIp` (e.g. the "Add WiFi Scale" dialog's
+    // mDNS-suggested "Use" button — see manualWifiMdnsDiscovered). Leave empty
+    // for a genuinely typed address, where nothing has been resolved yet.
+    Q_INVOKABLE void connectToWifiScale(const QString& hostnameOrIp, const QString& resolvedIp = QString());
     // Fire an mDNS probe for the HDS in parallel with the "Add WiFi Scale"
     // dialog. If the scale is on the LAN, this surfaces it to the user so
     // they don't have to type its address. Emits manualWifiMdnsDiscovered on
@@ -419,6 +436,12 @@ public:
     // an immediate scan when a saved refractometer is not connected and
     // Bluetooth is up; otherwise the reconnect tick resumes the hunt later.
     Q_INVOKABLE void setRefractometerHunt(bool active);
+    // True while the post-shot review page is open. The R2 is only used to
+    // capture TDS/EY on that page, so its auto-reconnect is scoped to the hunt:
+    // tryDirectConnectToRefractometer() no-ops when this is false, and the
+    // app-wide reconnect tick self-stops. The scale has no such scoping — it is
+    // needed everywhere and keeps its own always-on reconnect.
+    bool isRefractometerHunt() const { return m_refractometerHunt; }
 
     // DE1 address management
     void setSavedDE1Address(const QString& address, const QString& name);
@@ -534,6 +557,12 @@ signals:
     void refractometerConnectedChanged();
     void refractometerDiscovered(const QBluetoothDeviceInfo& device);
     void disconnectRefractometerRequested();
+    // Emitted when the review-page refractometer hunt turns on/off. The R2 is
+    // only pursued while the hunt is active, so main.cpp arms the persistent
+    // reconnect tick on activation (giving the hunt a backoff-paced recovery
+    // path if the scan chain dies, e.g. via onScanError) and stops it on
+    // deactivation. The scale's reconnect is independent and unaffected.
+    void refractometerHuntChanged(bool active);
     void linuxBlueZCacheHintNeeded();  // Request the BlueZ-cache recovery dialog (Linux, caps OK).
     // Emitted when an automatic BLE-adapter power-cycle begins / completes
     // (#1309). main.cpp uses bleStackRecovered() to reset the DE1 reconnect
@@ -725,6 +754,8 @@ private:
     // WiFi scale (so main.cpp can route the connect after the factory creates
     // the driver). Set immediately before emitting, read immediately after.
     QString m_pendingWifiHostname;
+    // Companion to m_pendingWifiHostname — see pendingWifiResolvedIp().
+    QString m_pendingWifiResolvedIp;
 
     // Saved DE1 for direct wake connection
     QString m_savedDE1Address;

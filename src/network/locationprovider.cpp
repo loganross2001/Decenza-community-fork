@@ -1,4 +1,5 @@
 #include "locationprovider.h"
+#include "core/appsettings.h"
 
 #include <QGeoPositionInfo>
 #include <QNetworkReply>
@@ -24,7 +25,7 @@ LocationProvider::LocationProvider(QNetworkAccessManager* networkManager, QObjec
 {
     Q_ASSERT(networkManager);
     // Load saved manual city and coordinates
-    QSettings settings;
+    AppSettings settings;
     m_manualCity = settings.value("shotMap/manualCity", "").toString();
     m_manualLat = settings.value("shotMap/manualLat", 0.0).toDouble();
     m_manualLon = settings.value("shotMap/manualLon", 0.0).toDouble();
@@ -354,7 +355,7 @@ void LocationProvider::setManualCity(const QString& city)
         m_manualCountryCode.clear();
 
         // Save to settings
-        QSettings settings;
+        AppSettings settings;
         settings.setValue("shotMap/manualCity", city);
         settings.setValue("shotMap/manualGeocoded", false);
         settings.setValue("shotMap/manualLat", 0.0);
@@ -428,7 +429,7 @@ void LocationProvider::onForwardGeocodeFinished(QNetworkReply* reply)
     m_manualGeocoded = true;
 
     // Save to settings
-    QSettings settings;
+    AppSettings settings;
     settings.setValue("shotMap/manualLat", m_manualLat);
     settings.setValue("shotMap/manualLon", m_manualLon);
     settings.setValue("shotMap/manualCountryCode", m_manualCountryCode);

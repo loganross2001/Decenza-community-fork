@@ -121,7 +121,9 @@ extern "C" const char* __ubsan_default_options()
 #include "core/btlogfilter.h"
 #include "core/emojiassets.h"
 #include "core/markdownrenderer.h"
+#include "core/appsettings.h"
 #include "core/settings.h"
+#include "core/settingsstoremigration.h"
 #include "core/settings_mqtt.h"
 #include "core/settings_autowake.h"
 #include "core/settings_hardware.h"
@@ -346,7 +348,10 @@ void runAppNameMigrationOnce()
         return;
     }
 
-    QSettings migrationSettings("DecentEspresso", "DE1Qt");
+    // Guard lives in the canonical store. It used to live in the legacy DE1Qt
+    // store, which runSettingsStoreMigrationOnce() destroys — leaving the flag
+    // there would re-run this migration on every launch forever.
+    AppSettings migrationSettings;
     if (migrationSettings.value(kMigrationKey, false).toBool()) {
         return;
     }
@@ -808,6 +813,16 @@ int main(int argc, char *argv[])
     app.setOrganizationDomain("decentespresso.com");
     app.setApplicationName("Decenza");
     app.setApplicationVersion(VERSION_STRING);
+
+    // Both migrations must complete here — before Settings (line ~1046) and
+    // AccessibilityManager (line ~1788) are constructed, since both read the
+    // store these populate.
+    //
+    // Store migration runs FIRST so that the app-name migration below finds its
+    // own done-flag: that flag used to live in the legacy DE1Qt store, and this
+    // migration is what carries it into the canonical one. Reversed, the
+    // app-name migration would see an unstamped flag and redundantly re-run.
+    runSettingsStoreMigrationOnce();
     runAppNameMigrationOnce();
 
     // Limit Qt's pixmap cache to 32 MB (default is 10 MB on desktop but unbounded
@@ -1011,7 +1026,7 @@ int main(int argc, char *argv[])
     // Re-register the app bundle with Launch Services when the version changes
     // so macOS picks up the new icon instead of serving a stale cached one.
     {
-        QSettings s;
+        AppSettings s;
         QString lastRegistered = s.value("internal/lastIconRegisteredVersion").toString();
         if (lastRegistered != VERSION_STRING) {
             QString bundlePath = QCoreApplication::applicationDirPath() + "/../..";
@@ -1997,10 +2012,13 @@ int main(int argc, char *argv[])
     bool wasInSleep = false;
 
     // R2 refractometer auto-reconnect: same persistent backoff as the scale
-    // (5s → 30s → 60s, then 60s forever). The R2 has no DE1-sleep power
-    // management, so there is no deliberate-disconnect suppression to track —
-    // it simply keeps trying whenever it is disconnected and an address is
-    // saved. Shares reconnectDelays with the scale.
+    // (5s → 30s → 60s, then 60s forever). The R2 is only used to capture TDS/EY
+    // on the post-shot review page, so — unlike the scale — this tick is scoped
+    // to that page's "hunt": while the hunt is active it keeps trying whenever
+    // the R2 is disconnected and an address is saved; off the review page the
+    // tick self-stops (see the isRefractometerHunt() guard in its handler) and
+    // is re-armed when the hunt turns back on. Shares reconnectDelays with the
+    // scale (whose reconnect is independent and always-on).
     int refractometerReconnectAttempt = 0;
     QTimer refractometerReconnectTimer;
     refractometerReconnectTimer.setSingleShot(true);
@@ -2332,6 +2350,13 @@ int main(int argc, char *argv[])
                      , &usbScaleManager
 #endif
                      ](const QBluetoothDeviceInfo& device, const QString& type) {
+        // A fresh mDNS resolution BLEManager just handed us (see BLEManager::
+        // pendingWifiResolvedIp()) is passed straight to connectToHost() as its
+        // preferredIp — dialed first, but never written to the persisted IP
+        // cache. Keeping unverified resolutions out of the cache is what stops a
+        // stale scan-time IP from clobbering a fresher one an actual connection
+        // already persisted; the cache is now written only by verified connects
+        // (DecentScaleWifi::onRecognizedAsHds) and eviction.
 #ifndef Q_OS_IOS
         // Tear down an active USB scale FIRST (before touching physicalScale).
         // The single-scale invariant covers BLE/WiFi via physicalScale, but the
@@ -2399,7 +2424,12 @@ int main(int argc, char *argv[])
                         wifi->setIpCacheUpdate([&settings](const QString& host, const QString& ip) {
                             settings.network()->setWifiScaleIp(host, ip);
                         });
-                        wifi->connectToHost(bleManager.pendingWifiHostname());
+                        // If BLEManager just resolved this hostname (a scan
+                        // selection), hand the IP to connectToHost() as its
+                        // preferredIp so it dials the known IP directly instead
+                        // of asking Qt's resolver to re-resolve ".local".
+                        wifi->connectToHost(bleManager.pendingWifiHostname(),
+                                            bleManager.pendingWifiResolvedIp());
                     }
                 } else {
                     physicalScale->connectToDevice(device);
@@ -2694,7 +2724,13 @@ int main(int argc, char *argv[])
                     },
                     Qt::SingleShotConnection);
                 }
-                wifi->connectToHost(hostname);
+                // pendingWifiResolvedIp() carries a fresh mDNS resolution for a
+                // scan selection, the "Add WiFi Scale" dialog's "Use" button, or
+                // a saved-primary auto-match; it's dialed first as preferredIp
+                // (never cached until verified). Empty for manual-typed entries
+                // and cache-driven reconnects — those fall through to the cached
+                // IP / hostname-resolve path (see BLEManager call sites).
+                wifi->connectToHost(hostname, bleManager.pendingWifiResolvedIp());
             }
         } else {
             physicalScale->connectToDevice(device);
@@ -2859,6 +2895,16 @@ int main(int argc, char *argv[])
             qDebug() << "Refractometer reconnect: no saved address, stopping retries";
             return;
         }
+        // The R2 is only used on the post-shot review page (the "hunt"). Off that
+        // page we don't need it, so stop the tick rather than reschedule — no
+        // scanning, no log spam, no BLE contention. setRefractometerHunt(true)
+        // resumes the hunt directly (immediate scan + onScanFinished chaining),
+        // so this timer isn't needed to drive on-page reconnects. The scale's
+        // reconnect is a separate always-on timer and is unaffected.
+        if (!bleManager.isRefractometerHunt()) {
+            qDebug() << "Refractometer reconnect: review page closed — stopping retries until it reopens";
+            return;
+        }
         if (bleManager.isRefractometerConnected()) {
             qDebug() << "Refractometer reconnect: already connected, stopping retries";
             return;
@@ -2918,6 +2964,34 @@ int main(int argc, char *argv[])
         }
     });
 
+    // Arm/stop the R2 reconnect tick to track the review-page hunt. The R2 is
+    // only pursued while the hunt is active, and the tick (which now self-stops
+    // off-page) is the hunt's backoff-paced recovery path: if the back-to-back
+    // scan chain dies — e.g. a scan ends via onScanError, which deliberately
+    // does not re-chain — this armed tick re-kicks it. Without arming on hunt
+    // activation, opening the review page for an R2 that never connected this
+    // session (so no disconnect transition armed the tick) would leave the hunt
+    // dependent solely on the scan-finished chain, unrecoverable if it breaks
+    // until the page is reopened. Stopping on deactivation keeps no stray tick
+    // running off-page. The scale reconnect is a separate timer, untouched.
+    QObject::connect(&bleManager, &BLEManager::refractometerHuntChanged,
+                     [&bleManager, &settings, &refractometerReconnectTimer,
+                      &refractometerReconnectAttempt, &reconnectDelays](bool active) {
+        if (!active) {
+            refractometerReconnectTimer.stop();
+            refractometerReconnectAttempt = 0;
+            return;
+        }
+        if (!settings.savedRefractometerAddress().isEmpty()
+            && !bleManager.isRefractometerConnected()
+            && !refractometerReconnectTimer.isActive()) {
+            refractometerReconnectAttempt = 0;
+            refractometerReconnectTimer.start(reconnectDelays[0]);
+            qDebug() << "Refractometer reconnect: review page opened — arming recovery tick in"
+                     << reconnectDelays[0] << "ms";
+        }
+    });
+
     // Re-arm the R2 reconnect when BLE comes back, because the tick above stops
     // (rather than reschedules) while BLE is disabled. Without this, turning
     // simulator mode off would leave a saved R2 unreachable until the next app
@@ -2937,19 +3011,12 @@ int main(int argc, char *argv[])
                  << reconnectDelays[0] << "ms";
     });
 
-    // Auto-reconnect refractometer on startup. tryDirectConnect kicks one
-    // scan; also arm the persistent reconnect timer so an R2 that is powered
-    // off at startup (and therefore never produces a connect→disconnect
-    // transition to arm it) is still picked up when it powers on later.
-    // Unlike the scale — whose timer is armed reactively by flowScaleFallback
-    // on a detected connection timeout — the R2 has no failure signal, so we
-    // arm unconditionally here; safe because the timeout lambda self-
-    // terminates once the R2 connects or the address is forgotten.
-    if (!settings.savedRefractometerAddress().isEmpty()) {
-        bleManager.tryDirectConnectToRefractometer();
-        refractometerReconnectAttempt = 0;
-        refractometerReconnectTimer.start(reconnectDelays[0]);
-    }
+    // No refractometer auto-connect at startup: the R2 is only used on the
+    // post-shot review page, so it is pursued when that page opens (which fires
+    // refractometerHuntChanged → arms the reconnect tick above) and disconnected
+    // when it closes. A startup arm here would be dead code — tryDirectConnect
+    // no-ops with the hunt off, and the tick self-stops on its first fire. The
+    // scale's own startup/reconnect path is separate and unaffected.
 
 #ifndef Q_OS_IOS
     // When USB scale discovered: wire it as the active scale (same pattern as BLE scale)
@@ -3790,13 +3857,17 @@ int main(int argc, char *argv[])
             }
 
             // Refractometer disconnected while suspended - (re)start its
-            // persistent reconnect sequence (mirrors the scale path above).
+            // reconnect tick. Unlike the scale path above, this only does real
+            // work while the review-page hunt is active: off that page the tick
+            // fires once and self-stops (the R2 is not pursued off-page), and
+            // hunt activation re-arms it. Arming here is harmless in that case
+            // and covers a resume that lands directly on the review page.
             if (!bleManager.isRefractometerConnected()
                 && !settings.savedRefractometerAddress().isEmpty()
                 && !refractometerReconnectTimer.isActive()) {
                 refractometerReconnectAttempt = 0;
                 refractometerReconnectTimer.start(reconnectDelays[0]);
-                qDebug() << "App resumed - starting refractometer reconnect sequence";
+                qDebug() << "App resumed - arming refractometer reconnect tick (effective only while hunting)";
             }
 
             // Resume smart charging check now that app is active again
@@ -3822,7 +3893,9 @@ int main(int argc, char *argv[])
     // mirror that path here, stopping both timers on entry and restarting them
     // on exit. Resume gates differ between the two: scale checks saved address,
     // not connected, not suppressed, not USB; refractometer checks saved address
-    // and not connected (no suppression flag or USB-routing for it).
+    // and not connected (no suppression flag or USB-routing for it). Note the
+    // refractometer restart only does real work while the review-page hunt is
+    // active — off that page its tick fires once and self-stops.
     QObject::connect(&screensaverManager, &ScreensaverVideoManager::screensaverActiveChanged,
                      [&screensaverManager, &physicalScale, &bleManager, &settings,
                       &scaleReconnectTimer, &scaleReconnectAttempt, &reconnectDelays,

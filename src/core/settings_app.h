@@ -1,7 +1,7 @@
 #pragma once
 
 #include <QObject>
-#include <QSettings>
+#include "appsettings.h"
 #include <QString>
 #include <QStringList>
 #include <QVariantList>
@@ -245,7 +245,7 @@ signals:
     void coachGameplanEnabledChanged();
 
 private:
-    mutable QSettings m_settings;
+    mutable AppSettings m_settings;
     bool m_use12HourTime = false;
 
     // Runtime-only flag — not persisted, resets to false on app restart

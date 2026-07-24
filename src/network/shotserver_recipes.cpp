@@ -18,6 +18,7 @@
 #include "webtemplates/grind_datalist_js.h"
 #include "../core/yieldspec.h"
 #include "../history/coffeebagstorage.h"
+#include "../profile/profile.h"  // profileJsonToDouble — tolerant string/number parse
 #include "../history/recipepromotion.h"
 #include "../history/recipestorage.h"
 #include "../history/shothistorystorage.h"
@@ -46,7 +47,8 @@ namespace {
 
 QJsonObject webRecipeJson(const Recipe& r, int activeRecipeId, QSqlDatabase* db,
                           qint64 shotCount = -1,
-                          const QHash<QString, QString>& bevByTitle = {})
+                          const QHash<QString, QString>& bevByTitle = {},
+                          const QHash<QString, double>& baseTempByTitle = {})
 {
     QJsonObject o;
     o["id"] = r.id;
@@ -81,6 +83,24 @@ QJsonObject webRecipeJson(const Recipe& r, int activeRecipeId, QSqlDatabase* db,
     else if (r.yieldMode == QLatin1String("ratio") && r.yieldValue > 0)
         o["yieldRatio"] = r.yieldValue;
     o["tempOffsetC"] = r.tempOffsetC;
+    // Profile base temperature (°C), so read-only web cards can show the
+    // RESULTING brew temp (base + offset) instead of a bare offset the reader
+    // must add up — matching the app's RecipeDrinkCard. Embedded profile JSON
+    // first (uninstalled/renamed profiles carry it), else the installed-catalog
+    // snapshot; omitted when the profile temp can't be resolved.
+    double baseTempC = 0.0;
+    if (!r.profileJson.isEmpty())
+        // Tolerant parse: Visualizer/de1app-format profile JSON stores
+        // espresso_temperature as a STRING — a raw toDouble() yields 0 and
+        // silently defeats this fallback (the same helper the storage/promotion
+        // readers use). This branch exists for uninstalled/renamed profiles,
+        // which then miss the installed-catalog snapshot below.
+        baseTempC = profileJsonToDouble(QJsonDocument::fromJson(r.profileJson.toUtf8())
+                        .object().value(QStringLiteral("espresso_temperature")));
+    if (baseTempC <= 0.0)
+        baseTempC = baseTempByTitle.value(r.profileTitle.trimmed().toLower(), 0.0);
+    if (baseTempC > 0.0)
+        o["profileBaseTempC"] = baseTempC;
     o["grindPinned"] = r.grindPinned;
     o["rpmPinned"] = r.rpmPinned;
     if (!r.steamJson.isEmpty())
@@ -203,13 +223,17 @@ void ShotServer::handleRecipesApi(QTcpSocket* socket, const QString& method,
             (m_mainController && m_mainController->profileManager())
                 ? m_mainController->profileManager()->beverageTypeByTitleSnapshot()
                 : QHash<QString, QString>();
-        QThread* t = QThread::create([dbPath, activeRecipeId, respondJson, bevByTitle]() {
+        const QHash<QString, double> baseTempByTitle =
+            (m_mainController && m_mainController->profileManager())
+                ? m_mainController->profileManager()->espressoTempByTitleSnapshot()
+                : QHash<QString, double>();
+        QThread* t = QThread::create([dbPath, activeRecipeId, respondJson, bevByTitle, baseTempByTitle]() {
             QJsonArray recipes;
             const bool opened = withTempDb(dbPath, "web_recipes", [&](QSqlDatabase& db) {
                 for (const InventoryRecipe& e : RecipeStorage::loadInventoryStatic(db, false))
-                    recipes.append(webRecipeJson(e.recipe, activeRecipeId, &db, e.shotCount, bevByTitle));
+                    recipes.append(webRecipeJson(e.recipe, activeRecipeId, &db, e.shotCount, bevByTitle, baseTempByTitle));
                 for (const InventoryRecipe& e : RecipeStorage::loadInventoryStatic(db, true))
-                    recipes.append(webRecipeJson(e.recipe, activeRecipeId, &db, e.shotCount, bevByTitle));
+                    recipes.append(webRecipeJson(e.recipe, activeRecipeId, &db, e.shotCount, bevByTitle, baseTempByTitle));
             });
             QMetaObject::invokeMethod(qApp, [opened, recipes, respondJson]() {
                 if (!opened)
@@ -365,13 +389,21 @@ void ShotServer::handleRecipesApi(QTcpSocket* socket, const QString& method,
 
         // GET /api/recipe/<id>
         if (action.isEmpty() && method == "GET") {
-            QThread* t = QThread::create([dbPath, recipeId, activeRecipeId, respondJson]() {
+            const QHash<QString, QString> bevByTitle =
+                (m_mainController && m_mainController->profileManager())
+                    ? m_mainController->profileManager()->beverageTypeByTitleSnapshot()
+                    : QHash<QString, QString>();
+            const QHash<QString, double> baseTempByTitle =
+                (m_mainController && m_mainController->profileManager())
+                    ? m_mainController->profileManager()->espressoTempByTitleSnapshot()
+                    : QHash<QString, double>();
+            QThread* t = QThread::create([dbPath, recipeId, activeRecipeId, respondJson, bevByTitle, baseTempByTitle]() {
                 QJsonObject result;
                 bool found = false;
                 const bool opened = withTempDb(dbPath, "web_recipe_get", [&](QSqlDatabase& db) {
                     const Recipe r = RecipeStorage::loadRecipeStatic(db, recipeId);
                     if (r.isValid()) {
-                        result = webRecipeJson(r, activeRecipeId, &db);
+                        result = webRecipeJson(r, activeRecipeId, &db, -1, bevByTitle, baseTempByTitle);
                         found = true;
                     }
                 });
@@ -650,6 +682,7 @@ QString ShotServer::generateRecipesPage() const
             <option value="americano">Americano</option>
             <option value="long_black">Long black</option>
             <option value="latte">Latte / Cappuccino</option>
+            <option value="latte_hotwater">Latte + Water</option>
             <option value="tea">Tea (portafilter)</option>
             <option value="tea_hotwater">Tea (hot water)</option>
         </select>
@@ -724,7 +757,8 @@ QString ShotServer::generateRecipesPage() const
 
         const DRINK_LABELS = {
             espresso: 'Espresso', filter: 'Filter', americano: 'Americano',
-            long_black: 'Long black', latte: 'Latte', tea: 'Tea', tea_hotwater: 'Tea',
+            long_black: 'Long black', latte: 'Latte', latte_hotwater: 'Latte + Water',
+            tea: 'Tea', tea_hotwater: 'Tea',
         };
         const drinkLabel = (t) => DRINK_LABELS[t] || (t ? t.replace('_', ' ') : '');
         const isTeaType = (t) => t === 'tea' || t === 'tea_hotwater';
@@ -802,8 +836,12 @@ QString ShotServer::generateRecipesPage() const
                     : '1:' + r.yieldRatio);
             else if (r.doseG > 0)
                 parts.push(r.doseG.toFixed(1) + 'g');
-            if ((r.tempOffsetC || 0) !== 0)
-                parts.push((r.tempOffsetC > 0 ? '+' : '') + r.tempOffsetC + '&deg;C');
+            // Resulting brew temperature (profile base + the recipe's stored
+            // offset), matching the app's RecipeDrinkCard — never a bare offset
+            // the reader has to add up. Omitted when the profile temp couldn't
+            // be resolved (uninstalled profile with no embedded JSON).
+            if ((r.profileBaseTempC || 0) > 0)
+                parts.push(Math.round(r.profileBaseTempC + (r.tempOffsetC || 0)) + '&deg;C');
             if (r.effectiveGrind) parts.push('grind ' + esc(r.effectiveGrind));
             if (r.rpmPinned > 0) parts.push(r.rpmPinned + ' rpm');
             return bullet(parts);
@@ -857,11 +895,25 @@ QString ShotServer::generateRecipesPage() const
                 + '<div class="actions">' + actions + '</div></div>';
         }
 
-        function matchesFilter(r) {
-            if (!filterText) return true;
-            const hay = [r.name, r.profileTitle, r.roasterName, r.coffeeName, drinkLabel(r.drinkType)]
-                .join(' ').toLowerCase();
-            return hay.indexOf(filterText) !== -1;
+        // Tokenized AND match: `-` `/` `.` are DELETED from both query and text, the
+        // query splits into tokens on whitespace, and every token must appear as a
+        // substring. Same algorithm and same five searched fields (name, profile,
+        // roaster, coffee, drink-type label) as the in-app path (RecipeSearch.js +
+        // RecipesPage.filterAndSort) so "Yirg Df" matches a Yirgacheffe recipe on a
+        // "D-Flow / Q" profile here too (deleting punctuation collapses "D-Flow" to
+        // "dflow"). The drink-label field differs from the app in two narrow ways: it is
+        // English here vs the app's localized DrinkType.shortLabel, and it reads
+        // r.drinkType directly whereas the app derives a type for legacy rows with no
+        // stored drinkType via DrinkType.fromRecipeMap. Guarded by tests/tst_recipesearch.cpp,
+        // which extracts normalizeSearch/tokenizeSearch/matchesFilter and re-runs the
+        // shared cases — keep the two in sync. tokens are computed once per render().
+        function normalizeSearch(s) { return String(s || '').toLowerCase().replace(/[-\/.]/g, ''); }
+        function tokenizeSearch(q) { return normalizeSearch(q).split(/\s+/).filter(Boolean); }
+        function matchesFilter(r, tokens) {
+            if (!tokens.length) return true;
+            const hay = normalizeSearch(
+                [r.name, r.profileTitle, r.roasterName, r.coffeeName, drinkLabel(r.drinkType)].join(' '));
+            return tokens.every(t => hay.indexOf(t) !== -1);
         }
         function sortRecipes(list) {
             const key = SORTS[sortIdx][0];
@@ -880,8 +932,11 @@ QString ShotServer::generateRecipesPage() const
         }
 
         function render() {
-            const active = sortRecipes(recipes.filter(r => !r.archived && matchesFilter(r)));
-            const archived = recipes.filter(r => r.archived);
+            const tokens = tokenizeSearch(filterText);
+            const active = sortRecipes(recipes.filter(r => !r.archived && matchesFilter(r, tokens)));
+            // Archived grid is filtered by the same query as the active grid (spec: the
+            // search applies to both), so "Show archived (N)" counts and shows only matches.
+            const archived = recipes.filter(r => r.archived && matchesFilter(r, tokens));
             el('searchbar').style.display = recipes.some(r => !r.archived) ? '' : 'none';
             el('searchClear').style.display = filterText ? '' : 'none';
 

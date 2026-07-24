@@ -609,6 +609,8 @@ endif()
 # Source files
 set(SOURCES
     src/main.cpp
+    src/core/appsettings.cpp
+    src/core/settingsstoremigration.cpp
     src/core/settings.cpp
     src/core/settings_mqtt.cpp
     src/core/settings_autowake.cpp
@@ -814,6 +816,8 @@ endif()
 set(HEADERS
     src/widget/machinestatussnapshot.h
     src/widget/widgetsharedkeys.h
+    src/core/appsettings.h
+    src/core/settingsstoremigration.h
     src/core/settings.h
     src/core/settings_mqtt.h
     src/core/settings_autowake.h
@@ -1274,6 +1278,7 @@ set(QML_FILES
     qml/components/QrCode.qml
     qml/components/DateUtils.js
     qml/components/qrcode.js
+    qml/components/RecipeSearch.js
     qml/components/SettingsSearchIndex.js
     qml/components/SettingsTabs.qml
 
@@ -1670,6 +1675,7 @@ if(NOT ANDROID AND NOT IOS)
     # what production would do under the same change.
     add_executable(saw_parity
         tools/saw_parity/main.cpp
+        src/core/appsettings.cpp
         src/core/settings.cpp
         src/core/settings_mqtt.cpp
         src/core/settings_autowake.cpp

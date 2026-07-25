@@ -3,10 +3,12 @@
 #include "../history/shothistorystorage.h"
 #include "../history/shotprojection.h"
 #include "../ai/shotsummarizer.h"
+#include "../ai/dialing_blocks.h"  // [barista-fork] prior-shot history blocks for grounded recommendations
 #include "../core/dbutils.h"
 #include "../core/drinktypes.h"  // [barista-fork] natural shot descriptor (type + beans), not a stat dump
 #include "feedbackstorage.h"
 #include "tasksstorage.h"
+#include "coffeeknowledgebase.h"  // [barista-fork] grounded coffee-science brain (translate/recommend/plan tools)
 #include "baristadiagnostics.h"  // [barista-fork] tool-call timeline recorder
 #include "../history/recipestorage.h"  // [barista-fork] Recipes 2.0 tools (list_recipes / activate / etc.)
 #include "../core/yieldspec.h"          // [barista-fork] update_recipe yield-anchor (ratio clamp / mode)
@@ -57,6 +59,35 @@ QString matchRosterName(const QVector<Barista>& roster, const QString& name) {
     }
     return QString();
 }
+
+// [barista-fork] Translate a MEASURED shot's detector verdicts into the coffee KB's trace vocabulary,
+// so recommend_next_shot reasons over what the machine actually recorded, not the model's guess. Channeling
+// wins first (the prep gate). Then grind direction: too-coarse / yield-overshoot = ran FAST (under-extracting),
+// too-fine / choked = ran SLOW. Returns "" when the shot ran on-target with no discriminating fault.
+QString objectiveTraceShape(const ShotProjection& s) {
+    if (s.channelingDetected
+        || s.detectorResults.value(QStringLiteral("channeling")).toMap()
+               .value(QStringLiteral("severity")).toString() == QLatin1String("sustained"))
+        return QStringLiteral("channeling");
+    const QString dir = s.detectorResults.value(QStringLiteral("grind")).toMap()
+                            .value(QStringLiteral("direction")).toString();
+    if (dir == QLatin1String("tooCoarse") || dir == QLatin1String("yieldOvershoot"))
+        return QStringLiteral("fast");
+    if (dir == QLatin1String("tooFine") || dir == QLatin1String("chokedPuck"))
+        return QStringLiteral("slow");
+    if (dir == QLatin1String("onTarget"))
+        return QStringLiteral("smooth");
+    return QString();  // unknown — let the KB treat trace as neutral rather than assert a shape
+}
+
+// Bucket the measured brew ratio (yield/dose) into the KB's ratio vocabulary. "" when unknown.
+QString ratioBucketFromShot(double doseG, double yieldG) {
+    if (doseG <= 0 || yieldG <= 0) return QString();
+    const double r = yieldG / doseG;
+    if (r < 1.7) return QStringLiteral("short");
+    if (r > 2.7) return QStringLiteral("wide");
+    return QStringLiteral("normal");
+}
 }  // namespace
 
 // [barista-fork] The 5 client-tool JSON definitions, moved verbatim from AnthropicProvider::analyzeConversation.
@@ -85,7 +116,7 @@ QJsonArray BaristaTools::toolDefinitions()
     props["untilDate"]    = strProp("Only shots on/before this date, YYYY-MM-DD.");
     props["sinceDaysAgo"] = intProp("Alternative to sinceDate: only shots within the last N days.");
     props["sortBy"]       = strProp("'recent' (default, newest first) or 'bestEnjoyment' (highest rated first).");
-    props["limit"]        = intProp("Max shots to return (default 15, capped at 50).");
+    props["limit"]        = intProp("Max shots to return (default 15, up to 200 for a deep history pull).");
     schema["properties"] = props;
     qs["input_schema"] = schema;
     tools.append(qs);
@@ -746,6 +777,77 @@ QJsonArray BaristaTools::toolDefinitions()
     sau["input_schema"] = sauSchema;
     tools.append(sau);
 
+    // [barista-fork] Coffee-science brain (CoffeeKnowledgeBase, :/ai/coffee_knowledge.json). Three read-only
+    // tools that translate the user's HUMAN words into grounded science and back into ONE next move. Every
+    // result carries citations (peer-reviewed papers / named authorities with a trust tier), so the barista can
+    // speak plainly while resting each claim on evidence. Honesty rails are enforced in the KB itself: never a
+    // fabricated extraction-yield number, grind changes as relative STEPS, and prep-before-parameters when the
+    // trace shows channeling.
+
+    // translate_taste — the Rosetta Stone: one perceptual word -> its mechanism.
+    QJsonObject tt;
+    tt["name"] = QString("translate_taste");
+    tt["description"] = QString(
+        "Translate a single word the user used about how a shot TASTES or FEELS (e.g. 'sour', 'sharp', 'bitter', "
+        "'harsh', 'thin', 'watery', 'dry', 'astringent', 'hollow', 'muddy', 'heavy', 'chocolatey') into the "
+        "coffee science behind it: the sensory modality, the leading physical cause, which way it points on "
+        "extraction/strength, contested alternative causes to rule out, and a citation. Use it to understand what "
+        "the user's language MEANS before you advise. Speak the plain-English takeaway; keep the jargon to yourself.");
+    QJsonObject ttSchema;
+    ttSchema["type"] = QString("object");
+    QJsonObject ttProps;
+    ttProps["word"] = strProp("The single taste/mouthfeel word the user used, e.g. \"sour\" or \"thin\".");
+    ttSchema["properties"] = ttProps;
+    ttSchema["required"] = QJsonArray{ QString("word") };
+    tt["input_schema"] = ttSchema;
+    tools.append(tt);
+
+    // recommend_next_shot — the planner: taste + shot context -> ONE change, stated as a checkable hypothesis.
+    QJsonObject rns;
+    rns["name"] = QString("recommend_next_shot");
+    rns["description"] = QString(
+        "Given how a shot tasted, get the single best next change to try, stated as a checkable hypothesis with "
+        "the trace change to watch for and how you'll know if it's wrong. This is your dial-in reasoning engine — "
+        "call it whenever the user gives taste feedback and wants to improve the next shot. BY DEFAULT it reads the "
+        "user's MOST RECENT shot straight from the machine — its real dose, yield, ratio, duration, grind, and the "
+        "OBJECTIVE trace (did it actually channel? run fast or slow?) from the shot's own detectors — plus the "
+        "prior-shot history for that bean+grinder, and returns a `machine_data` and `history` block alongside the "
+        "advice. So you usually only need to pass the taste. Pass `shot_id` to reason about a specific earlier shot "
+        "instead of the last one. The taste/roast/trace/etc. fields OVERRIDE what the machine shows (use them for a "
+        "video-only or hypothetical shot). It NEVER invents extraction numbers and always fixes puck prep first "
+        "when the shot channeled.");
+    QJsonObject rnsSchema;
+    rnsSchema["type"] = QString("object");
+    QJsonObject rnsProps;
+    rnsProps["taste"] = strProp("The main taste verdict / word, e.g. \"sour\", \"bitter\", \"thin\", \"harsh\". If omitted, the shot's own tasteBalance is used.");
+    rnsProps["shot_id"] = intProp("Optional: reason about THIS shot id (from query_shots) instead of the most recent shot.");
+    rnsProps["roast"] = strProp("Override roast level: \"light\", \"medium\", or \"dark\" (else taken from the shot's bean).");
+    rnsProps["trace"] = strProp("Override the trace shape: \"fast\", \"slow\"/\"choked\", \"channeling\", or \"smooth\" (else derived objectively from the shot's detectors).");
+    rnsProps["ratio"] = strProp("Override brew ratio feel: \"normal\", \"wide\"/\"long\", or \"short\"/\"tight\" (else computed from the shot's yield/dose).");
+    rnsProps["body"] = strProp("Override body verdict: \"thin\", \"medium\", or \"heavy\" (else the shot's tasteBody).");
+    rnsProps["water"] = strProp("Water note if known (optional; usually leave blank).");
+    rnsSchema["properties"] = rnsProps;
+    rns["input_schema"] = rnsSchema;
+    tools.append(rns);
+
+    // plan_for_goal — human goal -> target region + roast-aware dialing path.
+    QJsonObject pfg;
+    pfg["name"] = QString("plan_for_goal");
+    pfg["description"] = QString(
+        "Turn a plain-English GOAL the user states about their coffee ('I want it sweeter', 'less sharp', 'more "
+        "chocolatey / rounder', 'punchier', 'a bigger drink', 'gentler', 'more like the cafe's') into a target and "
+        "a dialing path to get there. Pass the roast level too — the SAME goal can mean opposite moves on a light "
+        "vs a dark roast, and this returns the roast-specific path when it matters.");
+    QJsonObject pfgSchema;
+    pfgSchema["type"] = QString("object");
+    QJsonObject pfgProps;
+    pfgProps["goal"] = strProp("The user's goal in their own words, e.g. \"sweeter\" or \"more like the cafe's\".");
+    pfgProps["roast"] = strProp("Roast level if known: \"light\", \"medium\", or \"dark\".");
+    pfgSchema["properties"] = pfgProps;
+    pfgSchema["required"] = QJsonArray{ QString("goal") };
+    pfg["input_schema"] = pfgSchema;
+    tools.append(pfg);
+
     return tools;
 }
 
@@ -757,6 +859,7 @@ QJsonArray BaristaTools::webToolDefinitions()
 {
     QJsonArray tools;
     const auto strProp = [](const QString& d){ QJsonObject o; o["type"] = QString("string"); o["description"] = d; return o; };
+    const auto intProp = [](const QString& d){ QJsonObject o; o["type"] = QString("integer"); o["description"] = d; return o; };
 
     // get_weather — current conditions for a city (open-meteo, keyless).
     QJsonObject gw;
@@ -813,6 +916,64 @@ QJsonArray BaristaTools::webToolDefinitions()
     gnSchema["properties"] = gnProps;
     gn["input_schema"] = gnSchema;
     tools.append(gn);
+
+    // [barista-fork] COFFEE CLOUD tools — reach the user's espresso data beyond the local DB (Visualizer cloud +
+    // canonical bean lookup). They ride the same internet gate as the fast-path web tools; the actual network
+    // calls run in BaristaCloudTools, reached via the same webTools seam.
+
+    // get_visualizer_shot — pull ANY shot by id/link (the user's own OR a public/community one).
+    QJsonObject gvs;
+    gvs["name"] = QString("get_visualizer_shot");
+    gvs["description"] = QString(
+        "Fetch a shot from Visualizer (the online shot database) by its id or share link, and get its dial-in "
+        "summary + bean. Works for the USER'S OWN uploaded shots AND for anyone's PUBLIC shot — so when the user "
+        "pastes or names a visualizer.coffee shot link ('what do you think of this shot: <link>', 'compare mine "
+        "to this one'), use this to pull it in and reason over it. Returns dose, yield, ratio, duration, grind, "
+        "bean, roast, profile, and enjoyment (and a measured TDS/EY only if that shot's owner recorded one).");
+    QJsonObject gvsSchema;
+    gvsSchema["type"] = QString("object");
+    QJsonObject gvsProps;
+    gvsProps["shot"] = strProp("The Visualizer shot id or full share link, e.g. \"a1b2c3\" or \"https://visualizer.coffee/shots/a1b2c3\".");
+    gvsSchema["properties"] = gvsProps;
+    gvsSchema["required"] = QJsonArray{ QString("shot") };
+    gvs["input_schema"] = gvsSchema;
+    tools.append(gvs);
+
+    // search_visualizer_shots — the user's own cloud history, or the public feed, as ids to pull.
+    QJsonObject svs;
+    svs["name"] = QString("search_visualizer_shots");
+    svs["description"] = QString(
+        "List shots from Visualizer as a feed of ids you can then pull with get_visualizer_shot. scope \"mine\" "
+        "(default) lists the USER'S OWN uploaded shots — useful for cloud shots that aren't stored locally; scope "
+        "\"public\" browses OTHER people's public/community shots. This is a time-ordered feed (newest first), "
+        "NOT a search — there's no server-side filter by bean or date, so page through it (page 1, 2, …) or, "
+        "better, ask the user for a specific shot link and use get_visualizer_shot. \"mine\" needs the user's "
+        "Visualizer login to be set; \"public\" does not.");
+    QJsonObject svsSchema;
+    svsSchema["type"] = QString("object");
+    QJsonObject svsProps;
+    svsProps["scope"] = strProp("\"mine\" (the user's own uploaded shots, default) or \"public\" (the community feed).");
+    svsProps["page"]  = intProp("Feed page to fetch, 1-based (default 1). Each page is ~50 shots, newest first.");
+    svsSchema["properties"] = svsProps;
+    svs["input_schema"] = svsSchema;
+    tools.append(svs);
+
+    // look_up_bean — canonical bean details (keyless Visualizer canonical search).
+    QJsonObject lub;
+    lub["name"] = QString("look_up_bean");
+    lub["description"] = QString(
+        "Look up a coffee bean's details from Visualizer's canonical bean database: roaster, origin, region, "
+        "producer, variety, process, roast level, elevation, and the roaster's tasting notes. Use it when the "
+        "user asks about a bean ('tell me about this Ethiopian', 'what's the process on my Kenya?') or when "
+        "knowing the origin/process/roast would sharpen your dialing advice. Returns up to 5 matching beans.");
+    QJsonObject lubSchema;
+    lubSchema["type"] = QString("object");
+    QJsonObject lubProps;
+    lubProps["query"] = strProp("The bean to look up — roaster and/or name, e.g. \"Onyx Southern Weather\" or \"Ethiopia Yirgacheffe\".");
+    lubSchema["properties"] = lubProps;
+    lubSchema["required"] = QJsonArray{ QString("query") };
+    lub["input_schema"] = lubSchema;
+    tools.append(lub);
 
     return tools;
 }
@@ -962,7 +1123,10 @@ void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage*
     // calls one — and it is only OFFERED these definitions when webSearchEnabled is on (webToolDefinitions() is
     // appended under RequestOptions.webSearch). An empty seam (module off / not wired) yields an error result.
     if (name == QLatin1String("get_weather") || name == QLatin1String("get_stock_quote")
-        || name == QLatin1String("get_local_news")) {
+        || name == QLatin1String("get_local_news")
+        // [barista-fork] Coffee CLOUD tools ride the SAME seam (the module dispatches by name to BaristaCloudTools).
+        || name == QLatin1String("get_visualizer_shot") || name == QLatin1String("search_visualizer_shots")
+        || name == QLatin1String("look_up_bean")) {
         if (!webTools) {
             done(QJsonObject{{QStringLiteral("error"), QStringLiteral("web tools unavailable")}});
             return;
@@ -982,6 +1146,109 @@ void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage*
         }
         endConversation();
         done(QJsonObject{{QStringLiteral("ended"), true}});
+        return;
+    }
+
+    // [barista-fork] Coffee-science brain (CoffeeKnowledgeBase) — three pure, synchronous read tools over the
+    // bundled KB. No storage, no seam, no thread: the shared instance is cached JSON. If the resource failed to
+    // load we say so plainly rather than answer from nothing (the whole point is grounded, cited advice).
+    if (name == QLatin1String("translate_taste")
+        || name == QLatin1String("recommend_next_shot")
+        || name == QLatin1String("plan_for_goal")) {
+        const CoffeeKnowledgeBase& kb = CoffeeKnowledgeBase::instance();
+        if (!kb.isLoaded()) {
+            done(QJsonObject{{QStringLiteral("error"), QStringLiteral("coffee knowledge base unavailable")}});
+            return;
+        }
+        if (name == QLatin1String("translate_taste")) {
+            done(kb.translateTaste(input.value(QStringLiteral("word")).toString()));
+            return;
+        }
+        if (name == QLatin1String("plan_for_goal")) {
+            done(kb.planForGoal(input.value(QStringLiteral("goal")).toString(),
+                                input.value(QStringLiteral("roast")).toString()));
+            return;
+        }
+
+        // recommend_next_shot — GROUND the advice in the user's actual measured shot + prior-shot history
+        // whenever we can. Resolve which shot to read: an explicit shot_id, else the most recent shot.
+        qint64 shotId = input.value(QStringLiteral("shot_id")).toVariant().toLongLong();
+        if (shotId <= 0 && shotHistory)
+            shotId = shotHistory->lastSavedShotId();
+        // No shot / no storage → fall back to the model-supplied free-text reasoning (still cited).
+        if (shotId <= 0 || !shotHistory || shotHistory->databasePath().isEmpty()) {
+            QJsonObject out = kb.recommendNextShot(input);
+            out[QStringLiteral("grounded_in_shot")] = false;
+            done(std::move(out));
+            return;
+        }
+        const QString dbPath = shotHistory->databasePath();
+        const QJsonObject in = input;
+        QThread* thread = QThread::create([dbPath, shotId, in, done]() {
+            QJsonObject result;
+            const bool dbOk = withTempDb(dbPath, "barista_recommend", [&](QSqlDatabase& db) {
+                const ShotProjection shot = ShotHistoryStorage::convertShotRecord(
+                    ShotHistoryStorage::loadShotRecordStatic(db, shotId));
+                const CoffeeKnowledgeBase& kb2 = CoffeeKnowledgeBase::instance();
+                if (!shot.isValid()) {
+                    // Shot vanished — degrade to free-text reasoning rather than erroring out.
+                    result = kb2.recommendNextShot(in);
+                    result[QStringLiteral("grounded_in_shot")] = false;
+                    return;
+                }
+                // Objective inputs derived from the MEASURED shot; an explicit input field overrides.
+                const auto pick = [&](const char* key, const QString& derived) {
+                    const QString v = in.value(QLatin1String(key)).toString().trimmed();
+                    return v.isEmpty() ? derived : v;
+                };
+                QJsonObject ctx;
+                ctx[QStringLiteral("taste")] = pick("taste", shot.tasteBalance);
+                ctx[QStringLiteral("roast")] = pick("roast", shot.roastLevel);
+                ctx[QStringLiteral("trace")] = pick("trace", objectiveTraceShape(shot));
+                ctx[QStringLiteral("ratio")] = pick("ratio", ratioBucketFromShot(shot.doseWeightG, shot.finalWeightG));
+                ctx[QStringLiteral("body")]  = pick("body", shot.tasteBody);
+                ctx[QStringLiteral("water")] = in.value(QStringLiteral("water")).toString();
+
+                result = kb2.recommendNextShot(ctx);
+                result[QStringLiteral("grounded_in_shot")] = true;
+
+                // The measured shot the advice rests on — real numbers for the barista's OWN reasoning
+                // (the persona says lead with the drink, not a spec recitation).
+                QJsonObject md{ {QStringLiteral("shotId"), shotId} };
+                if (shot.doseWeightG > 0) md[QStringLiteral("doseG")] = shot.doseWeightG;
+                if (shot.finalWeightG > 0) md[QStringLiteral("yieldG")] = shot.finalWeightG;
+                if (shot.doseWeightG > 0 && shot.finalWeightG > 0)
+                    md[QStringLiteral("ratio")] = QString::number(shot.finalWeightG / shot.doseWeightG, 'f', 1).toDouble();
+                if (shot.durationSec > 0) md[QStringLiteral("durationSec")] = shot.durationSec;
+                if (!shot.grinderSetting.isEmpty()) md[QStringLiteral("grind")] = shot.grinderSetting;
+                if (!shot.roastLevel.isEmpty()) md[QStringLiteral("roast")] = shot.roastLevel;
+                if (!shot.tasteBalance.isEmpty()) md[QStringLiteral("tasteBalance")] = shot.tasteBalance;
+                if (!shot.tasteBody.isEmpty()) md[QStringLiteral("tasteBody")] = shot.tasteBody;
+                md[QStringLiteral("channelingDetected")] = shot.channelingDetected;
+                const QString gdir = shot.detectorResults.value(QStringLiteral("grind")).toMap()
+                                         .value(QStringLiteral("direction")).toString();
+                if (!gdir.isEmpty()) md[QStringLiteral("grindDirection")] = gdir;
+                md[QStringLiteral("objectiveTrace")] = ctx.value(QStringLiteral("trace"));
+                result[QStringLiteral("machine_data")] = md;
+
+                // Prior-shot history for THIS bean+profile so advice builds on what's already been tried.
+                if (!shot.profileKbId.isEmpty()) {
+                    QJsonObject hist;
+                    const QJsonArray sessions =
+                        DialingBlocks::buildDialInSessionsBlock(db, shot.profileKbId, shotId, 5);
+                    if (!sessions.isEmpty()) hist[QStringLiteral("dialInSessions")] = sessions;
+                    const QJsonObject best = DialingBlocks::buildBeanBestShotBlock(
+                        db, shot.profileKbId, shot.beanBrand, shot.beanType, QString(), shotId, shot);
+                    if (!best.isEmpty()) hist[QStringLiteral("beanBestShot")] = best;
+                    if (!hist.isEmpty()) result[QStringLiteral("history")] = hist;
+                }
+            });
+            if (!dbOk && result.isEmpty())
+                result = QJsonObject{ {QStringLiteral("error"), QStringLiteral("shot database unavailable")} };
+            QMetaObject::invokeMethod(qApp, [done, result]() { done(result); }, Qt::QueuedConnection);
+        });
+        QObject::connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+        thread->start();
         return;
     }
 
@@ -2217,7 +2484,10 @@ void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage*
     const QString sortBy    = input.value(QStringLiteral("sortBy")).toString().trimmed();
     int limit = input.value(QStringLiteral("limit")).toInt(15);
     if (limit <= 0) limit = 15;
-    if (limit > 50) limit = 50;
+    // [barista-fork] Ceiling raised 50 → 200 (the storage query's own cap) so the barista can pull DEEP
+    // history in one call when the user wants a broad look ("how have all my Kenya shots trended?"); the
+    // default stays 15 so ordinary turns stay lean.
+    if (limit > 200) limit = 200;
 
     // Resolve date filters to epoch bounds here so the worker stays pure. sinceDate wins over sinceDaysAgo.
     qint64 sinceEpoch = 0, untilEpoch = 0;

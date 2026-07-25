@@ -13,6 +13,7 @@
 #include "baristavoiceid.h"       // [barista-fork] voice-ID enrollment + probe coordinator
 #include "coachphrasebook.h"      // [barista-fork] live-coach model-generated phrasing + gameplan
 #include "baristawebtools.h"      // [barista-fork] fast-path web tools (weather / stock / local news)
+#include "baristacloudtools.h"    // [barista-fork] coffee cloud tools (Visualizer shots + canonical bean lookup)
 #include "../core/settings.h"        // [barista-fork] app Settings → dye()->dyeBarista() for the active user
 #include "../core/settings_dye.h"
 #include "../controllers/maincontroller.h"
@@ -62,6 +63,8 @@ BaristaModule::BaristaModule(MainController* mainController, MachineState* machi
     // one host with only the user's query (city/symbol/topic). See BaristaWebTools' privacy note.
     , m_webNetwork(new QNetworkAccessManager(this))
     , m_webTools(new BaristaWebTools(m_webNetwork, this))
+    // [barista-fork] Coffee cloud tools reuse the web QNAM and read the app's stored Visualizer login.
+    , m_cloudTools(new BaristaCloudTools(m_webNetwork, appSettings, this))
     // [barista-fork] Diagnostic recorder. Constructed FIRST-class here so its static record() has a live
     // instance for the whole session; sets BaristaDiagnostics::s_instance in its ctor.
     , m_diagnostics(new BaristaDiagnostics(this))
@@ -142,9 +145,23 @@ BaristaModule::BaristaModule(MainController* mainController, MachineState* machi
             // which resolves `done` on the main thread. m_webTools + m_settings outlive AIManager (all parented
             // under the module).
             BaristaWebTools* web = m_webTools;
+            BaristaCloudTools* cloud = m_cloudTools;
             AssistantSettings* settings = m_settings;
-            ai->setWebToolsHandler([web, settings](const QString& name, const QJsonObject& input,
-                                                   std::function<void(QJsonValue)> done) {
+            ai->setWebToolsHandler([web, cloud, settings](const QString& name, const QJsonObject& input,
+                                                          std::function<void(QJsonValue)> done) {
+                // [barista-fork] Coffee cloud tools share this seam (same internet gate); dispatch them first.
+                if (name == QLatin1String("get_visualizer_shot")) {
+                    cloud->getVisualizerShot(input.value(QStringLiteral("shot")).toString(), std::move(done));
+                    return;
+                }
+                if (name == QLatin1String("search_visualizer_shots")) {
+                    cloud->searchVisualizerShots(input, std::move(done));
+                    return;
+                }
+                if (name == QLatin1String("look_up_bean")) {
+                    cloud->lookUpBean(input.value(QStringLiteral("query")).toString(), std::move(done));
+                    return;
+                }
                 const QString home = settings ? settings->homeLocation().trimmed() : QString();
                 if (name == QLatin1String("get_weather")) {
                     QString location = input.value(QStringLiteral("location")).toString().trimmed();

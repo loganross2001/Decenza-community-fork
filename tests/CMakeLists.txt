@@ -1131,6 +1131,15 @@ target_compile_definitions(tst_kb_schema PRIVATE
     VALIDATE_KB_REAL_JSON="${CMAKE_SOURCE_DIR}/resources/ai/profile_knowledge.json"
 )
 
+# --- tst_coffeeknowledgebase: [barista-fork] the coffee-science brain's reasoning paths
+# (translate_taste / recommend_next_shot / plan_for_goal). Compiles the real loader and loads
+# the SHIPPED resources/barista/coffee_knowledge.json via DECENZA_SOURCE_DIR (no qrc needed —
+# the test feeds raw bytes to CoffeeKnowledgeBase::fromJson). Pure Qt Core; no DB, no GUI.
+add_decenza_test(tst_coffeeknowledgebase
+    tst_coffeeknowledgebase.cpp
+    ${CMAKE_SOURCE_DIR}/src/barista/coffeeknowledgebase.cpp
+)
+
 # --- failonwarning_lint: guard that every QTEST_*MAIN test file arms
 # QTest::failOnWarning() (see tests/lint_failonwarning.cmake and the Handling
 # Warnings section of docs/CLAUDE_MD/TESTING.md). A pure cmake -P check — no

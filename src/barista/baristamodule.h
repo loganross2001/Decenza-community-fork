@@ -21,6 +21,7 @@ class AssistantOrchestrator;
 class AssistantVoice;
 class FeedbackStorage;   // [barista-fork] verbal-feedback KB
 class BaristaWebTools;   // [barista-fork] fast-path web tools (weather / stock / local news)
+class BaristaCloudTools; // [barista-fork] coffee cloud tools (Visualizer shots + canonical bean lookup)
 class CoachPhrasebook;   // [barista-fork] model-generated live-coach phrasing
 class QNetworkAccessManager;
 
@@ -109,6 +110,10 @@ private:
     // fallback + builds the news query before calling into it.
     QNetworkAccessManager* m_webNetwork = nullptr;
     BaristaWebTools* m_webTools = nullptr;
+    // [barista-fork] Coffee CLOUD tools (get_visualizer_shot / search_visualizer_shots / look_up_bean). Reuses
+    // m_webNetwork; reads the app's stored Visualizer login for authenticated pulls; dispatched via the same
+    // web-tools seam by name.
+    BaristaCloudTools* m_cloudTools = nullptr;
     // [barista-fork] Always-on voice/coaching timeline recorder (owned here). Its static record() is used
     // across subsystems; this instance is what backs Barista.diagnostics and the settings card.
     BaristaDiagnostics* m_diagnostics = nullptr;

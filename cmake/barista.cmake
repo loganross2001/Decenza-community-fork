@@ -31,6 +31,27 @@ target_sources(Decenza PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristatools.cpp
 )
 
+# CoffeeKnowledgeBase — the grounded coffee-science "brain" (perception->cause lexicon, causal
+# lever graph, diagnostic rules, goal->dial maps), loaded from the bundled :/barista/coffee_knowledge.json.
+# Registered UNCONDITIONALLY like BaristaTools: baristatools.cpp (unconditional) references it in the
+# translate_taste / recommend_next_shot / plan_for_goal executors, so a DECENZA_BARISTA=OFF build must
+# still link. Depends only on Qt Core, so it is safe in the DB-only test binaries too.
+target_sources(Decenza PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/coffeeknowledgebase.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/coffeeknowledgebase.cpp
+)
+
+# The KB data is bundled through THIS private module (never the shared resources/ai.qrc), so the
+# barista's coffee-science asset stays entirely inside the fork and upstream's resource lists are
+# untouched — the same isolation the barista QML uses. Its own prefix (/barista) keeps it clear of
+# upstream's /ai resource tree. Registered UNCONDITIONALLY so the always-compiled loader finds it.
+qt_add_resources(Decenza "barista_kb"
+    PREFIX "/barista"
+    BASE "${CMAKE_CURRENT_SOURCE_DIR}/resources/barista"
+    FILES
+        ${CMAKE_CURRENT_SOURCE_DIR}/resources/barista/coffee_knowledge.json
+)
+
 # BaristaDiagnostics — the always-on voice/coaching timeline recorder. Registered UNCONDITIONALLY
 # because its static record() is called from always-compiled files (aiprovider.cpp, the live
 # coaches, baristatools.cpp); a DECENZA_BARISTA=OFF build must still link those record() calls
@@ -90,6 +111,11 @@ if(DECENZA_BARISTA)
         # through a std::function seam, so this stays out of the DB-only tests (it pulls in QtNetwork).
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristawebtools.h
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristawebtools.cpp
+        # [barista-fork] Cloud data tools (get_visualizer_shot / search_visualizer_shots / look_up_bean). Gated
+        # WITH the module like BaristaWebTools — only baristamodule.cpp names it, and it pulls QtNetwork +
+        # BeanBaseClient, so it must stay out of a DECENZA_BARISTA=OFF binary and the DB-only tests.
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristacloudtools.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristacloudtools.cpp
         # [barista-fork] Voice-ID (Phase 2, Increment 1): on-device speaker enrollment + concurrent-capture
         # probe. Gated WITH the module (only baristamodule.cpp names BaristaVoiceId). MfccEmbedder is a
         # self-contained MFCC baseline behind the SpeakerEmbedder seam (ONNX/ECAPA can drop in later);

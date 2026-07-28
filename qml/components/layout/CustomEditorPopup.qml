@@ -252,8 +252,8 @@ Dialog {
 
                 // Current icon preview
                 Rectangle {
-                    width: Theme.scaled(40)
-                    height: Theme.scaled(40)
+                    Layout.preferredWidth: Theme.scaled(40)
+                    Layout.preferredHeight: Theme.scaled(40)
                     radius: Theme.scaled(6)
                     color: Theme.backgroundColor
                     border.color: Theme.borderColor
@@ -281,7 +281,7 @@ Dialog {
                 // Pick / Clear buttons
                 Rectangle {
                     Layout.preferredWidth: pickText.implicitWidth + Theme.scaled(16)
-                    height: Theme.scaled(28)
+                    Layout.preferredHeight: Theme.scaled(28)
                     radius: Theme.scaled(6)
                     color: pickMa.pressed ? Theme.primaryColor : Theme.backgroundColor
                     border.color: Theme.primaryColor
@@ -308,8 +308,8 @@ Dialog {
 
                 Rectangle {
                     visible: popup.textEmoji !== ""
-                    width: clearEmojiText.implicitWidth + Theme.scaled(16)
-                    height: Theme.scaled(28)
+                    Layout.preferredWidth: clearEmojiText.implicitWidth + Theme.scaled(16)
+                    Layout.preferredHeight: Theme.scaled(28)
                     radius: Theme.scaled(6)
                     color: clearEmojiMa.pressed ? Theme.errorColor : Theme.backgroundColor
                     border.color: Theme.errorColor
@@ -355,7 +355,7 @@ Dialog {
 
                 Rectangle {
                     Layout.fillWidth: true
-                    height: Theme.scaled(112)
+                    Layout.preferredHeight: Theme.scaled(112)
                     color: Theme.backgroundColor
                     radius: Theme.scaled(6)
                     border.color: contentInput.activeFocus ? Theme.primaryColor : Theme.borderColor
@@ -560,7 +560,7 @@ Dialog {
 
                         // Bold
                         Rectangle {
-                            width: Theme.scaled(30); height: Theme.scaled(30)
+                            Layout.preferredWidth: Theme.scaled(30); Layout.preferredHeight: Theme.scaled(30)
                             radius: Theme.scaled(4)
                             color: formatter.bold ? Theme.primaryColor : (boldMa.pressed ? Qt.darker(Theme.backgroundColor, 1.3) : Theme.backgroundColor)
                             border.color: Theme.borderColor; border.width: 1
@@ -579,7 +579,7 @@ Dialog {
 
                         // Italic
                         Rectangle {
-                            width: Theme.scaled(30); height: Theme.scaled(30)
+                            Layout.preferredWidth: Theme.scaled(30); Layout.preferredHeight: Theme.scaled(30)
                             radius: Theme.scaled(4)
                             color: formatter.italic ? Theme.primaryColor : (italicMa.pressed ? Qt.darker(Theme.backgroundColor, 1.3) : Theme.backgroundColor)
                             border.color: Theme.borderColor; border.width: 1
@@ -596,7 +596,7 @@ Dialog {
                             MouseArea { id: italicMa; anchors.fill: parent; onClicked: formatter.toggleItalic() }
                         }
 
-                        Rectangle { width: 1; height: Theme.scaled(20); color: Theme.borderColor }
+                        Rectangle { Layout.preferredWidth: 1; Layout.preferredHeight: Theme.scaled(20); color: Theme.borderColor }
 
                         // Font sizes
                         Repeater {
@@ -668,7 +668,7 @@ Dialog {
                         }
 
                         Rectangle {
-                            width: Theme.scaled(26); height: Theme.scaled(26)
+                            Layout.preferredWidth: Theme.scaled(26); Layout.preferredHeight: Theme.scaled(26)
                             radius: Theme.scaled(13)
                             color: formatter.currentColor || "#ffffff"
                             border.color: Theme.borderColor; border.width: 1
@@ -690,7 +690,7 @@ Dialog {
 
                         // Clear text color (reset selection to default)
                         Rectangle {
-                            width: Theme.scaled(22); height: Theme.scaled(22)
+                            Layout.preferredWidth: Theme.scaled(22); Layout.preferredHeight: Theme.scaled(22)
                             radius: Theme.scaled(11)
                             color: clearFgMa.pressed ? Theme.errorColor : "transparent"
                             border.color: Theme.errorColor; border.width: 1
@@ -719,7 +719,7 @@ Dialog {
                         }
 
                         Rectangle {
-                            width: Theme.scaled(26); height: Theme.scaled(26)
+                            Layout.preferredWidth: Theme.scaled(26); Layout.preferredHeight: Theme.scaled(26)
                             radius: Theme.scaled(13)
                             color: popup.textBackgroundColor || Theme.backgroundColor
                             border.color: popup.textBackgroundColor ? Theme.primaryContrastColor : Theme.borderColor
@@ -754,7 +754,7 @@ Dialog {
                         // Clear bg
                         Rectangle {
                             visible: popup.textBackgroundColor !== ""
-                            width: Theme.scaled(22); height: Theme.scaled(22)
+                            Layout.preferredWidth: Theme.scaled(22); Layout.preferredHeight: Theme.scaled(22)
                             radius: Theme.scaled(11)
                             color: clearBgMa.pressed ? Theme.errorColor : "transparent"
                             border.color: Theme.errorColor; border.width: 1
@@ -778,8 +778,8 @@ Dialog {
 
                         // Hide background toggle
                         Rectangle {
-                            width: noBgText.implicitWidth + Theme.scaled(12)
-                            height: Theme.scaled(22)
+                            Layout.preferredWidth: noBgText.implicitWidth + Theme.scaled(12)
+                            Layout.preferredHeight: Theme.scaled(22)
                             radius: Theme.scaled(11)
                             color: popup.textHideBackground ? Theme.primaryColor : "transparent"
                             border.color: popup.textHideBackground ? Theme.primaryColor : Theme.borderColor
@@ -808,7 +808,7 @@ Dialog {
                 // Vertical separator
                 Rectangle {
                     Layout.fillHeight: true
-                    width: 1
+                    Layout.preferredWidth: 1
                     color: Theme.borderColor
                 }
 
@@ -836,7 +836,7 @@ Dialog {
                 // Vertical separator
                 Rectangle {
                     Layout.fillHeight: true
-                    width: 1
+                    Layout.preferredWidth: 1
                     color: Theme.borderColor
                 }
 
@@ -856,7 +856,7 @@ Dialog {
                     // Click action selector
                     Rectangle {
                         Layout.fillWidth: true
-                        height: Theme.scaled(28)
+                        Layout.preferredHeight: Theme.scaled(28)
                         radius: Theme.scaled(4)
                         color: Theme.backgroundColor
                         border.color: popup.textAction ? Theme.primaryColor : Theme.borderColor
@@ -899,7 +899,7 @@ Dialog {
                     // Long Press action selector
                     Rectangle {
                         Layout.fillWidth: true
-                        height: Theme.scaled(28)
+                        Layout.preferredHeight: Theme.scaled(28)
                         radius: Theme.scaled(4)
                         color: Theme.backgroundColor
                         border.color: popup.textLongPressAction ? Theme.primaryColor : Theme.borderColor
@@ -942,7 +942,7 @@ Dialog {
                     // Double Click action selector
                     Rectangle {
                         Layout.fillWidth: true
-                        height: Theme.scaled(28)
+                        Layout.preferredHeight: Theme.scaled(28)
                         radius: Theme.scaled(4)
                         color: Theme.backgroundColor
                         border.color: popup.textDoubleclickAction ? Theme.primaryColor : Theme.borderColor
@@ -1096,7 +1096,7 @@ Dialog {
                         spacing: Theme.scaled(8)
 
                         Rectangle {
-                            width: Theme.scaled(48); height: Theme.scaled(48)
+                            Layout.preferredWidth: Theme.scaled(48); Layout.preferredHeight: Theme.scaled(48)
                             radius: Theme.scaled(8)
                             color: cpEditorInner.color
                             border.color: Theme.primaryContrastColor; border.width: 2
@@ -1112,7 +1112,7 @@ Dialog {
 
                         Rectangle {
                             Layout.preferredWidth: Theme.scaled(80)
-                            height: Theme.scaled(32)
+                            Layout.preferredHeight: Theme.scaled(32)
                             radius: Theme.scaled(6)
                             color: cpApplyMa.pressed ? Qt.darker(Theme.primaryColor, 1.2) : Theme.primaryColor
                             Accessible.role: Accessible.Button
@@ -1137,7 +1137,7 @@ Dialog {
 
                         Rectangle {
                             Layout.preferredWidth: Theme.scaled(80)
-                            height: Theme.scaled(32)
+                            Layout.preferredHeight: Theme.scaled(32)
                             radius: Theme.scaled(6)
                             color: cpCloseMa.pressed ? Qt.darker(Theme.backgroundColor, 1.2) : Theme.backgroundColor
                             border.color: Theme.borderColor; border.width: 1

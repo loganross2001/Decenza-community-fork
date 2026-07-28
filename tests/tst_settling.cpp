@@ -52,6 +52,30 @@ private slots:
         QCOMPARE(model.temperatureMixGoalData().size(), 50);
     }
 
+    // stopTime() is SAW-only, and silently so. It is written by exactly one
+    // caller — markStopAt(), wired to WeightProcessor::stopNow — so a shot that
+    // ends any other way (manual stop, profile end, volume stop, or SAW blocked
+    // by an oscillating scale) finishes with a full data set and stopTime still
+    // at its -1 sentinel. Nothing about the getter's name says that, and the
+    // Home Screen widget was wired to it as if it meant "how long the shot
+    // ran": every non-SAW shot was rejected as non-finalized and the last-shot
+    // tile stopped updating (#1658). Consumers wanting a duration must take the
+    // finalized value from MainController::shotPersisted instead.
+    void stopTimeStaysSentinelWithoutSaw() {
+        ShotDataModel model;
+        populateWithSettlingData(model, 50, 10);
+
+        // A real shot by every other measure...
+        QVERIFY(model.rawTime() > 0.0);
+        QVERIFY(!model.cumulativeWeightData().isEmpty());
+        // ...yet this is what a widget reading stopTime() would have been handed.
+        QCOMPARE(model.stopTime(), -1.0);
+
+        // And it only becomes a duration once the SAW path marks it.
+        model.markStopAt(10.0);
+        QCOMPARE(model.stopTime(), 10.0);
+    }
+
     void trimPreservesWeightData() {
         ShotDataModel model;
         populateWithSettlingData(model, 50, 10);
@@ -502,10 +526,6 @@ private slots:
         scale.mockSetConnected(true);
         tc.setScale(&scale);
 
-        // ScaleDevice's destructor emits a DISCONNECTED warning as the mock goes out
-        // of scope at test end; mark it expected per docs/CLAUDE_MD/TESTING.md.
-        QTest::ignoreMessage(QtWarningMsg, QRegularExpression("DISCONNECTED"));
-
         // Populate state so onSettlingComplete passes every guard and reaches the
         // sawLearningComplete emit: drip=1.5g, flow=1.5ml/s, overshoot=0.5g.
         tc.m_weightAtStop = 35.0;
@@ -537,11 +557,49 @@ private slots:
         QSignalSpy sawSpy(&tc, &ShotTimingController::sawLearningComplete);
         QSignalSpy readySpy(&tc, &ShotTimingController::shotProcessingReady);
 
-        QTest::ignoreMessage(QtWarningMsg, QRegularExpression("Scale disconnected"));
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression("No physical scale at settling"));
         tc.onSettlingComplete();
 
         QCOMPARE(sawSpy.count(), 0);   // learning skipped
         QCOMPARE(readySpy.count(), 1); // but shot still saves
+    }
+
+    void flowScaleServesSawButNeverTrainsIt() {
+        // A virtual scale is permanently isConnected(), so the connection check alone
+        // lets it through. Without the isFlowScale() clause a scale-less shot trains a
+        // physical scale's pool from a flow-integral ESTIMATE — and a biased one: the
+        // gravity drip off the puck lands after the pour ends, which is exactly when
+        // FlowScale goes silent, so its drip is systematically low and drags the saved
+        // scale's learned model down. SAW then stops late and overshoots once the real
+        // scale is reconnected. See the reasoning at the guard itself.
+        //
+        // State below is byte-for-byte the passing case in
+        // sawLearningCompleteFiresBeforeShotProcessingReady above, so the ONLY
+        // difference is isFlowScale() — deleting that clause flips this test red
+        // while the positive test stays green. (Note the fixture's drip is 1.5 g, not
+        // zero; the guard does not depend on the value, only on the source.)
+        DE1Device device;
+        ShotTimingController tc(&device);
+
+        MockScaleDevice scale;
+        scale.mockSetConnected(true);
+        scale.setIsFlowScale(true);
+        tc.setScale(&scale);
+
+        tc.m_weightAtStop = 35.0;
+        tc.m_flowRateAtStop = 1.5;
+        tc.m_targetWeightAtStop = 36.0;
+        tc.m_weight = 36.5;
+        tc.m_sawSettling = true;
+
+        QSignalSpy sawSpy(&tc, &ShotTimingController::sawLearningComplete);
+        QSignalSpy readySpy(&tc, &ShotTimingController::shotProcessingReady);
+
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression("No physical scale at settling"));
+        tc.onSettlingComplete();
+
+        QCOMPARE(sawSpy.count(), 0);    // never trains the physical scale's pool
+        QCOMPARE(readySpy.count(), 1);  // but the scale-less shot still saves
     }
 
     void startShotCancelsSettlingAndEmitsReady() {
@@ -579,7 +637,7 @@ private slots:
         tc.onSawTriggered(35.0, 2.0, 36.0);
         QVERIFY(tc.wasSawTriggered());
         tc.m_sawSettling = true;
-        QTest::ignoreMessage(QtWarningMsg, QRegularExpression("Scale disconnected"));
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression("No physical scale at settling"));
         tc.onSettlingComplete();  // clears m_sawTriggeredThisShot internally
         QVERIFY2(tc.wasSawTriggered(),
                  "#1161: SAW must still read true after settling — "

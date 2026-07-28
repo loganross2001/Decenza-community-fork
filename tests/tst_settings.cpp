@@ -1,6 +1,10 @@
 #include <QtTest>
 #include <QSettings>
 #include <QSignalSpy>
+#include <QQmlEngine>
+#include <QQmlComponent>
+#include <QQmlContext>
+#include <memory>
 
 #include "core/settings.h"
 #include "core/settings_app.h"
@@ -650,6 +654,76 @@ private slots:
         QVERIFY(SettingsSerializer::importFromJson(&m_settings, bundle));
 
         QCOMPARE(m_settings.brew()->getWaterVesselPreset(idx)["temperature"].toDouble(), 92.0);
+    }
+
+    void duplicatePresetNamesAreRejected() {
+        // Presets are addressed BY NAME downstream (recipes snapshot the vessel or
+        // pitcher and re-select it by name on activation), so two sharing a name
+        // are indistinguishable — the setter refuses the second one.
+        const qsizetype before = m_settings.brew()->waterVesselPresets().size();
+        m_settings.brew()->addWaterVesselPreset("Duplicate Test", 250);
+        QCOMPARE(m_settings.brew()->waterVesselPresets().size(), before + 1);
+
+        // Same name, and the case-insensitive/whitespace variants of it.
+        for (const QString& clash : {QStringLiteral("Duplicate Test"),
+                                     QStringLiteral("duplicate test"),
+                                     QStringLiteral("  Duplicate Test  ")}) {
+            QTest::ignoreMessage(QtWarningMsg,
+                QRegularExpression(QStringLiteral("refusing a duplicate water vessel named")));
+            m_settings.brew()->addWaterVesselPreset(clash, 300);
+        }
+        QCOMPARE(m_settings.brew()->waterVesselPresets().size(), before + 1);
+        QVERIFY(m_settings.brew()->waterVesselNameTaken("DUPLICATE TEST"));
+        QVERIFY(!m_settings.brew()->waterVesselNameTaken("Something Else"));
+
+        // Renaming a preset to the name it already holds is not a clash.
+        const int idx = static_cast<int>(before);
+        QVERIFY(!m_settings.brew()->waterVesselNameTaken("Duplicate Test", idx));
+        m_settings.brew()->updateWaterVesselPreset(idx, "Duplicate Test", 275);
+        QCOMPARE(m_settings.brew()->getWaterVesselPreset(idx)["volume"].toInt(), 275);
+
+        // The pitcher list carries the identical contract.
+        const qsizetype pitchersBefore = m_settings.brew()->steamPitcherPresets().size();
+        m_settings.brew()->addSteamPitcherPreset("Duplicate Pitcher", 30, 150, 150.0);
+        QTest::ignoreMessage(QtWarningMsg,
+            QRegularExpression(QStringLiteral("refusing a duplicate steam pitcher named")));
+        m_settings.brew()->addSteamPitcherPreset("duplicate pitcher", 45, 150, 150.0);
+        QCOMPARE(m_settings.brew()->steamPitcherPresets().size(), pitchersBefore + 1);
+    }
+
+    void unreadablePresetBlobIsNotOverwritten() {
+        // A corrupt preset blob used to be indistinguishable from an absent key:
+        // both parsed to an empty array, so the app reported "no presets" and the
+        // next add saved that empty array OVER the bytes it could not read. The
+        // read must warn, and every writer must refuse rather than destroy it.
+        QSettings raw(Settings::testQSettingsPath(), QSettings::IniFormat);
+        const QByteArray corrupt = QByteArrayLiteral("{ this is not json");
+        raw.setValue("water/vesselPresets", corrupt);
+        raw.sync();
+
+        // Read through a FRESH Settings, as visualizerAutoUpdateDefault does: the
+        // shared m_settings holds its own QSettings instance and need not observe
+        // another instance's write.
+        {
+            Settings fresh;
+            QTest::ignoreMessage(QtWarningMsg,
+                QRegularExpression(QStringLiteral("SettingsBrew: could not parse water/vesselPresets")));
+            QVERIFY(fresh.brew()->waterVesselPresets().isEmpty());
+
+            // The add is refused — it warns again on its own read — and the
+            // stored bytes survive untouched.
+            QTest::ignoreMessage(QtWarningMsg,
+                QRegularExpression(QStringLiteral("SettingsBrew: could not parse water/vesselPresets")));
+            fresh.brew()->addWaterVesselPreset("Should not be written", 200);
+        }
+
+        raw.sync();
+        QCOMPARE(raw.value("water/vesselPresets").toByteArray(), corrupt);
+
+        // Restore a readable list; cleanupTestCase puts the original back, but
+        // the tests that follow in this class read presets through m_settings.
+        raw.setValue("water/vesselPresets", QByteArrayLiteral("[]"));
+        raw.sync();
     }
 
     void temperatureUnitRoundTrip() {
@@ -2422,6 +2496,68 @@ private slots:
         theme->resetFontSizesToDefault();
         QVERIFY(theme->fontSizeOverrides().isEmpty());
         QCOMPARE(theme->effectiveFontSizes().value("headingSize").toInt(), 32);
+    }
+
+    // QML must be able to chain THROUGH a domain sub-object: `Settings.theme.activeThemeName`,
+    // which is how roughly 1,300 call sites read settings.
+    //
+    // This is not a hypothetical. `settings.h` declares the domain Q_PROPERTYs with their
+    // concrete types (SettingsTheme* etc.) precisely so qmllint can resolve what is behind them.
+    // Getting there without including the domain headers was attempted via
+    // Q_DECLARE_OPAQUE_POINTER — which compiled, satisfied the linter, and then handed QML a
+    // QVariant(SettingsTheme*) rather than an object, leaving every `Settings.<domain>.<prop>`
+    // undefined at runtime. That approach was reverted; this test is what makes the revert
+    // permanent, because nothing else in the build would notice its return.
+    //
+    // The change this test belongs to exists because that failure mode shipped once already
+    // (#1661), and during the migration an equivalent break passed the build, the linter AND the
+    // full suite while the app was unusable. So assert it against a real QQmlEngine.
+    //
+    // NOTE ON SCOPE: this publishes the instance as a context property, which is NOT how the app
+    // does it (main.cpp publishes SettingsForeign::s_singletonInstance and QML resolves the
+    // registered singleton type). The registration itself cannot be exercised here — it is
+    // emitted by qmltyperegistrar on the Decenza QML module target, which the test binaries do
+    // not link. What is checked instead is the property-chaining behaviour, which is identical
+    // once the object reaches QML by either route, and which is what the opaque-pointer attempt
+    // broke. The registration side is covered structurally by tst_qmlregistration.
+    void qmlChainsThroughDomainSubObjects() {
+        QQmlEngine engine;
+        engine.rootContext()->setContextProperty("Settings", &m_settings);
+
+        m_settings.theme()->setActiveThemeName("qml-chain-probe");
+
+        QQmlComponent component(&engine);
+        component.setData(
+            "import QtQml\n"
+            "QtObject {\n"
+            // A live binding through the sub-object — the read half.
+            "    property string themeName: Settings.theme.activeThemeName\n"
+            "    property string readBeforeWrite\n"
+            "    property bool wroteThrough\n"
+            // The write half, deliberately after property init so it does not race the binding
+            // above. Reading is the weaker check: a `typeof === 'object'` probe passes even for a
+            // QVariant-wrapped opaque pointer, which is the exact thing that broke. A write that
+            // reaches the C++ setter cannot.
+            "    Component.onCompleted: {\n"
+            "        readBeforeWrite = themeName\n"
+            "        Settings.theme.activeThemeName = 'qml-chain-written'\n"
+            "        wroteThrough = (Settings.theme.activeThemeName === 'qml-chain-written')\n"
+            "    }\n"
+            "}\n",
+            QUrl("qrc:/tst_settings_domain_chain.qml"));
+        QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+
+        std::unique_ptr<QObject> obj(component.create());
+        QVERIFY2(obj, qPrintable(component.errorString()));
+
+        QCOMPARE(obj->property("readBeforeWrite").toString(), QStringLiteral("qml-chain-probe"));
+        QVERIFY2(obj->property("wroteThrough").toBool(),
+                 "QML could not WRITE through Settings.<domain>.");
+        // And the write landed on the C++ object rather than on a copy — the failure shape of a
+        // QVariant-wrapped pointer.
+        QCOMPARE(m_settings.theme()->activeThemeName(), QStringLiteral("qml-chain-written"));
+        // The binding followed the change, so the sub-object's NOTIFY reaches QML too.
+        QCOMPARE(obj->property("themeName").toString(), QStringLiteral("qml-chain-written"));
     }
 
 };

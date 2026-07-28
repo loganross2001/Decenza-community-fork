@@ -34,7 +34,6 @@
 #include "../ble/blemanager.h"
 #include "../ble/scaledevice.h"
 #include "../ble/scales/flowscale.h"
-#include "../ble/refractometers/refractometerdevice.h"
 #include <QGuiApplication>
 #include <QClipboard>
 #include <cmath>
@@ -63,6 +62,39 @@
 #ifdef Q_OS_ANDROID
 #include <QJniObject>
 #endif
+#include <QQmlEngine>
+#include <QJSEngine>
+
+MainController *MainController::s_qmlInstance = nullptr;
+
+void MainController::setQmlInstance(MainController *instance)
+{
+    s_qmlInstance = instance;
+}
+
+MainController *MainController::create(QQmlEngine *qmlEngine, QJSEngine *jsEngine)
+{
+    Q_UNUSED(qmlEngine)
+    Q_UNUSED(jsEngine)
+    if (!s_qmlInstance) {
+        // Reached only if QML resolves the singleton before main.cpp published the instance.
+        // Name the missing call: the symptom otherwise is most of the UI reading as undefined,
+        // which looks like a dozen unrelated bugs rather than one missing line.
+        qCritical("MainController: QML asked for the singleton before "
+                  "MainController::setQmlInstance() was called. Publish the instance before "
+                  "QQmlEngine::load().");
+        return nullptr;
+    }
+    // No second-engine guard, matching AccessibilityManager and for the same reason: this class
+    // holds no per-engine state. TranslationManager needs one only because `translate` is a
+    // QJSValue bound to one QJSEngine. Add a guard here only if this class gains a QJSValue or
+    // QJSEngine member.
+    //
+    // The engine would otherwise take ownership of what it is handed and delete a stack object
+    // owned by main().
+    QJSEngine::setObjectOwnership(s_qmlInstance, QJSEngine::CppOwnership);
+    return s_qmlInstance;
+}
 
 MainController::MainController(QNetworkAccessManager* networkManager,
                                Settings* settings, DE1Device* device,
@@ -837,9 +869,24 @@ void MainController::applyLoadedShotMetadata(qint64 shotId, const ShotRecord& sh
 
         // Restore dose (input parameter, not a result). When loading an auto-favorite,
         // `doseOverride` holds the bucketed dose shown on the card — apply that instead
-        // of the shot's raw saved dose so what-you-see is what-gets-loaded. The override
-        // is queued to run after ProfileManager::loadProfile's own deferred
-        // setDyeBeanWeight(recommendedDose) (also a QueuedConnection), so ours wins.
+        // of the shot's raw saved dose so what-you-see is what-gets-loaded.
+        //
+        // A shot replay is NOT one of the three standing dose sources, so it
+        // does not CONSULT the ladder (dose-source-precedence) — it restores
+        // what that shot was actually pulled with, whoever owns the rung.
+        //
+        // It does still MOVE the ladder, and that is intended rather than a leak
+        // in the gate: setDyeBeanWeight writes through to the bag selected a few
+        // lines above ("the shot's values win over the bag's last-used values;
+        // via write-through the bag adopts them") and stamps the active recipe,
+        // so after a replay the replayed dose genuinely IS what those rows hold.
+        // The rung following it is the cache staying truthful, not overreach.
+        //
+        // Queued so it lands after ProfileManager::loadProfile's own deferred
+        // setDyeBeanWeight(recommendedDose), which may already be armed. That
+        // write now re-checks the ladder when it lands rather than when it was
+        // armed, so this is belt-and-braces for the replay's own value rather
+        // than the only thing standing between them.
         double doseToLoad = doseOverride > 0 ? doseOverride : shotRecord.summary.doseWeight;
         if (doseToLoad > 0) {
             QPointer<Settings> settings(m_settings);
@@ -1132,6 +1179,19 @@ void MainController::setupRecipeConnections() {
         const bool hadMilk = activeRecipeHasMilk();
         m_activeRecipe = recipe;
         m_activeRecipe.insert(QStringLiteral("resolvedBagId"), resolvedBagId);
+        // Claim the dose rung from the row we just read (dose-source-precedence).
+        // This is the ONLY path that arms it on the startup restore, and the only
+        // one that re-arms it after an external edit (composer / MCP / web) —
+        // activation goes through recipeActivationReady, not here. Without it the
+        // rung reads empty for the whole session after a launch, and a profile
+        // load would both take the dose and stamp its own value over the recipe's
+        // stored doseG. Profile-less (tea) recipes claim it with 0, exactly as
+        // activation does: their leaf dose is not a shot dose.
+        m_settings->dye()->setActiveRecipe(
+            static_cast<int>(recipeId),
+            m_activeRecipe.value(QStringLiteral("profileTitle")).toString().trimmed().isEmpty()
+                ? 0.0
+                : m_activeRecipe.value(QStringLiteral("doseG")).toDouble());
         emit activeRecipeChanged();
         // Re-assert the heater hold when hasMilk changed (composer/MCP edit
         // of the active recipe) or on the startup restore of a milk recipe —
@@ -1215,7 +1275,24 @@ void MainController::setupRecipeConnections() {
     // recipe (bag-style, no dirty state). All gated inside stampActiveRecipe
     // on active-recipe presence and the m_applyingRecipe guard.
     connect(m_settings->dye(), &SettingsDye::dyeBeanWeightChanged, this, [this]() {
-        stampActiveRecipe(QStringLiteral("doseG"), m_settings->dye()->dyeBeanWeight());
+        const double dose = m_settings->dye()->dyeBeanWeight();
+        stampActiveRecipe(QStringLiteral("doseG"), dose);
+        // Keep the dose ladder's rung in step with the stamp: a dose dialed
+        // while a recipe is active BECOMES that recipe's dose, so the recipe
+        // now occupies the top rung even if it began with none. Without this,
+        // dialing a dose onto a grind-only recipe would leave the rung reading
+        // empty and the next profile load would overwrite the dialed value
+        // (dose-source-precedence).
+        //
+        // The conditions MIRROR stampActiveRecipe's, m_recipeStorage included —
+        // the rung may only claim a dose the stamp actually persisted — plus
+        // the profile-less exclusion activation applies: a hot-water tea holds
+        // no shot dose, so it must not climb onto the rung and lock the bag and
+        // profile out of a value it never designs.
+        const int recipeId = m_settings->dye()->activeRecipeId();
+        if (!m_applyingRecipe && !m_activeRecipe.isEmpty() && m_recipeStorage && recipeId > 0
+            && !m_activeRecipe.value(QStringLiteral("profileTitle")).toString().trimmed().isEmpty())
+            m_settings->dye()->setActiveRecipe(recipeId, dose);
     });
     // Yield/temp are per-brew OVERRIDES, not tweaks: they live in Settings.brew
     // only and are never auto-stamped onto the recipe from the live dial
@@ -1548,10 +1625,16 @@ void MainController::applyActivatedRecipe(qint64 recipeId, const QVariantMap& re
                 dye->setDyeGrinderRpm(static_cast<int>(rpm));
         }
 
-        // Dose — queued so it wins over loadProfile's own deferred
-        // setDyeBeanWeight(recommendedDose) (same trick as shot load).
-        // Profile-less recipes skip it: dyeBeanWeight is espresso-shot
-        // metadata, and a hot-water tea's leaf dose is not a shot dose.
+        // Dose — the recipe is the top rung of the dose ladder
+        // (dose-source-precedence). Profile-less recipes skip it: dyeBeanWeight
+        // is espresso-shot metadata, and a hot-water tea's leaf dose is not a
+        // shot dose.
+        //
+        // The rung itself is claimed at the bottom of this function, together
+        // with the id — see setActiveRecipe. Only the LIVE dose is written
+        // here, and it stays QUEUED so it lands after the id is set and
+        // m_applyingRecipe is cleared; writing it inline would stamp the dose
+        // onto the recipe we are leaving.
         const double doseG = recipe.value("doseG").toDouble();
         if (doseG > 0 && !profileLess) {
             QPointer<Settings> settings(m_settings);
@@ -1663,27 +1746,47 @@ void MainController::applyActivatedRecipe(qint64 recipeId, const QVariantMap& re
                     qDebug() << "applyActivatedRecipe: recreated deleted water vessel" << vesselName;
                 } else if (!blockHasValues) {
                     // Name-only block (web): adopt the live vessel's values.
+                    // Each field is adopted only when the preset actually
+                    // carries it: presets predating these keys exist (the Hot
+                    // Water page reads them with the same `undefined`
+                    // fallbacks), and an absent key resolves to 0 — which would
+                    // silently discard the defaults applied above and push a
+                    // 0 mL/s, 0 °C target to the machine.
                     const QVariantMap p = brew->getWaterVesselPreset(index);
                     volume = p.value("volume").toInt();
                     const QString pMode = p.value("mode").toString();
                     if (!pMode.isEmpty()) mode = pMode;
-                    flowRate = p.value("flowRate").toInt();
-                    tempC = p.value("temperature").toDouble();
+                    if (p.contains("flowRate")) flowRate = p.value("flowRate").toInt();
+                    if (p.contains("temperature")) tempC = p.value("temperature").toDouble();
                 }
                 brew->setSelectedWaterCup(index);
             }
             // Push the vessel's values into the live hot-water settings and send
             // (the non-UI equivalent of selecting the vessel on the brew screen).
-            brew->setWaterVolume(volume);
-            brew->setWaterVolumeMode(mode);
-            m_settings->hardware()->setHotWaterFlowRate(flowRate);
-            brew->setWaterTemperature(tempC);
-            applyHotWaterSettings();
+            // A vessel that resolved to no usable volume is treated like the
+            // missing-vessel case above — say so and leave the live settings at
+            // the user's baseline, rather than pouring to a 0 target.
+            if (volume <= 0) {
+                qWarning() << "applyActivatedRecipe: hot-water vessel" << vesselName
+                           << "resolved to no usable volume — leaving the live hot-water"
+                           << "settings untouched";
+            } else {
+                brew->setWaterVolume(volume);
+                brew->setWaterVolumeMode(mode);
+                m_settings->hardware()->setHotWaterFlowRate(flowRate);
+                brew->setWaterTemperature(tempC);
+                applyHotWaterSettings();
+            }
         }
 
         // Selection state last, so the watchers above never see a half-
-        // applied recipe.
-        dye->setActiveRecipeId(static_cast<int>(recipeId));
+        // applied recipe. Id and dose land in ONE call: the dose ladder must
+        // never name this recipe while still holding the previous one's dose,
+        // and a profile-less recipe claims the rung with 0 so the ladder falls
+        // through to the bag rather than stranding on a rung it does not
+        // occupy (dose-source-precedence).
+        dye->setActiveRecipe(static_cast<int>(recipeId),
+                             profileLess ? 0.0 : recipe.value("doseG").toDouble());
     } else {
         m_activeRecipe = recipe;
         m_activeRecipe.insert(QStringLiteral("resolvedBagId"), linkedBagId);
@@ -3479,6 +3582,12 @@ void MainController::onShotEnded() {
                     m_lastSavedShotId = shotId;
                     emit lastSavedShotIdChanged();
 
+                    // Hand the finalized pair to last-shot summarizers (the Home
+                    // Screen widget) while it is still in scope — `duration` and
+                    // `finalWeight` are captured by value, so they describe THIS
+                    // shot no matter what the live models hold by now.
+                    emit shotPersisted(shotId, duration, finalWeight);
+
                     // Auto-upload here (not before save) so we know the
                     // local shots.id and can pass it to the uploader.
                     // VisualizerUploader emits uploadSucceededForShot with
@@ -4419,21 +4528,6 @@ void MainController::processVisualizerReconciliation()
     qDebug() << "MainController: starting one-time Visualizer reconciliation (window"
              << kReconcileWindowDays << "days)";
     m_visualizer->fetchShotListSince(windowStartEpoch);
-}
-
-void MainController::setRefractometer(RefractometerDevice* refractometer) {
-    // Disconnect old signal chain before connecting new one
-    if (m_refractometer) {
-        disconnect(m_refractometer, nullptr, this, nullptr);
-    }
-    m_refractometer = refractometer;
-    if (!m_refractometer) return;
-
-    // Non-mutating log only. PostShotReviewPage owns context-gated capture; do
-    // not write to Settings here — device-initiated readings would leak forward.
-    connect(m_refractometer, &RefractometerDevice::tdsChanged, this, [](double tds) {
-        qDebug() << "[Refractometer] tdsChanged" << tds;
-    });
 }
 
 

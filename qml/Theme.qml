@@ -1,5 +1,6 @@
 pragma Singleton
 import QtQuick
+import Decenza
 
 QtObject {
     // Reference design size (based on Android tablet in dp)
@@ -59,16 +60,35 @@ QtObject {
     function _emojiAssetPath(cps) {
         if (!cps || cps.length === 0) return ""
         if (typeof EmojiAssets === "undefined") {
-            // Distinct from "this emoji isn't bundled". If the context property is missing,
-            // EVERY emoji in this QML engine silently vanishes — and an app with no emoji
-            // looks deliberate. The C++ warning in emojiassets.cpp cannot fire here, because
-            // has() is never reached. Secondary engines are the real risk: main.cpp creates
-            // one for the GHC window that does not set this property.
+            // Distinct from "this emoji isn't bundled". If EmojiAssets is unresolvable, EVERY
+            // emoji in this QML engine vanishes — and an app with no emoji looks deliberate. The
+            // C++ warning in emojiassets.cpp cannot fire here, because has() is never reached.
+            //
+            // THIS BRANCH LOOKS DEAD AND IS NOT. It was deleted once on the reasoning that
+            // EmojiAssets is a QML_SINGLETON reached through this file's own `import Decenza`,
+            // so an engine that loaded Theme.qml must have it. The generated qmldir disproves
+            // that: it lists QML files only (`singleton Theme 1.0 qml/Theme.qml`) and NO C++
+            // types. Types declared with QML_ELEMENT arrive by a second, independent path —
+            // qml_register_types_Decenza(), called explicitly from main.cpp — and that path has
+            // failed in this codebase before, producing 1,081 ReferenceErrors with a green
+            // build. `import Decenza` succeeding says nothing about whether it ran. See the
+            // header of tests/tst_qmlregistration.cpp.
+            //
+            // Returning "" rather than throwing is the whole point: replaceEmojiWithImg() below
+            // handles "" by dropping the emoji and keeping the surrounding text. A ReferenceError
+            // out of here instead fails the entire binding, so every bean name, AI reply and
+            // release note built through it renders BLANK rather than merely emoji-less.
+            //
+            // Do NOT "fix" this by adding setContextProperty("EmojiAssets", ...). A context
+            // property of the same name SHADOWS the singleton and is invisible to qmllint,
+            // qmlcachegen and the language server — that is #1661, in this exact file. If this
+            // warning ever fires, the thing to check is qml_register_types_Decenza().
             if (!_warnedNoEmojiAssets) {
                 _warnedNoEmojiAssets = true
-                console.warn("[Emoji] EmojiAssets context property missing — every emoji in "
-                           + "this QML engine will be stripped. main.cpp must call "
-                           + "setContextProperty(\"EmojiAssets\", ...) on this engine.")
+                console.warn("[Emoji] EmojiAssets unresolvable — every emoji in this QML engine "
+                           + "will be stripped. The type is registered by "
+                           + "qml_register_types_Decenza() in main.cpp, NOT by the qmldir, so "
+                           + "check that call rather than the import.")
             }
             return ""
         }
@@ -544,9 +564,26 @@ QtObject {
     // (it has no parameter), so on a fresh install with no shots the source says shot while
     // BackgroundSurface paints a flat colour — and scrimming chrome over a flat colour is
     // the exact elevation-cancelling failure chromeFill()'s own comment documents.
+    //
+    // Set by main.qml from the background of the page on TOP of the stack — see the note
+    // there. Not read from LastShotChartSource: that singleton lives in qml/components/ and
+    // a file in qml/ cannot see a type from another directory, so referencing it here
+    // compiled clean and threw "ReferenceError: LastShotChartSource is not defined" on
+    // every evaluation, pinning hasBackgroundImage false for the whole shot case. Theme is
+    // also the lowest-level singleton in the app and deliberately depends on nothing but
+    // context properties; importing the module here to reach one component would trade a
+    // runtime error for a dependency cycle waiting to happen.
+    //
+    // Per-PAGE, unlike the image below, because the chart is the one background a page can
+    // refuse: ThemedPageBackground.suppressShotChart turns it off wherever the page draws a
+    // graph of its own, and those pages then paint a flat colour. A global "a render
+    // exists" answer would claim a picture is behind the chrome there too — which is the
+    // elevation-cancelling failure chromeFill() documents below, and which collapses
+    // insetBackgroundColor onto backgroundColor so the control disappears entirely.
+    property bool shotChartOnCurrentPage: false
+
     readonly property bool hasBackgroundImage: Settings.theme.backgroundSource === "image"
-                                               || (Settings.theme.backgroundSource === "shot"
-                                                   && LastShotChartSource.imageSource.length > 0)
+                                               || shotChartOnCurrentPage
 
     // The fill a piece of chrome should actually paint.
     //

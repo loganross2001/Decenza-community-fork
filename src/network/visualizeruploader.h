@@ -8,9 +8,20 @@
 
 #include "../history/shotprojection.h"
 
-class ShotDataModel;
+#include <QtQml/qqmlregistration.h>
+// Profile and ShotDataModel are INCLUDED, not forward-declared, because they appear as pointer
+// parameters of Q_INVOKABLE methods on a class that is now a QML type. moc must build a metatype
+// for every such parameter, and an incomplete type fails the build outright ("Pointer Meta Types
+// must either point to fully-defined types...").
+//
+// This surfaced a latent defect rather than creating one: uploadShot() has been Q_INVOKABLE all
+// along with `const Profile*` incomplete, so a QML call would have failed to marshal —
+// deduced, not observed, because nothing calls it. Registering the type is what made that visible.
+// Q_DECLARE_OPAQUE_POINTER would silence this and reintroduce the runtime failure; see
+// src/core/settings.h for why that escape hatch is banned here.
+#include "../profile/profile.h"
+#include "../models/shotdatamodel.h"
 class Settings;
-class Profile;
 class DE1Device;
 class TranslationManager;
 
@@ -74,6 +85,12 @@ struct ShotMetadata {
 
 class VisualizerUploader : public QObject {
     Q_OBJECT
+
+    // Compile-time QML registration, so qmllint, qmlcachegen and the language server can
+    // follow MainController's property through to this class. A runtime qmlRegister* call is
+    // invisible to all three. Full rationale in src/controllers/maincontroller.h.
+    QML_ELEMENT
+    QML_UNCREATABLE("VisualizerUploader is created in C++ and reached via MainController")
 
     Q_PROPERTY(bool uploading READ isUploading NOTIFY uploadingChanged)
     Q_PROPERTY(QString lastUploadStatus READ lastUploadStatus NOTIFY lastUploadStatusChanged)
@@ -187,6 +204,17 @@ public:
     // edit. Pure + public so the blob→API mapping is unit-tested.
     static void addBagDescriptiveFields(QJsonObject& body, const QVariantMap& bag);
 
+    // The profile object attached to a LIVE shot upload. Pure (no instance
+    // state, no network) and public so the canonicalization contract is
+    // unit-tested: this must be byte-identical to Profile::toJsonObject(), the
+    // same serialization used on disk, in exports and in share codes, so a
+    // profile pulled back off Visualizer makes the same coffee it made here.
+    //
+    // Note this is NOT the history path. buildHistoryShotJson() uploads the
+    // profile snapshot stored WITH the shot, verbatim — re-serializing an old
+    // shot through today's serializer would rewrite history.
+    static QJsonObject buildVisualizerProfileJson(const Profile* profile);
+
 signals:
     void uploadingChanged();
     void lastUploadStatusChanged();
@@ -240,7 +268,6 @@ private:
                              const QString& debugLog,
                              qint64 shotEpoch = 0);
 
-    QJsonObject buildVisualizerProfileJson(const Profile* profile);
     QByteArray buildMultipartData(const QByteArray& jsonData, const QString& boundary);
     QString authHeader() const;
 

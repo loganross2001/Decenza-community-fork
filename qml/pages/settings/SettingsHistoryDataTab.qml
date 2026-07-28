@@ -103,7 +103,7 @@ KeyboardAwareContainer {
                 // Divider
                 Rectangle {
                     Layout.fillWidth: true
-                    height: 1
+                    Layout.preferredHeight: 1
                     color: Theme.borderColor
                 }
 
@@ -245,7 +245,7 @@ KeyboardAwareContainer {
                 // Divider
                 Rectangle {
                     Layout.fillWidth: true
-                    height: 1
+                    Layout.preferredHeight: 1
                     color: Theme.borderColor
                 }
 
@@ -788,8 +788,8 @@ KeyboardAwareContainer {
                                            MainController.shotServer && MainController.shotServer.hasTotpSecret
 
                     Rectangle {
-                        width: Theme.scaled(8)
-                        height: Theme.scaled(8)
+                        Layout.preferredWidth: Theme.scaled(8)
+                        Layout.preferredHeight: Theme.scaled(8)
                         radius: Theme.scaled(4)
                         color: !parent.serverRunning ? Theme.errorColor :
                                parent.secured ? Theme.successColor : Theme.textSecondaryColor
@@ -1239,8 +1239,8 @@ KeyboardAwareContainer {
                 spacing: Theme.scaled(8)
 
                 Rectangle {
-                    width: Theme.scaled(24)
-                    height: Theme.scaled(24)
+                    Layout.preferredWidth: Theme.scaled(24)
+                    Layout.preferredHeight: Theme.scaled(24)
                     radius: Theme.scaled(12)
                     color: Theme.successColor
 
@@ -1356,12 +1356,10 @@ KeyboardAwareContainer {
             backupStatusTimer.restart();
 
             // TTS announcement for accessibility
-            if (MainController.accessibilityManager) {
-                MainController.accessibilityManager.announce(
-                    TranslationManager.translate("settings.data.backupcreatedAccessible",
-                        "Backup created successfully")
-                );
-            }
+            AccessibilityManager.announce(
+                TranslationManager.translate("settings.data.backupcreatedAccessible",
+                    "Backup created successfully")
+            );
         }
 
         function onBackupFailed(error) {
@@ -1373,12 +1371,10 @@ KeyboardAwareContainer {
             backupStatusTimer.restart();
 
             // TTS announcement for accessibility
-            if (MainController.accessibilityManager) {
-                MainController.accessibilityManager.announce(
-                    TranslationManager.translate("settings.data.backupfailedAccessible",
-                        "Backup failed: ") + error
-                );
-            }
+            AccessibilityManager.announce(
+                TranslationManager.translate("settings.data.backupfailedAccessible",
+                    "Backup failed: ") + error
+            );
         }
 
         function onStoragePermissionNeeded() {
@@ -1395,6 +1391,10 @@ KeyboardAwareContainer {
         anchors.bottom: parent.bottom
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.bottomMargin: Theme.scaled(20)
+        // NOT Layout.preferred*: this is reparented to Overlay.overlay and positioned with
+        // anchors, so no Layout manages it and the attached properties would be inert — the
+        // pill would collapse to 0x0 (Rectangle's implicit size). qmllint flags it as
+        // layout-positioning because it is DECLARED inside one; that is a false positive.
         width: backupStatusText.implicitWidth + Theme.scaled(20)
         height: backupStatusText.implicitHeight + Theme.scaled(20)
         color: Theme.surfaceColor
@@ -1607,7 +1607,7 @@ KeyboardAwareContainer {
 
                     Rectangle {
                         Layout.fillWidth: true
-                        height: 1
+                        Layout.preferredHeight: 1
                         color: Theme.borderColor
                     }
 
@@ -1716,12 +1716,10 @@ KeyboardAwareContainer {
             backupStatusTimer.restart();
 
             // TTS announcement for accessibility
-            if (MainController.accessibilityManager) {
-                MainController.accessibilityManager.announce(
-                    TranslationManager.translate("settings.data.restorecompletedAccessible",
-                        "Backup restored successfully.")
-                );
-            }
+            AccessibilityManager.announce(
+                TranslationManager.translate("settings.data.restorecompletedAccessible",
+                    "Backup restored successfully.")
+            );
         }
 
         function onRestoreFailed(error) {
@@ -1735,12 +1733,10 @@ KeyboardAwareContainer {
             backupStatusTimer.restart();
 
             // TTS announcement for accessibility
-            if (MainController.accessibilityManager) {
-                MainController.accessibilityManager.announce(
-                    TranslationManager.translate("settings.data.restorefailedAccessible",
-                        "Restore failed: ") + error
-                );
-            }
+            AccessibilityManager.announce(
+                TranslationManager.translate("settings.data.restorefailedAccessible",
+                    "Restore failed: ") + error
+            );
         }
     }
 
@@ -1829,8 +1825,8 @@ KeyboardAwareContainer {
                 // QR code — hidden when keyboard is open (user already scanned it)
                 Rectangle {
                     Layout.alignment: Qt.AlignHCenter
-                    width: Theme.scaled(200)
-                    height: Theme.scaled(200)
+                    Layout.preferredWidth: Theme.scaled(200)
+                    Layout.preferredHeight: Theme.scaled(200)
                     visible: !totpCodeField.activeFocus
                     color: "#ffffff"
                     radius: Theme.scaled(8)
@@ -1864,7 +1860,7 @@ KeyboardAwareContainer {
 
                         Rectangle {
                             Layout.fillWidth: true
-                            height: Theme.scaled(36)
+                            Layout.preferredHeight: Theme.scaled(36)
                             color: Theme.backgroundColor
                             radius: Theme.scaled(4)
                             border.color: Theme.borderColor

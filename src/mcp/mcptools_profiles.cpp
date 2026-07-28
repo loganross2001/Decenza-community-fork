@@ -238,13 +238,39 @@ void registerProfileTools(McpToolRegistry* registry, ProfileManager* profileMana
             QString editorType = profileManager->currentEditorType();
             result["editorType"] = editorType;
 
+            // Always PAIRED, and reported exactly once. Every profile holds a dose
+            // whether one was set or not (the read default is 18 g), so a bare figure
+            // would tell a caller there is a recommendation when there is not — all
+            // eight built-ins that used to carry a recipe block sit at exactly that
+            // default with the flag off.
+            //
+            // Emitted on EVERY editor type. This used to skip the advanced branch,
+            // whose profile-JSON spread already carried `recommended_dose` /
+            // `has_recommended_dose`, on the grounds that those were the spellings
+            // its own edit path accepted — emitting both would have handed an agent
+            // two names for one field with no way to tell which the writer honours.
+            // No editor type accepts either raw name now, and `dose` is the one way
+            // to write this field everywhere (dose-source-precedence), so the pair
+            // below is the single reported spelling — the advanced spread drops the
+            // snake_case names rather than duplicating them.
+            result["recommendedDoseG"] = profileManager->profileRecommendedDose();
+            result["hasRecommendedDose"] = profileManager->profileHasRecommendedDose();
+
             if (editorType == "advanced") {
                 // Advanced editor: show full profile data with frames
                 // (same data ProfileEditorPage uses via getCurrentProfile())
                 QJsonObject profileJson = QJsonObject::fromVariantMap(profile);
                 for (auto it = profileJson.begin(); it != profileJson.end(); ++it) {
-                    if (it.key() != "title")  // already set above
-                        result[it.key()] = it.value();
+                    // The snake_case dose pair is dropped from the spread: it is
+                    // the same field the camelCase pair above already reports,
+                    // and only `dose` can write it now. Leaving both in would
+                    // show four keys for two fields and invite a reader to send
+                    // back the spelling that no longer does anything.
+                    if (it.key() == "title"                       // already set above
+                        || it.key() == "recommended_dose"
+                        || it.key() == "has_recommended_dose")
+                        continue;
+                    result[it.key()] = it.value();
                 }
             } else {
                 // Recipe editors (dflow, aflow, pressure, flow): show RecipeParams
@@ -254,7 +280,7 @@ void registerProfileTools(McpToolRegistry* registry, ProfileManager* profileMana
                 QJsonObject recipeJson = recipe.toJson();
 
                 // Common fields shown by all recipe editors
-                QStringList common = {"targetWeight", "targetVolume", "dose", "editorType"};
+                QStringList common = {"targetWeight", "targetVolume", "editorType"};
                 for (const QString& key : common) {
                     if (recipeJson.contains(key))
                         result[key] = recipeJson[key];
@@ -268,8 +294,12 @@ void registerProfileTools(McpToolRegistry* registry, ProfileManager* profileMana
                     // than only the ones present. GCC's -Wall flags it
                     // (-Wrange-loop-construct); clang's does not, which is why
                     // the macOS warning measurement never saw these five.
-                    for (const char* key : {"fillTemperature", "fillPressure", "fillFlow", "fillTimeout",
-                                                "infuseEnabled", "infusePressure", "infuseTime", "infuseWeight", "infuseVolume",
+                    // fillPressure / fillFlow / fillTimeout / infuseEnabled are
+                    // deliberately absent: neither plugin exposes them, and writing
+                    // them rewrote frame fields the plugins preserve. See
+                    // RecipeParams.
+                    for (const char* key : {"fillTemperature",
+                                                "infusePressure", "infuseTime", "infuseWeight", "infuseVolume",
                                                 "pourTemperature", "pourPressure", "pourFlow"}) {
                         if (recipeJson.contains(key))
                             result[key] = recipeJson[key];
@@ -318,20 +348,17 @@ void registerProfileTools(McpToolRegistry* registry, ProfileManager* profileMana
                 {"fillTemperature", "fillTemperatureC"},
                 {"pourTemperature", "pourTemperatureC"},
                 // bar
-                {"fillPressure", "fillPressureBar"},
                 {"infusePressure", "infusePressureBar"},
                 {"pourPressure", "pourPressureBar"},
                 {"espressoPressure", "espressoPressureBar"},
                 {"pressureEnd", "pressureEndBar"},
                 {"preinfusionStopPressure", "preinfusionStopPressureBar"},
                 // mL/s
-                {"fillFlow", "fillFlowMlPerSec"},
                 {"pourFlow", "pourFlowMlPerSec"},
                 {"holdFlow", "holdFlowMlPerSec"},
                 {"flowEnd", "flowEndMlPerSec"},
                 {"preinfusionFlowRate", "preinfusionFlowRateMlPerSec"},
                 // s
-                {"fillTimeout", "fillTimeoutSec"},
                 {"infuseTime", "infuseTimeSec"},
                 {"preinfusionTime", "preinfusionTimeSec"},
                 {"holdTime", "holdTimeSec"},
@@ -340,7 +367,6 @@ void registerProfileTools(McpToolRegistry* registry, ProfileManager* profileMana
                 // g
                 {"infuseWeight", "infuseWeightG"},
                 {"targetWeight", "targetWeightG"},
-                {"dose", "doseG"},
                 // mL
                 {"infuseVolume", "infuseVolumeMl"},
                 {"targetVolume", "targetVolumeMl"},
@@ -369,14 +395,10 @@ void registerProfileTools(McpToolRegistry* registry, ProfileManager* profileMana
                 // Recipe params (dflow/aflow/pressure/flow)
                 {"targetWeight", QJsonObject{{"type", "number"}, {"description", "Stop at weight (grams)"}}},
                 {"targetVolume", QJsonObject{{"type", "number"}, {"description", "Stop at volume (mL, 0=disabled)"}}},
-                {"dose", QJsonObject{{"type", "number"}, {"description", "Input dose for ratio display (grams)"}}},
+                {"dose", QJsonObject{{"type", "number"}, {"description", "Recommended dose for this profile (grams, 0-100). Sets recommended_dose and enables it; 0 CLEARS the recommendation. Works on every editor type. Must be a number — a string is rejected, not coerced."}}},
                 {"fillTemperature", QJsonObject{{"type", "number"}, {"description", "Fill water temperature (Celsius)"}}},
-                {"fillPressure", QJsonObject{{"type", "number"}, {"description", "Fill pressure (bar)"}}},
-                {"fillFlow", QJsonObject{{"type", "number"}, {"description", "Fill flow rate (mL/s)"}}},
-                {"fillTimeout", QJsonObject{{"type", "number"}, {"description", "Max fill duration (seconds)"}}},
-                {"infuseEnabled", QJsonObject{{"type", "boolean"}, {"description", "Enable infuse/soak phase"}}},
                 {"infusePressure", QJsonObject{{"type", "number"}, {"description", "Soak pressure (bar)"}}},
-                {"infuseTime", QJsonObject{{"type", "number"}, {"description", "Soak duration (seconds)"}}},
+                {"infuseTime", QJsonObject{{"type", "number"}, {"description", "Soak duration (seconds, 0=no soak)"}}},
                 {"infuseWeight", QJsonObject{{"type", "number"}, {"description", "Weight to exit infuse (grams, 0=disabled)"}}},
                 {"infuseVolume", QJsonObject{{"type", "number"}, {"description", "Max volume during infuse (mL)"}}},
                 {"pourTemperature", QJsonObject{{"type", "number"}, {"description", "Pour water temperature (Celsius)"}}},
@@ -408,8 +430,11 @@ void registerProfileTools(McpToolRegistry* registry, ProfileManager* profileMana
                 {"target_weight", QJsonObject{{"type", "number"}, {"description", "Advanced: target weight (grams)"}}},
                 {"target_volume", QJsonObject{{"type", "number"}, {"description", "Advanced: target volume (mL)"}}},
                 {"notes", QJsonObject{{"type", "string"}, {"description", "Advanced: profile notes text"}}},
-                {"has_recommended_dose", QJsonObject{{"type", "boolean"}, {"description", "Advanced: enable recommended dose"}}},
-                {"recommended_dose", QJsonObject{{"type", "number"}, {"description", "Advanced: recommended dose (grams)"}}},
+                // No `has_recommended_dose` / `recommended_dose` here: `dose`
+                // above is the one spelling of the per-profile dose on every
+                // editor type (dose-source-precedence). The field is still
+                // reported by profiles_get_params, as `recommendedDoseG` +
+                // `hasRecommendedDose` — a reader needs the enabled flag.
                 {"tank_desired_water_temperature", QJsonObject{{"type", "number"}, {"description", "Advanced: tank water temperature (Celsius)"}}},
                 {"maximum_flow_range_advanced", QJsonObject{{"type", "number"}, {"description", "Advanced: flow limiter range (mL/s)"}}},
                 {"maximum_pressure_range_advanced", QJsonObject{{"type", "number"}, {"description", "Advanced: pressure limiter range (bar)"}}},
@@ -429,10 +454,105 @@ void registerProfileTools(McpToolRegistry* registry, ProfileManager* profileMana
             // Use the same authoritative method the app uses to determine editor type
             QString editorType = profileManager->currentEditorType();
 
+            QStringList ignoredKeys;      // see the recipe path below
+            QStringList retiredKeys;      // recognised once, now replaced by `dose`
+
+            QJsonObject remaining = args;
+
+            // The retired spellings. `recommended_dose` / `has_recommended_dose`
+            // used to be accepted on the advanced branch — the whole profile map
+            // is passed straight through there — so the same profile field had
+            // two names depending on editor type. Removing the second name is
+            // what retires the collision between them; adjudicating it was the
+            // previous attempt, and because the two spellings differ — `dose` is
+            // set-and-enable, `recommended_dose` writes the value and leaves the
+            // flag untouched — it stored a dose whose recommendation stayed
+            // disabled on every profile that ships with the flag off, which is
+            // all eight built-ins. No reader acts on that state.
+            //
+            // Stripped explicitly rather than just dropped from the schema:
+            // nothing validates incoming keys against it, so on the advanced
+            // branch they would otherwise still be applied by the map loop.
+            for (const QString& retired : {QStringLiteral("recommended_dose"),
+                                           QStringLiteral("has_recommended_dose")}) {
+                if (remaining.contains(retired)) {
+                    remaining.remove(retired);
+                    retiredKeys << retired;
+                }
+            }
+
+            // `dose` is handled here for BOTH paths, before anything else looks at
+            // the incoming keys.
+            //
+            // It used to write RecipeParams::dose, which lived in the profile's recipe
+            // block and was read by nothing. That block is gone and so is the field, so
+            // an unhandled `dose` would fall through to the currentParams membership
+            // check below and be reported IGNORED — the one outcome worth avoiding,
+            // since the parameter has always been accepted. It now writes the
+            // per-profile dose that IS consumed: recommended_dose plus its enabled
+            // flag, which reach the advanced editor's control, dialing_get_context and
+            // the AI advisor.
+            //
+            // Clamped because RecipeParams::clamp() bounded this to [0, 100] and
+            // Profile::setRecommendedDose is a bare assignment.
+            //
+            // VALIDATED, not coerced. `dose` is the one key that does not travel
+            // through toVariant() into a QVariantMap — it is read straight as a
+            // double — and QJsonValue::toDouble() answers 0 for anything that is
+            // not a JSON number, which setCurrentProfileRecommendedDose reads as
+            // "clear the recommendation". A stringified number is NOT the
+            // exposure: the registry's normalizeArguments already coerces "18"
+            // to 18 off the schema's declared type. What survives that is a
+            // value no parse can rescue — "heavy", null, an object — and those
+            // would silently DELETE the profile's dose and report success.
+            // Refuse them, and say when a legal value had to be clamped rather
+            // than echoing the caller's number back as if it had been stored.
+            bool doseApplied = false;
+            if (remaining.contains(QStringLiteral("dose"))) {
+                const QJsonValue raw = remaining.take(QStringLiteral("dose"));
+                if (!raw.isDouble()) {
+                    result["success"] = false;
+                    result["error"] = QStringLiteral(
+                        "'dose' must be a number in grams (0-100); 0 clears the "
+                        "recommendation. Received a value that is not numeric.");
+                    return result;
+                }
+                const double d = qBound(0.0, raw.toDouble(), 100.0);
+                if (!qFuzzyCompare(1.0 + d, 1.0 + raw.toDouble())) {
+                    result["adjustedFields"] = QJsonArray{QStringLiteral("dose")};
+                    result["adjustedNote"] =
+                        QStringLiteral("dose %1 is outside 0-100 g and was clamped to %2.")
+                            .arg(raw.toDouble()).arg(d);
+                }
+                profileManager->setCurrentProfileRecommendedDose(d);
+                doseApplied = true;
+            }
+
+            // Nothing left to apply — every key in the call was a retired
+            // spelling. Falling through would still run uploadProfile(), which
+            // sets m_profileModified and rewrites _current.json: a fully
+            // rejected edit would dirty the loaded profile and then tell the
+            // caller to profiles_save the modification it never made. Stop here
+            // and report the rejection.
+            int actionableKeys = 0;
+            for (auto it = remaining.begin(); it != remaining.end(); ++it)
+                if (it.key() != QLatin1String("confirmed"))
+                    actionableKeys++;
+            if (!doseApplied && actionableKeys == 0 && !retiredKeys.isEmpty()) {
+                result["success"] = false;
+                result["retiredFields"] = QJsonArray::fromStringList(retiredKeys);
+                result["error"] =
+                    QStringLiteral("Nothing was changed: %1 no longer set the per-profile dose. "
+                                   "Use 'dose' (grams, 0-100), which sets the value and enables "
+                                   "the recommendation, on every editor type.")
+                        .arg(retiredKeys.join(QStringLiteral(", ")));
+                return result;
+            }
+
             if (editorType == "advanced") {
                 // Advanced path: use uploadProfile() — same as ProfileEditorPage
                 QVariantMap profileData = profileManager->getCurrentProfile();
-                for (auto it = args.begin(); it != args.end(); ++it) {
+                for (auto it = remaining.begin(); it != remaining.end(); ++it) {
                     if (it.key() == "confirmed") continue;
                     profileData[it.key()] = it.value().toVariant();
                 }
@@ -441,8 +561,16 @@ void registerProfileTools(McpToolRegistry* registry, ProfileManager* profileMana
             } else {
                 // Recipe path: use uploadRecipeProfile() — same as RecipeEditorPage/SimpleProfileEditorPage
                 QVariantMap currentParams = profileManager->getOrConvertRecipeParams();
-                for (auto it = args.begin(); it != args.end(); ++it) {
+                // Nothing validates incoming keys against the declared schema, so
+                // an unrecognised one lands here, is dropped by
+                // RecipeParams::fromVariantMap, and used to still draw a
+                // success:true. fillPressure, fillFlow, fillTimeout and
+                // infuseEnabled were all valid and effective before they were
+                // removed, so a client written against the older schema would
+                // believe its edit took effect. Report them instead.
+                for (auto it = remaining.begin(); it != remaining.end(); ++it) {
                     if (it.key() == "confirmed") continue;
+                    if (!currentParams.contains(it.key())) ignoredKeys << it.key();
                     currentParams[it.key()] = it.value().toVariant();
                 }
                 profileManager->uploadRecipeProfile(currentParams);
@@ -450,7 +578,35 @@ void registerProfileTools(McpToolRegistry* registry, ProfileManager* profileMana
             }
 
             result["success"] = true;
-            result["message"] = "Profile updated and uploaded to machine. Call profiles_save to persist.";
+            if (!retiredKeys.isEmpty()) {
+                // These are not typos, so "unrecognised" alone would send the
+                // caller hunting for one. Name the replacement instead.
+                result["retiredFields"] = QJsonArray::fromStringList(retiredKeys);
+                result["retiredNote"] =
+                    QStringLiteral("%1 no longer set the per-profile dose. Use 'dose' "
+                                   "(grams, 0-100), which sets the value and enables the "
+                                   "recommendation, on every editor type.")
+                        .arg(retiredKeys.join(QStringLiteral(", ")));
+            }
+            // Both caveats ride on `message`, not only on their own keys: a
+            // client that reads `message` and `success` and skips the siblings
+            // — which is most of them — would otherwise be told a clean
+            // "Profile updated" for a call that dropped half its arguments.
+            QStringList caveats;
+            if (!ignoredKeys.isEmpty())
+                caveats << QStringLiteral("%1 unrecognised field(s) were IGNORED: %2")
+                               .arg(ignoredKeys.size()).arg(ignoredKeys.join(QStringLiteral(", ")));
+            if (!retiredKeys.isEmpty())
+                caveats << QStringLiteral("%1 no longer set the per-profile dose (use 'dose')")
+                               .arg(retiredKeys.join(QStringLiteral(", ")));
+            result["message"] = caveats.isEmpty()
+                ? QStringLiteral("Profile updated and uploaded to machine. "
+                                 "Call profiles_save to persist.")
+                : QStringLiteral("Profile updated and uploaded to machine, but %1. "
+                                 "Call profiles_save to persist.")
+                      .arg(caveats.join(QStringLiteral("; ")));
+            if (!ignoredKeys.isEmpty())
+                result["ignoredFields"] = QJsonArray::fromStringList(ignoredKeys);
             result["modified"] = true;
             result["editorType"] = editorType;
             return result;

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(Decenza VERSION 2.0.0 LANGUAGES CXX)
+project(Decenza VERSION 2.0.1 LANGUAGES CXX)
 
 message(STATUS "Developer note: executable target is now 'Decenza'. If Qt Creator shows 'No executable specified', re-run CMake and select the 'Decenza' Run configuration.")
 
@@ -672,6 +672,7 @@ set(SOURCES
     src/machine/weightprocessor.cpp
     src/machine/stepexitarbiter.cpp
     src/profile/profile.cpp
+    src/profile/de1apptclfields.cpp
     src/profile/profileframe.cpp
     src/profile/profileconverter.cpp
     src/profile/profileimporter.cpp
@@ -783,16 +784,23 @@ if(NOT IOS)
     )
 endif()
 
-# Simulator engine - always included for multi-config generators (Xcode, Visual Studio)
-# CMAKE_BUILD_TYPE is empty at configure time, so conditional inclusion won't work.
-# The simulator code is small and has no extra dependencies, so it's safe to always link.
+# Simulator engine - listed unconditionally so AUTOMOC sees the same files in
+# every configuration. Whether any of it actually compiles is decided by
+# DECENZA_SIMULATOR (see the target_compile_definitions block below), which the
+# files themselves guard on.
 list(APPEND SOURCES
     src/simulator/de1simulator.cpp
     src/simulator/simulatedscale.cpp
 )
 
-# GHC simulator window - desktop only (uses QWidget window)
-if(WIN32 OR APPLE)
+# GHC simulator window - desktop only. It opens a second top-level window,
+# which is meaningless on a tablet. (It is not a QWidget despite what this
+# comment said for years: GHCSimulator is a plain QObject and the window is a
+# QtQuick Window in its own QQmlApplicationEngine.)
+# NOT `if(WIN32 OR APPLE)`: APPLE is true for iOS too, so that spelling compiled
+# this into every iPad build despite the comment. It drives DE1Simulator's
+# signals, so with the simulator absent it would not even compile there.
+if(WIN32 OR (APPLE AND NOT IOS))
     list(APPEND SOURCES
         src/simulator/ghcsimulator.cpp
     )
@@ -819,6 +827,10 @@ set(HEADERS
     src/core/appsettings.h
     src/core/settingsstoremigration.h
     src/core/settings.h
+    # QML_FOREIGN registration for Settings. Listed here so AUTOMOC processes it and
+    # qmltyperegistrar sees the type; it is compiled by no other target, which is the point
+    # (settings.h stays free of QtQml — see the file's own comment).
+    src/core/settings_qml.h
     src/core/settings_mqtt.h
     src/core/settings_autowake.h
     src/core/settings_hardware.h
@@ -848,6 +860,7 @@ set(HEADERS
     src/ble/protocol/de1characteristics.h
     src/ble/protocol/decentscaleprotocol.h
     src/ble/blecapability.h
+    src/ble/blecontrollererror.h
     src/ble/bleserviceerror.h
     src/ble/blemanager.h
     src/ble/de1transport.h
@@ -964,8 +977,8 @@ list(APPEND HEADERS
     src/simulator/simulatedscale.h
 )
 
-# GHC simulator window header - desktop only
-if(WIN32 OR APPLE)
+# GHC simulator window header - desktop only (see source section note on iOS)
+if(WIN32 OR (APPLE AND NOT IOS))
     list(APPEND HEADERS
         src/simulator/ghcsimulator.h
     )
@@ -1023,6 +1036,51 @@ if(ENABLE_TSNET)
     target_compile_definitions(Decenza PRIVATE DECENZA_ENABLE_TSNET)
     decenza_link_tsnet(Decenza)
 endif()
+
+# Simulation Mode availability.
+#
+# The simulator is a development aid on a tablet — the machine is right there —
+# so tablet RELEASE builds ship without it: no engine, none of DE1Device's
+# simulator branches, no main.cpp wiring, and no Settings card. (DE1Device's
+# setSimulator() seam itself stays compiled in every configuration — see the
+# comment on it for why.) Debug builds keep it on every platform, and
+# desktop keeps it in every configuration (running the app on a laptop with no
+# DE1 attached is a legitimate way to use it).
+#
+# DECENZA_SIMULATOR is the single source of truth. src/simulator/*.{h,cpp} guard
+# their whole contents on it, so when it is off those translation units compile
+# to nothing and no simulator code reaches the binary. The sources stay listed in
+# the target either way, which keeps AUTOMOC's view of them stable.
+#
+# This MUST be a generator expression, not `if(CMAKE_BUILD_TYPE STREQUAL Debug)`.
+# The iOS release build uses the Xcode generator, where CMAKE_BUILD_TYPE is empty
+# at configure time — a configure-time test silently reads as "not Debug" for
+# every config, including Debug. That is exactly what broke the old conditional
+# and led #487 to link the engine into every build instead. Android builds
+# single-config, where a plain if() would work, but it uses the same genex so
+# there is one spelling to reason about rather than two that can diverge.
+#
+# DECENZA_SIMULATOR_OVERRIDE exists so the simulator-absent shape can be built
+# without an Android or iOS toolchain: configure with -DDECENZA_SIMULATOR_OVERRIDE=0
+# and a desktop build compiles exactly what ships to tablets. Worth having,
+# because otherwise no routine CI job compiles that arm at all — the nightly is
+# Linux (always on) and the mobile workflows run only on tag push or manual
+# dispatch, so a break of #1629's shape would first surface at a release tag.
+# Left empty by default; not cached as a computed default, which would go stale
+# if the same build directory were reconfigured for another platform.
+set(DECENZA_SIMULATOR_OVERRIDE "" CACHE STRING
+    "Force the DECENZA_SIMULATOR condition (0 = build the simulator-absent shape). Empty = per-platform default.")
+if(DECENZA_SIMULATOR_OVERRIDE STREQUAL "")
+    if(ANDROID OR IOS)
+        set(DECENZA_SIMULATOR_CONDITION "$<CONFIG:Debug>")
+    else()
+        set(DECENZA_SIMULATOR_CONDITION "1")
+    endif()
+else()
+    set(DECENZA_SIMULATOR_CONDITION "${DECENZA_SIMULATOR_OVERRIDE}")
+endif()
+target_compile_definitions(Decenza PRIVATE
+    "$<${DECENZA_SIMULATOR_CONDITION}:DECENZA_SIMULATOR>")
 
 # Link SerialPort only on desktop (not available on Android/iOS)
 if(NOT ANDROID AND NOT IOS)
@@ -1092,6 +1150,27 @@ endif()
 target_include_directories(Decenza PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_BINARY_DIR}  # For version.h
+    # Needed by QML_ELEMENT types, whose headers must be reachable by BARE BASENAME.
+    # qmltyperegistrar generates decenza_qmltyperegistrations.cpp from moc's JSON and emits
+    # `#if __has_include(<translationmanager.h>)` around the include — moc records `inputFile`
+    # as the basename alone, and no path prefix changes that (AUTOMOC_PATH_PREFIX does prefix
+    # the include moc writes into moc_*.cpp, but not the JSON field this is generated from).
+    # When the basename does not resolve, the guarded include expands to nothing and the build
+    # fails on `use of undeclared identifier` in generated code — three tools away from the
+    # cause. Qt's own modules do not hit this because their headers sit flat in one include dir.
+    #
+    # Add the directory of each new QML_ELEMENT header here. There are currently no duplicate
+    # header basenames across these directories, so this cannot make an include ambiguous —
+    # re-check that when adding one (`find <dirs> -maxdepth 1 -name '*.h' -exec basename {} \; |
+    # sort | uniq -d`), because an ambiguous basename would silently pick the wrong header.
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/controllers
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ai
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/history
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/machine
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/models
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/network
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/profile
 )
 if(ANDROID)
     # SYSTEM: mjansson/mdns is vendored third-party code, and it is header-only,
@@ -1272,6 +1351,7 @@ set(QML_FILES
     qml/components/CrashReportDialog.qml
     qml/components/McpConfirmDialog.qml
     qml/components/De1CommunicationErrorDialog.qml
+    qml/components/ProfileRefusedDialog.qml
     qml/components/ColoredIcon.qml
     qml/components/CrtOverlay.qml
     qml/components/CrtShaderEffect.qml
@@ -1342,8 +1422,11 @@ set(QML_FILES
     qml/pages/CommunityBrowserPage.qml
 )
 
-# Simulator QML - desktop only (GHC window uses QWidget)
-if(WIN32 OR APPLE)
+# Simulator QML - desktop only (second top-level window; see source section).
+# `WIN32 OR APPLE` would include iOS, which shipped this window's compiled QML
+# in every IPA — dead weight for a window iOS never loads, and whose
+# GHCSimulator context property does not exist there at all.
+if(WIN32 OR (APPLE AND NOT IOS))
     list(APPEND QML_FILES
         qml/simulator/GHCSimulatorWindow.qml
     )
@@ -1443,6 +1526,105 @@ add_custom_target(validate_kb ALL
     VERBATIM
 )
 add_dependencies(Decenza validate_kb)
+
+# ---------------------------------------------------------------------------
+# QML diagnostics gate (qmllint)
+#
+# Deliberately NOT part of the default build and NOT a dependency of Decenza:
+# a full-tree qmllint run takes minutes, and a gate slow enough that people
+# route around it stops being a gate. It is an explicit target:
+#
+#     cmake --build <dir> --target qmllint_check     # the gate
+#     cmake --build <dir> --target qmllint_report    # what is actually in there
+#
+# Why it exists: an undeclared QML identifier compiles clean and throws only
+# when its binding is first evaluated — possibly on a screen nobody opened
+# during review. That is not hypothetical here. It shipped in 2.0.1 (#1661),
+# where Theme.qml referenced a singleton living in another directory, so
+# hasBackgroundImage stayed false forever and every user who chose the
+# shot-chart background silently lost its scrim.
+#
+# The import path is the BUILD directory, not the source tree, because that is
+# where the generated Decenza/qmldir lives and it points at the build's own
+# copies of the QML. Lint against a stale build and the numbers describe
+# whatever was last compiled rather than what is on disk — the script hard-errors
+# on that rather than reporting a plausible wrong answer.
+#
+# Policy (per-file clean list, category ceilings) lives in the script, next to
+# the parser that produces the numbers it enforces. This target only wires the
+# two together.
+# ---------------------------------------------------------------------------
+get_target_property(_qt_qmake_location Qt6::qmake IMPORTED_LOCATION)
+get_filename_component(_qt_bin_dir "${_qt_qmake_location}" DIRECTORY)
+find_program(QMLLINT_EXECUTABLE
+    NAMES qmllint
+    HINTS "${_qt_bin_dir}"
+    DOC "qmllint from the Qt build this project targets"
+)
+
+# qmllint 6.11.1 cannot analyse every file in this tree. QQmlJSTypeResolver::merge() is
+# exponential, and one layout item crosses the threshold: the linter grows to a 313 GB
+# footprint and is OOM-killed after ~10 minutes rather than reporting anything. So the
+# default here is to SKIP that file (the script names it, and says so on every run) —
+# a target that hangs a CI runner is worse than one that checks 217 of 218 files and
+# admits it.
+#
+# Turn this OFF when qmllint carries the upstream fix
+# (https://codereview.qt-project.org/c/qt/qtdeclarative/+/755657), which is also when the
+# whole option should be deleted:
+#
+#     cmake -DQMLLINT_EXECUTABLE=<fixed qmllint> -DQMLLINT_SKIP_UNLINTABLE=OFF <dir>
+#
+# It cannot be inferred from QMLLINT_EXECUTABLE — pointing at another binary says nothing
+# about whether that binary is patched — so it is an explicit switch.
+option(QMLLINT_SKIP_UNLINTABLE
+    "Exclude files a released qmllint cannot finish (see UNLINTABLE_BY_TOOL_BUG in scripts/qmllint_report.py)"
+    ON)
+if(QMLLINT_SKIP_UNLINTABLE)
+    set(_qmllint_skip --skip-unlintable)
+else()
+    set(_qmllint_skip "")
+endif()
+
+if(QMLLINT_EXECUTABLE)
+    add_custom_target(qmllint_check
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_SOURCE_DIR}/scripts/qmllint_report.py
+            --check
+            ${_qmllint_skip}
+            --qmllint ${QMLLINT_EXECUTABLE}
+            --import-path ${CMAKE_BINARY_DIR}
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        COMMENT "Checking QML diagnostics against the baseline..."
+        VERBATIM
+    )
+    add_custom_target(qmllint_report
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_SOURCE_DIR}/scripts/qmllint_report.py
+            --report
+            ${_qmllint_skip}
+            --qmllint ${QMLLINT_EXECUTABLE}
+            --import-path ${CMAKE_BINARY_DIR}
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        COMMENT "Summarising QML diagnostics by category and file..."
+        VERBATIM
+    )
+    # Both targets need the module built: qmllint resolves Decenza types through the generated
+    # qmldir, which points at the build's own copies of the QML, and Qt's generated argument
+    # file (.rcc/qmllint/Decenza.rsp) does not exist until then. The script refuses to run
+    # against a stale build rather than report numbers for whatever was last compiled — this
+    # dependency turns that refusal into a rebuild instead of an error message.
+    add_dependencies(qmllint_check Decenza)
+    add_dependencies(qmllint_report Decenza)
+else()
+    # Not fatal: qmllint ships with Qt's QML tooling, which a runtime-only Qt
+    # install can lack.
+    message(STATUS
+        "qmllint not found next to ${_qt_bin_dir} — the qmllint_check/qmllint_report "
+        "targets are unavailable. NOTE: the gate is not wired into CI yet (see "
+        "openspec/changes/fix-qmllint-usability/tasks.md 1.9), so nothing else is "
+        "checking this for you.")
+endif()
 
 # Force QML resource rebuild when source files change
 # NOTE: Disabled - defeats QML caching which slows page loads
@@ -1650,6 +1832,7 @@ if(NOT ANDROID AND NOT IOS)
     add_executable(profile_sync
         tools/profile_sync.cpp
         src/profile/profile.cpp
+        src/profile/de1apptclfields.cpp
         src/profile/profileframe.cpp
         src/profile/recipegenerator.cpp
         src/profile/recipeanalyzer.cpp

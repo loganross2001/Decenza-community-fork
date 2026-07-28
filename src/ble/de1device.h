@@ -36,9 +36,7 @@ class SettingsHardware;
 class DE1Transport;
 class BleTransport;
 
-#ifdef QT_DEBUG
 class DE1Simulator;
-#endif
 
 struct ShotSample {
     qint64 timestamp = 0;
@@ -172,9 +170,19 @@ public:
     // app commands a new steam target via setShotSettings). Emits a minimal
     // shot sample so QML bindings on DE1Device.steamTemperature re-evaluate.
     void setSimulatedIdleSteamTemp(double steamTempC);
-#ifdef QT_DEBUG
+    // Deliberately NOT guarded on DECENZA_SIMULATOR, even though the branches
+    // that dereference m_simulator are: this setter and the member only need
+    // the forward declaration, so callers (including main.cpp's teardown
+    // `setSimulator(nullptr)`) compile in every configuration.
+    //
+    // #1629 is why. Two halves were needed and either alone was harmless: this
+    // line carried a `#ifdef QT_DEBUG` guard, and #1629 added an *unguarded*
+    // `setSimulator(nullptr)` teardown call in main.cpp. Together they broke the
+    // nightly, which builds RelWithDebInfo, and would have broken the next
+    // release tag — while every local debug build stayed green because QT_DEBUG
+    // was defined there. Keeping the seam unguarded removes that whole class of
+    // failure: a stray dereference now fails as an incomplete type instead.
     void setSimulator(DE1Simulator* simulator) { m_simulator = simulator; }
-#endif
 
     // Hardware settings (heater calibration sent to firmware)
     void setSettings(SettingsHardware* settings);
@@ -524,9 +532,7 @@ private:
     bool m_connecting = false;
     bool m_simulationMode = false;
     bool m_firmwareFlashInProgress = false;
-#ifdef QT_DEBUG
     DE1Simulator* m_simulator = nullptr;  // For simulation mode
-#endif
     SettingsHardware* m_settings = nullptr;  // Heater calibration sent to firmware
     // Set by profileForUpload() (const) → mutable. Whether the last upload injected
     // the prime-first-frame priming step; read by the shot-save path.

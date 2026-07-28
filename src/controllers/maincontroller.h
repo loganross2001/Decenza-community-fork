@@ -36,13 +36,16 @@
 #include "../core/datamigrationclient.h"
 #include "../core/databasebackupmanager.h"
 
+#include <QtQml/qqmlregistration.h>
+
 class QNetworkAccessManager;
+class QQmlEngine;
+class QJSEngine;
 class Settings;
 class DE1Device;
 class MachineState;
 class BLEManager;
 class FlowScale;
-class RefractometerDevice;
 class ProfileStorage;
 class ShotDebugLogger;
 class LocationProvider;
@@ -52,6 +55,38 @@ struct ShotSample;
 
 class MainController : public QObject {
     Q_OBJECT
+
+    // A compile-time-registered QML singleton. The macros are what put the type in the module's
+    // generated Decenza.qmltypes — the only place qmllint, qmlcachegen and the language server
+    // learn about C++ types. This replaced a setContextProperty, which exists only at runtime and
+    // is therefore invisible to all three: it was the largest source of unresolvable names
+    // REMAINING once TranslationManager and Settings had migrated (design.md records those at
+    // 3,459 and 1,335 against this one's 879 — and the 879 anchor was itself stale; the measured
+    // reduction was 916).
+    //
+    // Registering the type is necessary but NOT sufficient: main.cpp must also call
+    // qml_register_types_Decenza() explicitly, or no declarative type in this module reaches the
+    // runtime registry at all. See the comment at that call site.
+    //
+    // Direct macros rather than the QML_FOREIGN wrapper Settings uses.
+    //
+    // Be careful with the reason, because the rule as written in settings_qml.h does not hold.
+    // That file says a <QtQml/...> include in a header compiled by saw_parity "is a build break".
+    // Measured on this branch: it is not. saw_parity compiles coffeebagstorage.cpp and
+    // equipmentstorage.cpp, shot_eval reaches shothistorystorage.h, all three headers now carry
+    // qqmlregistration.h, and both tools link and run — QML_ELEMENT/QML_UNCREATABLE expand to
+    // Q_CLASSINFO plus friend declarations, which need no Qml symbols, and the header resolves
+    // through Qt6::Core's own include paths. So the wrapper was not forced by what that comment
+    // claims forced it. Recorded in bugs-found.md rather than rewritten here: settings_qml.h is a
+    // merged, reviewed decision and re-deciding it is not this change's business.
+    //
+    // What IS true and worth checking before copying either shape: a class registered directly
+    // needs a complete type for every pointer parameter of its Q_INVOKABLE/signal/slot signatures,
+    // because moc must build a metatype for each. That is what forced real #includes into
+    // visualizeruploader.h, and what defers ShotDataModel/SteamDataModel (their registerFastSeries
+    // would drag <QQuickItem> into every consumer of this header).
+    QML_ELEMENT
+    QML_SINGLETON
 
     // Non-profile QML properties (profile properties are on ProfileManager)
     Q_PROPERTY(VisualizerUploader* visualizer READ visualizer CONSTANT)
@@ -140,6 +175,13 @@ public:
                            ProfileStorage* profileStorage = nullptr,
                            QObject* parent = nullptr);
 
+    // QML_SINGLETON hooks. The engine does not create this object: main.cpp builds it on the
+    // stack with five collaborators the constructor requires, and wires it into the MCP server,
+    // the ShotServer and the machine signal path long before QML exists. So main publishes the
+    // instance and create() hands that same one back.
+    static void setQmlInstance(MainController *instance);
+    static MainController *create(QQmlEngine *qmlEngine, QJSEngine *jsEngine);
+
     // ProfileManager accessor
     ProfileManager* profileManager() const { return m_profileManager; }
 
@@ -175,8 +217,6 @@ public:
     }
     void setBLEManager(BLEManager* bleManager) { m_bleManager = bleManager; }
     void setFlowScale(FlowScale* flowScale) { m_flowScale = flowScale; }
-    void setRefractometer(RefractometerDevice* refractometer);
-    RefractometerDevice* refractometer() const { return m_refractometer; }
     void setTimingController(ShotTimingController* controller) { m_timingController = controller; }
     void setBackupManager(DatabaseBackupManager* backupManager) { m_backupManager = backupManager; }
     ShotDataModel* shotDataModel() const { return m_shotDataModel; }
@@ -371,6 +411,29 @@ signals:
     void shotEndedShowMetadata(qint64 shotId);
     void lastSavedShotIdChanged();
 
+    // A real espresso shot has been persisted, carrying the SAME finalized
+    // duration and yield that went into the stored row. Consumers that summarize
+    // the last shot must use these rather than re-deriving from ShotDataModel:
+    // the model's stopTime is only written on the stop-at-weight path, so on any
+    // other ending (manual stop, profile end, volume) it keeps its -1 sentinel,
+    // and its raw cumulative weight is a different source from the one the row
+    // stores — the unrounded last point of the graph series, not the timing
+    // controller's settled reading. Both are decided here in onShotEnded() —
+    // extractionDuration() excludes SAW
+    // settling, and the yield is the settled, 0.1 g-rounded value — so this
+    // signal is the only place the finalized pair is available together.
+    //
+    // Emitted only for a successful save (shotId > 0); a failed save has no row
+    // to describe. generateFakeShotData() deliberately does NOT emit it — a
+    // dev-simulated row is not a shot anyone pulled.
+    //
+    // Parameter order is (duration, yield) to match shotDiscarded() below and
+    // ShotHistoryStorage::saveShot(), the two other carriers of this same pair
+    // in onShotEnded(). Both are doubles, so a transposed call would compile and
+    // produce a plausible-looking "30.0 g in 36 s" — matching the neighbours is
+    // the only thing making that mistake visible at the call site. (#1658)
+    void shotPersisted(qint64 shotId, double durationSec, double yieldG);
+
     // Shot aborted because saved scale is not connected
     void shotAbortedNoScale();
 
@@ -429,6 +492,10 @@ private slots:
                                 double deviceGroupTargetC);
 
 private:
+    // The instance create() hands to the engine. Not owned here — main's stack object outlives
+    // the engine, which is why create() pins CppOwnership.
+    static MainController *s_qmlInstance;
+
     void applyAllSettings();
     void applyLoadedShotMetadata(qint64 shotId, const ShotRecord& shotRecord, double doseOverride = 0,
                                  qint64 matchedBagId = -1);
@@ -488,7 +555,6 @@ private:
     ShotTimingController* m_timingController = nullptr;
     BLEManager* m_bleManager = nullptr;
     FlowScale* m_flowScale = nullptr;  // Shadow FlowScale for comparison logging
-    RefractometerDevice* m_refractometer = nullptr;
 
     SteamDataModel* m_steamDataModel = nullptr;
     SteamHealthTracker* m_steamHealthTracker = nullptr;

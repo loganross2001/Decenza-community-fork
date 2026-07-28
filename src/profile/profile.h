@@ -3,6 +3,8 @@
 #include <QString>
 #include <QList>
 #include <QJsonDocument>
+#include <QJsonObject>
+#include <QStringList>
 #include <QJsonValue>
 #include <QByteArray>
 #include <QDebug>
@@ -27,6 +29,12 @@
  * - .tcl: de1app format (Tcl list syntax, importable)
  */
 double profileJsonToDouble(const QJsonValue& val, double defaultVal = 0.0);
+
+// Tolerant boolean reader. QJsonValue::toBool() returns its default for a
+// non-bool, so de1app/reaprime's "1"/"0" string flags read as false and are
+// destroyed rather than misread. Pass `ok` when comparing two values — see the
+// definition for why a silent default is dangerous there.
+bool profileJsonToBool(const QJsonValue& val, bool defaultVal = false, bool* ok = nullptr);
 
 class Profile {
 public:
@@ -97,6 +105,11 @@ public:
     void setTemperaturePresets(const QList<double>& presets) { m_temperaturePresets = presets; }
 
     // === Recommended Dose ===
+    // The read default, shared by the member initialiser, fromJson's fallback and the
+    // recipe-block promotion — which needs it to tell "the user set 18" (indistinguishable,
+    // and harmless) from "this is just the default" (must not enable a recommendation).
+    static constexpr double kDefaultRecommendedDose = 18.0;
+
     bool hasRecommendedDose() const { return m_hasRecommendedDose; }
     void setHasRecommendedDose(bool enabled) { m_hasRecommendedDose = enabled; }
 
@@ -219,17 +232,93 @@ public:
 
     // === Recipe Parameters ===
     RecipeParams recipeParams() const { return m_recipeParams; }
-    void setRecipeParams(const RecipeParams& params) { m_recipeParams = params; }
+    void setRecipeParams(const RecipeParams& params) {
+        m_recipeParams = params;
+        m_hasRecipeParams = true;
+    }
+
+    // Have this profile's recipe parameters been ESTABLISHED — derived from its
+    // frames, read from a stored recipe block, or set by a D-Flow/A-Flow edit —
+    // as opposed to being the member initialisers of a default-constructed
+    // RecipeParams?
+    //
+    // NOT set by editing a pressure/flow (settings_2a/2b) profile:
+    // uploadRecipeProfile routes those through applyRecipeToScalarFields, which
+    // writes the profile's own scalar fields and never touches m_recipeParams.
+    // That is harmless — those parameters round-trip through the scalars
+    // independently of any recipe block — but it means this flag answers
+    // "does a recipe BLOCK belong on this profile", not "has anyone edited it".
+    //
+    // This is not a nicety. RecipeParams' defaults are live values, not sentinels
+    // (targetWeight 36.0, fillTemperature 88.0), so "did anyone set these?" cannot
+    // be answered by inspecting them: a fresh struct is indistinguishable from a
+    // deliberate 88 °C. Writing a recipe block for a profile that merely has a
+    // recipe-shaped TITLE is what fabricated the five identical blocks in the
+    // A-Flow built-ins, none of which matches its own frames — and what made
+    // editing any one parameter reset the fill temperature to 88 °C
+    // (finding REC-1). The plugins have no such notion: both reconstruct their
+    // editor state from the frames on every load. A stored block is a cache.
+    // True when the profile was loaded from a source that still carried a `recipe`
+    // block. See ProfileManager::loadProfile, which persists the stripped form once.
+    bool recipeBlockStripped() const { return m_recipeBlockStripped; }
+    void clearRecipeBlockStripped() { m_recipeBlockStripped = false; }
+
+    bool hasRecipeParams() const { return m_hasRecipeParams; }
 
     // Regenerate frames from stored recipe parameters
     void regenerateFromRecipe();
+
+private:
+    // Reinstate the in-place-mutation semantics the plugins have and Decenza's
+    // build-from-constants generator does not: every frame field the plugin's
+    // update_* proc never assigns keeps the value it had. Called by
+    // regenerateFromRecipe with the pre-regeneration frames.
+    void restoreFieldsThePluginNeverWrites(const QList<ProfileFrame>& oldSteps);
+
+public:
 
     // Regenerate frames from scalar fields for simple profiles (settings_2a/2b)
     void regenerateSimpleFrames();
 
     // === Serialization ===
+    // toJsonObject() is the single canonical profile serializer: string-encoded
+    // values, ecosystem-required keys, standard DE1 v2 metadata, non-empty steps.
+    // toJson() wraps it in a document; the Visualizer upload delegates to it too,
+    // so there is exactly one format validated across Decenza, reaprime, and Visualizer.
+    QJsonObject toJsonObject() const;
     QJsonDocument toJson() const;
     static Profile fromJson(const QJsonDocument& doc);
+
+    // Validate a serialized profile object against reaprime's Profile.fromJson
+    // contract (the strictest reader in the DE1 ecosystem): non-empty title and
+    // steps, the required tank_temperature / target_volume_count_start keys, and
+    // in-vocabulary enum values (pump/sensor/transition, exit type/condition).
+    // Returns an empty list when the object is reaprime-readable; otherwise one
+    // human-readable message per violation. Reusable from tests and profile_sync.
+    static QStringList reaprimeReadabilityErrors(const QJsonObject& obj);
+
+    // Deep semantic parity check between two serialized profiles: every key and
+    // value in `before` must survive into `after`. Encoding differences are
+    // normalized (numeric 9.0 == string "9.00"), so this compares MEANING, not
+    // bytes — the exact invariant a format-only change must satisfy.
+    //
+    // Additions are allowed (a canonical serializer may add keys); LOSSES are not.
+    // A dropped object/array, or a dropped or changed non-zero scalar, is an error;
+    // a dropped zero/empty scalar is inert (absent and 0 mean the same to every
+    // reader in this format). Returns one message per violation, empty when parity
+    // holds.
+    //
+    // Because additions are allowed, this CANNOT detect content the reader derived
+    // rather than read — a key absent from `before` is never visited. A caller that
+    // needs "nothing changed", not merely "nothing was lost", has to exclude the
+    // deriving cases itself; ProfileManager::upgradeStoredEncoding does that with
+    // Profile::espressoTemperatureHealed().
+    //
+    // Callers: profile_sync's rewrite audit, the built-in parity tests,
+    // ProfileManager::upgradeStoredEncoding and ProfileManager::migrateProfileFormat
+    // — the last two run against real user profiles, so a format change that
+    // silently drops data fails all four.
+    static QStringList jsonParityErrors(const QJsonObject& before, const QJsonObject& after);
 
     // === File I/O ===
     static Profile loadFromFile(const QString& filePath);
@@ -275,6 +364,21 @@ public:
     bool isValid() const;
     QStringList validationErrors() const;
 
+    // Step keys encountered at load that this build does not understand. When
+    // non-empty the profile is deliberately invalid: we cannot promise it brews
+    // the same shot, so it must not be imported. Exposed so callers can name the
+    // offending key in a message the user can turn into a bug report.
+    QStringList unsupportedStepKeys() const { return m_unsupportedStepKeys; }
+
+    // Values encountered at load that this build cannot interpret, as
+    // "key=raw". The value-level twin of unsupportedStepKeys(), and invalidating
+    // for the same reason: a number we cannot read becomes 0.0, and 0 is legal
+    // for every field it can happen to, so substituting it silently pours
+    // something the file did not describe. `maximum_pressure 9,5` would read as
+    // "no pressure limit"; `final_desired_shot_weight n/a` would switch
+    // stop-at-weight on at the 36 g default.
+    QStringList malformedValues() const { return m_malformedValues; }
+
     // Count consecutive leading frames with exit conditions (preinfusion frames)
     static int countPreinfuseFrames(const QList<ProfileFrame>& steps);
 
@@ -283,7 +387,41 @@ public:
     // Returns false if either profile has no steps.
     static bool functionallyEqual(const Profile& a, const Profile& b);
 
+    // Human-readable account of WHY functionallyEqual() said no: one line per
+    // differing field, labelled with the frame index. Empty exactly when
+    // functionallyEqual() is true.
+    //
+    // It lives next to functionallyEqual() because it has to apply the same
+    // rules — the same skipped inactive axis, the same active-exit-only
+    // threshold check. It previously existed as two hand-maintained copies, in
+    // profile_sync and in tst_tclimport, and a rule added to one of them did not
+    // reach the other.
+    static QString frameDiffReport(const Profile& a, const Profile& b);
+
+    // Canonical profile-title → base filename mapping (no extension). Accents
+    // are decomposed and stripped, every other non-alphanumeric becomes '_',
+    // runs collapse, leading/trailing '_' are trimmed.
+    //
+    // ONE implementation on purpose: this used to be three (ProfileManager, the
+    // profile_sync tool, tst_tclimport) that had already drifted apart on both
+    // accent handling and a length cap. A tool that computes a different
+    // filename than the app looks in the wrong place and reports a built-in as
+    // missing.
+    static QString titleToFilename(const QString& title);
+
 private:
+    // Frames for serialization, materializing simple (settings_2a/2b) profiles
+    // that carry their frames implicitly. const-safe (no mutation of m_steps).
+    QVector<ProfileFrame> materializedSteps() const;
+
+    // Log a portability failure without blocking the write. Called by BOTH write
+    // paths — saveToFile() and toJsonString() — because the latter is every write
+    // on Android and previously produced no diagnostic. `target` may be empty when
+    // the caller has no file path to name. See the definition for why this warns
+    // rather than refuses.
+    static void warnIfNotPortable(const QJsonObject& canonical, const QString& title,
+                                  const QString& context, const QString& target);
+
     // Metadata
     QString m_title = "Default";
     QString m_author;
@@ -302,7 +440,13 @@ private:
 
     // Recommended dose
     bool m_hasRecommendedDose = false;
-    double m_recommendedDose = 18.0;
+    double m_recommendedDose = kDefaultRecommendedDose;
+
+    // Transient; set by fromJson() when the source carried a `recipe` block, so
+    // ProfileManager::loadProfile can write the stripped profile back once. Not
+    // serialized — the block is gone from the output either way, and this only
+    // says whether the copy ON DISK still has one.
+    bool m_recipeBlockStripped = false;
 
     // Limits
     double m_maximumPressure = 12.0;
@@ -319,14 +463,20 @@ private:
     double m_preinfusionTime = 5.0;
     double m_preinfusionFlowRate = 4.0;
     double m_preinfusionStopPressure = 4.0;
-    double m_espressoPressure = 9.2;        // settings_2a only
+    // "used BY the settings_2a editor" — NOT "only present on settings_2a
+    // profiles". de1app writes this whole block on every profile of every type,
+    // and reading it only on the matching type is what lost the flow-editor
+    // values on 2a/2c profiles and the pressure-editor ones on 2b. The
+    // annotations below used to read "settings_2a only", which is how that
+    // mistake reads as correct.
+    double m_espressoPressure = 9.2;        // settings_2a editor
     double m_espressoHoldTime = 10.0;
     double m_espressoDeclineTime = 25.0;
-    double m_pressureEnd = 4.0;             // settings_2a only
-    double m_flowProfileHold = 2.0;         // settings_2b only
-    double m_flowProfileHoldTime = 8.0;     // settings_2b only
-    double m_flowProfileDecline = 1.2;      // settings_2b only
-    double m_flowProfileDeclineTime = 17.0; // settings_2b only
+    double m_pressureEnd = 4.0;             // settings_2a editor
+    double m_flowProfileHold = 2.0;         // settings_2b editor
+    double m_flowProfileHoldTime = 8.0;     // settings_2b editor
+    double m_flowProfileDecline = 1.2;      // settings_2b editor
+    double m_flowProfileDeclineTime = 17.0; // settings_2b editor
     double m_maximumFlowRangeDefault = 1.0; // settings_2a limiter range
     double m_maximumPressureRangeDefault = 0.9; // settings_2b limiter range
     bool m_tempStepsEnabled = false;
@@ -339,7 +489,20 @@ private:
     Mode m_mode = Mode::FrameBased;
 
     // Recipe parameters (for D-Flow/A-Flow/Pressure/Flow editors)
+    // Top-level keys from the source JSON that Decenza does not model. Re-emitted
+    // verbatim on serialize so a profile authored in another DE1 app survives a
+    // Decenza load→save round trip instead of being silently stripped (de1app
+    // writes several simple-editor keys we never read). Canonical keys always win.
+    QJsonObject m_unknownKeys;
+
+    // Step keys seen at load that we do not understand. Non-empty makes the
+    // profile invalid — see ProfileFrame::knownJsonKeys() for why an unknown
+    // key inside a step is refused rather than carried along.
+    QStringList m_unsupportedStepKeys;
+    QStringList m_malformedValues;
+
     RecipeParams m_recipeParams;
+    bool m_hasRecipeParams = false;  // see hasRecipeParams()
 
     // Read-only flag (de1app compatibility: 0=editable, 1=read-only, 2=reset)
     int m_readOnly = 0;

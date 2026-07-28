@@ -6,7 +6,7 @@
 #include "profile/profile.h"
 #include "../core/settings_hardware.h"
 
-#ifdef QT_DEBUG
+#ifdef DECENZA_SIMULATOR
 #include "../simulator/de1simulator.h"
 #endif
 #include <QBluetoothAddress>
@@ -257,6 +257,21 @@ bool DE1Device::isConnecting() const {
 // -- Simulation mode --
 
 void DE1Device::setSimulationMode(bool enabled) {
+#ifndef DECENZA_SIMULATOR
+    // Belt and braces. Today no caller can get here with `true` on a build
+    // without a simulator — main.cpp passes the hard-false settings getter and
+    // the Ctrl+D shortcut is disabled — but this is a public Q_PROPERTY WRITE
+    // that compiles identically in both configurations, so a future QML or C++
+    // writer would reopen the bug with no compile-time signal. Enabling here
+    // fabricates a connected machine (synthetic firmware string, water level,
+    // head temp) and makes isConnected() true, which is exactly the dead
+    // "simulating with no engine" UI this build is meant to be free of.
+    if (enabled) {
+        qWarning() << "DE1Device: simulation mode requested, but no simulator is "
+                      "compiled into this build - ignoring";
+        return;
+    }
+#endif
     if (m_simulationMode == enabled) {
         return;
     }
@@ -867,7 +882,7 @@ void DE1Device::parseMMRResponse(const QByteArray& data) {
 // -- Machine control methods (delegate through transport) --
 
 void DE1Device::requestState(DE1::State state) {
-#ifdef QT_DEBUG
+#ifdef DECENZA_SIMULATOR
     if (m_simulationMode && m_simulator) {
         switch (state) {
         case DE1::State::Espresso:
@@ -1029,7 +1044,7 @@ void DE1Device::customEvent(QEvent* event) {
 }
 
 void DE1Device::stopOperationUrgent(qint64 sawTriggerMs) {
-#ifdef QT_DEBUG
+#ifdef DECENZA_SIMULATOR
     if (m_simulationMode && m_simulator) {
         m_simulator->stop();
         return;
@@ -1060,7 +1075,7 @@ void DE1Device::skipToNextFrame() {
 }
 
 void DE1Device::goToSleep() {
-#ifdef QT_DEBUG
+#ifdef DECENZA_SIMULATOR
     if (m_simulationMode && m_simulator) {
         m_simulator->goToSleep();
         return;
@@ -1181,8 +1196,9 @@ Profile DE1Device::profileForUpload(const Profile& profile) const {
 }
 
 void DE1Device::uploadProfile(const Profile& profile) {
+    // [barista-fork] prime-first-frame transform (profileForUpload) — `p` is used for the real upload below too.
     const Profile p = profileForUpload(profile);
-#ifdef QT_DEBUG
+#ifdef DECENZA_SIMULATOR
     if (m_simulationMode && m_simulator) {
         m_simulator->setProfile(p);
     }
@@ -1791,11 +1807,7 @@ void DE1Device::setShotSettings(double steamTemp, int steamDuration,
     // read-back verification are all skipped. m_lastShotSettingsPayload is
     // intentionally left untouched — drift detection only runs against real
     // DE1 indications, which never fire in sim mode.
-    //
-    // Guarded by QT_DEBUG because m_simulator and setSimulator() are only
-    // compiled in debug builds (see de1device.h). Release builds have no
-    // simulator at all, so this branch is dead code there.
-#ifdef QT_DEBUG
+#ifdef DECENZA_SIMULATOR
     if (m_simulationMode && m_simulator) {
         m_simulator->setTargetSteamTemp(steamTemp);
         m_commandedSteamTargetC = steamTemp;

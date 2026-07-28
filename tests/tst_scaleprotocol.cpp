@@ -5,6 +5,8 @@
 
 #include "ble/scales/decentscale.h"
 #include "ble/scales/bookooscale.h"
+#include "ble/scales/difluidscale.h"
+#include "ble/scales/acaiascale.h"
 #include "ble/transport/scalebletransport.h"
 #include "ble/protocol/de1characteristics.h"
 #include "ble/protocol/decentscaleprotocol.h"
@@ -23,22 +25,46 @@ class MockScaleBleTransport : public ScaleBleTransport {
 public:
     explicit MockScaleBleTransport(QObject* parent = nullptr) : ScaleBleTransport(parent) {}
 
-    void connectToDevice(const QString&, const QString&) override {}
+    void connectToDevice(const QString&, const QString&) override { m_connectCount++; }
     void disconnectFromDevice() override { m_disconnectCount++; }
     void discoverServices() override {}
-    void discoverCharacteristics(const QBluetoothUuid&) override {}
-    void enableNotifications(const QBluetoothUuid&, const QBluetoothUuid&) override { m_notifyEnableCount++; }
-    void writeCharacteristic(const QBluetoothUuid&, const QBluetoothUuid&,
+    void discoverCharacteristics(const QBluetoothUuid& service) override {
+        m_characteristicDiscoveries.append(service);
+    }
+    void enableNotifications(const QBluetoothUuid& service, const QBluetoothUuid&) override {
+        m_notifyEnableCount++;
+        m_lastNotifyService = service;
+    }
+    void writeCharacteristic(const QBluetoothUuid& service, const QBluetoothUuid&,
                              const QByteArray& value, WriteType = WriteType::WithResponse) override {
         m_writes.append(value);
+        m_lastWriteService = service;
     }
     void readCharacteristic(const QBluetoothUuid&, const QBluetoothUuid&) override {}
     bool isConnected() const override { return m_isConnected; }
 
+    // Drive the discovery handshake from a test. Qt's `signals` macro expands to
+    // `public`, so these are not strictly necessary — they exist because
+    // `transport->fakeServiceDiscovered(x)` reads as "the transport reported x",
+    // which is the thing under test, rather than as a test emitting a signal.
+    void fakeServiceDiscovered(const QBluetoothUuid& s) { emit serviceDiscovered(s); }
+    void fakeServicesDiscoveryFinished() { emit servicesDiscoveryFinished(); }
+    void fakeCharacteristicsDiscoveryFinished(const QBluetoothUuid& s) {
+        emit characteristicsDiscoveryFinished(s);
+    }
+    void fakeCharacteristicChanged(const QBluetoothUuid& c, const QByteArray& v) {
+        emit characteristicChanged(c, v);
+    }
+    void fakeDisconnected() { emit disconnected(); }
+
     int m_notifyEnableCount = 0;
     int m_disconnectCount = 0;
+    int m_connectCount = 0;
     bool m_isConnected = true;
     QList<QByteArray> m_writes;
+    QList<QBluetoothUuid> m_characteristicDiscoveries;
+    QBluetoothUuid m_lastNotifyService;
+    QBluetoothUuid m_lastWriteService;
 };
 
 class tst_ScaleProtocol : public QObject {
@@ -669,9 +695,6 @@ private slots:
 
         QVERIFY(scale.isConnected());
         QVERIFY(scale.m_watchdogTimer && scale.m_watchdogTimer->isActive());
-
-        // Teardown: ~ScaleDevice warn-logs DISCONNECTED for a still-connected scale
-        QTest::ignoreMessage(QtWarningMsg, QRegularExpression(".*DISCONNECTED.*"));
     }
 
     void errorOnDeadLinkCleansUp() {
@@ -712,9 +735,6 @@ private slots:
         scale.onCharacteristicChanged(Scale::Decent::READ, pkt);
 
         QVERIFY(!scale.m_watchdogTimer || !scale.m_watchdogTimer->isActive());
-
-        // Teardown: ~ScaleDevice warn-logs DISCONNECTED for a still-connected scale
-        QTest::ignoreMessage(QtWarningMsg, QRegularExpression(".*DISCONNECTED.*"));
     }
 
     void serviceNotFoundPropagatesDisconnect() {
@@ -765,9 +785,6 @@ private slots:
         scale.onCharacteristicsDiscoveryFinished(Scale::Decent::SERVICE);
 
         QVERIFY(scale.isConnected());
-
-        // Teardown: ~ScaleDevice warn-logs DISCONNECTED for a still-connected scale
-        QTest::ignoreMessage(QtWarningMsg, QRegularExpression(".*DISCONNECTED.*"));
     }
 
     void wakeDoesNotReviveDeadLink() {
@@ -920,6 +937,462 @@ private slots:
 
         // Watchdog should have fired and re-enabled notifications
         QVERIFY(transport->m_notifyEnableCount >= 1);
+    }
+
+    // === DiFluid Microbalance / Microbalance Ti ===
+
+    // The service-selection tests below feed a constant in and assert the same
+    // constant comes out, and production compares that symbol to itself in between —
+    // so they cannot catch a wrong UUID. This is the assertion that ties the suite to
+    // the actual protocol fact the Ti support rests on.
+    void difluidServiceUuidsMatchTheProtocol() {
+        QCOMPARE(Scale::DiFluid::SERVICE.toString(),
+                 QString("{000000ee-0000-1000-8000-00805f9b34fb}"));
+        QCOMPARE(Scale::DiFluid::SERVICE_TI.toString(),
+                 QString("{000000dd-0000-1000-8000-00805f9b34fb}"));
+        QCOMPARE(Scale::DiFluid::CHARACTERISTIC.toString(),
+                 QString("{0000aa01-0000-1000-8000-00805f9b34fb}"));
+        QVERIFY2(Scale::DiFluid::SERVICE != Scale::DiFluid::SERVICE_TI,
+                 "the two models must not share a service, or Ti support is a no-op");
+    }
+
+    // DiFluid's worked example from protocolMicrobalance.md. Weight is bytes 5-8,
+    // signed, x10 grams: 0x000002F8 = 760 -> 76.0 g.
+    static QByteArray difluidWeightFrame(qint32 rawWeight) {
+        QByteArray f = QByteArray::fromHex("dfdf03000d");
+        f.append(static_cast<char>((rawWeight >> 24) & 0xFF));
+        f.append(static_cast<char>((rawWeight >> 16) & 0xFF));
+        f.append(static_cast<char>((rawWeight >> 8) & 0xFF));
+        f.append(static_cast<char>(rawWeight & 0xFF));
+        f.append(QByteArray::fromHex("00000000000a27b000a9"));  // timer + trailer
+        return f;
+    }
+
+    void difluidParsesTheDocumentedWeightFrame() {
+        auto* transport = new MockScaleBleTransport;
+        DifluidScale scale(transport);
+        QSignalSpy weightSpy(&scale, &ScaleDevice::weightChanged);
+
+        // Verbatim from the vendor doc, checksum byte included.
+        const QByteArray doc = QByteArray::fromHex(
+            "dfdf03000d000002f800000000000a27b000a9");
+        QCOMPARE(doc.size(), 19);
+        transport->fakeCharacteristicChanged(Scale::DiFluid::CHARACTERISTIC, doc);
+
+        QVERIFY2(!weightSpy.isEmpty(), "the vendor's own weight frame produced no reading");
+        QCOMPARE(scale.weight(), 76.0);
+    }
+
+    void difluidWeightGoesNegativeAfterTare() {
+        // The field is signed. Read unsigned, -0.5 g became 4294967291 and was
+        // discarded by the range gate, freezing the display at its last value.
+        auto* transport = new MockScaleBleTransport;
+        DifluidScale scale(transport);
+
+        transport->fakeCharacteristicChanged(Scale::DiFluid::CHARACTERISTIC,
+                                             difluidWeightFrame(-5));
+        QCOMPARE(scale.weight(), -0.5);
+    }
+
+    void difluidRejectsImplausibleAndShortFrames() {
+        auto* transport = new MockScaleBleTransport;
+        DifluidScale scale(transport);
+        QSignalSpy weightSpy(&scale, &ScaleDevice::weightChanged);
+
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression("Sensor frame too short"));
+        transport->fakeCharacteristicChanged(Scale::DiFluid::CHARACTERISTIC,
+                                             QByteArray::fromHex("dfdf030001"));
+
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression("Weight out of range"));
+        transport->fakeCharacteristicChanged(Scale::DiFluid::CHARACTERISTIC,
+                                             difluidWeightFrame(999999));
+
+        QVERIFY(weightSpy.isEmpty());
+    }
+
+    void difluidIgnoresSettingsEchoesQuietly() {
+        // AA01 is also the characteristic the driver WRITES to, and the DF-DF family
+        // echoes settings back — so enableNotifications() and setToGrams() each drew a
+        // "too short" warning on every connect, calling healthy traffic malformed. At
+        // 5Hz a format mismatch would also evict the 1000-entry scale log, destroying
+        // the artifact someone would be asked to share.
+        auto* transport = new MockScaleBleTransport;
+        DifluidScale scale(transport);
+        QSignalSpy weightSpy(&scale, &ScaleDevice::weightChanged);
+
+        // Func 1 Cmd 0 echo — no warning, and failOnWarning() enforces that.
+        transport->fakeCharacteristicChanged(Scale::DiFluid::CHARACTERISTIC,
+                                             QByteArray::fromHex("dfdf01000101c1"));
+        QVERIFY(weightSpy.isEmpty());
+    }
+
+    void difluidExtremeWeightBytesDoNotTripUndefinedBehaviour() {
+        // 80 00 00 00 is INT32_MIN, the canonical "invalid reading" sentinel and the
+        // shape an unrecognised frame produces. qAbs() asserts on it in debug builds
+        // and is signed-overflow UB in release, so the range check must not use it.
+        auto* transport = new MockScaleBleTransport;
+        DifluidScale scale(transport);
+        QSignalSpy weightSpy(&scale, &ScaleDevice::weightChanged);
+
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression("Weight out of range"));
+        transport->fakeCharacteristicChanged(
+            Scale::DiFluid::CHARACTERISTIC,
+            QByteArray::fromHex("dfdf03000d") + QByteArray::fromHex("80000000")
+                + QByteArray::fromHex("00000000000a27b000a9"));
+
+        QVERIFY(weightSpy.isEmpty());
+    }
+
+    void difluidPrefersTheFirstServiceWhenBothAreAdvertised() {
+        // A vendor keeping the old service for compatibility is exactly the shape of
+        // this change, and BLE discovery order is not guaranteed — so this must not
+        // be a coin toss.
+        auto* transport = new MockScaleBleTransport;
+        DifluidScale scale(transport);
+
+        transport->fakeServiceDiscovered(Scale::DiFluid::SERVICE);
+        transport->fakeServiceDiscovered(Scale::DiFluid::SERVICE_TI);
+        transport->fakeServicesDiscoveryFinished();
+
+        QCOMPARE(transport->m_characteristicDiscoveries.size(), 1);
+        QCOMPARE(transport->m_characteristicDiscoveries.at(0), Scale::DiFluid::SERVICE);
+    }
+
+    void difluidCommandsAreRefusedAndLoggedBeforeDiscovery() {
+        auto* transport = new MockScaleBleTransport;
+        DifluidScale scale(transport);
+
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression("Dropping command"));
+        scale.tare();
+
+        QVERIFY2(transport->m_writes.isEmpty(), "a command was written before any service was adopted");
+    }
+
+    void difluidDisconnectClearsLinkState() {
+        auto* transport = new MockScaleBleTransport;
+        DifluidScale scale(transport);
+
+        transport->fakeServiceDiscovered(Scale::DiFluid::SERVICE_TI);
+        transport->fakeServicesDiscoveryFinished();
+        transport->fakeCharacteristicsDiscoveryFinished(Scale::DiFluid::SERVICE_TI);
+        QVERIFY(scale.isConnected());
+
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression("DISCONNECTED"));
+        transport->fakeDisconnected();
+
+        // The 100ms notification-enable timer armed by characteristic discovery is
+        // still pending. It must not enable notifications on a dropped link — and it
+        // returns on the characteristicsReady check before reaching the m_service
+        // guard, so it does so silently. Let it fire to prove it stays quiet.
+        QTest::qWait(200);
+        QVERIFY2(transport->m_notifyEnableCount == 0,
+                 "notifications were enabled after the link dropped");
+
+        // Without the reset, sendCommand's guards still pass and every later write
+        // goes to a torn-down transport.
+        transport->m_writes.clear();
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression("Dropping command"));
+        scale.tare();
+        QVERIFY(transport->m_writes.isEmpty());
+    }
+
+    // === DiFluid Microbalance / Microbalance Ti service selection ===
+    //
+    // The two models are the same protocol on different services (0x00EE vs
+    // 0x00DD). The driver must follow whichever the device advertised through
+    // characteristic discovery, notifications and writes — matching only 0x00EE
+    // left a Ti connected but permanently silent.
+
+    void difluidClassicServiceDrivesDiscovery() {
+        auto* transport = new MockScaleBleTransport;
+        DifluidScale scale(transport);
+
+        transport->fakeServiceDiscovered(Scale::DiFluid::SERVICE);
+        transport->fakeServicesDiscoveryFinished();
+
+        QCOMPARE(transport->m_characteristicDiscoveries.size(), 1);
+        QCOMPARE(transport->m_characteristicDiscoveries.at(0), Scale::DiFluid::SERVICE);
+    }
+
+    void difluidTiServiceDrivesDiscovery() {
+        auto* transport = new MockScaleBleTransport;
+        DifluidScale scale(transport);
+
+        transport->fakeServiceDiscovered(Scale::DiFluid::SERVICE_TI);
+        transport->fakeServicesDiscoveryFinished();
+
+        QCOMPARE(transport->m_characteristicDiscoveries.size(), 1);
+        QCOMPARE(transport->m_characteristicDiscoveries.at(0), Scale::DiFluid::SERVICE_TI);
+    }
+
+    void difluidTiCommandsUseTiService() {
+        auto* transport = new MockScaleBleTransport;
+        DifluidScale scale(transport);
+
+        transport->fakeServiceDiscovered(Scale::DiFluid::SERVICE_TI);
+        transport->fakeServicesDiscoveryFinished();
+        transport->fakeCharacteristicsDiscoveryFinished(Scale::DiFluid::SERVICE_TI);
+
+        QVERIFY(scale.isConnected());
+
+        // Setup commands are sent from a 100ms singleShot after discovery.
+        QTest::qWait(200);
+        QVERIFY(!transport->m_writes.isEmpty());
+        QCOMPARE(transport->m_lastWriteService, Scale::DiFluid::SERVICE_TI);
+        QCOMPARE(transport->m_lastNotifyService, Scale::DiFluid::SERVICE_TI);
+
+        // And an explicit command after setup keeps using the Ti service.
+        scale.tare();
+        QCOMPARE(transport->m_lastWriteService, Scale::DiFluid::SERVICE_TI);
+    }
+
+    void difluidUnknownServiceIsNotAdopted() {
+        auto* transport = new MockScaleBleTransport;
+        DifluidScale scale(transport);
+
+        // A Decent Scale service on a device we routed here by name must not be
+        // mistaken for a DiFluid one.
+        transport->fakeServiceDiscovered(Scale::Decent::SERVICE);
+        QTest::ignoreMessage(QtWarningMsg,
+                             QRegularExpression("advertises neither DiFluid service"));
+        transport->fakeServicesDiscoveryFinished();
+
+        QVERIFY(transport->m_characteristicDiscoveries.isEmpty());
+        QVERIFY(!scale.isConnected());
+    }
+
+    // --- Acaia (issues #1669, #1670) --------------------------------------
+    //
+    // Frames are `EF DD <msgType> <length> <payload…>`, length counting from the
+    // length byte itself, so a frame occupies ACAIA_METADATA_LEN(5) + length
+    // bytes. AcaiaScale defaults to the IPS protocol, so feeding
+    // Scale::AcaiaIPS::CHARACTERISTIC reaches parseResponse() with no discovery
+    // handshake.
+    //
+    // Byte layouts are asserted against pyacaia (decode/Settings), Beanconqueror
+    // (decoder.ts) and reaprime (acaia_scale.dart), which agree; de1app parses
+    // weight only and never reads a 0x08 settings frame.
+
+    // 0x08 settings frame. Battery is payload[1] = buf[4]; buf[5] is the units
+    // byte (2 = grams). Defaults are chosen to discriminate: reverting the fix to
+    // buf[5] yields 2 — the exact "always 2%" symptom reported in #1670.
+    static QByteArray buildAcaiaSettings(uint8_t battery, uint8_t units = 2) {
+        QByteArray pkt;
+        pkt.append(static_cast<char>(0xEF));
+        pkt.append(static_cast<char>(0xDD));
+        pkt.append(static_cast<char>(0x08));
+        pkt.append(static_cast<char>(0x0D));            // length
+        pkt.append(static_cast<char>(battery));         // buf[4]
+        pkt.append(static_cast<char>(units));           // buf[5]
+        pkt.append(QByteArray(12, '\0'));               // rest of the frame
+        return pkt.left(5 + 0x0D);
+    }
+
+    // 0x0C / eventType 5 weight frame. Body is 3-byte LE value, then a decimal
+    // exponent at payload[4] and a sign flag at payload[5].
+    static QByteArray buildAcaiaWeight(double grams) {
+        const uint32_t raw = static_cast<uint32_t>(qRound(qAbs(grams) * 10.0));
+        QByteArray pkt;
+        pkt.append(static_cast<char>(0xEF));
+        pkt.append(static_cast<char>(0xDD));
+        pkt.append(static_cast<char>(0x0C));
+        pkt.append(static_cast<char>(0x06));            // length
+        pkt.append(static_cast<char>(0x05));            // eventType
+        pkt.append(static_cast<char>(raw & 0xFF));
+        pkt.append(static_cast<char>((raw >> 8) & 0xFF));
+        pkt.append(static_cast<char>((raw >> 16) & 0xFF));
+        pkt.append(static_cast<char>(0x00));
+        pkt.append(static_cast<char>(0x01));            // one decimal place
+        pkt.append(static_cast<char>(grams < 0 ? 0x02 : 0x00));
+        return pkt;
+    }
+
+    static void feedAcaia(MockScaleBleTransport* t, const QByteArray& bytes) {
+        t->fakeCharacteristicChanged(Scale::AcaiaIPS::CHARACTERISTIC, bytes);
+    }
+
+    void acaiaBatteryComesFromPayloadByteOne() {
+        auto* transport = new MockScaleBleTransport;
+        AcaiaScale scale(transport);
+        QSignalSpy spy(&scale, &ScaleDevice::batteryLevelChanged);
+
+        feedAcaia(transport, buildAcaiaSettings(90));
+
+        QCOMPARE(spy.count(), 1);
+        QCOMPARE(spy.at(0).at(0).toInt(), 90);
+        QCOMPARE(scale.batteryLevel(), 90);
+    }
+
+    void acaiaBatteryIsNotTheUnitsByte() {
+        // The #1670 regression guard. Units is grams(2) here while the battery is
+        // 77, so reading the wrong byte cannot coincidentally pass.
+        auto* transport = new MockScaleBleTransport;
+        AcaiaScale scale(transport);
+
+        feedAcaia(transport, buildAcaiaSettings(77, /*units=*/2));
+
+        QCOMPARE(scale.batteryLevel(), 77);
+        QVERIFY(scale.batteryLevel() != 2);
+    }
+
+    void acaiaBatteryHighBitIsMasked() {
+        // pyacaia and Beanconqueror mask 0x80 off; reaprime does not. Masking
+        // keeps a set high bit from reading as an out-of-range battery.
+        auto* transport = new MockScaleBleTransport;
+        AcaiaScale scale(transport);
+
+        feedAcaia(transport, buildAcaiaSettings(0x80 | 64));
+
+        QCOMPARE(scale.batteryLevel(), 64);
+    }
+
+    void acaiaDecodesSecondFrameInSameNotification() {
+        // The frame-carrying fix: a settings frame followed by a weight frame in
+        // one notification. The old parser decoded the first and cleared the rest.
+        auto* transport = new MockScaleBleTransport;
+        AcaiaScale scale(transport);
+        QSignalSpy weightSpy(&scale, &ScaleDevice::weightChanged);
+        QSignalSpy batterySpy(&scale, &ScaleDevice::batteryLevelChanged);
+
+        feedAcaia(transport, buildAcaiaSettings(90) + buildAcaiaWeight(100.0));
+
+        QCOMPARE(batterySpy.count(), 1);
+        QCOMPARE(batterySpy.at(0).at(0).toInt(), 90);
+        QCOMPARE(weightSpy.count(), 1);
+        QCOMPARE(weightSpy.at(0).at(0).toDouble(), 100.0);
+    }
+
+    void acaiaDecodesSettingsBehindWeight() {
+        // Reverse order — the comment in parseResponse claims this is the common
+        // shape on the wire, so pin both orderings.
+        auto* transport = new MockScaleBleTransport;
+        AcaiaScale scale(transport);
+        QSignalSpy weightSpy(&scale, &ScaleDevice::weightChanged);
+        QSignalSpy batterySpy(&scale, &ScaleDevice::batteryLevelChanged);
+
+        feedAcaia(transport, buildAcaiaWeight(18.5) + buildAcaiaSettings(42));
+
+        QCOMPARE(weightSpy.count(), 1);
+        QCOMPARE(weightSpy.at(0).at(0).toDouble(), 18.5);
+        QCOMPARE(batterySpy.count(), 1);
+        QCOMPARE(batterySpy.at(0).at(0).toInt(), 42);
+    }
+
+    void acaiaShortFrameDoesNotReadIntoItsNeighbour() {
+        // A weight frame whose length byte is too short for its own body must be
+        // dropped, not completed from the following frame's bytes. Before the
+        // frame-bounded reads this decoded `AA BB EF DD 0C 06` as a weight with
+        // unit=12 and emitted a spurious sample ahead of the real one.
+        auto* transport = new MockScaleBleTransport;
+        AcaiaScale scale(transport);
+        QSignalSpy weightSpy(&scale, &ScaleDevice::weightChanged);
+
+        QByteArray truncated = QByteArray::fromHex("EFDD0C0205AABB");
+        feedAcaia(transport, truncated + buildAcaiaWeight(100.0));
+
+        QCOMPARE(weightSpy.count(), 1);
+        QCOMPARE(weightSpy.at(0).at(0).toDouble(), 100.0);
+    }
+
+    void acaiaHeartbeatTimerBodyIsNotAWeight() {
+        // eventType 11 carries a selector at buf[7]: 5 = weight, 7 = timer.
+        // Decoding a timer body as a weight is what the selector check prevents.
+        auto* transport = new MockScaleBleTransport;
+        AcaiaScale scale(transport);
+        QSignalSpy weightSpy(&scale, &ScaleDevice::weightChanged);
+
+        feedAcaia(transport, QByteArray::fromHex("EFDD0C090B000007123456789ABC"));
+        QCOMPARE(weightSpy.count(), 0);
+
+        // The weight-bodied variant of the same event still decodes.
+        feedAcaia(transport, QByteArray::fromHex("EFDD0C090B000005E80300000100"));
+        QCOMPARE(weightSpy.count(), 1);
+        QCOMPARE(weightSpy.at(0).at(0).toDouble(), 100.0);
+    }
+
+    void acaiaResyncsPastBogusLength() {
+        auto* transport = new MockScaleBleTransport;
+        AcaiaScale scale(transport);
+        QSignalSpy weightSpy(&scale, &ScaleDevice::weightChanged);
+
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression("Frame resync"));
+        feedAcaia(transport, QByteArray::fromHex("EFDD0CFF0500") + buildAcaiaWeight(100.0));
+
+        QCOMPARE(weightSpy.count(), 1);
+        QCOMPARE(weightSpy.at(0).at(0).toDouble(), 100.0);
+    }
+
+    void acaiaCarriesFrameSplitAcrossNotifications() {
+        auto* transport = new MockScaleBleTransport;
+        AcaiaScale scale(transport);
+        QSignalSpy weightSpy(&scale, &ScaleDevice::weightChanged);
+
+        const QByteArray whole = buildAcaiaWeight(100.0);
+        feedAcaia(transport, whole.left(6));
+        QCOMPARE(weightSpy.count(), 0);
+        feedAcaia(transport, whole.mid(6));
+
+        QCOMPARE(weightSpy.count(), 1);
+        QCOMPARE(weightSpy.at(0).at(0).toDouble(), 100.0);
+    }
+
+    void acaiaCarriesHeaderSplitAcrossNotifications() {
+        // The trailing-0xEF hold-back. The old parser found no header, cleared
+        // the buffer, and the next notification then began with a stray 0xDD —
+        // losing the frame entirely.
+        auto* transport = new MockScaleBleTransport;
+        AcaiaScale scale(transport);
+        QSignalSpy weightSpy(&scale, &ScaleDevice::weightChanged);
+
+        const QByteArray whole = buildAcaiaWeight(100.0);
+        feedAcaia(transport, QByteArray::fromHex("1122") + whole.left(1));
+        feedAcaia(transport, whole.mid(1));
+
+        QCOMPARE(weightSpy.count(), 1);
+        QCOMPARE(weightSpy.at(0).at(0).toDouble(), 100.0);
+    }
+
+    void acaiaOutOfRangeBatteryIsReportedNotSwallowed() {
+        // 101..127 survives the 0x7F mask and means buf[4] is not a battery byte
+        // — the evidence #1670 lacked. It must warn rather than vanish, and the
+        // level must stay at the unknown sentinel.
+        auto* transport = new MockScaleBleTransport;
+        AcaiaScale scale(transport);
+
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression("Battery byte out of range"));
+        feedAcaia(transport, buildAcaiaSettings(120));
+
+        QCOMPARE(scale.batteryLevel(), -1);
+    }
+
+    void acaiaReconnectIsNotRefusedAfterAFailedAttempt() {
+        // #1669. The first attempt dies without a disconnected() callback — the
+        // shape BLEManager's direct-connect abort produces by severing the
+        // controller's signals. The next ladder tick must still reach the
+        // transport; the old latched m_isConnecting swallowed it forever.
+        auto* transport = new MockScaleBleTransport;
+        transport->m_isConnected = false;   // mock defaults to connected
+        AcaiaScale scale(transport);
+
+        scale.connectToDevice(QBluetoothDeviceInfo());
+        QCOMPARE(transport->m_connectCount, 1);
+
+        scale.connectToDevice(QBluetoothDeviceInfo());
+        QCOMPARE(transport->m_connectCount, 2);
+    }
+
+    void acaiaConnectIsRefusedOnALiveLink() {
+        // The complement: a stray scaleDiscovered for a scale we are already
+        // talking to must not run the reset block, which would stop the heartbeat
+        // and clear m_characteristicsReady (blocking every later write).
+        auto* transport = new MockScaleBleTransport;
+        AcaiaScale scale(transport);
+        feedAcaia(transport, buildAcaiaWeight(12.0));   // first weight → connected
+        QVERIFY(scale.isConnected());
+
+        scale.connectToDevice(QBluetoothDeviceInfo());
+
+        QCOMPARE(transport->m_connectCount, 0);
     }
 };
 

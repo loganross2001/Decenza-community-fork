@@ -152,7 +152,10 @@ Item {
                                 // makes the binding depend on sawLearnedLagChanged so that
                                 // commits/rejects/resets trigger a re-evaluation.
                                 property string _profile: ProfileManager.baseProfileName
-                                property string _scale: Settings.scaleType
+                                // The scale SERVING, not the saved primary — this must match the
+                                // key the shot engine learns under, or the tab shows one pool
+                                // while shots train another (WiFi primary, BLE actually serving).
+                                property string _scale: MachineState.activeScaleType
                                 property double _lagDep: Settings.calibration.sawLearnedLag
                                 text: { void(_lagDep);
                                     return Settings.calibration.sawLearnedLagFor(_profile, _scale).toFixed(2)
@@ -168,7 +171,7 @@ Item {
                             Layout.fillWidth: true
                             property double _modelDep: Settings.calibration.sawLearnedLag  // dep tracker for rebind
                             property string _modelSource: { void(_modelDep);
-                                return Settings.calibration.sawModelSource(ProfileManager.baseProfileName, Settings.scaleType); }
+                                return Settings.calibration.sawModelSource(ProfileManager.baseProfileName, MachineState.activeScaleType); }
                             property string _sourceSuffix: {
                                 if (_modelSource === "perProfile")
                                     return " " + TranslationManager.translate("settings.preferences.sawPerProfile", "(per-profile)");
@@ -182,7 +185,7 @@ Item {
                             Text {
                                 // Show the human-readable scale name, not scaleType — the latter
                                 // is now a canonical id ("decent", "bookoo"), not a display label.
-                                text: (Settings.scaleName || TranslationManager.translate("settings.options.none", "none"))
+                                text: (MachineState.activeScaleName || TranslationManager.translate("settings.options.none", "none"))
                                       + sawSourceRow._sourceSuffix
                                       + " • "
                                       + TranslationManager.translate("settings.options.autoLearns", "learns when to stop so your cup hits target weight")
@@ -206,7 +209,7 @@ Item {
                                     anchors.margins: -Theme.scaled(4)
                                     accessibleName: TranslationManager.translate("settings.calibration.resetWeightStopTimingProfile", "Reset weight stop timing for current profile")
                                     accessibleItem: resetThisProfileText
-                                    onAccessibleClicked: Settings.calibration.resetSawLearningForProfile(ProfileManager.baseProfileName, Settings.scaleType)
+                                    onAccessibleClicked: Settings.calibration.resetSawLearningForProfile(ProfileManager.baseProfileName, MachineState.activeScaleType)
                                 }
                             }
 
@@ -504,7 +507,7 @@ Item {
                             // Progress bar
                             Rectangle {
                                 Layout.fillWidth: true
-                                height: Theme.scaled(6)
+                                Layout.preferredHeight: Theme.scaled(6)
                                 radius: Theme.scaled(3)
                                 color: Theme.backgroundColor
 
@@ -572,7 +575,7 @@ Item {
                             // Progress bar
                             Rectangle {
                                 Layout.fillWidth: true
-                                height: Theme.scaled(6)
+                                Layout.preferredHeight: Theme.scaled(6)
                                 radius: Theme.scaled(3)
                                 color: Theme.backgroundColor
 
@@ -617,8 +620,8 @@ Item {
                             Rectangle {
                                 id: resetBaselineBtn
                                 visible: SteamHealthTracker.sessionCount > 0
-                                width: resetBaselineText.implicitWidth + Theme.spacingMedium * 2
-                                height: Theme.scaled(28)
+                                Layout.preferredWidth: resetBaselineText.implicitWidth + Theme.spacingMedium * 2
+                                Layout.preferredHeight: Theme.scaled(28)
                                 radius: Theme.scaled(4)
                                 color: resetBaselineMa.containsMouse ? Qt.darker(Theme.surfaceColor, 1.3) : "transparent"
                                 border.color: Theme.textSecondaryColor
@@ -756,7 +759,7 @@ Item {
                     font.bold: true
                 }
 
-                Rectangle { Layout.fillWidth: true; height: 1; color: Theme.borderColor }
+                Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.borderColor }
 
                 // Heater idle temperature
                 RowLayout {
@@ -806,7 +809,7 @@ Item {
                     ValueInput { id: fanThresholdSlider; valueColor: Theme.temperatureColor; accessibleName: TranslationManager.translate("settings.calibration.fanThreshold", "Fan temperature threshold"); from: 0; to: 60; stepSize: 1; displayText: value === 0 ? TranslationManager.translate("settings.calibration.fanAlwaysOn", "Always on") : Theme.formatTemperature(value, 0); rangeText: TranslationManager.translate("settings.calibration.fanAlwaysOn", "Always on") + " — " + Theme.formatTemperature(60, 0); value: Settings.hardware.fanThreshold; onValueModified: function(newValue) { Settings.hardware.fanThreshold = Math.round(newValue) }; KeyNavigation.tab: defaultsButton; KeyNavigation.backtab: heaterTestTimeoutSlider }
                 }
 
-                Rectangle { Layout.fillWidth: true; height: 1; color: Theme.borderColor }
+                Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.borderColor }
 
                 // Defaults for cafe button
                 AccessibleButton {

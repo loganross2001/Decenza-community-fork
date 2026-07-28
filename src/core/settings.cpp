@@ -426,22 +426,6 @@ Settings::Settings(QObject* parent)
     }
 }
 
-// Domain sub-object QML accessors. Each sub-object IS-A QObject; the upcast
-// requires the full type to be visible, hence these live in the .cpp where
-// the headers are already included for construction.
-QObject* Settings::mqttQObject() const { return m_mqtt; }
-QObject* Settings::autoWakeQObject() const { return m_autoWake; }
-QObject* Settings::hardwareQObject() const { return m_hardware; }
-QObject* Settings::aiQObject() const { return m_ai; }
-QObject* Settings::themeQObject() const { return m_theme; }
-QObject* Settings::visualizerQObject() const { return m_visualizer; }
-QObject* Settings::mcpQObject() const { return m_mcp; }
-QObject* Settings::brewQObject() const { return m_brew; }
-QObject* Settings::dyeQObject() const { return m_dye; }
-QObject* Settings::networkQObject() const { return m_network; }
-QObject* Settings::appQObject() const { return m_app; }
-QObject* Settings::calibrationQObject() const { return m_calibration; }
-
 // Machine settings
 QString Settings::machineAddress() const {
     return m_settings.value("machine/address", "").toString();
@@ -472,7 +456,32 @@ QString Settings::scaleType() const {
 void Settings::setScaleType(const QString& type) {
     // Persist the canonical type-id, never a display name — scaleType is a
     // rename-stable key for SAW learning / sensorLag / known scales.
-    const QString id = ScaleTypeIds::normalizeScaleTypeId(type);
+    QString id = ScaleTypeIds::normalizeScaleTypeId(type);
+
+    // Never persist an EMPTY id. removeKnownScale()'s auto-promote reaches here with
+    // "" when the removed scale was primary and nothing is left to promote, and once
+    // stored, the "decent" default below stops applying — scaleType() returns the
+    // stored empty string. Everything downstream then keys on it: SAW pools become
+    // "<profile>::" and sensorLag("") warns on every single shot with an empty value
+    // in the message, which reads as a logging bug rather than the data bug it is.
+    // The pool is also orphaned the moment a scale is paired again. Fall back to the
+    // same default scaleType() would have used.
+    if (id.isEmpty()) {
+        // Logged because this SUBSTITUTES a specific scale the user may not own for a
+        // genuinely-unknown state. Without it a support log shows scale/type = "decent"
+        // with no way to tell whether the user owns a Decent scale or whether this
+        // branch invented one.
+        //
+        // qDebug, not qWarning: setPrimaryScale(QString()) reaches here on a perfectly
+        // ordinary path (clearing the primary, e.g. removing the last known scale), so
+        // a warning would flag routine behaviour — and did fail three tests exercising
+        // exactly that. The substitution is still worth a line in the log.
+        qDebug() << "[Settings] setScaleType() called with an empty/unrecognized type"
+                 << type << "- falling back to \"decent\". An empty key would orphan"
+                 << "the SAW pool; see removeKnownScale()'s auto-promote.";
+        id = QStringLiteral("decent");
+    }
+
     if (scaleType() != id) {
         m_settings.setValue("scale/type", id);
         emit scaleTypeChanged();

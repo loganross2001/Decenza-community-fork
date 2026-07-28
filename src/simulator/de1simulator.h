@@ -1,5 +1,10 @@
 #pragma once
 
+// Whole file compiles to nothing without DECENZA_SIMULATOR — see the rationale
+// in CMakeLists.txt. (moc then reports "No relevant classes found" for the
+// headers on those builds; that note is expected, not a fault.)
+#ifdef DECENZA_SIMULATOR
+
 #include <QObject>
 #include <QTimer>
 #include <QElapsedTimer>
@@ -80,6 +85,8 @@ private:
     void setState(DE1::State state, DE1::SubState subState);
     void startOperation(DE1::State state);
     void stopOperation();
+    // Zero the shared yield accumulator and publish the new zero to the scale.
+    void resetYield();
 
     // Profile execution
     void executeFrame();
@@ -230,3 +237,5 @@ private:
 
     int m_tickCount = 0;  // For 5Hz sample output
 };
+
+#endif  // DECENZA_SIMULATOR

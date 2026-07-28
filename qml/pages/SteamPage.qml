@@ -47,7 +47,7 @@ Page {
         }
     }
 
-    property bool isSteaming: MachineState.phase === MachineStateType.Phase.Steaming || root.debugLiveView
+    property bool isSteaming: MachineState.phase === MachineState.Phase.Steaming || root.debugLiveView
     property int editingPitcherIndex: -1  // For the edit popup
     property bool steamSoftStopped: false  // For two-stage stop on headless machines
     property bool wasSteaming: false  // Track if we were steaming (to turn off heater after)
@@ -709,8 +709,8 @@ Page {
                 // View toggle button (graph/timer)
                 Rectangle {
                     id: viewToggleBtn
-                    width: Theme.scaled(44)
-                    height: Theme.scaled(44)
+                    Layout.preferredWidth: Theme.scaled(44)
+                    Layout.preferredHeight: Theme.scaled(44)
                     radius: Theme.cardRadius
                     color: viewToggleMa.containsMouse ? Qt.darker(Theme.surfaceColor, 1.2) : Theme.surfaceColor
 
@@ -1631,7 +1631,7 @@ Page {
                         }
                     }
 
-                    Rectangle { Layout.fillWidth: true; height: 1; color: Theme.textSecondaryColor; opacity: 0.3; visible: !steamPage.currentPitcherDisabled }
+                    Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.textSecondaryColor; opacity: 0.3; visible: !steamPage.currentPitcherDisabled }
 
                     // Steam Flow (per-pitcher, auto-saves)
                     RowLayout {
@@ -1679,7 +1679,7 @@ Page {
                         }
                     }
 
-                    Rectangle { Layout.fillWidth: true; height: 1; color: Theme.textSecondaryColor; opacity: 0.3; visible: !steamPage.currentPitcherDisabled }
+                    Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.textSecondaryColor; opacity: 0.3; visible: !steamPage.currentPitcherDisabled }
 
                     // Temperature (global setting)
                     RowLayout {
@@ -1733,7 +1733,7 @@ Page {
                         }
                     }
 
-                    Rectangle { Layout.fillWidth: true; height: 1; color: Theme.textSecondaryColor; opacity: 0.3; visible: !steamPage.currentPitcherDisabled }
+                    Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.textSecondaryColor; opacity: 0.3; visible: !steamPage.currentPitcherDisabled }
 
                     // Milk pitcher (per-pitcher): the empty-pitcher weight, used to
                     // work out net milk (scale − pitcher) and, when a reference milk is
@@ -1829,8 +1829,8 @@ Page {
                             // Tare button
                             Rectangle {
                                 id: tareBtn
-                                width: Theme.scaled(80)
-                                height: Theme.scaled(44)
+                                Layout.preferredWidth: Theme.scaled(80)
+                                Layout.preferredHeight: Theme.scaled(44)
                                 radius: Theme.cardRadius
                                 color: tareBtnMa.pressed ? Qt.darker(Theme.surfaceColor, 1.2) : Theme.surfaceColor
                                 border.color: Theme.borderColor
@@ -1864,8 +1864,8 @@ Page {
                             Rectangle {
                                 id: savePitcherWeightBtn
                                 readonly property bool isClear: MachineState.scaleWeight < 5.0
-                                width: Theme.scaled(80)
-                                height: Theme.scaled(44)
+                                Layout.preferredWidth: Theme.scaled(80)
+                                Layout.preferredHeight: Theme.scaled(44)
                                 radius: Theme.cardRadius
                                 color: {
                                     var base = isClear ? Theme.surfaceColor : Theme.primaryColor
@@ -1922,7 +1922,7 @@ Page {
                         }
                     }
 
-                    Rectangle { Layout.fillWidth: true; height: 1; color: Theme.textSecondaryColor; opacity: 0.3; visible: !steamPage.currentPitcherDisabled }
+                    Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.textSecondaryColor; opacity: 0.3; visible: !steamPage.currentPitcherDisabled }
 
                     // ── Weight-timed steaming: section header + one-line explanation,
                     // then the master on/off, shown above the controls it governs. ──
@@ -1960,7 +1960,7 @@ Page {
                         onToggled: Settings.brew.milkAutoCaptureEnabled = checked
                     }
 
-                    Rectangle { Layout.fillWidth: true; height: 1; color: Theme.textSecondaryColor; opacity: 0.3; visible: !steamPage.currentPitcherDisabled }
+                    Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.textSecondaryColor; opacity: 0.3; visible: !steamPage.currentPitcherDisabled }
 
                     // ── Steam rate calibration (GLOBAL — applies to every pitcher).
                     // One "seconds per gram of milk" replaces the old per-pitcher
@@ -2059,7 +2059,7 @@ Page {
                         }
                     }
 
-                    Rectangle { Layout.fillWidth: true; height: 1; color: Theme.textSecondaryColor; opacity: 0.3; visible: !steamPage.currentPitcherDisabled }
+                    Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.textSecondaryColor; opacity: 0.3; visible: !steamPage.currentPitcherDisabled }
 
                     // Live expected steam time for the milk currently on the scale
                     // (only when the preset is calibrated and milk is present).
@@ -2094,7 +2094,7 @@ Page {
                         }
                     }
 
-                    Rectangle { Layout.fillWidth: true; height: 1; color: Theme.textSecondaryColor; opacity: 0.3; visible: !steamPage.currentPitcherDisabled && steamPage.realScaleConnected && steamPage.scaledSteamTimeout() > 0 }
+                    Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.textSecondaryColor; opacity: 0.3; visible: !steamPage.currentPitcherDisabled && steamPage.realScaleConnected && steamPage.scaledSteamTimeout() > 0 }
 
                     // ── Coaching (GLOBAL — not per-pitcher): live cues while steaming.
                     // Every row above changes with the selected pitcher preset; these two
@@ -2478,10 +2478,19 @@ Page {
                     primary: true
                     text: saveButtonText.text
                     accessibleName: TranslationManager.translate("steam.savePitcherChanges", "Save changes to pitcher preset")
+                    // Recipes snapshot the pitcher BY NAME, so a blank name is
+                    // one nothing can refer to and a duplicate makes two
+                    // pitchers indistinguishable. ignoreIndex is this preset —
+                    // keeping its own name is not a clash.
+                    enabled: editPitcherNameInput.text.trim().length > 0
+                        && !Settings.brew.steamPitcherNameTaken(editPitcherNameInput.text, editingPitcherIndex)
                     KeyNavigation.tab: editPitcherNameInput
                     KeyNavigation.backtab: editCancelButton
                     onClicked: {
                         Qt.inputMethod.commit()
+                        if (editPitcherNameInput.text.trim().length === 0
+                                || Settings.brew.steamPitcherNameTaken(editPitcherNameInput.text, editingPitcherIndex))
+                            return
                         var preset = Settings.brew.getSteamPitcherPreset(editingPitcherIndex)
                         Settings.brew.updateSteamPitcherPreset(editingPitcherIndex, editPitcherNameInput.text, preset.duration, preset.flow)
                         editPitcherPopup.close()
@@ -2594,6 +2603,8 @@ Page {
                     id: addPitcherOffButton
                     text: addOffButtonText.text
                     accessibleName: TranslationManager.translate("steam.addNewPitcherOff", "Add new preset that turns the steam heater off")
+                    enabled: newPitcherName.text.trim().length > 0
+                        && !Settings.brew.steamPitcherNameTaken(newPitcherName.text, -1)
                     KeyNavigation.tab: addPitcherConfirmButton
                     KeyNavigation.backtab: addCancelPitcherButton
                     onClicked: {
@@ -2613,6 +2624,8 @@ Page {
                     primary: true
                     text: addButtonText.text
                     accessibleName: TranslationManager.translate("steam.addNewPitcher", "Add new pitcher preset with entered name")
+                    enabled: newPitcherName.text.trim().length > 0
+                        && !Settings.brew.steamPitcherNameTaken(newPitcherName.text, -1)
                     KeyNavigation.tab: newPitcherName
                     KeyNavigation.backtab: addPitcherOffButton
                     onClicked: {

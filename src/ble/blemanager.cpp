@@ -283,9 +283,12 @@ void BLEManager::noteDe1Connected(bool connected)
 
 void BLEManager::onDe1Error(const QString& error)
 {
-    // Debounce: the reconnect ladder emits the same "Connection error" on every
-    // failed attempt (~once/60s during a wedge), so show each distinct message
-    // only once until the DE1 reconnects. Mirrors the onScanError debounce.
+    // Debounce: a failing reconnect ladder re-raises the same message on every
+    // attempt, so show each distinct message only once until the DE1 reconnects.
+    // Mirrors the onScanError debounce. Controller errors no longer reach here at
+    // all — the transport keeps that whole path log-only (#1658) — so what lands
+    // here is the service-discovery and USB-transport kind, e.g. "DE1 service not
+    // found … try toggling Bluetooth off/on".
     if (error.isEmpty() || error == m_lastDe1ErrorShown) return;
     m_lastDe1ErrorShown = error;
     emit errorOccurred(error);
@@ -1798,6 +1801,8 @@ QVariantList BLEManager::discoveredRefractometers() const {
 }
 
 bool BLEManager::isRefractometerConnected() const {
+    // m_refractometerDevice is a QPointer on purpose — this line is the one a
+    // raw pointer crashes on during teardown. See its declaration.
     return m_refractometerDevice && m_refractometerDevice->isConnected();
 }
 
@@ -1826,22 +1831,36 @@ void BLEManager::setSavedRefractometerAddress(const QString& address, const QStr
 void BLEManager::clearSavedRefractometer() {
     m_savedRefractometerAddress.clear();
     m_savedRefractometerName.clear();
-    m_refractometerDevice = nullptr;
-    emit refractometerConnectedChanged();
+    // Through the setter, not a bare assignment: the setter is what severs the
+    // connectedChanged/destroyed handlers installed alongside the pointer. The
+    // bare assignment this replaced left them live on a device that outlives
+    // this call (main.cpp disconnects it, then destroys it), and was harmless
+    // only because clearing the saved address above happens to make the stale
+    // handler's re-kick no-op. It also emits refractometerConnectedChanged.
+    //
+    // This MUST stay ahead of disconnectRefractometerRequested: that emission
+    // is what arms the reconnect timer, and the handler's unconditional
+    // stop() — which runs first thing — is what tears it down again. Emitting
+    // the request first would stop the timer before this armed it, leaving a
+    // reconnect running for the device the user just forgot.
+    setRefractometerDevice(nullptr);
     emit disconnectRefractometerRequested();
 }
 
 void BLEManager::setRefractometerDevice(RefractometerDevice* device) {
     qDebug().noquote() << QString("[R2-diag] setRefractometerDevice old=%1 new=%2")
-        .arg(m_refractometerDevice ? QString::number(reinterpret_cast<quintptr>(m_refractometerDevice), 16)
+        .arg(m_refractometerDevice ? QString::number(reinterpret_cast<quintptr>(m_refractometerDevice.data()), 16)
                                     : QStringLiteral("none"),
              device ? QString::number(reinterpret_cast<quintptr>(device), 16)
                      : QStringLiteral("none"));
-    if (m_refractometerDevice) {
-        disconnect(m_refractometerDevice, nullptr, this, nullptr);
-    }
+    // Sever exactly the two handlers we installed — see the note on the
+    // Connection members. Disconnecting an already-severed or default
+    // Connection is a no-op, so this needs no null guard.
+    QObject::disconnect(m_refractometerConnectedConn);
+    QObject::disconnect(m_refractometerDestroyedConn);
     m_refractometerDevice = device;
     if (m_refractometerDevice) {
+        m_refractometerConnectedConn =
         connect(m_refractometerDevice, &RefractometerDevice::connectedChanged,
                 this, [this]() {
             emit refractometerConnectedChanged();
@@ -1852,6 +1871,26 @@ void BLEManager::setRefractometerDevice(RefractometerDevice* device) {
                 qDebug().noquote() << "[R2-diag] R2 dropped while hunting — re-kicking scan";
                 tryDirectConnectToRefractometer();
             }
+        });
+        // Own the "device went away" invariant rather than borrowing QML's. The
+        // QPointer above self-nulls, but nothing tells our observers — today the
+        // UI only stays correct because QQmlContext::setContextProperty quietly
+        // connects to destroyed() too, and its dropDestroyedQObject pokes the
+        // context notify, which re-runs the binding that reads us. That is
+        // load-bearing, invisible, and rests on a registration Qt's own source
+        // discourages; move `Refractometer` to a singleton some day and it
+        // vanishes silently. Emitting here means our property is right on our
+        // own terms. Every non-teardown path calls setRefractometerDevice(nullptr)
+        // before the device dies, so in practice this only fires at app exit —
+        // hence qDebug, not qWarning. A future path that forgets gets a log line
+        // instead of a silently stale "connected".
+        m_refractometerDestroyedConn =
+        connect(m_refractometerDevice, &QObject::destroyed, this, [this]() {
+            qDebug().noquote() << "[R2-diag] refractometer destroyed with the holder "
+                                  "still set — reporting disconnected. Expected at app "
+                                  "exit; anywhere else means a path skipped "
+                                  "setRefractometerDevice(nullptr).";
+            emit refractometerConnectedChanged();
         });
     }
     emit refractometerConnectedChanged();

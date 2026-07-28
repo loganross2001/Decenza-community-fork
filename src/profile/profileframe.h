@@ -1,6 +1,8 @@
 #pragma once
 
 #include <QString>
+#include <QStringList>
+#include <QSet>
 #include <QJsonObject>
 
 /**
@@ -19,6 +21,21 @@
  *   FrameToWrite (1), MaxFlowOrPressure (U8P4, 1), Range (U8P4, 1), [padding]
  */
 struct ProfileFrame {
+    // ADDING A FIELD HERE? Decide its fate in
+    // Profile::restoreFieldsThePluginNeverWrites() (profile.cpp) as well.
+    //
+    // That function reinstates the de1app plugins' in-place-mutation semantics
+    // for D-Flow/A-Flow profiles: a frame field the plugin's update_* proc never
+    // assigns must keep the value the profile's author gave it. It works from a
+    // hand-maintained list of fields — so a field added here and not mentioned
+    // there is silently never restored, for every frame role, permanently. That
+    // is exactly findings DF-1, DF-2, DF-5 and AF-6, which is what the function
+    // exists to close. Nothing will warn you; the compiler is happy either way.
+    //
+    // nonStockPreFillSecondFillAndPauseSurviveARegenerate and
+    // restoredFieldPartitionIsPinned (tst_recipeeditorparity) are the tests that
+    // will fail if you forget.
+
     // === Basic Frame Properties ===
     QString name;                   // Human-readable step name (e.g., "Preinfusion")
     double temperature = 93.0;      // Target temperature (Celsius, range 0-127.5)
@@ -58,6 +75,46 @@ struct ProfileFrame {
     // Convert to/from JSON (supports both our format and de1app format)
     QJsonObject toJson() const;
     static ProfileFrame fromJson(const QJsonObject& json);
+
+    // Step keys we understand. Anything else in a step is a hard import failure
+    // (see unknownJsonKeys), NOT a key we quietly carry along.
+    //
+    // The asymmetry with the top-level passthrough is deliberate. A top-level key
+    // we do not model is usually an app's own metadata block — our `recipe` is
+    // exactly that, and it is "unknown" to reaprime — and preserving it costs
+    // nothing because it does not touch the shot. A key inside a STEP is
+    // different: steps are what the machine executes. If a future app version
+    // adds, say, a new exit condition or pump mode to a frame, round-tripping the
+    // key verbatim would NOT save us — we would still ignore it while brewing and
+    // silently pour a different shot than the file describes.
+    //
+    // So an unrecognised step key means we cannot promise the same coffee, and
+    // the honest response is to refuse the profile and say which key we did not
+    // understand, so it gets reported rather than quietly mis-brewed.
+    //
+    // Verified against every profile available at the time of writing: the 93
+    // shipped built-ins, the 93-file pre-change golden corpus, and 96 reaprime
+    // profiles use exactly 13 distinct step keys between them, all listed here.
+    static const QSet<QString>& knownJsonKeys();
+
+    // Keys present in `json` that knownJsonKeys() does not cover, sorted.
+    static QStringList unknownJsonKeys(const QJsonObject& json);
+
+    // The Tcl frame vocabulary — exactly what fromTclList reads, which is NOT
+    // the same set as knownJsonKeys(). See the definition: reusing the JSON set
+    // here let a .tcl frame carrying `exit_weight` pass as understood while the
+    // parser ignored it entirely.
+    static const QSet<QString>& knownTclKeys();
+
+    // Keys in a de1app Tcl frame that knownTclKeys() does not cover, sorted.
+    static QStringList unknownTclKeys(const QString& tclList);
+
+    // Numeric frame values that cannot be interpreted, as "key=raw", sorted.
+    // The value-level twin of unknownTclKeys(): that one catches a key we do
+    // not understand, this one a known key whose value we cannot read. Both
+    // make the profile invalid, because toDouble() yields 0.0 on failure and 0
+    // is legal for all of these — so a garbled value is otherwise undetectable.
+    static QStringList malformedTclValues(const QString& tclList);
 
     // Parse from de1app Tcl list format: {key value key value ...}
     static ProfileFrame fromTclList(const QString& tclList);

@@ -1,6 +1,8 @@
 #include <QtTest>
 #include <QSignalSpy>
 #include <QJsonDocument>
+#include <QStandardPaths>
+#include <QRegularExpression>
 #include <QJsonObject>
 #include <QJsonArray>
 
@@ -13,6 +15,9 @@
 #include <QTemporaryDir>
 #include <QFile>
 #include <QTextStream>
+#include <QSqlDatabase>
+#include <QSqlQuery>
+#include <QThread>
 
 #include "mocks/McpTestFixture.h"
 #include "core/settings_app.h"
@@ -22,6 +27,9 @@
 #include "network/webdebuglogger.h"
 #include "ble/protocol/de1characteristics.h"
 #include "ble/protocol/binarycodec.h"
+#include "core/dbutils.h"
+#include "history/coffeebagstorage.h"
+#include "history/shothistorystorage.h"
 #include "profile/recipeparams.h"
 #include "profile/profilesavehelper.h"
 
@@ -57,8 +65,14 @@ class tst_ProfileManager : public QObject {
 
 private:
     // Load a minimal D-Flow profile into the fixture's ProfileManager
+    // withInfuse: a real D-Flow profile is ALWAYS three frames — Filling /
+    // Infusing / Pouring — because that is what the plugin's `prep` indexes
+    // (0/1/2, no pattern matching). Most tests here only need *a* profile to
+    // manipulate frames on and hardcode a count of two, so the third frame is
+    // opt-in; any test that reads recipe PARAMETERS needs it.
     static void loadDFlowProfile(McpTestFixture& f, const QString& title = "D-Flow / Test",
-                                 double targetWeight = 36.0, double temp = 93.0) {
+                                 double targetWeight = 36.0, double temp = 93.0,
+                                 bool withInfuse = false) {
         QJsonObject json;
         json["title"] = title;
         json["author"] = "test";
@@ -77,8 +91,6 @@ private:
         recipe.targetWeight = targetWeight;
         recipe.fillTemperature = temp;
         recipe.pourTemperature = temp;
-        recipe.fillPressure = 6.0;
-        recipe.fillFlow = 4.0;
         recipe.pourFlow = 2.0;
         json["recipe"] = recipe.toJson();
 
@@ -96,6 +108,23 @@ private:
         frame1["exit"] = QJsonObject{{"type", "pressure"}, {"condition", "over"}, {"value", 4.0}};
         frame1["limiter"] = QJsonObject{{"value", 0.0}, {"range", 0.6}};
         steps.append(frame1);
+
+        if (withInfuse) {
+        QJsonObject frameSoak;
+        frameSoak["name"] = "infuse";
+        frameSoak["temperature"] = temp;
+        frameSoak["sensor"] = "coffee";
+        frameSoak["pump"] = "pressure";
+        frameSoak["transition"] = "fast";
+        frameSoak["pressure"] = 3.0;
+        frameSoak["flow"] = 8.0;
+        frameSoak["seconds"] = 20.0;
+        frameSoak["volume"] = 100.0;
+        frameSoak["weight"] = 4.0;
+        frameSoak["exit"] = QJsonObject{{"type", "pressure"}, {"condition", "over"}, {"value", 3.0}};
+        frameSoak["limiter"] = QJsonObject{{"value", 0.0}, {"range", 0.6}};
+        steps.append(frameSoak);
+        }
 
         QJsonObject frame2;
         frame2["name"] = "pour";
@@ -123,7 +152,464 @@ private:
     }
 
 private slots:
+    void initTestCase() {
+        // Redirect AppDataLocation, which ProfileManager::profilesPath() reads.
+        // Two reasons: migrateRecipeFrames below writes real files, and without
+        // this the whole suite has been reading and writing the developer's own
+        // ~/Library/Application Support profiles directory.
+        QStandardPaths::setTestModeEnabled(true);
+    }
+
     void init() { QTest::failOnWarning(); }
+
+    // The dye store is PID-scoped but shared across every test in this file, and
+    // the active bag/recipe ids persist into it. The dose-ladder tests set them,
+    // and restoring on the last line of each only works when the test reaches
+    // that line — a failed QCOMPARE aborts the function and would leave an
+    // active bag armed for every test that follows, turning one red into
+    // several. Clear it here instead, where an abort cannot skip it.
+    void cleanup() {
+        QSettings raw(Settings::testQSettingsPath(), QSettings::IniFormat);
+        raw.remove(QStringLiteral("dye/activeBagId"));
+        raw.remove(QStringLiteral("dye/activeRecipeId"));
+        raw.sync();
+    }
+
+    // === stripStoredRecipeBlocks: runs at startup, rewrites files on disk ===
+    // Minimal valid D-Flow profile JSON, for the strip-pass cases below. Frame
+    // values are deliberately NOT RecipeParams' defaults, so a pass that rebuilt
+    // frames instead of just removing a key would be visible.
+    // The QStandardPaths test-mode store persists across runs, and several tests in
+    // this file leave deliberately-broken fixtures behind. A pass that walks every
+    // profile at ProfileManager construction then reports them, which has nothing to
+    // do with what these cases are asserting — so start from a known-empty store.
+    static void clearTestProfileStore() {
+        const QString base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
+                             + QStringLiteral("/profiles");
+        for (const QString& sub : {QStringLiteral(""), QStringLiteral("/user"),
+                                   QStringLiteral("/downloaded")}) {
+            QDir d(base + sub);
+            for (const QString& f : d.entryList({QStringLiteral("*.json")}, QDir::Files))
+                QFile::remove(d.filePath(f));
+        }
+    }
+
+    // Writes a 3-frame D-Flow profile to the store and loads it. D-Flow's editor
+    // reads frames positionally and refuses to regenerate below 3, so a 2-frame
+    // fixture cannot exercise the save guard at all.
+    static void loadThreeFrameDFlow(McpTestFixture& f, const QString& fileName,
+                                    const QString& title) {
+        const QString path = f.profileManager.userProfilesPath() + "/" + fileName + ".json";
+        QFile out(path);
+        QVERIFY(out.open(QIODevice::WriteOnly));
+        out.write(QJsonDocument(makeDFlowJson(title)).toJson());
+        out.close();
+        f.profileManager.refreshProfiles();
+        f.profileManager.loadProfile(fileName);
+    }
+
+    static QJsonObject makeDFlowJson(const QString& title) {
+        QJsonObject p;
+        p["title"] = title;
+        p["author"] = "test";
+        p["beverage_type"] = "espresso";
+        p["version"] = "2";
+        p["legacy_profile_type"] = "settings_2c";
+        p["target_weight"] = 36.0;
+        p["target_volume"] = 0.0;
+        p["target_volume_count_start"] = 2;
+        p["tank_temperature"] = 0.0;
+        p["espresso_temperature"] = 84.0;
+        QJsonArray steps;
+        for (const char* name : {"Filling", "Infusing", "Pouring"}) {
+            QJsonObject fr;
+            fr["name"] = name;
+            fr["temperature"] = 84.0;
+            fr["sensor"] = "coffee";
+            fr["pump"] = "pressure";
+            fr["transition"] = "fast";
+            fr["pressure"] = 3.0;
+            fr["flow"] = 8.0;
+            fr["seconds"] = 25.0;
+            fr["volume"] = 60.0;
+            fr["exit"] = QJsonObject{{"type", "pressure"}, {"condition", "over"}, {"value", 3.0}};
+            fr["limiter"] = QJsonObject{{"value", 0.0}, {"range", 0.6}};
+            steps.append(fr);
+        }
+        p["steps"] = steps;
+        return p;
+    }
+
+
+    void stripLeavesProfilesWithoutABlockByteIdentical() {
+        // The pass runs ONCE, reads every profile on disk and rewrites the ones that
+        // qualify, so a mistake here is permanent and silent. A profile with no
+        // `recipe` key has nothing to strip and must not be touched at all — not
+        // even re-serialized, which would quietly renormalise a user's file under
+        // the banner of a migration.
+        //
+        // The legacy `is_recipe_mode` flag is deliberately included: the pass this
+        // replaced once keyed off it and rebuilt frames from RecipeParams' defaults
+        // for profiles that had no parameters to rebuild from (REC-1).
+        clearTestProfileStore();
+        McpTestFixture f;
+        f.settings.setValue("recipe_blocks_stripped", false);
+
+        const QString dir = f.profileManager.userProfilesPath();
+
+        QJsonObject legacy;
+        legacy["title"] = "D-Flow / Legacy Flag";
+        legacy["author"] = "test";
+        legacy["beverage_type"] = "espresso";
+        legacy["version"] = "2";
+        legacy["legacy_profile_type"] = "settings_2c";
+        legacy["is_recipe_mode"] = true;      // the legacy flag...
+        legacy["target_weight"] = 36.0;
+        legacy["espresso_temperature"] = 84.0;
+        QJsonArray steps;
+        for (const char* name : {"Filling", "Infusing", "Pouring"}) {
+            QJsonObject fr;
+            fr["name"] = name;
+            fr["temperature"] = 84.0;   // distinctive: NOT RecipeParams' 88.0 default
+            fr["sensor"] = "coffee";
+            fr["pump"] = "pressure";
+            fr["transition"] = "fast";
+            fr["pressure"] = 3.0;
+            fr["flow"] = 8.0;
+            fr["seconds"] = 25.0;
+            fr["volume"] = 60.0;
+            fr["exit"] = QJsonObject{{"type", "pressure"}, {"condition", "over"}, {"value", 3.0}};
+            fr["limiter"] = QJsonObject{{"value", 0.0}, {"range", 0.6}};
+            steps.append(fr);
+        }
+        legacy["steps"] = steps;
+        // ...and no "recipe" block, which is the whole point.
+
+        const QString path = dir + "/legacy_flag_only.json";
+        QFile out(path);
+        QVERIFY(out.open(QIODevice::WriteOnly));
+        const QByteArray before = QJsonDocument(legacy).toJson();
+        QCOMPARE(out.write(before), qint64(before.size()));
+        out.close();
+
+        f.profileManager.stripStoredRecipeBlocks();
+
+        QFile back(path);
+        QVERIFY(back.open(QIODevice::ReadOnly));
+        const QByteArray after = back.readAll();
+        back.close();
+        QFile::remove(path);
+
+        QVERIFY2(before == after,
+                 "a profile with no recipe block was rewritten by the strip pass — it "
+                 "has nothing to strip, so touching it can only lose something");
+    }
+
+    void stripRemovesTheBlockAndLeavesEverythingElseAlone() {
+        clearTestProfileStore();
+        McpTestFixture f;
+        f.settings.setValue("recipe_blocks_stripped", false);
+        const QString dir = f.profileManager.userProfilesPath();
+
+        QJsonObject p = makeDFlowJson("D-Flow / Has Block");
+        // A block whose values CONTRADICT the frames, which is the real-world case:
+        // five shipped A-Flow built-ins carried exactly that.
+        p["recipe"] = QJsonObject{
+            {"editorType", "dflow"}, {"dose", 18.0},
+            {"fillTemperature", 88.0}, {"pourTemperature", 93.0}, {"pourPressure", 9.0}};
+
+        const QString path = dir + "/has_block.json";
+        QFile out(path);
+        QVERIFY(out.open(QIODevice::WriteOnly));
+        out.write(QJsonDocument(p).toJson());
+        out.close();
+
+        f.profileManager.stripStoredRecipeBlocks();
+
+        QFile back(path);
+        QVERIFY(back.open(QIODevice::ReadOnly));
+        const QJsonObject after = QJsonDocument::fromJson(back.readAll()).object();
+        back.close();
+        QFile::remove(path);
+
+        QVERIFY2(!after.contains("recipe"), "the recipe block survived the strip pass");
+        // Everything else intact — the frames especially, which the block disagreed with.
+        QCOMPARE(after.value("title").toString(), QStringLiteral("D-Flow / Has Block"));
+        QCOMPARE(after.value("steps").toArray().size(), p.value("steps").toArray().size());
+        // dose was the struct default, so no recommendation is switched on.
+        QVERIFY2(!after.value("has_recommended_dose").toBool(false),
+                 "a default dose of 18 enabled a recommendation the user never set");
+    }
+
+    void stripPromotesAUserSetDose() {
+        clearTestProfileStore();
+        McpTestFixture f;
+        f.settings.setValue("recipe_blocks_stripped", false);
+        const QString dir = f.profileManager.userProfilesPath();
+
+        QJsonObject p = makeDFlowJson("D-Flow / Real Dose");
+        p["recipe"] = QJsonObject{{"editorType", "dflow"}, {"dose", 20.5}};
+
+        const QString path = dir + "/real_dose.json";
+        QFile out(path);
+        QVERIFY(out.open(QIODevice::WriteOnly));
+        out.write(QJsonDocument(p).toJson());
+        out.close();
+
+        f.profileManager.stripStoredRecipeBlocks();
+
+        QFile back(path);
+        QVERIFY(back.open(QIODevice::ReadOnly));
+        const QJsonObject after = QJsonDocument::fromJson(back.readAll()).object();
+        back.close();
+        QFile::remove(path);
+
+        QVERIFY(!after.contains("recipe"));
+        QVERIFY2(after.value("has_recommended_dose").toBool(false),
+                 "a dose the user set was dropped with the block instead of promoted");
+        QCOMPARE(after.value("recommended_dose").toVariant().toDouble(), 20.5);
+    }
+
+    void stripRunsOnlyOnce() {
+        clearTestProfileStore();
+        McpTestFixture f;
+        f.settings.setValue("recipe_blocks_stripped", false);
+        f.profileManager.stripStoredRecipeBlocks();
+        QVERIFY2(f.settings.value("recipe_blocks_stripped", false).toBool(),
+                 "the pass did not record completion, so it would rewrite every "
+                 "profile on every launch");
+
+        // Second run must be a no-op: a profile placed afterwards is left alone.
+        const QString dir = f.profileManager.userProfilesPath();
+        QJsonObject p = makeDFlowJson("D-Flow / After");
+        p["recipe"] = QJsonObject{{"editorType", "dflow"}, {"dose", 18.0}};
+        const QString path = dir + "/after.json";
+        QFile out(path);
+        QVERIFY(out.open(QIODevice::WriteOnly));
+        const QByteArray before = QJsonDocument(p).toJson();
+        out.write(before);
+        out.close();
+
+        f.profileManager.stripStoredRecipeBlocks();
+
+        QFile back(path);
+        QVERIFY(back.open(QIODevice::ReadOnly));
+        const QByteArray after = back.readAll();
+        back.close();
+        QFile::remove(path);
+        QCOMPARE(before, after);   // the gate held; loadProfile handles late arrivals
+    }
+
+    // === strip-on-load: the block must not survive on disk ===
+
+    void loadStripsAndPersistsAStoredBlock() {
+        // The one-time upgrade covers what is already stored. This covers everything
+        // that arrives afterwards — an import, a share code, a SAF sync, a restored
+        // backup. Dropping the block in memory alone would leave it on disk forever
+        // on a profile the user never re-saves.
+        clearTestProfileStore();
+        McpTestFixture f;
+        const QString dir = f.profileManager.userProfilesPath();
+        const QString path = dir + "/late_arrival.json";
+
+        QJsonObject p = makeDFlowJson("D-Flow / Late Arrival");
+        p["recipe"] = QJsonObject{{"editorType", "dflow"}, {"dose", 19.5}};
+        QFile out(path);
+        QVERIFY(out.open(QIODevice::WriteOnly));
+        out.write(QJsonDocument(p).toJson());
+        out.close();
+
+        f.profileManager.refreshProfiles();
+        f.profileManager.loadProfile("late_arrival");
+
+        QFile back(path);
+        QVERIFY(back.open(QIODevice::ReadOnly));
+        const QByteArray afterFirst = back.readAll();
+        back.close();
+        const QJsonObject stripped = QJsonDocument::fromJson(afterFirst).object();
+
+        QVERIFY2(!stripped.contains("recipe"),
+                 "the block was only dropped in memory — it survives on disk");
+        QVERIFY2(stripped.value("has_recommended_dose").toBool(false),
+                 "the dose went with the block instead of being promoted");
+        QCOMPARE(stripped.value("recommended_dose").toVariant().toDouble(), 19.5);
+
+        // Second load must not rewrite: there is no longer a block to strip.
+        f.profileManager.loadProfile("late_arrival");
+        QFile again(path);
+        QVERIFY(again.open(QIODevice::ReadOnly));
+        const QByteArray afterSecond = again.readAll();
+        again.close();
+        QFile::remove(path);
+        QCOMPARE(afterFirst, afterSecond);
+    }
+
+    void stripRefusesAProfileItCannotRewriteLosslessly() {
+        // The guard that stops the pass mangling a profile stored in an encoding the
+        // canonical serializer cannot reproduce. Every other fixture round-trips
+        // cleanly, so without a deliberately lossy one this branch is never entered.
+        clearTestProfileStore();
+        McpTestFixture f;
+        f.settings.setValue("recipe_blocks_stripped", false);
+
+        QJsonObject p = makeDFlowJson("D-Flow / Lossy");
+        p["recipe"] = QJsonObject{{"editorType", "dflow"}, {"dose", 18.0}};
+        // A key the serializer models and re-emits with a DIFFERENT value: the parity
+        // check reports a change, so the rewrite is refused.
+        p["target_weight"] = 36.5555;
+
+        const QString path = f.profileManager.userProfilesPath() + "/lossy.json";
+        QFile out(path);
+        QVERIFY(out.open(QIODevice::WriteOnly));
+        const QByteArray before = QJsonDocument(p).toJson();
+        out.write(before);
+        out.close();
+
+        f.profileManager.stripStoredRecipeBlocks();
+
+        QFile back(path);
+        QVERIFY(back.open(QIODevice::ReadOnly));
+        const QByteArray after = back.readAll();
+        back.close();
+        QFile::remove(path);
+
+        QCOMPARE(before, after);   // untouched, block and all
+        QVERIFY2(QJsonDocument::fromJson(after).object().contains("recipe"),
+                 "a profile that could not be rewritten losslessly was stripped anyway");
+        // A refusal must NOT block completion — it can never succeed on a later run.
+        QVERIFY2(f.settings.value("recipe_blocks_stripped", false).toBool(),
+                 "a refusal blocked the completion flag, so the pass would repeat forever");
+    }
+
+    void stripCountsAnUnparseableProfileAsFailedAndRetries() {
+        // Three outcomes used to collapse into one silent `false`, so a corrupt file
+        // was invisible on every launch AND the flag was set anyway.
+        clearTestProfileStore();
+        McpTestFixture f;
+        f.settings.setValue("recipe_blocks_stripped", false);
+
+        const QString path = f.profileManager.userProfilesPath() + "/corrupt.json";
+        QFile out(path);
+        QVERIFY(out.open(QIODevice::WriteOnly));
+        out.write("{ \"title\": \"D-Flow / Truncated\", \"recipe\": {");   // half a document
+        out.close();
+
+        QTest::ignoreMessage(QtWarningMsg,
+                             QRegularExpression("cannot parse .*corrupt\\.json"));
+        // ...and the run summary, which is a warning precisely because failed > 0 —
+        // that is the outcome being asserted, so it must be expected, not silenced.
+        QTest::ignoreMessage(QtWarningMsg,
+                             QRegularExpression("Recipe block strip incomplete"));
+        f.profileManager.stripStoredRecipeBlocks();
+        QFile::remove(path);
+
+        QVERIFY2(!f.settings.value("recipe_blocks_stripped", false).toBool(),
+                 "an unparseable profile did not block the flag, so it is never revisited");
+    }
+
+    // === no-op-save guard ===
+
+    void uneditedSaveLeavesDFlowFramesUntouched() {
+        // A regeneration is NOT a no-op for D-Flow: it derives exit_pressure_over
+        // from the soak pressure (soak < 2.8 ? soak : soak/2 + 0.6, floored 1.2), so a
+        // profile whose stored value is off-formula is silently rewritten by an
+        // open-and-close save.
+        //
+        // makeDFlowJson stores exit_pressure_over 3.0 against a soak pressure of 3.0,
+        // whose formula value is 3.0/2 + 0.6 = 2.1. Keep that margin if you retune the
+        // fixture — equal values would make a spurious regeneration invisible here.
+        McpTestFixture f;
+        clearTestProfileStore();
+        loadThreeFrameDFlow(f, "guard_noop", "D-Flow / Guard");
+        const QList<ProfileFrame> before = f.profileManager.currentProfile().steps();
+        QCOMPARE(before.size(), 3);   // fewer and the editor refuses to regenerate at all
+        QVERIFY(!before.isEmpty());
+
+        // Save exactly what the editor was populated with — no edit.
+        f.profileManager.uploadRecipeProfile(f.profileManager.getOrConvertRecipeParams());
+
+        const QList<ProfileFrame> after = f.profileManager.currentProfile().steps();
+        QCOMPARE(after.size(), before.size());
+        for (qsizetype i = 0; i < before.size(); ++i) {
+            QCOMPARE(after[i].temperature, before[i].temperature);
+            QCOMPARE(after[i].pressure, before[i].pressure);
+            QCOMPARE(after[i].seconds, before[i].seconds);
+            QCOMPARE(after[i].exitPressureOver, before[i].exitPressureOver);
+        }
+    }
+
+    void uneditedSaveLeavesAFlowFramesUntouched() {
+        // A-Flow is the harder half of the derivesFromFrames split: prepAFlow overwrites
+        // 12 fields across a 9-frame layout to D-Flow's 8 across 3. The guard rests on
+        // extractRecipeParams(profile) equalling getOrConvertRecipeParams(), and that
+        // equality was only ever demonstrated for the simpler generator.
+        McpTestFixture f;
+        clearTestProfileStore();
+        const QString src = QStringLiteral(":/profiles/a_flow_default_medium.json");
+        Profile aflow = Profile::loadFromFile(src);
+        QVERIFY(!aflow.steps().isEmpty());
+        const QString path = f.profileManager.userProfilesPath() + "/aflow_guard.json";
+        QVERIFY(aflow.saveToFile(path));
+        f.profileManager.refreshProfiles();
+        f.profileManager.loadProfile("aflow_guard");
+        QCOMPARE(f.profileManager.currentEditorType(), QStringLiteral("aflow"));
+
+        const QList<ProfileFrame> before = f.profileManager.currentProfile().steps();
+        f.profileManager.uploadRecipeProfile(f.profileManager.getOrConvertRecipeParams());
+        const QList<ProfileFrame> after = f.profileManager.currentProfile().steps();
+
+        QCOMPARE(after.size(), before.size());
+        for (qsizetype i = 0; i < before.size(); ++i) {
+            QCOMPARE(after[i].temperature, before[i].temperature);
+            QCOMPARE(after[i].pressure, before[i].pressure);
+            QCOMPARE(after[i].flow, before[i].flow);
+            QCOMPARE(after[i].seconds, before[i].seconds);
+        }
+        QFile::remove(path);
+    }
+
+    void editedSaveDoesRegenerate() {
+        // The converse: the guard must not be so eager that a real edit is skipped.
+        McpTestFixture f;
+        clearTestProfileStore();
+        loadThreeFrameDFlow(f, "guard_edit", "D-Flow / Guard Edit");
+        QCOMPARE(f.profileManager.currentProfile().steps().size(), 3);
+        QVariantMap params = f.profileManager.getOrConvertRecipeParams();
+        const double oldTemp = params.value("pourTemperature").toDouble();
+        params["pourTemperature"] = oldTemp + 4.0;
+        f.profileManager.uploadRecipeProfile(params);
+
+        const QList<ProfileFrame>& steps = f.profileManager.currentProfile().steps();
+        QVERIFY(!steps.isEmpty());
+        QCOMPARE(steps.last().temperature, oldTemp + 4.0);
+    }
+
+    void advancedProfileTargetWeightEditStillApplies() {
+        // Advanced profiles share uploadRecipeProfile's non-simple branch. Sourcing
+        // their comparison baseline from the frames would make needFrameRegen
+        // permanently true; regenerateFromRecipe() early-returns for advanced, and
+        // the else-branch that applies target weight/volume would be skipped — so a
+        // target edit would silently do nothing.
+        McpTestFixture f;
+        clearTestProfileStore();
+        // Advanced = a title with no D-Flow/A-Flow prefix on a settings_2c profile.
+        QJsonObject adv = makeDFlowJson("Advanced Guard");
+        const QString advPath = f.profileManager.userProfilesPath() + "/advanced_guard.json";
+        QFile advFile(advPath);
+        QVERIFY(advFile.open(QIODevice::WriteOnly));
+        advFile.write(QJsonDocument(adv).toJson());
+        advFile.close();
+        f.profileManager.refreshProfiles();
+        f.profileManager.loadProfile("advanced_guard");
+        QCOMPARE(f.profileManager.currentEditorType(), QStringLiteral("advanced"));
+
+        QVariantMap params = f.profileManager.getOrConvertRecipeParams();
+        params["targetWeight"] = 42.0;
+        f.profileManager.uploadRecipeProfile(params);
+
+        QCOMPARE(f.profileManager.currentProfile().targetWeight(), 42.0);
+        QFile::remove(advPath);
+    }
 
     // === Profile state after load ===
 
@@ -520,15 +1006,16 @@ private slots:
 
     void uploadRecipeProfileUpdatesState() {
         McpTestFixture f;
-        loadDFlowProfile(f, "D-Flow / Test", 36.0, 93.0);
+        // Three frames: uploadRecipeProfile now refuses to regenerate a profile
+        // whose frames its editor cannot read positionally, and a two-frame
+        // "D-Flow" profile is not one.
+        loadDFlowProfile(f, "D-Flow / Test", 36.0, 93.0, /*withInfuse=*/true);
 
         QVariantMap recipe;
         recipe["editorType"] = "dflow";
         recipe["targetWeight"] = 40.0;
         recipe["fillTemperature"] = 95.0;
         recipe["pourTemperature"] = 95.0;
-        recipe["fillPressure"] = 6.0;
-        recipe["fillFlow"] = 4.0;
         recipe["pourFlow"] = 2.5;
         f.profileManager.uploadRecipeProfile(recipe);
 
@@ -1093,7 +1580,9 @@ private slots:
 
     void qmlMethodsCallable() {
         McpTestFixture f;
-        loadDFlowProfile(f, "D-Flow / Methods Test");
+        // Three-frame: this smoke test calls getOrConvertRecipeParams below, and
+        // parameters are derived from the frames.
+        loadDFlowProfile(f, "D-Flow / Methods Test", 36.0, 93.0, /*withInfuse=*/true);
 
         QQmlEngine engine;
         engine.rootContext()->setContextProperty("ProfileManager", &f.profileManager);
@@ -1113,7 +1602,7 @@ private slots:
 
         result = evaluate("ProfileManager.frameCount()");
         QVERIFY2(!result.isNull(), "ProfileManager.frameCount() must be callable from QML");
-        QCOMPARE(result.toInt(), 2);
+        QCOMPARE(result.toInt(), 3);
 
         result = evaluate("ProfileManager.previousProfileName()");
         // May return empty string but must not be undefined
@@ -1651,11 +2140,156 @@ private slots:
         QCOMPARE(f.profileManager.targetWeight(), 38.0);
     }
 
+    // === The dose ladder on profile load (dose-source-precedence) ===
+
+    // Writes a D-Flow profile carrying an ENABLED recommended dose, then loads
+    // it through loadProfile — the path that applies the dose, and the one
+    // loadProfileFromJson (used by loadDFlowProfile above) never takes.
+    static void loadDFlowWithRecommendedDose(McpTestFixture& f, const QString& fileName,
+                                             double doseG) {
+        QJsonObject p = makeDFlowJson(QStringLiteral("D-Flow / ") + fileName);
+        p["recommended_dose"] = doseG;
+        p["has_recommended_dose"] = true;
+        const QString path = f.profileManager.userProfilesPath() + "/" + fileName + ".json";
+        QFile out(path);
+        QVERIFY(out.open(QIODevice::WriteOnly));
+        out.write(QJsonDocument(p).toJson());
+        out.close();
+        f.profileManager.refreshProfiles();
+        f.profileManager.loadProfile(fileName);
+        // The write is deferred to the next event-loop turn.
+        QCoreApplication::processEvents();
+    }
+
+    // The profile is the LAST rung. With nothing else active it supplies the
+    // dose, which is the behaviour that must survive the gate.
+    void profileDoseAppliesWhenNothingElseIsActive() {
+        clearTestProfileStore();
+        McpTestFixture f;
+        f.settings.dye()->setActiveRecipeId(-1);
+        f.settings.dye()->setActiveBagId(-1);
+        f.settings.dye()->setDyeBeanWeight(15.0);
+
+        loadDFlowWithRecommendedDose(f, "dose_profile_only", 21.0);
+
+        QCOMPARE(f.settings.dye()->doseOwner(), SettingsDye::DoseOwner::Profile);
+        QCOMPARE(f.settings.dye()->dyeBeanWeight(), 21.0);
+    }
+
+    // The inversion this change fixes. A recipe supplying a dose outranks the
+    // profile, so switching profiles while it is active must not touch the
+    // dose — and because dyeBeanWeightChanged stamps the recipe and writes
+    // through to the bag, a write here would not merely show the wrong number,
+    // it would overwrite the recipe's stored doseG.
+    void loadingAProfileDoesNotOverwriteAnActiveRecipesDose() {
+        clearTestProfileStore();
+        McpTestFixture f;
+        f.settings.dye()->setActiveBagId(-1);
+        f.settings.dye()->setDyeBeanWeight(19.0);
+        f.settings.dye()->setActiveRecipe(7, 19.0);
+
+        loadDFlowWithRecommendedDose(f, "dose_recipe_wins", 21.0);
+
+        QCOMPARE(f.settings.dye()->doseOwner(), SettingsDye::DoseOwner::Recipe);
+        QCOMPARE(f.settings.dye()->dyeBeanWeight(), 19.0);
+    }
+
+    // Same rule one rung down, against a REAL bag row — because the damage a
+    // profile load does to an active bag is persistent, not just a wrong live
+    // number: setDyeBeanWeight writes through to the bag's stored doseWeightG,
+    // so an ungated load replaces what the bean remembered. Asserting only the
+    // session value would pass just as happily with the write-through intact,
+    // which is the failure mode worth catching.
+    void loadingAProfileDoesNotOverwriteAnActiveBagsStoredDose() {
+        clearTestProfileStore();
+        McpTestFixture f;
+
+        QTemporaryDir dbDir;
+        const QString dbPath = dbDir.filePath(QStringLiteral("bags.db"));
+        {   // Migrate through the real chain, as tst_coffeebags does.
+            ShotHistoryStorage migrate;
+            QVERIFY(migrate.initialize(dbPath));
+            migrate.close();
+            for (int i = 0; i < 20; i++) { QCoreApplication::processEvents(); QThread::msleep(25); }
+        }
+        CoffeeBagStorage bags;
+        bags.initialize(dbPath);
+
+        qint64 bagId = -1;
+        CoffeeBag bag;
+        bag.roasterName = "R";
+        bag.coffeeName = "Remembered";
+        bag.doseWeightG = 20.0;
+        QVERIFY(withTempDb(dbPath, QStringLiteral("dose_bag_seed"), [&](QSqlDatabase& db) {
+            bagId = CoffeeBagStorage::insertBagStatic(db, bag);
+        }));
+        QVERIFY(bagId > 0);
+
+        f.settings.dye()->setActiveRecipeId(-1);
+        f.settings.dye()->setBagStorage(&bags);
+        f.settings.dye()->setActiveBagId(static_cast<int>(bagId));
+        QTRY_COMPARE(f.settings.dye()->dyeBeanWeight(), 20.0);
+        QCOMPARE(f.settings.dye()->doseOwner(), SettingsDye::DoseOwner::Bag);
+
+        loadDFlowWithRecommendedDose(f, "dose_bag_wins", 21.0);
+
+        QCOMPARE(f.settings.dye()->dyeBeanWeight(), 20.0);
+        // And the row itself is untouched.
+        double storedDose = -1;
+        QVERIFY(withTempDb(dbPath, QStringLiteral("dose_bag_read"), [&](QSqlDatabase& db) {
+            QSqlQuery q(db);
+            q.prepare(QStringLiteral("SELECT dose_weight_g FROM coffee_bags WHERE id = ?"));
+            q.addBindValue(bagId);
+            if (q.exec() && q.next())
+                storedDose = q.value(0).toDouble();
+        }));
+        QCOMPARE(storedDose, 20.0);
+
+        f.settings.dye()->setActiveBagId(-1);
+    }
+
+    // A profile whose recommendation is not enabled changes nothing, whoever
+    // owns the dose. makeDFlowJson writes no dose keys, so the loaded profile
+    // holds the 18 g read-default with the flag off — exactly the shape every
+    // built-in ships in, and the reason the flag is checked before the value.
+    void aProfileWithNoRecommendationLeavesTheDoseAlone() {
+        clearTestProfileStore();
+        McpTestFixture f;
+        f.settings.dye()->setActiveRecipeId(-1);
+        f.settings.dye()->setActiveBagId(-1);
+        f.settings.dye()->setDyeBeanWeight(15.0);
+
+        loadThreeFrameDFlow(f, "dose_no_recommendation", "D-Flow / No Dose");
+        QCoreApplication::processEvents();
+
+        QVERIFY(!f.profileManager.currentProfile().hasRecommendedDose());
+        QCOMPARE(f.settings.dye()->dyeBeanWeight(), 15.0);
+    }
+
+    // Startup is not a resolution point: the bag and recipe rows are still
+    // loading, so the ladder cannot be answered, and the live dose is already
+    // persisted from whichever source won last session. Writing the profile's
+    // dose here would overwrite it on every launch.
+    void theStartupLoadDoesNotApplyTheProfilesDose() {
+        clearTestProfileStore();
+        McpTestFixture f;
+        f.settings.dye()->setActiveRecipeId(-1);
+        f.settings.dye()->setActiveBagId(-1);
+        f.settings.dye()->setDyeBeanWeight(19.5);   // persisted from last session
+
+        f.profileManager.m_startupLoadDone = false;
+        loadDFlowWithRecommendedDose(f, "dose_startup", 21.0);
+        f.profileManager.m_startupLoadDone = true;
+
+        QCOMPARE(f.settings.dye()->dyeBeanWeight(), 19.5);
+    }
+
     // === activateBrewWithOverrides ===
 
     void activateBrewWithOverridesSetsSettings() {
         McpTestFixture f;
         loadDFlowProfile(f);
+        const double doseBefore = f.profileManager.profileRecommendedDose();
 
         f.profileManager.activateBrewWithOverrides(18.0, 40.0, 95.0, "14");
 
@@ -1663,6 +2297,15 @@ private slots:
         QCOMPARE(f.settings.brew()->brewYieldOverride(), 40.0);
         QCOMPARE(f.settings.brew()->temperatureOverride(), 95.0);
         QCOMPARE(f.settings.dye()->dyeGrinderSetting(), "14");
+
+        // The profile is NOT a write target for the dial (dose-source-precedence).
+        // The only call that would write it, setCurrentProfileRecommendedDose,
+        // marks the profile modified — and this dialog commits on every OK, so
+        // "completing the ladder" with a third write target would make a 0.2 g
+        // nudge dirty the loaded profile and ask to be saved. The recommendation
+        // is stored design, edited in the profile editors.
+        QCOMPARE(f.profileManager.profileRecommendedDose(), doseBefore);
+        QVERIFY(!f.profileManager.isProfileModified());
     }
 
     void activateBrewWithOverridesTriggersUpload() {
@@ -1894,7 +2537,10 @@ private slots:
 
     void uploadRecipeProfileEmitsAllSignals() {
         McpTestFixture f;
-        loadDFlowProfile(f, "D-Flow / Test", 36.0, 93.0);
+        // Three frames: uploadRecipeProfile now refuses to regenerate a profile
+        // whose frames its editor cannot read positionally, and a two-frame
+        // "D-Flow" profile is not one.
+        loadDFlowProfile(f, "D-Flow / Test", 36.0, 93.0, /*withInfuse=*/true);
 
         QSignalSpy modSpy(&f.profileManager, &ProfileManager::profileModifiedChanged);
         QSignalSpy curSpy(&f.profileManager, &ProfileManager::currentProfileChanged);
@@ -1905,8 +2551,6 @@ private slots:
         recipe["targetWeight"] = 40.0;
         recipe["fillTemperature"] = 95.0;
         recipe["pourTemperature"] = 95.0;
-        recipe["fillPressure"] = 6.0;
-        recipe["fillFlow"] = 4.0;
         recipe["pourFlow"] = 2.5;
         f.profileManager.uploadRecipeProfile(recipe);
 
@@ -2240,6 +2884,269 @@ private slots:
         QFile::remove(f.profileManager.userProfilesPath() + "/test_user_copy_xyz.json");
     }
 
+    // === Stored-encoding upgrade on load ===
+    //
+    // Change 1 made everything the app EMITS canonical, but a file already on disk
+    // keeps its old encoding until something re-saves it — and DatabaseBackupManager
+    // copies the profile directory verbatim, so a legacy-encoded file travels into a
+    // backup and onto another device, where a stricter reader rejects it. The upgrade
+    // runs on load rather than as a one-time pass because the user can drop a profile
+    // into the folder at any time.
+
+    // Write a profile whose numbers are JSON numbers rather than the canonical
+    // strings, and which omits the two keys reaprime hard-requires. This is the
+    // shape of a file written before Change 1.
+    static QString writeLegacyEncodedProfile(McpTestFixture& f, const QString& filename) {
+        const QString path = f.profileManager.userProfilesPath() + "/" + filename + ".json";
+        QDir().mkpath(f.profileManager.userProfilesPath());
+
+        QJsonObject step{
+            {"name", "preinfusion"}, {"pump", "flow"},   {"transition", "fast"},
+            {"sensor", "coffee"},    {"temperature", 92.0}, {"seconds", 20.0},
+            {"volume", 100.0},       {"flow", 4.0},      {"pressure", 1.0},
+        };
+        // Advanced, so the stored steps are authoritative. A simple type would have
+        // its frames regenerated from scalars this fixture does not carry, which
+        // makes the fixture — not the code under test — the thing being measured.
+        QJsonObject obj{
+            {"title", "Legacy Encoded Test"},
+            {"author", "Decent"},
+            {"type", "advanced"},
+            {"legacy_profile_type", "settings_2c"},
+            {"beverage_type", "espresso"},
+            {"version", "2"},
+            // Present and not the bare 93.0 default, so fromJson does not derive it
+            // and espressoTemperatureHealed() stays false. That matters twice over:
+            // the heal has its own on-disk write, and a healed profile is excluded
+            // from the encoding upgrade entirely — either would make these tests
+            // measure something other than what they claim.
+            {"espresso_temperature", 92.0},
+            {"target_weight", 36.0},        // number, not "36.0"
+            {"target_volume", 0.0},
+            {"steps", QJsonArray{step}},
+        };
+        QFile file(path);
+        if (file.open(QIODevice::WriteOnly))
+            file.write(QJsonDocument(obj).toJson(QJsonDocument::Indented));
+        return path;
+    }
+
+    void loadUpgradesLegacyEncodedUserProfile() {
+        McpTestFixture f;
+        const QString path = writeLegacyEncodedProfile(f, "legacy_encoding_xyz");
+
+        f.profileManager.loadProfile("legacy_encoding_xyz");
+
+        QFile after(path);
+        QVERIFY(after.open(QIODevice::ReadOnly));
+        const QJsonObject obj = QJsonDocument::fromJson(after.readAll()).object();
+        after.close();
+
+        // Numbers are string-encoded, and the keys reaprime requires are present —
+        // the whole point of the conversion.
+        QVERIFY(obj["target_weight"].isString());
+        QVERIFY(obj.contains("tank_temperature"));
+        QVERIFY(obj.contains("target_volume_count_start"));
+        // Content is untouched: this converts encoding, never values.
+        QCOMPARE(obj["title"].toString(), QString("Legacy Encoded Test"));
+        QCOMPARE(obj["target_weight"].toString().toDouble(), 36.0);
+        QCOMPARE(obj["steps"].toArray().size(), 1);
+
+        QFile::remove(path);
+    }
+
+    void loadDoesNotRewriteAnAlreadyCanonicalProfile() {
+        // Without an "already canonical" check the file would be rewritten on every
+        // single activation, churning its mtime forever.
+        McpTestFixture f;
+        const QString path = writeLegacyEncodedProfile(f, "already_canonical_xyz");
+
+        f.profileManager.loadProfile("already_canonical_xyz");   // converts
+        QFile first(path);
+        QVERIFY(first.open(QIODevice::ReadOnly));
+        const QByteArray afterFirst = first.readAll();
+        first.close();
+
+        f.profileManager.loadProfile("already_canonical_xyz");   // must be a no-op
+        QFile second(path);
+        QVERIFY(second.open(QIODevice::ReadOnly));
+        const QByteArray afterSecond = second.readAll();
+        second.close();
+
+        QCOMPARE(afterSecond, afterFirst);
+        QFile::remove(path);
+    }
+
+    void loadLeavesBuiltInProfilesUntouched() {
+        // `:/profiles/` is a read-only Qt resource. Attempting a write there would
+        // fail rather than corrupt anything, but it must not be attempted at all —
+        // and it must not leave a stray copy in the user directory either.
+        McpTestFixture f;
+        f.profileManager.loadProfile("default");
+
+        QVERIFY(!QFile::exists(f.profileManager.userProfilesPath() + "/default.json"));
+        QVERIFY(!QFile::exists(f.profileManager.downloadedProfilesPath() + "/default.json"));
+    }
+
+    void loadLeavesAProfileAloneWhenConversionWouldLoseData() {
+        // A profile whose values do not survive the round trip must be left exactly
+        // as it is, and the skip must be audible. Silently altering a user's file to
+        // tidy its formatting is the one outcome this pass must never produce.
+        //
+        // The lossy ingredient is precision: target_weight is written with
+        // ProfileJson::TargetMass, which is ONE decimal, so 36.1234 comes back as
+        // 36.1 — a drift of 0.0234, far outside jsonParityErrors' 0.0005 tolerance.
+        // Realistic for a profile authored in another tool. (An unknown top-level key
+        // would NOT work: the serializer preserves those, which is worth knowing.)
+        McpTestFixture f;
+        const QString path = writeLegacyEncodedProfile(f, "lossy_encoding_xyz");
+
+        QJsonObject obj;
+        {
+            QFile in(path);
+            QVERIFY(in.open(QIODevice::ReadOnly));
+            obj = QJsonDocument::fromJson(in.readAll()).object();
+        }
+        obj["target_weight"] = 36.1234;
+        {
+            QFile out(path);
+            QVERIFY(out.open(QIODevice::WriteOnly));
+            out.write(QJsonDocument(obj).toJson(QJsonDocument::Indented));
+        }
+        QFile before(path);
+        QVERIFY(before.open(QIODevice::ReadOnly));
+        const QByteArray original = before.readAll();
+        before.close();
+
+        // qWarning() << quotes a QString, so the name appears as "lossy_encoding_xyz".
+        QTest::ignoreMessage(QtWarningMsg,
+                             QRegularExpression("leaving .*lossy_encoding_xyz.* in its stored encoding"));
+        f.profileManager.loadProfile("lossy_encoding_xyz");
+
+        QFile after(path);
+        QVERIFY(after.open(QIODevice::ReadOnly));
+        QCOMPARE(after.readAll(), original);   // byte-for-byte untouched
+        after.close();
+
+        QFile::remove(path);
+    }
+
+    void loadDoesNotPersistBackfilledNotesIntoTheUsersFile() {
+        // The notes backfill injects the BUILT-IN's notes into the in-memory profile.
+        // No write in loadProfile may persist them: the user's file would gain text
+        // it never contained. This regressed once — the espresso_temperature repair
+        // ran after the backfill and serialized the whole profile.
+        //
+        // Uses a filename that matches a shipped built-in so a backfill source
+        // exists, and omits espresso_temperature so the repair fires.
+        McpTestFixture f;
+        const QString path = f.profileManager.userProfilesPath() + "/default.json";
+        QDir().mkpath(f.profileManager.userProfilesPath());
+
+        QJsonObject step{
+            {"name", "preinfusion"}, {"pump", "flow"},    {"transition", "fast"},
+            {"sensor", "coffee"},    {"temperature", 92.0}, {"seconds", 20.0},
+            {"volume", 100.0},       {"flow", 4.0},       {"pressure", 1.0},
+        };
+        QJsonObject obj{
+            {"title", "Default"},   {"author", "Decent"},
+            {"type", "advanced"},   {"legacy_profile_type", "settings_2c"},
+            {"beverage_type", "espresso"}, {"version", "2"},
+            {"notes", ""},          // empty, so the backfill has something to do
+            {"target_weight", 36.0},
+            {"steps", QJsonArray{step}},
+        };
+        {
+            QFile out(path);
+            QVERIFY(out.open(QIODevice::WriteOnly));
+            out.write(QJsonDocument(obj).toJson(QJsonDocument::Indented));
+        }
+
+        f.profileManager.loadProfile("default");
+
+        QFile after(path);
+        QVERIFY(after.open(QIODevice::ReadOnly));
+        const QJsonObject onDisk = QJsonDocument::fromJson(after.readAll()).object();
+        after.close();
+
+        // Non-vacuous: prove a write actually happened, otherwise "notes are empty"
+        // would pass simply because nothing touched the file. The repair persists the
+        // derived espresso_temperature, which the fixture deliberately omitted.
+        QVERIFY2(onDisk.contains("espresso_temperature"),
+                 "the espresso_temperature repair did not write, so this test would "
+                 "pass without proving anything about the notes");
+
+        // And in memory the backfill did run, so the ordering is what kept it off disk.
+        QVERIFY(!f.profileManager.currentProfile().profileNotes().isEmpty());
+
+        // On disk the notes must still be empty.
+        QVERIFY2(onDisk.value("notes").toString().isEmpty(),
+                 qPrintable("built-in notes leaked into the user's file: "
+                            + onDisk.value("notes").toString().left(60)));
+
+        QFile::remove(path);
+    }
+
+    void aHealedProfileIsLeftAloneWhenRewritingWouldLoseData() {
+        // A profile that needs the espresso_temperature repair AND carries a value
+        // the writer cannot round-trip must not be rewritten: the repair would carry
+        // the unrelated loss into the user's file. The temperature stays corrected in
+        // memory and the repair is retried on a later load.
+        McpTestFixture f;
+        const QString path = writeLegacyEncodedProfile(f, "healed_and_lossy_xyz");
+
+        QJsonObject obj;
+        {
+            QFile in(path);
+            QVERIFY(in.open(QIODevice::ReadOnly));
+            obj = QJsonDocument::fromJson(in.readAll()).object();
+        }
+        obj.remove("espresso_temperature");   // forces the heal
+        obj["target_weight"] = 36.1234;       // does not survive TargetMass precision
+        {
+            QFile out(path);
+            QVERIFY(out.open(QIODevice::WriteOnly));
+            out.write(QJsonDocument(obj).toJson(QJsonDocument::Indented));
+        }
+        QFile before(path);
+        QVERIFY(before.open(QIODevice::ReadOnly));
+        const QByteArray original = before.readAll();
+        before.close();
+
+        QTest::ignoreMessage(QtWarningMsg,
+                             QRegularExpression("NOT persisting the espresso_temperature repair"));
+        f.profileManager.loadProfile("healed_and_lossy_xyz");
+
+        QFile after(path);
+        QVERIFY(after.open(QIODevice::ReadOnly));
+        QCOMPARE(after.readAll(), original);   // byte-for-byte untouched
+        after.close();
+
+        QFile::remove(path);
+    }
+
+    void upgradedProfileSurvivesABackupRoundTrip() {
+        // The reason the conversion exists: DatabaseBackupManager copies the profile
+        // directory verbatim, so whatever encoding is on disk is what lands on the
+        // next device.
+        McpTestFixture f;
+        const QString path = writeLegacyEncodedProfile(f, "backup_roundtrip_xyz");
+        f.profileManager.loadProfile("backup_roundtrip_xyz");
+
+        QTemporaryDir backupDir;
+        QVERIFY(backupDir.isValid());
+        const QString copied = backupDir.filePath("backup_roundtrip_xyz.json");
+        QVERIFY(QFile::copy(path, copied));
+
+        const Profile restored = Profile::loadFromFile(copied);
+        QVERIFY(restored.isValid());
+        QCOMPARE(restored.title(), QString("Legacy Encoded Test"));
+        // And it satisfies the cross-app contract that a legacy-encoded copy would not.
+        QVERIFY(Profile::reaprimeReadabilityErrors(restored.toJsonObject()).isEmpty());
+
+        QFile::remove(path);
+    }
+
     // === renameProfile (in-place title rename) ===
 
     void renameProfileChangesTitleKeepsFilename() {
@@ -2550,19 +3457,65 @@ private slots:
 
     // === getOrConvertRecipeParams for different editor types ===
 
-    void getOrConvertRecipeParamsDFlowReturnsStoredParams() {
+    void getOrConvertRecipeParamsDFlowDerivesFromFrames() {
+        // Renamed from ...ReturnsStoredParams. It no longer does, deliberately:
+        // a stored recipe block is a cache, and the frames win. The old
+        // short-circuit left finding REC-1 half-fixed — every profile that
+        // already carried a fabricated block, including the five shipped A-Flow
+        // built-ins, kept showing the stale numbers because `prep` never ran.
         McpTestFixture f;
-        loadDFlowProfile(f, "D-Flow / Test", 36.0, 93.0);
+        loadDFlowProfile(f, "D-Flow / Test", 36.0, 93.0, /*withInfuse=*/true);
 
         QVariantMap params = f.profileManager.getOrConvertRecipeParams();
 
         QCOMPARE(params["editorType"].toString(), "dflow");
+        // Profile-level, so it comes through either way.
         QCOMPARE(params["targetWeight"].toDouble(), 36.0);
+        // Frame-derived: the fixture's Infusing frame, not the stored block
+        // (which carries none of these).
+        QCOMPARE(params["infusePressure"].toDouble(), 3.0);
+        QCOMPARE(params["infuseTime"].toDouble(), 20.0);
+        QCOMPARE(params["infuseWeight"].toDouble(), 4.0);
+    }
+
+    void storedRecipeBlockNeverOverridesTheFrames() {
+        // The spec requirement, asserted directly: "WHEN a profile carries a
+        // recipe block whose values contradict its frames, THEN the parameters
+        // used are those derived from the frames."
+        //
+        // This is the shape of the five shipped A-Flow built-ins, whose
+        // byte-identical blocks claim 88 C / 20 s / 9 bar against frames saying
+        // 93 / 60 / 10.
+        McpTestFixture f;
+        loadDFlowProfile(f, "D-Flow / Contradictory", 36.0, 93.0, /*withInfuse=*/true);
+
+        Profile p = f.profileManager.currentProfile();
+        RecipeParams stale;                 // deliberately disagrees with the frames
+        stale.editorType = EditorType::DFlow;
+        stale.infusePressure = 9.9;
+        stale.infuseTime = 1.0;
+        stale.fillTemperature = 60.0;
+        p.setRecipeParams(stale);
+        QVERIFY(f.profileManager.loadProfileFromJson(
+            QString::fromUtf8(QJsonDocument(p.toJsonObject()).toJson(QJsonDocument::Compact))));
+
+        const QVariantMap params = f.profileManager.getOrConvertRecipeParams();
+        QCOMPARE(params["infusePressure"].toDouble(), 3.0);    // frame, not 9.9
+        QCOMPARE(params["infuseTime"].toDouble(), 20.0);       // frame, not 1.0
+        QCOMPARE(params["fillTemperature"].toDouble(), 93.0);  // frame, not 60.0
     }
 
     void getOrConvertRecipeParamsDFlowNoStoredExtractsFromFrames() {
         // D-Flow profile without stored recipe params (de1app import)
-        // Should extract params from frames on-the-fly
+        // Should extract params from frames on-the-fly.
+        //
+        // The fixture is three frames — Filling / Infusing / Pouring — because
+        // that is what a D-Flow profile IS. The plugin's `prep` reads indices
+        // 0/1/2 with no pattern matching, so a two-frame profile has no pour
+        // frame to read and the extraction has nothing to do. This used to be a
+        // two-frame fixture asserting `pourFlow > 0`, which the struct default
+        // of 2.0 satisfied on its own: it would have passed with extraction
+        // deleted entirely. Assert the frames' own values instead.
         QJsonObject json;
         json["title"] = "D-Flow / Import";
         json["author"] = "test";
@@ -2592,18 +3545,32 @@ private slots:
         frame1["exit"] = QJsonObject{{"type", "pressure"}, {"condition", "over"}, {"value", 4.0}};
         frame1["limiter"] = QJsonObject{{"value", 0.0}, {"range", 0.6}};
         steps.append(frame1);
+        QJsonObject frameSoak;
+        frameSoak["name"] = "infuse";
+        frameSoak["temperature"] = 90.5;
+        frameSoak["sensor"] = "coffee";
+        frameSoak["pump"] = "pressure";
+        frameSoak["transition"] = "fast";
+        frameSoak["pressure"] = 3.5;
+        frameSoak["flow"] = 8.0;
+        frameSoak["seconds"] = 22.0;
+        frameSoak["volume"] = 70.0;
+        frameSoak["weight"] = 1.5;
+        frameSoak["exit"] = QJsonObject{{"type", "pressure"}, {"condition", "over"}, {"value", 4.0}};
+        frameSoak["limiter"] = QJsonObject{{"value", 0.0}, {"range", 0.6}};
+        steps.append(frameSoak);
         QJsonObject frame2;
         frame2["name"] = "pour";
-        frame2["temperature"] = 93.0;
+        frame2["temperature"] = 91.5;
         frame2["sensor"] = "coffee";
         frame2["pump"] = "flow";
         frame2["transition"] = "smooth";
         frame2["pressure"] = 6.0;
-        frame2["flow"] = 2.0;
+        frame2["flow"] = 2.4;
         frame2["seconds"] = 60.0;
         frame2["volume"] = 0.0;
         frame2["exit"] = QJsonObject{{"type", "pressure"}, {"condition", "over"}, {"value", 11.0}};
-        frame2["limiter"] = QJsonObject{{"value", 0.0}, {"range", 0.6}};
+        frame2["limiter"] = QJsonObject{{"value", 8.5}, {"range", 0.6}};
         steps.append(frame2);
         json["steps"] = steps;
 
@@ -2612,7 +3579,17 @@ private slots:
 
         QVariantMap params = f.profileManager.getOrConvertRecipeParams();
         QCOMPARE(params["editorType"].toString(), "dflow");
-        QVERIFY(params["pourFlow"].toDouble() > 0);  // Extracted from frames
+
+        // plugin.tcl:195-210 — filling(0), soaking(1), pouring(2), by index.
+        QCOMPARE(params["fillTemperature"].toDouble(), 93.0);
+        QCOMPARE(params["infusePressure"].toDouble(), 3.5);
+        QCOMPARE(params["infuseTime"].toDouble(), 22.0);
+        QCOMPARE(params["infuseVolume"].toDouble(), 70.0);
+        QCOMPARE(params["infuseWeight"].toDouble(), 1.5);
+        QCOMPARE(params["pourFlow"].toDouble(), 2.4);
+        QCOMPARE(params["pourTemperature"].toDouble(), 91.5);
+        // Pour pressure is the LIMITER, not the frame's pressure setpoint.
+        QCOMPARE(params["pourPressure"].toDouble(), 8.5);
     }
 
     void getOrConvertRecipeParamsPressureReturnsScalarFields() {
@@ -2651,15 +3628,14 @@ private slots:
 
     void uploadRecipeProfileRegeneratesFramesOnParamChange() {
         McpTestFixture f;
-        loadDFlowProfile(f, "D-Flow / Test", 36.0, 93.0);
+        loadDFlowProfile(f, "D-Flow / Test", 36.0, 93.0, /*withInfuse=*/true);
 
         QVariantMap recipe;
         recipe["editorType"] = "dflow";
         recipe["targetWeight"] = 40.0;
         recipe["fillTemperature"] = 95.0;
         recipe["pourTemperature"] = 95.0;
-        recipe["fillPressure"] = 8.0;  // Changed from 6.0
-        recipe["fillFlow"] = 4.0;
+        recipe["infusePressure"] = 8.0;  // Changed from 6.0
         recipe["pourFlow"] = 2.5;     // Changed from 2.0
         f.profileManager.uploadRecipeProfile(recipe);
 
@@ -2684,7 +3660,15 @@ private slots:
         // flow-controlled Pouring frame.
         QCOMPARE(pouring["pump"].toString(), QStringLiteral("flow"));
         QCOMPARE(pouring["flow"].toDouble(), 2.5);
-        // fillFlow and pourTemperature must survive the same regeneration.
+        // The fill frame's flow is a field update_D-Flow never writes, so it must
+        // survive the regeneration carrying the SOURCE profile's value.
+        //
+        // This asserted 8.0 until the review caught it. 8.0 is
+        // RecipeGenerator::createFillFrame's own hardcoded literal, and the
+        // fixture was two frames — for which roleIndex returns -1 for every role
+        // (n < 3), so the restore loop is skipped entirely. The assertion passed
+        // whether restoreFieldsThePluginNeverWrites worked, was broken, or was
+        // deleted. Three frames, and 4.0 from the fixture, makes it discriminate.
         QCOMPARE(filling["flow"].toDouble(), 4.0);
         QCOMPARE(pouring["temperature"].toDouble(), 95.0);
 

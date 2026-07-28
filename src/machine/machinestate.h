@@ -4,6 +4,7 @@
 #include <QPointer>
 #include <QTimer>
 #include <QElapsedTimer>
+#include <QtQml/qqmlregistration.h>
 #include "../ble/protocol/de1characteristics.h"
 
 class DE1Device;
@@ -11,9 +12,37 @@ class ScaleDevice;
 class Profile;
 class Settings;
 class ShotTimingController;
+class QQmlEngine;
+class QJSEngine;
 
 class MachineState : public QObject {
     Q_OBJECT
+
+    // Compile-time QML registration, replacing BOTH the setContextProperty("MachineState", …)
+    // and the qmlRegisterUncreatableType<MachineState>(…, "MachineStateType") that main.cpp used
+    // to do. The two existed because a context property shadows a type of the same name, so the
+    // enums had to be reached under a second, invented name. A QML_SINGLETON needs no such
+    // split: `MachineState.Phase.Pouring` resolves through the singleton, and unlike either of
+    // the runtime calls it is visible to qmllint, qmlcachegen and the language server. Full
+    // rationale in src/controllers/maincontroller.h.
+    //
+    // ONE REAL BEHAVIOURAL CHANGE, and it is not obvious from the macros. Qt resolves enums on a
+    // singleton INSIDE the instance guard — qqmltypewrapper.cpp:320,
+    // `if (QObject *qobjectSingleton = enginePrivate->singletonInstance<QObject*>(type))`, with
+    // the enum branch within it. The old uncreatable-type registration took the `else` at :361,
+    // which needs no instance at all. So the 155 `MachineState.Phase.X` reads in qml/ (on 153
+    // lines) used to be instance-independent constants and now depend on setQmlInstance().
+    //
+    // Miss that call and `MachineState.Phase` is `undefined`, so reading `.Pouring` off it
+    // THROWS a TypeError with a file and line — these sites are the loud ones. The quiet damage
+    // is elsewhere in the same failure: `Connections { target: MachineState }` (20+ sites)
+    // resolves its target to null and simply never connects, and plain reads like
+    // `MachineState.isReady` are `undefined`, hence falsy, so guarded actions refuse while
+    // logging only their own "cannot start" line. If you are ever debugging that, look at the
+    // Connections, not at the enums. tst_qmlregistration asserts the publish call for exactly
+    // this reason.
+    QML_ELEMENT
+    QML_SINGLETON
 
     Q_PROPERTY(Phase phase READ phase NOTIFY phaseChanged)
     Q_PROPERTY(bool isFlowing READ isFlowing NOTIFY phaseChanged)
@@ -22,6 +51,16 @@ class MachineState : public QObject {
     Q_PROPERTY(double shotTime READ shotTime NOTIFY shotTimeChanged)
     Q_PROPERTY(double targetWeight READ targetWeight WRITE setTargetWeight NOTIFY targetWeightChanged)
     Q_PROPERTY(double targetVolume READ targetVolume WRITE setTargetVolume NOTIFY targetVolumeChanged)
+    // The type-id of the scale ACTUALLY serving, which is not always the saved primary:
+    // the WiFi→BLE fallback preserves the WiFi primary on purpose, and a USB scale never
+    // occupies main()'s physicalScale at all. Everything that keys persistent per-scale
+    // state on "which scale is this?" — SAW learning, the Calibration tab's model/reset —
+    // must read THIS, so the pool being written is the pool being shown and reset.
+    // See SettingsCalibration and docs/CLAUDE_MD/SAW_LEARNING.md.
+    Q_PROPERTY(QString activeScaleType READ activeScaleType NOTIFY activeScaleTypeChanged)
+    // Display label matching activeScaleType, so a UI showing the two together cannot
+    // name one scale while reporting the other's learned model.
+    Q_PROPERTY(QString activeScaleName READ activeScaleName NOTIFY activeScaleTypeChanged)
     Q_PROPERTY(double scaleWeight READ scaleWeight NOTIFY scaleWeightChanged)
     Q_PROPERTY(double scaleFlowRate READ scaleFlowRate NOTIFY scaleFlowRateChanged)
     Q_PROPERTY(double smoothedScaleFlowRate READ smoothedScaleFlowRate NOTIFY scaleFlowRateChanged)
@@ -50,6 +89,9 @@ public:
     Q_ENUM(Phase)
 
     explicit MachineState(DE1Device* device, QObject* parent = nullptr);
+    // Clears the SAW scale-type provider it installed on SettingsCalibration, which
+    // captures `this` — see syncServingScale().
+    ~MachineState() override;
 
     Phase phase() const { return m_phase; }
     QString phaseString() const;
@@ -62,8 +104,15 @@ public:
     double cumulativeVolume() const { return m_cumulativeVolume; }
     double preinfusionVolume() const { return m_preinfusionVolume; }
     double pourVolume() const { return m_pourVolume; }
+    // QML_SINGLETON hooks. The engine does not create this object: main.cpp builds it on the
+    // stack and publishes the pointer before QQmlEngine::load(). See maincontroller.h.
+    static void setQmlInstance(MachineState *instance);
+    static MachineState *create(QQmlEngine *qmlEngine, QJSEngine *jsEngine);
+
     ScaleDevice* scale() const;
     void setScale(ScaleDevice* scale);
+    QString activeScaleType() const;
+    QString activeScaleName() const;
     void setSettings(Settings* settings);
     void setTimingController(ShotTimingController* controller);
     void setTargetWeight(double weight);
@@ -100,6 +149,7 @@ signals:
     void preinfusionVolumeChanged();
     void pourVolumeChanged();
     void scaleWeightChanged();
+    void activeScaleTypeChanged();
     void scaleFlowRateChanged();
     void espressoCycleStarted();  // When entering espresso preheating (clear graph here)
     // The PAIR of espressoCycleStarted: fires when the espresso cycle is left,
@@ -139,6 +189,16 @@ private slots:
     void onTimingControllerTareComplete();
 
 private:
+    static MachineState *s_qmlInstance;
+
+    // Install the serving-scale provider on SettingsCalibration, which resolves the SAW
+    // pool key for every consumer. Called from setSettings() ONLY, and once is enough:
+    // the provider is a closure over m_scale, so it follows every later setScale() and
+    // every connectedChanged without being reinstalled. (An earlier revision called it
+    // from setScale() too, which was the right shape for a pushed VALUE and pointless
+    // for a pull provider.)
+    void syncServingScale();
+
     void updatePhase();
     void startShotTimer();
     void stopShotTimer();

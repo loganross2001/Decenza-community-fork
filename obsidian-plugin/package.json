@@ -8,10 +8,10 @@
         "build": "node esbuild.config.mjs production"
     },
     "devDependencies": {
-        "@types/node": "^20.0.0",
-        "esbuild": "^0.27.3",
+        "@types/node": "^26.1.1",
+        "esbuild": "^0.28.1",
         "obsidian": "latest",
-        "typescript": "^5.4.0"
+        "typescript": "^7.0.2"
     },
     "dependencies": {
         "chart.js": "^4.4.1"

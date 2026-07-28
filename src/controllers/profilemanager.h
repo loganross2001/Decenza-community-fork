@@ -6,12 +6,15 @@
 #include <QMap>
 #include <QHash>
 #include <QJsonArray>
+#include <QtQml/qqmlregistration.h>
 #include "../profile/profile.h"
 
 class Settings;
 class DE1Device;
 class MachineState;
 class ProfileStorage;
+class QQmlEngine;
+class QJSEngine;
 
 // Profile source enumeration (moved from maincontroller.h)
 enum class ProfileSource {
@@ -47,6 +50,13 @@ struct ProfileInfo {
 class ProfileManager : public QObject {
     Q_OBJECT
 
+    // Compile-time QML registration, replacing the setContextProperty("ProfileManager", …) that
+    // main.cpp used to do. A context property is invisible to qmllint, qmlcachegen and the
+    // language server, so every `ProfileManager.x` in QML was unchecked. Full rationale in
+    // src/controllers/maincontroller.h.
+    QML_ELEMENT
+    QML_SINGLETON
+
     Q_PROPERTY(QString currentProfileName READ currentProfileName NOTIFY currentProfileChanged)
     Q_PROPERTY(QString baseProfileName READ baseProfileName NOTIFY currentProfileChanged)
     Q_PROPERTY(bool profileModified READ isProfileModified NOTIFY profileModifiedChanged)
@@ -61,7 +71,14 @@ class ProfileManager : public QObject {
     Q_PROPERTY(QVariantList downloadedProfiles READ downloadedProfiles NOTIFY profilesChanged)
     Q_PROPERTY(QVariantList userCreatedProfiles READ userCreatedProfiles NOTIFY profilesChanged)
     Q_PROPERTY(QVariantList allProfilesList READ allProfilesList NOTIFY profilesChanged)
-    Q_PROPERTY(Profile* currentProfilePtr READ currentProfilePtr CONSTANT)
+    // No Q_PROPERTY for currentProfilePtr. `Profile` is a plain C++ class — no Q_OBJECT, no
+    // Q_GADGET — so QML could never have read a member through the pointer; the property
+    // resolved to an opaque handle and nothing in qml/ ever referenced it (verified by grep,
+    // and tst_profilemanager already lists the name among the identifiers that must NOT appear
+    // as MainController.x). Registering this class turns that dead property into an
+    // `unresolved-type` diagnostic, and giving Profile a Q_GADGET to satisfy it would mean
+    // annotating ~50 accessors to expose something no caller wants. The accessor below stays:
+    // it is used from maincontroller.cpp, in C++ only.
     Q_PROPERTY(bool isCurrentProfileRecipe READ isCurrentProfileRecipe NOTIFY currentProfileChanged)
     Q_PROPERTY(QString currentEditorType READ currentEditorType NOTIFY currentProfileChanged)
     Q_PROPERTY(double profileTargetTemperature READ profileTargetTemperature NOTIFY currentProfileChanged)
@@ -87,6 +104,11 @@ class ProfileManager : public QObject {
     Q_PROPERTY(bool isCurrentProfileReadOnly READ isCurrentProfileReadOnly NOTIFY currentProfileChanged)
 
 public:
+    // QML_SINGLETON hooks. The engine does not create this object: MainController owns it and
+    // main.cpp publishes the pointer before QQmlEngine::load(). See maincontroller.h.
+    static void setQmlInstance(ProfileManager *instance);
+    static ProfileManager *create(QQmlEngine *qmlEngine, QJSEngine *jsEngine);
+
     explicit ProfileManager(Settings* settings, DE1Device* device,
                            MachineState* machineState,
                            ProfileStorage* profileStorage = nullptr,
@@ -124,6 +146,17 @@ public:
     }
     bool profileHasRecommendedDose() const { return m_currentProfile.hasRecommendedDose(); }
     double profileRecommendedDose() const { return m_currentProfile.recommendedDose(); }
+
+    // Sets the per-profile dose and enables it in one step, for callers that have a
+    // value rather than a value plus a toggle — the MCP `dose` parameter and the Dose
+    // control on both recipe editors. Setting a dose without enabling it would store a
+    // number nothing reads, which is what the retired recipe-block `dose` did.
+    //
+    // Q_INVOKABLE because RecipeEditorPage and SimpleProfileEditorPage call it
+    // directly: their `updateRecipe(key, value)` idiom routes through RecipeParams,
+    // which no longer carries a dose, so the slider has to write the profile field.
+    // Passing 0 CLEARS the recommendation rather than recommending zero grams.
+    Q_INVOKABLE void setCurrentProfileRecommendedDose(double doseG);
 
     // === Target weight / brew-by-ratio ===
     // The yield ladder's single evaluation point (add-yield-ratio-anchor):
@@ -337,6 +370,20 @@ signals:
     // The UI should show an error and prompt the user to select another profile.
     void profileLoadFailed(const QString& filename);
 
+    // Emitted when loadProfile() found the file but REFUSED it: this build
+    // cannot promise the profile brews what it describes, so activating it would
+    // pour a different shot silently. The previously active profile stays
+    // active — nothing is switched — and main.qml opens ProfileRefusedDialog.
+    //
+    // The two key lists are passed raw rather than pre-formatted because
+    // Profile::validationErrors() is untranslated English; QML composes the
+    // user-facing text so it follows the app language. Either list may be empty
+    // (a profile can also be refused for having no steps at all, or more than
+    // MAX_FRAMES), so the dialog must handle "refused with no keys to name".
+    void profileRefusedUnreadable(const QString& filename, const QString& title,
+                                  const QStringList& unsupportedStepKeys,
+                                  const QStringList& malformedValues);
+
     // See Q_PROPERTY documentation above.
     void de1CommunicationFailureChanged();
     void profileUploadRetryingChanged();
@@ -358,12 +405,25 @@ signals:
     void autoLoadStaleCleared();
 
 private:
+    static ProfileManager *s_qmlInstance;
+
     // Current profile's frames with every temperature shifted so the reference
     // temperature (espressoTemperature) becomes targetTemp. Single source of truth
     // for the override delta, shared by the live-brew and save-to-profile paths.
     QList<ProfileFrame> framesShiftedToTemperature(double targetTemp) const;
 
     void loadDefaultProfile();
+
+    // Rewrite a just-loaded profile in the canonical encoding, but only where that
+    // is provably lossless. Runs on load rather than as a one-time migration: the
+    // user can drop a profile into the folder at any time, so a pass that completes
+    // would miss every later arrival. `filePath` empty means the ProfileStorage
+    // (SAF) tier, which is written through ProfileStorage rather than QFile.
+    // Built-in profiles are never passed here — `:/profiles/` is a read-only resource.
+    void upgradeStoredEncoding(const QString& resolvedName,
+                               const QString& filePath,
+                               const Profile& loaded);
+
     // Reset brew overrides for a freshly loaded profile. After startup this is
     // a genuine clear (flags go false — an override is relative to the profile
     // it was dialed against). During startup, persisted overrides survive
@@ -371,9 +431,37 @@ private:
     // defaults: pre-fix sessions latched a same-as-default "override" on every
     // load, so a matching persisted value is noise, not intent.
     void resetBrewOverridesForLoadedProfile();
+    // Apply the loaded profile's recommended dose to the live dose — but only
+    // when the dose ladder names the profile as the owner, i.e. no active
+    // recipe or bag supplies one (dose-source-precedence). Also a no-op during
+    // the startup load, where the ladder cannot yet be answered and the live
+    // dose is already persisted.
+    void applyRecommendedDoseIfProfileOwnsIt();
     void migrateProfileFolders();
     void migrateProfileFormat();
-    void migrateRecipeFrames();
+    // One-time upgrade: remove the `recipe` block from already-saved profiles,
+    // promoting a set dose to recommended_dose. Replaces migrateRecipeFrames().
+    void stripStoredRecipeBlocks();
+
+    enum class WriteBack { Written, Refused, Failed, NotWritable };
+
+    // Rewrites a profile over whichever stored copy it came from, but ONLY when
+    // re-serializing it loses nothing.
+    //
+    // The point is that it reads the "before" bytes from the SAME place the write
+    // will land. Splitting those two decisions is what let a storage-tier write go
+    // unaudited in two separate places here; keeping them in one function makes that
+    // divergence impossible rather than merely fixed.
+    //
+    // An unreadable "before" is a REFUSAL, not a clean audit — otherwise the read
+    // failure silently disables the check it was supposed to gate.
+    //
+    // `excludedKey` is dropped from both sides for a repair whose whole purpose is to
+    // change one key. Refusal detail lands in *parityOut so each caller keeps its own
+    // wording and log level.
+    WriteBack writeProfileBackIfLossless(const QString& resolvedName, const QString& filePath,
+                                         bool preferStorage, const Profile& profile,
+                                         const QString& excludedKey, QStringList* parityOut);
     void migrateReadOnlyProfiles();
     void applyRecipeToScalarFields(const RecipeParams& recipe);
     void createNewProfileWithEditorType(EditorType type, const QString& title);

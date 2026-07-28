@@ -73,6 +73,16 @@ class SettingsApp : public QObject {
     // Developer settings
     Q_PROPERTY(bool developerTranslationUpload READ developerTranslationUpload WRITE setDeveloperTranslationUpload NOTIFY developerTranslationUploadChanged)
     Q_PROPERTY(bool simulationMode READ simulationMode WRITE setSimulationMode NOTIFY simulationModeChanged)
+    // Whether the paired refractometer should measure by itself when it detects a
+    // sample. The device stores this too, but the R2 is only connected while the
+    // post-shot review page is open — so the setting has to live here for the user
+    // to be able to change it at any time. Applied to the device on every connect.
+    Q_PROPERTY(bool refractometerAutoTest READ refractometerAutoTest WRITE setRefractometerAutoTest NOTIFY refractometerAutoTestChanged)
+    // False on builds with no simulator compiled in (tablet release). QML gates
+    // every Simulation Mode affordance on this, so the feature is absent from
+    // the UI rather than present and dead. CONSTANT: it is a build property, so
+    // it cannot change while the app is running.
+    Q_PROPERTY(bool simulatorAvailable READ simulatorAvailable CONSTANT)
     Q_PROPERTY(bool hideGhcSimulator READ hideGhcSimulator WRITE setHideGhcSimulator NOTIFY hideGhcSimulatorChanged)
     Q_PROPERTY(bool simulatedScaleEnabled READ simulatedScaleEnabled WRITE setSimulatedScaleEnabled NOTIFY simulatedScaleEnabledChanged)
     Q_PROPERTY(bool screenCaptureEnabled READ screenCaptureEnabled WRITE setScreenCaptureEnabled NOTIFY screenCaptureEnabledChanged)
@@ -184,7 +194,16 @@ public:
     bool developerTranslationUpload() const;
     void setDeveloperTranslationUpload(bool enabled);
     bool simulationMode() const;
+
+    bool refractometerAutoTest() const;
+    void setRefractometerAutoTest(bool value);
     void setSimulationMode(bool enabled);
+    // Plain const member, matching isDebugBuild() above. A static READ accessor
+    // also compiles, but this property is only useful if QML resolves it: a
+    // property that reads as `undefined` is falsy and silently fails CLOSED,
+    // which would remove Simulation Mode from desktop builds too, with nothing
+    // logged. Not worth deviating from the working precedent on this class.
+    bool simulatorAvailable() const;
     bool hideGhcSimulator() const;
     void setHideGhcSimulator(bool hide);
     bool simulatedScaleEnabled() const;
@@ -235,6 +254,7 @@ signals:
     void coachAfterEachShotChanged();
     void developerTranslationUploadChanged();
     void simulationModeChanged();
+    void refractometerAutoTestChanged();
     void hideGhcSimulatorChanged();
     void simulatedScaleEnabledChanged();
     void screenCaptureEnabledChanged();
@@ -245,6 +265,11 @@ signals:
     void coachGameplanEnabledChanged();
 
 private:
+    // Stored simulation preference with this build's default applied, before
+    // simulationMode()'s "no simulator in this build" override. Shared by the
+    // getter and the setter so their notion of "unchanged" cannot drift.
+    bool storedSimulationMode() const;
+
     mutable AppSettings m_settings;
     bool m_use12HourTime = false;
 

@@ -560,6 +560,14 @@ void VisualizerImporter::onProfileFetchFinished(QNetworkReply* reply) {
     }
 
     if (!profile.isValid() || profile.steps().isEmpty()) {
+        // Every other skip and failure in this loop names the profile; this one
+        // used to increment a counter and say nothing, so a batch that quietly
+        // dropped items gave the user an aggregate number and no way to find out
+        // which or why.
+        qWarning() << "VisualizerImporter: skipping" << profile.title()
+                   << "-" << (profile.steps().isEmpty()
+                                  ? QStringLiteral("no frames")
+                                  : profile.validationErrors().join(QStringLiteral(", ")));
         m_batchSkipped++;
     } else {
         QString filename = m_saveHelper->titleToFilename(profile.title());
@@ -631,10 +639,19 @@ Profile VisualizerImporter::parseVisualizerProfile(const QJsonObject& json) {
         profile.setTitle(json["title"].toString("Imported Profile"));
     }
 
-    // Safety net: if profile has recipe params with no steps, generate frames
-    if (profile.steps().isEmpty() && profile.editorType() != QLatin1String("advanced")) {
-        profile.regenerateFromRecipe();
-    }
+    // There is deliberately NO frame-generation safety net here for a payload that
+    // arrives with no steps.
+    //
+    // One used to call regenerateFromRecipe() on the theory that a profile carrying
+    // a recipe block but no frames could be rebuilt from the block. Two things
+    // retired it. First, fabricating a profile from unestablished parameters is
+    // finding REC-1 — it produced a complete default 88 °C / 20 s / 4 g profile from
+    // a broken download. Second, a stored block is no longer read into RecipeParams
+    // at all, so regenerateFromRecipe() would refuse regardless: it is guarded on
+    // hasRecipeParams(), which nothing sets from JSON any more.
+    //
+    // A payload with no steps is simply broken, and is rejected by the
+    // isValid()/steps().isEmpty() checks in both callers of this function.
 
     qDebug() << "Parsed Visualizer profile:" << profile.title()
              << "with" << profile.steps().size() << "steps";

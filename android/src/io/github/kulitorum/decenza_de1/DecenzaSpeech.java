@@ -20,6 +20,14 @@ import java.util.ArrayList;
 public class DecenzaSpeech {
     private static SpeechRecognizer recognizer;
     private static final Handler main = new Handler(Looper.getMainLooper());
+    // [barista-fork] After a MALFUNCTION error (ERROR_CLIENT=5, ERROR_RECOGNIZER_BUSY=8) the platform
+    // SpeechRecognizer instance is often left wedged — calling startListening() on it again just re-fires
+    // ERROR_CLIENT and the user's next utterance is silently dropped (the "says listening, never hears me,
+    // works if I repeat" loop, confirmed in the stt diagnostics as repeated code=5 right after mic resume).
+    // The reliable cure is to DESTROY and recreate the recognizer before the next start. We do NOT do this for
+    // the benign silence family (timeout=6 / no-match=7), which fire normally across a conversational pause —
+    // recreating on those would churn the recogniser through idle listening for no benefit.
+    private static volatile boolean recreateOnNextStart = false;
 
     // Implemented in C++ and bound via QJniEnvironment::registerNativeMethods.
     public static native void nativeOnFinal(String text);
@@ -114,6 +122,13 @@ public class DecenzaSpeech {
                     recoverMutedStreams(ctx);
                     // Keep the mic off Bluetooth SCO (built-in mic) so the first words aren't lost.
                     preferBuiltInMicForBluetooth(ctx);
+                    // [barista-fork] A prior malfunction (code 5/8) leaves the recogniser wedged — tear it down so
+                    // the block below builds a fresh one, instead of re-starting a broken instance into ERROR_CLIENT.
+                    if (recreateOnNextStart && recognizer != null) {
+                        try { recognizer.destroy(); } catch (Exception ignored) {}
+                        recognizer = null;
+                    }
+                    recreateOnNextStart = false;
                     if (recognizer == null) {
                         recognizer = SpeechRecognizer.createSpeechRecognizer(ctx);
                         recognizer.setRecognitionListener(listener);
@@ -159,7 +174,14 @@ public class DecenzaSpeech {
             ArrayList<String> list = partial.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
             if (list != null && !list.isEmpty()) nativeOnPartial(list.get(0));
         }
-        @Override public void onError(int error) { nativeOnError(error); }
+        @Override public void onError(int error) {
+            // [barista-fork] Malfunction family (5=client, 8=busy) wedges the recogniser — force a fresh
+            // instance on the next start so the restart the C++ side triggers doesn't re-fire ERROR_CLIENT and
+            // eat the user's next utterance. Benign silence (6/7) leaves the recogniser fine, so no recreate.
+            if (error == SpeechRecognizer.ERROR_CLIENT || error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY)
+                recreateOnNextStart = true;
+            nativeOnError(error);
+        }
         @Override public void onReadyForSpeech(Bundle params) {}
         @Override public void onBeginningOfSpeech() {}
         @Override public void onRmsChanged(float rmsdB) {}

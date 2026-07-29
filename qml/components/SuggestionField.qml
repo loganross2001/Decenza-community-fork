@@ -29,7 +29,7 @@ Item {
     signal inputBlurred()  // Emitted when text input loses focus
 
     // Accessibility mode: show buttons below text field instead of overlapping
-    readonly property bool _accessibilityMode: typeof AccessibilityManager !== "undefined" && AccessibilityManager.enabled
+    readonly property bool _accessibilityMode: typeof AccessibilityManager !== "undefined" && AccessibilityManager !== null && AccessibilityManager.enabled
 
     implicitHeight: (root.label.length > 0 ? fieldLabel.height + Theme.scaled(2) : 0)
                     + Theme.scaled(36)   // matches textInput height + ValueInput (app field standard)
@@ -68,7 +68,7 @@ Item {
             // clearing textInput.focus, otherwise QML traverses to the next
             // text field and the keyboard reappears.
             root.forceActiveFocus()
-            Qt.inputMethod.hide()
+            Keyboard.hide()
         })
     }
 
@@ -87,7 +87,7 @@ Item {
             // want it to restore to textInput (which would re-show the
             // keyboard).
             root.forceActiveFocus()
-            Qt.inputMethod.hide()
+            Keyboard.hide()
             suggestionsDialog.open()
         })
     }

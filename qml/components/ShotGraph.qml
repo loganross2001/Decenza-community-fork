@@ -1,8 +1,6 @@
 import QtQuick
 import QtGraphs
 import Decenza
-import "."  // For AccessibleMouseArea
-import "graphs"
 
 // Outer Item wraps GraphsView so all overlays — FastLineRenderer traces, dashed
 // goal curves, phase-marker vertical lines, manual right-axis labels — render as
@@ -409,7 +407,7 @@ Item {
                 }
 
                 onAccessibleClicked: {
-                    if (typeof AccessibilityManager !== "undefined") {
+                    if (typeof AccessibilityManager !== "undefined" && AccessibilityManager !== null) {
                         AccessibilityManager.announce(accessibleName)
                     }
                 }

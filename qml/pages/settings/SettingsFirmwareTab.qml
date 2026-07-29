@@ -2,7 +2,6 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import Decenza
-import "../../components"
 
 // DE1 firmware update tab. Surfaces the FirmwareUpdater state machine
 // from MainController (MainController.firmwareUpdater) — current vs.
@@ -15,7 +14,7 @@ import "../../components"
 Item {
     id: firmwareTab
 
-    readonly property var fw: typeof MainController !== "undefined" && MainController
+    readonly property var fw: typeof MainController !== "undefined" && MainController !== null && MainController
                               ? MainController.firmwareUpdater : null
 
     // FirmwareUpdater::State enum values (kept in sync with the C++ side

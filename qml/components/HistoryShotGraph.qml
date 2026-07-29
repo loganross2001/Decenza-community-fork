@@ -1,7 +1,6 @@
 import QtQuick
 import QtGraphs
 import Decenza
-import "graphs"
 
 // Outer Item wraps the GraphsView so dashed overlays, right-axis-mapped traces,
 // inspect crosshair, marker labels, and the right-axis label column render as
@@ -306,7 +305,7 @@ Item {
         }
 
         if (parts.length === 0) return
-        if (typeof AccessibilityManager !== "undefined") {
+        if (typeof AccessibilityManager !== "undefined" && AccessibilityManager !== null) {
             var phase = getPhaseAtTime(time)
             var header = "At " + time.toFixed(1) + " seconds"
             if (phase !== "") header += ", " + phase + " phase"

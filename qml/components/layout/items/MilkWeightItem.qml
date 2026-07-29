@@ -1,8 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
-import QtQuick.Window
 import Decenza
-import "../.."
 
 // Layout widget: measured milk weight (composable-brew-bar).
 // Shows the live in-session milk while steaming (sessionMeasuredMilkG on the
@@ -31,12 +29,11 @@ Item {
         return (p && !p.disabled) ? (p.pitcherWeightG ?? 0) : 0
     }
 
-    // Captured/committed milk for this session: the auto-captured value held on
-    // the window root (set at capture, reset to 0 at session end / pitcher change).
-    readonly property double sessionMilkG: {
-        var win = root.Window.window
-        return (win && win.sessionMeasuredMilkG > 0) ? win.sessionMeasuredMilkG : 0
-    }
+    // [barista-fork] Captured/committed milk for this session — set at capture, reset to 0 at session end /
+    // pitcher change. Upstream #1680 migrated sessionMeasuredMilkG off the window root onto the AppShell
+    // singleton, so read it there (the old window-root read is gone).
+    readonly property double sessionMilkG:
+        AppShell.sessionMeasuredMilkG > 0 ? AppShell.sessionMeasuredMilkG : 0
     // Live net milk on the scale right now (pitcher tare subtracted). Needs a saved
     // pitcher weight to be meaningful; 0 otherwise.
     readonly property double liveNetMilkG: {

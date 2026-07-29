@@ -1,10 +1,13 @@
+// Loader/sourceComponent blocks below are nested components, so `idlePage` and the other ids
+// in this file are not statically resolvable inside them without this pragma. There is no
+// Repeater or delegate in this file, so no `required property` is needed.
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Window
 import Decenza
-import "../components"
-import "../components/layout"
 import "../components/layout/PillFit.js" as PillFit
 
 Page {
@@ -30,9 +33,9 @@ Page {
         // Safety net: if a picker popup was destroyed while open (e.g. a layout
         // rebuild) its onClosed never fired, so clear any leftover slide offset.
         idlePage.releasePanelClearance()
-        if (root.pendingBrewDialog) {
-            root.pendingBrewDialog = false
-            root.openBrewSettings()
+        if (AppShell.pendingBrewDialog) {
+            AppShell.pendingBrewDialog = false
+            AppShell.brewSettingsRequested()
         }
     }
 
@@ -50,7 +53,7 @@ Page {
             onTriggered: {
                 console.log("DEV: Simulating completed shot")
                 MainController.generateFakeShotData()
-                pageStack.push(Qt.resolvedUrl("EspressoPage.qml"))
+                AppShell.espressoRequested()
                 fakeShowMetadataTimer.start()
             }
         }
@@ -61,7 +64,7 @@ Page {
             onTriggered: {
                 var shotId = MainController.lastSavedShotId
                 console.log("DEV: Opening PostShotReviewPage with shotId:", shotId)
-                pageStack.push(Qt.resolvedUrl("PostShotReviewPage.qml"), { editShotId: shotId })
+                AppShell.postShotReviewRequested(shotId, true)
             }
         }
 
@@ -442,7 +445,7 @@ Page {
         } else if (!MachineState.isReady) {
             console.log("[recipe pill] start blocked: machine not ready — recipe=" + recipe.id
                         + " phase=" + MachineState.phase)
-            if (typeof AccessibilityManager !== "undefined" && AccessibilityManager.enabled)
+            if (typeof AccessibilityManager !== "undefined" && AccessibilityManager !== null && AccessibilityManager.enabled)
                 AccessibilityManager.announce(TranslationManager.translate("machine.notReady", "Machine is not ready"))
         } else {
             // Deferred in MainController until the recipe's profile is applied,
@@ -496,7 +499,7 @@ Page {
             idlePage.beanCaptureText = TranslationManager.translate("idle.doseCaptured", "Dose set: %1g").arg(net.toFixed(1))
             idlePage.beanCaptureShown = true
             idleBeanCaptureTimer.restart()
-            if (typeof AccessibilityManager !== "undefined") {
+            if (typeof AccessibilityManager !== "undefined" && AccessibilityManager !== null) {
                 if (Settings.brew.doseCaptureSoundEnabled)
                     AccessibilityManager.playCaptureDing()
                 if (AccessibilityManager.enabled)
@@ -583,7 +586,7 @@ Page {
             // the duration at session end, in main.qml). Recorded even for an
             // uncalibrated preset so the very first calibration-bootstrap steam can be
             // adopted — and never as a half-pair, since the time half is written there.
-            if (Window.window) Window.window.sessionMeasuredMilkG = milk
+            AppShell.sessionMeasuredMilkG = milk
             // Single source of truth (SettingsBrew): 0 when off/uncalibrated → nothing to lock.
             var t = Settings.brew.scaledSteamTime(Settings.brew.selectedSteamPitcher, milk)
             if (t <= 0) return
@@ -594,7 +597,7 @@ Page {
             idlePage.milkCaptureText = TranslationManager.translate("idle.steamCaptured", "Steam time: %1s for %2g milk").arg(t).arg(milk.toFixed(0))
             idlePage.milkCaptureShown = true
             idleMilkCaptureTimer.restart()
-            if (typeof AccessibilityManager !== "undefined") {
+            if (typeof AccessibilityManager !== "undefined" && AccessibilityManager !== null) {
                 if (Settings.brew.doseCaptureSoundEnabled)
                     AccessibilityManager.playCaptureDing()
                 if (AccessibilityManager.enabled)
@@ -745,10 +748,10 @@ Page {
             MachineState.tareScale()
             // Fresh steam attempt: drop any milk captured but not consumed by a prior
             // (abandoned) attempt, so it can't scale this one.
-            if (Window.window) Window.window.sessionMeasuredMilkG = 0
+            AppShell.sessionMeasuredMilkG = 0
         }
 
-        if (typeof AccessibilityManager !== "undefined" && AccessibilityManager.enabled && activePresetFunction !== "") {
+        if (typeof AccessibilityManager !== "undefined" && AccessibilityManager !== null && AccessibilityManager.enabled && activePresetFunction !== "") {
             var presets = []
             var selectedName = ""
             switch (activePresetFunction) {
@@ -835,9 +838,9 @@ Page {
     MouseArea {
         anchors.fill: parent
         z: -1
-        enabled: activePresetFunction !== "" &&
-                 !(typeof AccessibilityManager !== "undefined" && AccessibilityManager.enabled)
-        onClicked: activePresetFunction = ""
+        enabled: idlePage.activePresetFunction !== "" &&
+                 !(typeof AccessibilityManager !== "undefined" && AccessibilityManager !== null && AccessibilityManager.enabled)
+        onClicked: idlePage.activePresetFunction = ""
     }
 
     // ============================================================
@@ -898,7 +901,14 @@ Page {
         // down for an upper-half one (restores to 0 on close).
         transform: Translate {
             y: -idlePage.bottomPanelClearance + idlePage.topPanelClearance
+            // qmllint disable Quick.layout-positioning
+            // False positive, verified: this `y` belongs to the Translate transform, not to the
+            // layout-managed item. A transform is precisely how you offset an item inside a layout
+            // WITHOUT fighting the layout — the alternative qmllint suggests (Layout.topMargin)
+            // would make the layout re-measure on every animation frame. The linter attributes the
+            // `y` to the enclosing item and cannot see the transform boundary.
             Behavior on y { NumberAnimation { duration: 200; easing.type: Easing.OutQuad } }
+            // qmllint enable Quick.layout-positioning
         }
 
         // Status readouts (temp, water level, connection)
@@ -928,7 +938,7 @@ Page {
         // Inline preset rows (for center-zone action buttons)
         Item {
             Layout.alignment: Qt.AlignHCenter
-            Layout.preferredHeight: activePresetFunction !== "" ? activePresetRow.implicitHeight : 0
+            Layout.preferredHeight: idlePage.activePresetFunction !== "" ? activePresetRow.implicitHeight : 0
             Layout.fillWidth: true
             Layout.maximumWidth: Theme.scaled(900)
             Layout.leftMargin: Theme.standardMargin
@@ -936,7 +946,7 @@ Page {
             clip: true
 
             property var activePresetRow: {
-                switch (activePresetFunction) {
+                switch (idlePage.activePresetFunction) {
                     case "steam": return steamPresetLoader
                     case "espresso": return espressoColumnLoader
                     case "hotwater": return hotWaterPresetLoader
@@ -956,7 +966,7 @@ Page {
                 id: steamPresetLoader
                 width: parent.width
                 anchors.horizontalCenter: parent.horizontalCenter
-                active: activePresetFunction === "steam"
+                active: idlePage.activePresetFunction === "steam"
                 visible: active
 
                 // Track scale weight changes and bump version to refresh the live
@@ -1042,7 +1052,7 @@ Page {
                                     DE1Device.startSteam()
                                 } else {
                                     console.log("Cannot start steam - machine not ready, phase:", MachineState.phase)
-                                    if (typeof AccessibilityManager !== "undefined" && AccessibilityManager.enabled)
+                                    if (typeof AccessibilityManager !== "undefined" && AccessibilityManager !== null && AccessibilityManager.enabled)
                                         AccessibilityManager.announce(TranslationManager.translate("machine.notReady", "Machine is not ready"))
                                 }
                             }
@@ -1054,7 +1064,7 @@ Page {
                         // milk-weight -> steam-time reference.
                         onPresetLongPressed: function(index) {
                             Settings.brew.selectedSteamPitcher = index
-                            pageStack.push(Qt.resolvedUrl("SteamPage.qml"))
+                            AppShell.steamRequested()
                         }
                     }
 
@@ -1093,7 +1103,7 @@ Page {
                 id: espressoColumnLoader
                 width: parent.width
                 anchors.horizontalCenter: parent.horizontalCenter
-                active: activePresetFunction === "espresso"
+                active: idlePage.activePresetFunction === "espresso"
                 visible: active
                 sourceComponent: Column {
                     width: parent ? parent.width : 0
@@ -1135,7 +1145,7 @@ Page {
                                     DE1Device.startEspresso()
                                 } else {
                                     console.log("Cannot start espresso - machine not ready, phase:", MachineState.phase)
-                                    if (typeof AccessibilityManager !== "undefined" && AccessibilityManager.enabled)
+                                    if (typeof AccessibilityManager !== "undefined" && AccessibilityManager !== null && AccessibilityManager.enabled)
                                         AccessibilityManager.announce(TranslationManager.translate("machine.notReady", "Machine is not ready"))
                                 }
                             } else {
@@ -1178,8 +1188,8 @@ Page {
                             Accessible.name: (ProfileManager.currentProfileName || "") + " " + TranslationManager.translate("idle.accessible.startespresso", "Start espresso")
                             Accessible.focusable: true
                             Accessible.onPressAction: idleNonFavMouseArea.clicked(null)
-                            Keys.onReturnPressed: { idleNonFavMouseArea.clicked(null); event.accepted = true }
-                            Keys.onSpacePressed:  { idleNonFavMouseArea.clicked(null); event.accepted = true }
+                            Keys.onReturnPressed: function(event) { idleNonFavMouseArea.clicked(null); event.accepted = true }
+                            Keys.onSpacePressed: function(event) { idleNonFavMouseArea.clicked(null); event.accepted = true }
 
                             Text {
                                 id: nonFavoriteProfileText
@@ -1199,7 +1209,7 @@ Page {
                                         DE1Device.startEspresso()
                                     } else {
                                         console.log("Cannot start espresso - machine not ready, phase:", MachineState.phase)
-                                        if (typeof AccessibilityManager !== "undefined" && AccessibilityManager.enabled)
+                                        if (typeof AccessibilityManager !== "undefined" && AccessibilityManager !== null && AccessibilityManager.enabled)
                                             AccessibilityManager.announce(TranslationManager.translate("machine.notReady", "Machine is not ready"))
                                     }
                                 }
@@ -1212,10 +1222,7 @@ Page {
                             profileName: ProfileManager.currentProfileName
 
                             onClicked: {
-                                pageStack.push(Qt.resolvedUrl("ProfileInfoPage.qml"), {
-                                    profileFilename: Settings.app.currentProfile,
-                                    profileName: ProfileManager.currentProfileName
-                                })
+                                AppShell.profileInfoRequested(Settings.app.currentProfile, ProfileManager.currentProfileName)
                             }
                         }
                     }
@@ -1273,7 +1280,7 @@ Page {
                 id: hotWaterPresetLoader
                 width: parent.width
                 anchors.horizontalCenter: parent.horizontalCenter
-                active: activePresetFunction === "hotwater"
+                active: idlePage.activePresetFunction === "hotwater"
                 visible: active
                 sourceComponent: PresetPillRow {
                     maxWidth: hotWaterPresetLoader.width
@@ -1308,7 +1315,7 @@ Page {
                                 DE1Device.startHotWater()
                             } else {
                                 console.log("Cannot start hot water - machine not ready, phase:", MachineState.phase)
-                                if (typeof AccessibilityManager !== "undefined" && AccessibilityManager.enabled)
+                                if (typeof AccessibilityManager !== "undefined" && AccessibilityManager !== null && AccessibilityManager.enabled)
                                     AccessibilityManager.announce(TranslationManager.translate("machine.notReady", "Machine is not ready"))
                             }
                         }
@@ -1320,7 +1327,7 @@ Page {
                 id: flushPresetLoader
                 width: parent.width
                 anchors.horizontalCenter: parent.horizontalCenter
-                active: activePresetFunction === "flush"
+                active: idlePage.activePresetFunction === "flush"
                 visible: active
                 sourceComponent: PresetPillRow {
                     maxWidth: flushPresetLoader.width
@@ -1356,7 +1363,7 @@ Page {
                                 DE1Device.startFlush()
                             } else {
                                 console.log("Cannot start flush - machine not ready, phase:", MachineState.phase)
-                                if (typeof AccessibilityManager !== "undefined" && AccessibilityManager.enabled)
+                                if (typeof AccessibilityManager !== "undefined" && AccessibilityManager !== null && AccessibilityManager.enabled)
                                     AccessibilityManager.announce(TranslationManager.translate("machine.notReady", "Machine is not ready"))
                             }
                         }
@@ -1368,7 +1375,7 @@ Page {
                 id: beanPresetLoader
                 width: parent.width
                 anchors.horizontalCenter: parent.horizontalCenter
-                active: activePresetFunction === "beans"
+                active: idlePage.activePresetFunction === "beans"
                 visible: active
                 sourceComponent: PresetPillRow {
                     id: inlineBeanPresetRow
@@ -1402,7 +1409,7 @@ Page {
                 id: equipmentPresetLoader
                 width: parent.width
                 anchors.horizontalCenter: parent.horizontalCenter
-                active: activePresetFunction === "equipment"
+                active: idlePage.activePresetFunction === "equipment"
                 visible: active
                 sourceComponent: PresetPillRow {
                     maxWidth: equipmentPresetLoader.width
@@ -1435,7 +1442,7 @@ Page {
                 id: recipePresetLoader
                 width: parent.width
                 anchors.horizontalCenter: parent.horizontalCenter
-                active: activePresetFunction === "recipes"
+                active: idlePage.activePresetFunction === "recipes"
                 visible: active
                 sourceComponent: PresetPillRow {
                     maxWidth: recipePresetLoader.width

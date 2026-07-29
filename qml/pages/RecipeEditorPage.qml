@@ -2,7 +2,6 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import Decenza
-import "../components"
 
 /**
  * RecipeEditorPage - Simplified D-Flow style profile editor
@@ -32,7 +31,7 @@ Page {
         if (recipeModified) {
             exitDialog.open()
         } else {
-            root.goBack()
+            AppShell.backRequested()
         }
     }
 
@@ -603,6 +602,7 @@ Page {
         }
 
         AccessibleButton {
+            id: doneButton
             text: TranslationManager.translate("recipeEditor.done", "Done")
             accessibleName: TranslationManager.translate("recipeEditor.finishEditing", "Finish editing recipe")
             onClicked: {
@@ -610,7 +610,7 @@ Page {
                 if (recipeModified) {
                     exitDialog.open()
                 } else {
-                    root.goBack()
+                    AppShell.backRequested()
                 }
             }
             // White button with primary text for bottom bar
@@ -618,11 +618,11 @@ Page {
                 implicitWidth: Math.max(Theme.scaled(80), recipeDoneText.implicitWidth + Theme.scaled(32))
                 implicitHeight: Theme.scaled(36)
                 radius: Theme.scaled(6)
-                color: parent.down ? Qt.darker(Theme.primaryContrastColor, 1.1) : Theme.primaryContrastColor
+                color: doneButton.down || doneButton.isPressed ? Qt.darker(Theme.primaryContrastColor, 1.1) : Theme.primaryContrastColor
             }
             contentItem: Text {
                 id: recipeDoneText
-                text: parent.text
+                text: doneButton.text
                 font.pixelSize: Theme.scaled(14)
                 font.family: Theme.bodyFont.family
                 color: Theme.primaryColor
@@ -700,17 +700,17 @@ Page {
             if (originalProfileName) {
                 ProfileManager.loadProfile(originalProfileName)
             }
-            root.goBack()
+            AppShell.backRequested()
         }
         onTryClicked: {
             ProfileManager.uploadCurrentProfile()
-            root.goBack()
+            AppShell.backRequested()
         }
         onSaveAsClicked: saveAsDialog.open()
         onSaveClicked: {
             if (ProfileManager.saveProfile(originalProfileName)) {
                 AccessibilityManager.announce(TranslationManager.translate("recipeEditor.profileSaved", "Profile saved"))
-                root.goBack()
+                AppShell.backRequested()
             } else {
                 AccessibilityManager.announce(TranslationManager.translate("recipeEditor.saveFailed", "Save failed"))
                 saveErrorDialog.open()
@@ -840,7 +840,7 @@ Page {
         }
 
         function doSave() {
-            Qt.inputMethod.commit()
+            Keyboard.commit()
             if (saveAsTitleField.text.length > 0) {
                 var fullTitle = editorPrefix() + saveAsTitleField.text
                 var filename = ProfileManager.titleToFilename(fullTitle)
@@ -856,7 +856,7 @@ Page {
                     return
                 }
                 if (ProfileManager.saveProfileAs(filename, fullTitle)) {
-                    root.goBack()
+                    AppShell.backRequested()
                 } else {
                     saveErrorDialog.open()
                 }
@@ -938,7 +938,7 @@ Page {
                         overwriteDialog.close()
                         var fullTitle = editorPrefix() + saveAsTitleField.text
                         if (ProfileManager.saveProfileAs(saveAsDialog.pendingFilename, fullTitle)) {
-                            root.goBack()
+                            AppShell.backRequested()
                         } else {
                             saveErrorDialog.open()
                         }

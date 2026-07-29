@@ -239,6 +239,7 @@ Dialog {
                 property real buttonHeight: Theme.scaled(50)
 
                 AccessibleButton {
+                    id: dismissButton
                     width: parent.buttonWidth
                     height: parent.buttonHeight
                     text: TranslationManager.translate("crashReport.dismiss", "Dismiss")
@@ -255,7 +256,7 @@ Dialog {
                         border.color: Theme.textSecondaryColor
                     }
                     contentItem: Text {
-                        text: parent.text
+                        text: dismissButton.text
                         font: Theme.bodyFont
                         color: Theme.textColor
                         horizontalAlignment: Text.AlignHCenter
@@ -264,23 +265,24 @@ Dialog {
                 }
 
                 AccessibleButton {
+                    id: sendReportButton
                     width: parent.buttonWidth
                     height: parent.buttonHeight
                     text: TranslationManager.translate("crashReport.sendReport", "Send Report")
                     accessibleName: TranslationManager.translate("crashReport.sendReportAccessible", "Send crash report")
                     enabled: !CrashReporter.submitting
                     onClicked: {
-                        Qt.inputMethod.commit()
+                        Keyboard.commit()
                         root.dialogState = "submitting"
                         CrashReporter.submitReport(crashLog, userNotesInput.text, debugLogTail)
                     }
                     background: Rectangle {
                         implicitHeight: Theme.scaled(60)
                         radius: Theme.buttonRadius
-                        color: parent.down ? Qt.darker(Theme.primaryColor, 1.2) : Theme.primaryColor
+                        color: sendReportButton.down || sendReportButton.isPressed ? Qt.darker(Theme.primaryColor, 1.2) : Theme.primaryColor
                     }
                     contentItem: Text {
-                        text: parent.text
+                        text: sendReportButton.text
                         font: Theme.bodyFont
                         color: Theme.primaryContrastColor
                         horizontalAlignment: Text.AlignHCenter
@@ -389,6 +391,7 @@ Dialog {
                 Layout.margins: Theme.scaled(20)
 
                 AccessibleButton {
+                    id: okButton
                     anchors.right: parent.right
                     width: Theme.scaled(120)
                     height: parent.height
@@ -401,10 +404,10 @@ Dialog {
                     background: Rectangle {
                         implicitHeight: Theme.scaled(60)
                         radius: Theme.buttonRadius
-                        color: parent.down ? Qt.darker(Theme.primaryColor, 1.2) : Theme.primaryColor
+                        color: okButton.down || okButton.isPressed ? Qt.darker(Theme.primaryColor, 1.2) : Theme.primaryColor
                     }
                     contentItem: Text {
-                        text: parent.text
+                        text: okButton.text
                         font: Theme.bodyFont
                         color: Theme.primaryContrastColor
                         horizontalAlignment: Text.AlignHCenter
@@ -485,6 +488,7 @@ Dialog {
                 property real buttonHeight: Theme.scaled(50)
 
                 AccessibleButton {
+                    id: dismissButton2
                     width: parent.buttonWidth
                     height: parent.buttonHeight
                     text: TranslationManager.translate("crashReport.dismiss", "Dismiss")
@@ -501,7 +505,7 @@ Dialog {
                         border.color: Theme.textSecondaryColor
                     }
                     contentItem: Text {
-                        text: parent.text
+                        text: dismissButton2.text
                         font: Theme.bodyFont
                         color: Theme.textColor
                         horizontalAlignment: Text.AlignHCenter
@@ -510,23 +514,24 @@ Dialog {
                 }
 
                 AccessibleButton {
+                    id: retryButton
                     width: parent.buttonWidth
                     height: parent.buttonHeight
                     text: TranslationManager.translate("crashReport.retry", "Retry")
                     accessibleName: TranslationManager.translate("crashReport.retryAccessible", "Retry sending crash report")
                     enabled: !CrashReporter.submitting
                     onClicked: {
-                        Qt.inputMethod.commit()
+                        Keyboard.commit()
                         root.dialogState = "submitting"
                         CrashReporter.submitReport(crashLog, userNotesInput.text, debugLogTail)
                     }
                     background: Rectangle {
                         implicitHeight: Theme.scaled(60)
                         radius: Theme.buttonRadius
-                        color: parent.down ? Qt.darker(Theme.primaryColor, 1.2) : Theme.primaryColor
+                        color: retryButton.down || retryButton.isPressed ? Qt.darker(Theme.primaryColor, 1.2) : Theme.primaryColor
                     }
                     contentItem: Text {
-                        text: parent.text
+                        text: retryButton.text
                         font: Theme.bodyFont
                         color: Theme.primaryContrastColor
                         horizontalAlignment: Text.AlignHCenter

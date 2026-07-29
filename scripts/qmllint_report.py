@@ -46,6 +46,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shlex
 import subprocess
 import tempfile
 import sys
@@ -83,25 +84,76 @@ BASELINE = REPO / "qml-diagnostics-baseline.json"
 # still includes files the run never read is an allowance, not a ceiling.
 CATEGORY_EXEMPTIONS: dict[str, int] = {
     # Each entry is a ceiling, not a budget.
-    "missing-property": 326,
-    # All 21 remaining are qmllint FALSE POSITIVES and cannot be driven to zero from this side:
-    # it flags any child DECLARED lexically inside a Layout without checking that a Layout will
-    # actually manage it. Two shapes — objects that are not Items at all (Popup/Dialog derive
-    # from QObject; one Translate transform), and one Item reparented out of the layout at
-    # runtime (`parent: Overlay.overlay` + anchors, SettingsHistoryDataTab.qml). Verified in the
-    # Qt 6.11.1 source; see bugs-found.md. The real ones were fixed by moving to
-    # Layout.preferredWidth/Height — do not "clean up" these 21.
-    "Quick.layout-positioning": 21,
-    "import": 23,
-    "Quick.property-changes-parsed": 5,
-    "duplicate-property-binding": 2,
-    "unresolved-type": 2,
-    "equality-type-coercion": 1,
-    # One finding: StrangeAttractorScreensaver.qml:47 binds `target: renderer` where the
-    # declared type is QObject and the value is StrangeAttractorRenderer. This entry was briefly
-    # deleted as "cleared" — it was not, it was one of the 475 diagnostics the glued-line bug was
-    # dropping, and the gate caught the mistake on the next run.
-    "incompatible-type": 1,
+    #
+    # 322 -> 311 when the AppShell singleton replaced the pages' `root.*` reach into
+    # main.qml. Note the direction: fixing the UNQUALIFIED class lowered this one, which is
+    # the opposite of what task 3c saw. The reason is that the old code was not merely
+    # unchecked, it was untyped at the hop — `Window.window.sessionMeasuredMilkG` is a
+    # member access on QQuickWindow and was counted here, and each collapse of six
+    # `itemAt(i).focusTarget` call sites into one helper removed five more.
+    #
+    # 311 -> 303 when three widgets stopped reaching main.qml through `Window.window` with a
+    # `typeof win.X === "function"` probe and used AppShell signals instead. Same lesson as
+    # above: a duck-typed hop is counted here, so removing it lowers this ceiling.
+    # 303 -> 268 by deleting the directory imports described above. (This line read `300 ->`
+    # until the #1687 review flagged the 3-diagnostic gap against the step above. The endpoints
+    # are what the gate checks and they are right; the intermediate was a transcription slip.) A directory import resolves
+    # a singleton .qml as a plain component type, so `DrinkType.shortLabel` and
+    # `SettingsTabs.indexOf` — both real, both declared — reported as missing members. The types
+    # were being shadowed, not the members lost.
+    # 268 -> 250 by hoisting `root.Window.window` to `Window.window` read once at the item root
+    # in six layout widgets. `Window` is an ATTACHED property — it resolves against the current
+    # scope, so writing it through an id is a member access on a type that has no such member.
+    # It works at runtime, which is why it survived; it is simply not checkable in that spelling.
+    # 250 -> 145 with the Keyboard singleton (src/core/keyboard.h). QML reached the input method
+    # as `Qt.inputMethod.commit()`, and qmllint types that as a bare QObject, so 108 call sites
+    # across 36 files were unchecked. Not a bug — but `Qt.inputMethod.comit()` was
+    # indistinguishable from the correct spelling, and its failure mode is the silent one (the
+    # in-progress word is never committed). CLAUDE.md's "call commit() before reading
+    # TextField.text" rule now has a home in code rather than being a convention.
+    # No "missing-property" entry: NOT exempted. As of this change there are no approved
+    # category exemptions at all, and this dict is empty by intent.
+    #
+    # The category is NOT yet at zero — the gate is red on it, deliberately. A ceiling here
+    # would be global: at 145, a brand-new missing-property bug anywhere in the tree was
+    # invisible, which is what an exemption costs and why none of the five survived. Red and
+    # honest beats green and blind; the remaining sites are being worked to zero.
+    # No "Quick.layout-positioning" entry: CLEAR, and deliberately not by blanket exemption.
+    # All 21 were qmllint FALSE POSITIVES — its ForbiddenChildrenPropertyValidatorPass checks
+    # only whether an object is DECLARED lexically inside a Layout, never whether a Layout
+    # actually manages it. Three shapes: Dialog/Popup (derive from QObject, not Item), items
+    # reparented out at runtime via `parent: Overlay.overlay`, and one Translate transform.
+    #
+    # They are now suppressed AT EACH SITE with `qmllint disable/enable` and the reason
+    # inline, rather than exempted here. That is the whole point: a category exemption is
+    # global, so at 21 a genuine layout-positioning bug introduced anywhere in the tree was
+    # invisible. At 0 the category is enforced and the next real one fails the gate.
+    # No "import" entry: the category is CLEAR. It went 23 -> 7 when the last runtime
+    # qmlRegisterType<> calls became QML_ELEMENT, and 7 -> 0 when 106 redundant directory imports
+    # were deleted — `import "../components"` and friends, which shadowed the module's own
+    # registrations. Re-adding a directory import for a type the module already provides will
+    # bring this category back.
+    # No "Quick.property-changes-parsed" entry: CLEAR. The five were one PropertyChanges block
+    # in SettingsPage.qml using `target:` plus bare property names, which PropertyChanges
+    # custom-parses so the bindings are not analysable. Rephrased as explicit
+    # `highlightOverlay.<prop>:` bindings.
+    # No "duplicate-property-binding" entry: CLEAR. Both were `NumberAnimation on X` over a
+    # property that also had an initialiser (ScreensaverPage gradientHue, CrtShaderEffect
+    # time). A value source OVERRIDES an initial binding rather than starting from it, so in
+    # both cases the initialiser was dead and the code had never done what it read as.
+    # No "unresolved-type" entry either — same cause, cleared the same way.
+    # No "equality-type-coercion" entry: CLEAR. One `!=` in ProfileImportPage — and the fix was
+    # NOT the obvious one. The operand is a `property url`, which QML hands to JS as a UrlObject
+    # whose default virtualIsEqualTo returns false unconditionally, so a bare `!==` is ALWAYS
+    # true and silently broke the rescan fallback. Compare `.toString()`. Lint-clean and wrong
+    # is worse than lint-dirty and right.
+    # No "incompatible-type" entry. Its single finding was
+    # StrangeAttractorScreensaver.qml:47 binding `target: renderer`, declared QObject and actually
+    # a StrangeAttractorRenderer — unresolvable while that type was registered at runtime, and
+    # resolved the moment it gained QML_ELEMENT. (An earlier deletion of this entry was WRONG: the
+    # finding had not cleared, it was one of the 475 diagnostics a glued-line parsing bug was
+    # dropping, and the gate caught it on the next run. This time the count is zero on a full,
+    # verified run.)
 }
 
 # Two shapes, and getting either wrong loses diagnostics silently:
@@ -162,7 +214,12 @@ UNLINTABLE_BY_TOOL_BUG: dict[str, str] = {
 # skip-mode ceilings depend on them. `unqualified` is absent on purpose — it is never a category
 # exemption, it is enforced per file, and a skipped file simply has no ceiling checked that run.
 UNLINTABLE_CATEGORY_CONTRIBUTION: dict[str, dict[str, int]] = {
-    "qml/components/layout/items/CustomItem.qml": {"missing-property": 4},
+    # 4 -> 0. All four were duck-typed hops through `Window.window` — three
+    # `typeof win.goToScreensaver === "function"` probes and one `win.openBrewSettings` —
+    # now AppShell signals. The entry stays with an empty contribution rather than being
+    # deleted: the file is still in UNLINTABLE_BY_TOOL_BUG, and a future warning in it must
+    # be recorded here deliberately rather than by re-adding a mapping someone removed.
+    "qml/components/layout/items/CustomItem.qml": {},
 }
 
 
@@ -562,6 +619,91 @@ def check_fresh(import_path: str, files: list[str]) -> None:
         )
 
 
+def check_registry_fresh(import_path: str) -> None:
+    """Refuse to run when the TYPE REGISTRY is a generation behind the C++ sources.
+
+    check_fresh() above compares the QML, and it cannot see this one. qmllint resolves module
+    types through <build>/Decenza/Decenza.qmltypes, which qmltyperegistrar generates from the C++
+    QML_* macros. Change a registration in a header, skip the rebuild, and every QML file matches
+    its build copy byte for byte while the registry still describes the previous generation — so
+    the counts are measured against types that no longer match the source, and check_fresh() says
+    nothing because no QML changed.
+
+    That is not hypothetical either, and it is more expensive than the stale-QML case because it
+    fails SILENTLY IN THE SAFE-LOOKING DIRECTION. PR #1680 regenerated the baseline from a build
+    whose registry predated its own C++ changes: the newly-migrated names did not resolve, qmllint
+    gave up early on expressions it could not type, and it therefore reported FEWER warnings than
+    the tree really produces. Those numbers were written to the baseline as ceilings. Every later
+    honest run then failed against targets the tree could not meet, and the failure surfaced on
+    the nightly a day later rather than on the machine that caused it.
+
+    Content-based, like check_fresh, for the same reason: any git operation rewrites source
+    mtimes, so a timestamp comparison reports a freshly built tree as stale. The check is that
+    every singleton the C++ registers is actually IN the registry. A new or renamed registration
+    that has not been through qmltyperegistrar is missing from the exports, which is precisely the
+    generation skew this catches.
+    """
+    qmltypes = REPO / import_path / "Decenza" / "Decenza.qmltypes"
+    if not qmltypes.exists():
+        sys.exit(f"No {qmltypes}. Build first — qmllint cannot resolve Decenza types without it.")
+    registry = qmltypes.read_text(errors="replace")
+
+    # A struct/class carrying QML_SINGLETON exports under QML_NAMED_ELEMENT(X) if present, else
+    # under the foreign type from QML_FOREIGN(X), else its own name. Same resolution order
+    # tst_qmlregistration.cpp uses; this is the cheap textual half of it.
+    # The split CAPTURES the class name, because a plain QML_ELEMENT exports under it and there is
+    # nowhere else to get it. The first version of this function discarded the name and had no
+    # else-branch, so it silently collected 20 of the tree's 27 singletons — every QML_ELEMENT one,
+    # including MainController, MachineState and TranslationManager, went unchecked. It passed its
+    # negative control because that control used the QML_FOREIGN shape, exercising the branch that
+    # worked. A guard that covers 74% of its subject while reporting success is the failure mode
+    # this whole file exists to argue against, so see the count assertion below.
+    declared: set[str] = set()
+    for header in sorted((REPO / "src").rglob("*.h")):
+        text = header.read_text(errors="replace")
+        if "QML_SINGLETON" not in text:
+            continue
+        parts = re.split(r"^[ \t]*(?:class|struct)\s+(\w+)", text, flags=re.M)
+        # re.split with one group yields [pre, name1, body1, name2, body2, ...].
+        for cls, block in zip(parts[1::2], parts[2::2]):
+            if not re.search(r"^\s*QML_SINGLETON\s*$", block, flags=re.M):
+                continue
+            named = re.search(r"QML_NAMED_ELEMENT\(\s*(\w+)\s*\)", block)
+            foreign = re.search(r"QML_FOREIGN\(\s*(\w+)\s*\)", block)
+            if named:
+                declared.add(named.group(1))
+            elif foreign:
+                declared.add(foreign.group(1))
+            else:
+                declared.add(cls)
+    if not declared:
+        sys.exit("Found no QML_SINGLETON declarations under src/. The scan is broken, not the code.")
+
+    # Presence is not enough: the registry lists an `exports:` line for every registered type,
+    # singleton or not, so a type being MIGRATED to a singleton would still match on a stale
+    # registry — it is already there as an uncreatable type. Require the export and the singleton
+    # flag in the SAME component, which is what actually changes when the registration changes.
+    stale_types = []
+    components = registry.split("    Component {")
+    for name in sorted(declared):
+        owning = [c for c in components if f'"Decenza/{name} ' in c]
+        if not owning:
+            stale_types.append((name, "absent from the registry"))
+        elif not any("isSingleton: true" in c for c in owning):
+            stale_types.append((name, "present, but NOT as a singleton"))
+    if stale_types:
+        sys.exit(
+            "Type registry is STALE — these are registered as QML singletons in C++ but the\n"
+            f"registry at {qmltypes} disagrees, so qmllint is resolving against a previous\n"
+            "generation and the counts would not describe this source:\n"
+            + "".join(f"  {n}: {why}\n" for n, why in stale_types)
+            + "Rebuild, then re-run. (--allow-stale to override, but not with --update-baseline.)\n"
+            "This is the shape that produced the bad baseline in #1680: an under-resolving run\n"
+            "reports FEWER warnings, which looks like an improvement and ratchets the gate to a\n"
+            "target the tree cannot meet."
+        )
+
+
 def cmd_report(state: dict, categories: Counter, unqualified: dict, files: list[str],
                skipped: set[str]) -> int:
     total_unq = sum(sum(c.values()) for c in unqualified.values())
@@ -715,7 +857,11 @@ def main() -> int:
                          "at --batch 10). It exists only as an escape hatch for a qmllint that "
                          "cannot finish the tree in one process — see the note in run().")
     ap.add_argument("--allow-stale", action="store_true",
-                    help="skip the staleness check (for debugging only)")
+                    help="skip the staleness checks, QML and type registry (for debugging only)")
+    ap.add_argument("--allow-ceiling-rise", action="store_true",
+                    help="permit --update-baseline to write a HIGHER ceiling for a file, or move "
+                         "one off the clean list. Relaxing the gate, so it is never implicit; "
+                         "record the reason in the change's bugs-found.md.")
     ap.add_argument("--skip-unlintable", action="store_true",
                     help="drop the files in UNLINTABLE_BY_TOOL_BUG from the run. For a qmllint "
                          "that cannot finish them at all (CI, until the upstream fix ships); a "
@@ -742,6 +888,16 @@ def main() -> int:
             "backlog. Regenerate the baseline with a qmllint that can lint the whole tree."
         )
 
+    if args.allow_stale and args.update_baseline:
+        sys.exit(
+            "--update-baseline refuses --allow-stale. Those two together are precisely how the "
+            "#1680 baseline was written: the freshness checks are the only thing standing between "
+            "a build that under-resolves and a set of ceilings the tree cannot meet, and a "
+            "baseline is the one output where being wrong is durable — it becomes the target every "
+            "later run is measured against. --allow-stale exists for reading a report off a build "
+            "you know is behind, not for recording one. Rebuild, then write."
+        )
+
     on_disk = qml_files()
     if not on_disk:
         sys.exit("No QML files found.")
@@ -750,6 +906,7 @@ def main() -> int:
     # nothing about it. Checking freshness would be checking the wrong thing.
     if not args.allow_stale and not args.from_raw:
         check_fresh(import_path, on_disk)
+        check_registry_fresh(import_path)
 
     rsp = response_file(import_path)
     unlisted: list[str] = []
@@ -784,6 +941,72 @@ def main() -> int:
             + "".join(f"  {f}\n    {UNLINTABLE_BY_TOOL_BUG[f]}\n" for f in skipped),
             file=sys.stderr,
         )
+
+    # Refuse the run that cannot succeed, instead of discovering it ten minutes in.
+    #
+    # A released qmllint cannot finish the UNLINTABLE_BY_TOOL_BUG files — it grows to hundreds of
+    # gigabytes and is OOM-killed, which on a laptop takes the desktop down with it. Only a local
+    # build carrying the Gerrit fix can, and the two are indistinguishable by --version. (Not undetectable in principle — running
+    # one against the problem file tells you within ten minutes, which is the cost being avoided.)
+    #
+    # So the test is WHERE the binary lives, not whether --qmllint was passed. An earlier version
+    # of this guard used the flag as a proxy for intent and was dead on the path that matters:
+    # both CMake targets pass --qmllint unconditionally, filled in by find_program() from Qt's own
+    # bin/. Under `cmake -DQMLLINT_SKIP_UNLINTABLE=OFF` with QMLLINT_EXECUTABLE left at that
+    # default, the stock binary would still be handed CustomItem.qml with nothing said.
+    #
+    # Keying on the path works for both entry points because CLAUDE.local.md requires the patched
+    # build to stay in its own tree: copying it into ~/Qt breaks qmlimportscanner's code signature
+    # and with it the whole Decenza build. A binary under a Qt install is therefore a stock one.
+    if not args.from_raw:
+        effective = args.qmllint or find_qmllint()
+        looks_stock = any(
+            str(Path(effective).resolve()).startswith(str(root))
+            for root in (Path.home() / "Qt", Path("C:/Qt"), Path("/opt/Qt"), Path("/usr/lib/qt6"))
+        )
+        blocked = sorted(set(files) & set(UNLINTABLE_BY_TOOL_BUG)) if looks_stock else []
+        if blocked:
+            # Rebuild the command without anything this message is about to re-add, so both
+            # suggestions are runnable rather than self-contradictory: --update-baseline plus
+            # --skip-unlintable is a combination the script refuses outright a few lines up, and a
+            # mode flag or --qmllint left in here would simply appear twice. Every mode goes, not
+            # just --update-baseline: each suggestion below supplies its own.
+            drop_flags = {"--check", "--report", "--update-baseline", "--skip-unlintable"}
+            base = []
+            skip_next = False
+            for a in sys.argv[1:]:
+                if skip_next:
+                    skip_next = False
+                    continue
+                if a in drop_flags:
+                    continue
+                # --qmllint takes a value; drop both halves, in either spelling.
+                if a == "--qmllint":
+                    skip_next = True
+                    continue
+                if a.startswith("--qmllint="):
+                    continue
+                base.append(a)
+            invocation = f"python3 {sys.argv[0]}"
+            quoted = " ".join(shlex.quote(a) for a in base)
+            sys.exit(
+                "refusing to start: this run includes {n} file(s) that a released qmllint cannot "
+                "analyse, and {which}:\n{detail}\n"
+                "It would climb to hundreds of GB and be OOM-killed after roughly ten minutes, "
+                "having written nothing.\n\n"
+                "Lint the whole tree with a patched build:\n"
+                "  {inv} {rest} --update-baseline --qmllint <path-to-patched-qmllint>\n\n"
+                "or skip those files, which reports but cannot rewrite the baseline — a partial "
+                "run must never ratchet it:\n"
+                "  {inv} {rest} --check --skip-unlintable".format(
+                    n=len(blocked),
+                    which=(f"the binary is {effective}, which sits inside a Qt install"
+                           if args.qmllint else "no --qmllint was given, so the binary is Qt's own"),
+                    detail="".join(f"  {f}\n    {UNLINTABLE_BY_TOOL_BUG[f]}\n" for f in blocked),
+                    inv=invocation,
+                    rest=quoted,
+                )
+            )
 
     if args.from_raw:
         output = Path(args.from_raw).read_text(errors="replace")
@@ -824,11 +1047,67 @@ def main() -> int:
     if args.check:
         return cmd_check(state, set(skipped), unlisted)
     if args.update_baseline:
+        # A ceiling that RISES is the one edit this file exists to resist, and until now
+        # --update-baseline wrote it without comment — the same keystroke that records a genuine
+        # improvement also relaxes the gate, and the output looked identical either way. Raising
+        # one is sometimes right (the #1680 baseline recorded three ceilings the tree could not
+        # meet, and correcting them meant raising them), but it is never routine, so it costs a
+        # flag and prints what it did.
+        rises, drops = [], 0
+        if BASELINE.exists():
+            try:
+                prev = json.loads(BASELINE.read_text())
+            except json.JSONDecodeError as e:
+                sys.exit(f"{BASELINE} is not valid JSON ({e}). Refusing to write: the rise check "
+                         "below can only compare against a baseline it can read, and skipping it "
+                         "silently is how an unmeetable ceiling gets recorded.")
+            if not isinstance(prev, dict) or "ceilings" not in prev or "clean" not in prev:
+                sys.exit(f"{BASELINE} is missing 'ceilings'/'clean'. Refusing to write: with an "
+                         "unrecognised schema every file reads as having no history, so no rise "
+                         "could ever be detected and the check would pass by being blind.")
+            # Indexed, not .get()-with-default — see the schema check just above. A default would
+            # make every comparison below vacuous and the write unconditional, which is a guard
+            # that silently declines to run: the exact shape this whole change argues against.
+            old = prev["ceilings"]
+            was_clean = set(prev["clean"])
+            for f, n in state["ceilings"].items():
+                was = old.get(f)
+                if was is None:
+                    # Not in ceilings. Either it was clean, or it is a file the baseline has never
+                    # seen — and BOTH are rises from zero. The new-file case matters most: the
+                    # baseline's own _README promises "new code never starts with a budget", and
+                    # cmd_check() enforces it, so letting --update-baseline hand a brand-new file
+                    # a ceiling silently is the one edit that quietly repeals that rule.
+                    rises.append((f, 0, n))
+                elif n > was:
+                    rises.append((f, was, n))
+                elif n < was:
+                    drops += 1
+            # A file that reached zero leaves state["ceilings"] entirely, so counting drops only
+            # over the surviving entries understates exactly the work worth reporting.
+            drops += sum(1 for f in old if f not in state["ceilings"])
+        if rises and not args.allow_ceiling_rise:
+            sys.exit(
+                "refusing to write: this would RAISE %d ceiling(s), which relaxes the gate:\n"
+                % len(rises)
+                + "".join(f"  {f}: {was} -> {now}\n" for f, was, now in rises)
+                + "\nA rise is not always wrong — a baseline measured against a stale build can\n"
+                "record a target the tree cannot meet, and correcting it means raising it. But it\n"
+                "is never routine, so say so explicitly:\n"
+                "  --update-baseline --allow-ceiling-rise\n"
+                "and record why in the change's bugs-found.md. If you did NOT expect a rise, the\n"
+                "likely cause is a stale build: rebuild and re-run before writing anything."
+            )
         BASELINE.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
         print(
             f"Baseline written: {len(state['clean'])} clean, "
             f"{len(state['ceilings'])} with ceilings, {len(state['observed_categories'])} categories."
         )
+        if rises:
+            print(f"RAISED {len(rises)} ceiling(s) (--allow-ceiling-rise): "
+                  + ", ".join(f"{f} {was}->{now}" for f, was, now in rises))
+        if drops:
+            print(f"lowered {drops} ceiling(s).")
         return 0
     return cmd_report(state, categories, unqualified, files, set(skipped))
 

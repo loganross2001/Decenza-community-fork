@@ -2,7 +2,6 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import Decenza
-import "../../components"
 
 Item {
     id: calibrationTab
@@ -111,7 +110,7 @@ Item {
                                 text: TranslationManager.translate("settings.preferences.calibrate", "Calibrate")
                                 primary: true
                                 enabled: !Settings.calibration.autoFlowCalibration
-                                onClicked: pageStack.push(Qt.resolvedUrl("../FlowCalibrationPage.qml"))
+                                onClicked: AppShell.flowCalibrationRequested()
                             }
                         }
                     }
@@ -442,12 +441,12 @@ Item {
                                 var state = SteamHealthTracker.baselineState
                                 var count = SteamHealthTracker.sessionCount
                                 var total = SteamHealthTracker.minSessionsForTrend
-                                if (state === SteamHealthTrackerType.EstablishingAfterReset) {
+                                if (state === SteamHealthTracker.EstablishingAfterReset) {
                                     return TranslationManager.translate("settings.calibration.steamHealthEstablishingAfterReset",
                                         "Establishing new, improved baseline — we detected a significant pressure drop (likely a descale or steam-wand clean). Collecting %1 of %2 sessions to calibrate against your freshly-clean machine.")
                                         .arg(count).arg(total)
                                 }
-                                if (state === SteamHealthTrackerType.EstablishingInitial) {
+                                if (state === SteamHealthTracker.EstablishingInitial) {
                                     return TranslationManager.translate("settings.calibration.steamHealthEstablishingInitial",
                                         "Establishing baseline — %1 of %2 sessions collected. Steam your next drink as normal; trends will appear once we have enough data.")
                                         .arg(count).arg(total)

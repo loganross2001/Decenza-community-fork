@@ -1,7 +1,6 @@
 import QtQuick
 import QtGraphs
 import Decenza
-import "graphs"
 
 // Outer Item wraps the GraphsView so all 30 trace overlays (3 shots × 10
 // curves), the Canvas phase markers, the crosshair, and phase labels render
@@ -290,7 +289,7 @@ Item {
             if (metrics.length > 0)
                 parts.push(sv.dateTime + ": " + metrics.join(", "))
         }
-        if (typeof AccessibilityManager !== "undefined" && parts.length > 1)
+        if (typeof AccessibilityManager !== "undefined" && AccessibilityManager !== null && parts.length > 1)
             AccessibilityManager.announce(parts.join(". "), true)
     }
 

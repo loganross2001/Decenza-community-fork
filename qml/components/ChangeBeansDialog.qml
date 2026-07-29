@@ -562,7 +562,7 @@ Dialog {
     }
 
     function confirmForm() {
-        Qt.inputMethod.commit()
+        Keyboard.commit()
         errorMessage = ""
         if (fRoaster.trim().length === 0 && fCoffee.trim().length === 0) {
             errorMessage = TranslationManager.translate(
@@ -793,7 +793,7 @@ Dialog {
         else
             roastDateField.textField.forceActiveFocus()
 
-        if (typeof AccessibilityManager !== "undefined" && AccessibilityManager.enabled) {
+        if (typeof AccessibilityManager !== "undefined" && AccessibilityManager !== null && AccessibilityManager.enabled) {
             AccessibilityManager.announce(mode === "search"
                 ? TranslationManager.translate("changebeans.accessible.searchOpened", "Change Beans dialog. Search beans")
                 : formTitleText.text)
@@ -1076,7 +1076,7 @@ Dialog {
                                     ? ", " + TranslationManager.translate("accessibility.selected", "selected") : "")
                             accessibleItem: resultRow
                             onAccessibleClicked: {
-                                Qt.inputMethod.commit()
+                                Keyboard.commit()
                                 root.selectResult(MainController.beanSearch.get(index))
                             }
                         }
@@ -1133,7 +1133,7 @@ Dialog {
                                 accessibleName: TranslationManager.translate("changebeans.accessible.enterManually", "Enter bean details manually")
                                 accessibleItem: manualRow
                                 onAccessibleClicked: {
-                                    Qt.inputMethod.commit()
+                                    Keyboard.commit()
                                     root.openManualEntry()
                                 }
                             }
@@ -1252,7 +1252,7 @@ Dialog {
                             root.infoStatus = TranslationManager.translate(
                                 "changebeans.form.getInfo.pageFailed", "Couldn't read the page: %1")
                                 .arg(root.infoErrorText(error))
-                            if (typeof AccessibilityManager !== "undefined" && AccessibilityManager.enabled)
+                            if (typeof AccessibilityManager !== "undefined" && AccessibilityManager !== null && AccessibilityManager.enabled)
                                 AccessibilityManager.announce(root.infoStatus)
                         }
                     }
@@ -1316,14 +1316,14 @@ Dialog {
                                       "%1 field(s) filled from the page").arg(applied)
                                 : TranslationManager.translate("changebeans.form.getInfo.nothing",
                                       "Nothing new found on the page")
-                            if (typeof AccessibilityManager !== "undefined" && AccessibilityManager.enabled)
+                            if (typeof AccessibilityManager !== "undefined" && AccessibilityManager !== null && AccessibilityManager.enabled)
                                 AccessibilityManager.announce(root.infoStatus)
                         }
                         function onBagDetailsExtractionFailed(requestToken, error) {
                             if (!root.fetchingInfo || requestToken !== root._fetchUrl) return
                             root.fetchingInfo = false
                             root.infoStatus = root.infoErrorText(error)
-                            if (typeof AccessibilityManager !== "undefined" && AccessibilityManager.enabled)
+                            if (typeof AccessibilityManager !== "undefined" && AccessibilityManager !== null && AccessibilityManager.enabled)
                                 AccessibilityManager.announce(root.infoStatus)
                         }
                     }

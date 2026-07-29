@@ -126,7 +126,7 @@ Dialog {
     function showRecipeError(msg) {
         recipeErrorText = msg
         recipeErrorTimer.restart()
-        if (typeof AccessibilityManager !== "undefined" && AccessibilityManager.enabled)
+        if (typeof AccessibilityManager !== "undefined" && AccessibilityManager !== null && AccessibilityManager.enabled)
             AccessibilityManager.announce(msg, true)
     }
 
@@ -421,7 +421,7 @@ Dialog {
 
     onAboutToShow: {
         // Announce dialog for accessibility
-        if (typeof AccessibilityManager !== "undefined" && AccessibilityManager.enabled) {
+        if (typeof AccessibilityManager !== "undefined" && AccessibilityManager !== null && AccessibilityManager.enabled) {
             var announcement = TranslationManager.translate("brewDialog.dialogAnnouncement", "Brew Settings dialog. Profile: ") + ProfileManager.currentProfileName
             if (Settings.dye.dyeBeanBrand.length > 0)
                 announcement += ". " + TranslationManager.translate("brewDialog.roasterAnnouncementLabel", "Roaster: ") + Settings.dye.dyeBeanBrand
@@ -576,6 +576,7 @@ Dialog {
 
                 // Clear all overrides
                 AccessibleButton {
+                    id: clearButton
                     Layout.preferredHeight: Theme.scaled(36)
                     text: TranslationManager.translate("brewDialog.clear", "Clear")
                     accessibleName: TranslationManager.translate("brewDialog.clearAllOverrides", "Clear all overrides")
@@ -624,7 +625,7 @@ Dialog {
                         border.color: Theme.warningColor
                     }
                     contentItem: Text {
-                        text: parent.text
+                        text: clearButton.text
                         font: Theme.bodyFont
                         color: Theme.warningColor
                         horizontalAlignment: Text.AlignHCenter
@@ -634,6 +635,7 @@ Dialog {
 
                 // Cancel
                 AccessibleButton {
+                    id: cancelButton
                     Layout.preferredHeight: Theme.scaled(36)
                     text: TranslationManager.translate("brewDialog.cancel", "Cancel")
                     accessibleName: TranslationManager.translate("brewDialog.cancelBrewSettings", "Cancel brew settings")
@@ -646,7 +648,7 @@ Dialog {
                         border.color: Theme.textSecondaryColor
                     }
                     contentItem: Text {
-                        text: parent.text
+                        text: cancelButton.text
                         font: Theme.bodyFont
                         color: Theme.textColor
                         horizontalAlignment: Text.AlignHCenter
@@ -656,11 +658,12 @@ Dialog {
 
                 // OK (primary)
                 AccessibleButton {
+                    id: okButton
                     Layout.preferredHeight: Theme.scaled(36)
                     text: TranslationManager.translate("brewDialog.ok", "OK")
                     accessibleName: TranslationManager.translate("brewDialog.confirmBrewSettings", "Confirm brew settings")
                     onClicked: {
-                        Qt.inputMethod.commit()
+                        Keyboard.commit()
                         // lastUsedRatio survives only as PRESET MEMORY (which
                         // pick is highlighted; a fresh brew's seed) — it is
                         // never an authority a yield derives from, so only a
@@ -686,10 +689,10 @@ Dialog {
                     background: Rectangle {
                         implicitHeight: Theme.scaled(36)
                         radius: Theme.buttonRadius
-                        color: parent.down ? Qt.darker(Theme.primaryColor, 1.2) : Theme.primaryColor
+                        color: okButton.down || okButton.isPressed ? Qt.darker(Theme.primaryColor, 1.2) : Theme.primaryColor
                     }
                     contentItem: Text {
-                        text: parent.text
+                        text: okButton.text
                         font: Theme.bodyFont
                         color: Theme.primaryContrastColor
                         horizontalAlignment: Text.AlignHCenter
@@ -989,7 +992,7 @@ Dialog {
 
                 // Announce warning when it becomes visible
                 onVisibleChanged: {
-                    if (visible && typeof AccessibilityManager !== "undefined" && AccessibilityManager.enabled) {
+                    if (visible && typeof AccessibilityManager !== "undefined" && AccessibilityManager !== null && AccessibilityManager.enabled) {
                         AccessibilityManager.announce(TranslationManager.translate("brewDialog.warningPrefix", "Warning: ") + warningText.text)
                     }
                 }

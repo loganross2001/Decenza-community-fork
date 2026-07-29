@@ -4,7 +4,6 @@ import QtQuick.Layouts
 import QtQuick.Dialogs
 import QtQuick.Effects
 import Decenza
-import "../../components"
 
 KeyboardAwareContainer {
     id: historyDataTab
@@ -66,7 +65,7 @@ KeyboardAwareContainer {
                     text: TranslationManager.translate("settings.history.title", "Shot History") + " →"
                     accessibleName: TranslationManager.translate("settings.history.openShotHistory", "Open Shot History")
                     primary: true
-                    onClicked: pageStack.push(Qt.resolvedUrl("../ShotHistoryPage.qml"))
+                    onClicked: AppShell.shotHistoryRequested({})
                 }
 
                 Tr {
@@ -1047,7 +1046,13 @@ KeyboardAwareContainer {
             modal: true
             dim: true
             closePolicy: Dialog.NoAutoClose
+            // qmllint disable Quick.layout-positioning
+            // False positive, verified: qmllint's ForbiddenChildrenPropertyValidatorPass checks only
+            // whether an object is DECLARED lexically inside a Layout, never whether a Layout actually
+            // manages it. This object is not layout-managed — Dialog/Popup derive from QObject rather
+            // than Item, and anything with `parent: Overlay.overlay` is reparented out at runtime.
             anchors.centerIn: Overlay.overlay
+            // qmllint enable Quick.layout-positioning
             padding: Theme.scaled(24)
 
             background: Rectangle {
@@ -1103,7 +1108,13 @@ KeyboardAwareContainer {
             modal: true
             dim: true
             closePolicy: Dialog.CloseOnEscape
+            // qmllint disable Quick.layout-positioning
+            // False positive, verified: qmllint's ForbiddenChildrenPropertyValidatorPass checks only
+            // whether an object is DECLARED lexically inside a Layout, never whether a Layout actually
+            // manages it. This object is not layout-managed — Dialog/Popup derive from QObject rather
+            // than Item, and anything with `parent: Overlay.overlay` is reparented out at runtime.
             anchors.centerIn: Overlay.overlay
+            // qmllint enable Quick.layout-positioning
             padding: Theme.scaled(24)
 
             property string resultMessage: ""
@@ -1213,9 +1224,15 @@ KeyboardAwareContainer {
     Dialog {
         id: importCompletePopup
         parent: Overlay.overlay
+        // qmllint disable Quick.layout-positioning
+        // False positive, verified: qmllint's ForbiddenChildrenPropertyValidatorPass checks only
+        // whether an object is DECLARED lexically inside a Layout, never whether a Layout actually
+        // manages it. This object is not layout-managed — Dialog/Popup derive from QObject rather
+        // than Item, and anything with `parent: Overlay.overlay` is reparented out at runtime.
         anchors.centerIn: parent
         modal: true
         width: Theme.scaled(300)
+        // qmllint enable Quick.layout-positioning
         padding: Theme.scaled(20)
 
         property int settingsCount: 0
@@ -1388,15 +1405,27 @@ KeyboardAwareContainer {
         id: backupStatusBackground
         parent: Overlay.overlay
         visible: false
+        // qmllint disable Quick.layout-positioning
+        // False positive, verified: qmllint's ForbiddenChildrenPropertyValidatorPass checks only
+        // whether an object is DECLARED lexically inside a Layout, never whether a Layout actually
+        // manages it. This object is not layout-managed — Dialog/Popup derive from QObject rather
+        // than Item, and anything with `parent: Overlay.overlay` is reparented out at runtime.
         anchors.bottom: parent.bottom
+        // qmllint enable Quick.layout-positioning
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.bottomMargin: Theme.scaled(20)
         // NOT Layout.preferred*: this is reparented to Overlay.overlay and positioned with
         // anchors, so no Layout manages it and the attached properties would be inert — the
         // pill would collapse to 0x0 (Rectangle's implicit size). qmllint flags it as
         // layout-positioning because it is DECLARED inside one; that is a false positive.
+        // qmllint disable Quick.layout-positioning
+        // False positive, verified: qmllint's ForbiddenChildrenPropertyValidatorPass checks only
+        // whether an object is DECLARED lexically inside a Layout, never whether a Layout actually
+        // manages it. This object is not layout-managed — Dialog/Popup derive from QObject rather
+        // than Item, and anything with `parent: Overlay.overlay` is reparented out at runtime.
         width: backupStatusText.implicitWidth + Theme.scaled(20)
         height: backupStatusText.implicitHeight + Theme.scaled(20)
+        // qmllint enable Quick.layout-positioning
         color: Theme.surfaceColor
         radius: Theme.scaled(4)
         border.color: Theme.borderColor
@@ -1421,8 +1450,14 @@ KeyboardAwareContainer {
     Dialog {
         id: restoreConfirmDialog
         parent: Overlay.overlay
+        // qmllint disable Quick.layout-positioning
+        // False positive, verified: qmllint's ForbiddenChildrenPropertyValidatorPass checks only
+        // whether an object is DECLARED lexically inside a Layout, never whether a Layout actually
+        // manages it. This object is not layout-managed — Dialog/Popup derive from QObject rather
+        // than Item, and anything with `parent: Overlay.overlay` is reparented out at runtime.
         anchors.centerIn: parent
         width: Theme.scaled(400)
+        // qmllint enable Quick.layout-positioning
         padding: 0
         modal: true
 
@@ -1744,11 +1779,17 @@ KeyboardAwareContainer {
     Dialog {
         id: totpSetupDialog
         parent: Overlay.overlay
+        // qmllint disable Quick.layout-positioning
+        // False positive, verified: qmllint's ForbiddenChildrenPropertyValidatorPass checks only
+        // whether an object is DECLARED lexically inside a Layout, never whether a Layout actually
+        // manages it. This object is not layout-managed — Dialog/Popup derive from QObject rather
+        // than Item, and anything with `parent: Overlay.overlay` is reparented out at runtime.
         x: Math.round((parent.width - width) / 2)
+        // qmllint enable Quick.layout-positioning
         y: {
             if (totpCodeField.activeFocus) {
                 // Center in the visible area above the keyboard
-                var kbHeight = Qt.inputMethod.keyboardRectangle.height;
+                var kbHeight = Keyboard.rectangle.height;
                 if (kbHeight <= 0 && (Qt.platform.os === "android" || Qt.platform.os === "ios"))
                     kbHeight = parent.height * 0.45;
                 var availableHeight = parent.height - kbHeight;
@@ -1756,11 +1797,17 @@ KeyboardAwareContainer {
             }
             return Math.round((parent.height - height) / 2);
         }
+        // qmllint disable Quick.layout-positioning
+        // False positive, verified: qmllint's ForbiddenChildrenPropertyValidatorPass checks only
+        // whether an object is DECLARED lexically inside a Layout, never whether a Layout actually
+        // manages it. This object is not layout-managed — Dialog/Popup derive from QObject rather
+        // than Item, and anything with `parent: Overlay.overlay` is reparented out at runtime.
         width: Theme.scaled(380)
         padding: 0
         modal: true
 
         Behavior on y { NumberAnimation { duration: 250; easing.type: Easing.OutQuad } }
+        // qmllint enable Quick.layout-positioning
 
         property string totpSecret: ""
         property string totpUri: ""
@@ -1950,7 +1997,7 @@ KeyboardAwareContainer {
                                 "Verify authenticator code to complete setup")
                             enabled: totpCodeField.text.length === 6 && !totpSetupDialog.verifying
                             onClicked: {
-                                Qt.inputMethod.commit()
+                                Keyboard.commit()
                                 totpSetupDialog.verifying = true;
                                 var success = MainController.shotServer.completeTotpSetup(
                                     totpSetupDialog.totpSecret, totpCodeField.text);
@@ -1991,8 +2038,14 @@ KeyboardAwareContainer {
     Dialog {
         id: totpResetDialog
         parent: Overlay.overlay
+        // qmllint disable Quick.layout-positioning
+        // False positive, verified: qmllint's ForbiddenChildrenPropertyValidatorPass checks only
+        // whether an object is DECLARED lexically inside a Layout, never whether a Layout actually
+        // manages it. This object is not layout-managed — Dialog/Popup derive from QObject rather
+        // than Item, and anything with `parent: Overlay.overlay` is reparented out at runtime.
         anchors.centerIn: parent
         width: Theme.scaled(380)
+        // qmllint enable Quick.layout-positioning
         padding: 0
         modal: true
 
@@ -2076,8 +2129,14 @@ KeyboardAwareContainer {
     Dialog {
         id: factoryResetDialog1
         parent: Overlay.overlay
+        // qmllint disable Quick.layout-positioning
+        // False positive, verified: qmllint's ForbiddenChildrenPropertyValidatorPass checks only
+        // whether an object is DECLARED lexically inside a Layout, never whether a Layout actually
+        // manages it. This object is not layout-managed — Dialog/Popup derive from QObject rather
+        // than Item, and anything with `parent: Overlay.overlay` is reparented out at runtime.
         anchors.centerIn: parent
         width: Theme.scaled(400)
+        // qmllint enable Quick.layout-positioning
         padding: 0
         modal: true
 
@@ -2161,8 +2220,14 @@ KeyboardAwareContainer {
     Dialog {
         id: factoryResetDialog2
         parent: Overlay.overlay
+        // qmllint disable Quick.layout-positioning
+        // False positive, verified: qmllint's ForbiddenChildrenPropertyValidatorPass checks only
+        // whether an object is DECLARED lexically inside a Layout, never whether a Layout actually
+        // manages it. This object is not layout-managed — Dialog/Popup derive from QObject rather
+        // than Item, and anything with `parent: Overlay.overlay` is reparented out at runtime.
         anchors.centerIn: parent
         width: Theme.scaled(400)
+        // qmllint enable Quick.layout-positioning
         padding: 0
         modal: true
 

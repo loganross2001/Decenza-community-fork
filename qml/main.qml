@@ -3,8 +3,6 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Window
 import Decenza
-import "components"
-import "components/library"
 
 ApplicationWindow {
     id: root
@@ -26,8 +24,9 @@ ApplicationWindow {
     leftPadding: 0
     rightPadding: 0
 
-    // Debug flag to force live view on operation pages (for development)
-    property bool debugLiveView: false
+    // debugLiveView, pendingBrewDialog, userExitedFlush, steamAutoFlushCountdown,
+    // scaleDialogDeferred and stopReason now live on the AppShell singleton, which
+    // is where the pages that share them can actually see the declaration.
 
     // True when the app is allowed to start machine operations on-screen.
     // The hardware Group Head Controller (GHC), when present and active, takes
@@ -35,8 +34,6 @@ ApplicationWindow {
     // are only valid in headless (no/inactive GHC) or simulation mode.
     readonly property bool canStartOperations: DE1Device.isHeadless || DE1Device.simulationMode
 
-    // Flag to open BrewDialog when IdlePage becomes active (set by AutoFavoritesPage)
-    property bool pendingBrewDialog: false
 
     // Single, global Brew Settings dialog — reachable from anywhere via
     // root.openBrewSettings() (home-screen content, the persistent status bar, the
@@ -61,10 +58,6 @@ ApplicationWindow {
     property string returnToPageName: ""
     property int returnToShotId: 0
 
-    // Set by FlushPage's back-arrow / STOP handlers to suppress the 1.5s "Flush
-    // Complete" overlay when the user explicitly chose to leave. Single-shot:
-    // cleared on the next Idle/Ready transition regardless of current page.
-    property bool userExitedFlush: false
 
     // True while the first-run restore dialog is active (prevents SettingsHistoryDataTab from also handling restore signals)
 
@@ -407,7 +400,7 @@ ApplicationWindow {
     Timer {
         id: sleepCountdownTimer
         interval: 60 * 1000  // 1 minute
-        running: !screensaverActive && !root.operationActive && root.autoSleepMinutes > 0
+        running: !root.screensaverActive && !root.operationActive && root.autoSleepMinutes > 0
         repeat: true
         onTriggered: {
             if (root.sleepCountdownNormal > 0) root.sleepCountdownNormal--
@@ -420,7 +413,7 @@ ApplicationWindow {
                     console.log("[AutoSleep] Inactivity elapsed but inside scheduled stay-awake window — staying awake")
                 } else {
                     console.log("[AutoSleep] Inactivity elapsed, no stay-awake window — triggering sleep")
-                    triggerAutoSleep()
+                    root.triggerAutoSleep()
                 }
             }
         }
@@ -440,7 +433,7 @@ ApplicationWindow {
     Timer {
         id: autoLoadCountdownTimer
         interval: 60 * 1000  // 1 minute
-        running: root.autoLoadIdleCountdown > 0 && !screensaverActive && !root.operationActive
+        running: root.autoLoadIdleCountdown > 0 && !root.screensaverActive && !root.operationActive
         repeat: true
         onTriggered: {
             if (root.autoLoadIdleCountdown <= 0) return
@@ -551,7 +544,7 @@ ApplicationWindow {
     Connections {
         target: MachineState
         function onPhaseChanged() {
-            if (!screensaverActive && root.autoSleepMinutes > 0) {
+            if (!root.screensaverActive && root.autoSleepMinutes > 0) {
                 root.sleepCountdownNormal = root.autoSleepMinutes
                 console.log("[AutoSleep] Reset by phase change: normal=" + root.sleepCountdownNormal)
             }
@@ -563,18 +556,16 @@ ApplicationWindow {
     // Latched by the milk auto-capture (IdlePage/SteamPage) to the milk weight
     // measured for the upcoming steam session. Committed atomically with the actual
     // duration when the session ends, so "use as baseline" never adopts a mismatched
-    // (milk, time) pair. 0 = no milk measured this session. Reset points: pitcher
-    // change and session end (both below), plus IdlePage's fresh-steam-attempt zero
-    // when steam is re-selected. Mirrored read-only by SteamPlanText and
-    // MilkWeightItem; read by SteamPage's captured-milk fallback and SteamItem's
-    // popup preset tap.
-    property real sessionMeasuredMilkG: 0
+    // (milk, time) pair. The property itself is AppShell.sessionMeasuredMilkG — see
+    // there for why it is not declared on this object. Reset points: pitcher change
+    // and session end (both below), plus IdlePage's fresh-steam-attempt zero when
+    // steam is re-selected.
     // The captured milk is specific to the selected pitcher's tare + calibration, so
     // drop it when the pitcher changes — otherwise a new pitcher's steam could scale to
     // the previous pitcher's milk.
     Connections {
         target: Settings.brew
-        function onSelectedSteamPitcherChanged() { root.sessionMeasuredMilkG = 0 }
+        function onSelectedSteamPitcherChanged() { AppShell.sessionMeasuredMilkG = 0 }
     }
 
     // Live dose-weighing state, pushed by IdlePage (Bindings next to its
@@ -604,12 +595,12 @@ ApplicationWindow {
             if (MachineState.phase !== MachineState.Phase.Steaming && steamElapsedTracker > 0) {
                 // Commit the (milk, time) pair only for a real session with measured
                 // milk; either way clear the latches so nothing leaks to the next one.
-                if (steamElapsedTracker >= 1 && root.sessionMeasuredMilkG > 0) {
-                    Settings.brew.lastSteamMilkG = root.sessionMeasuredMilkG
+                if (steamElapsedTracker >= 1 && AppShell.sessionMeasuredMilkG > 0) {
+                    Settings.brew.lastSteamMilkG = AppShell.sessionMeasuredMilkG
                     Settings.brew.lastSteamTimeS = steamElapsedTracker
                 }
                 steamElapsedTracker = 0
-                root.sessionMeasuredMilkG = 0
+                AppShell.sessionMeasuredMilkG = 0
             }
         }
     }
@@ -639,7 +630,7 @@ ApplicationWindow {
                 // Navigate to SteamPage immediately so user sees heating progress
                 var currentPage = pageStack.currentItem ? pageStack.currentItem.objectName : ""
                 if (currentPage !== "steamPage" && !pageStack.busy) {
-                    saveReturnToPage(currentPage)
+                    root.saveReturnToPage(currentPage)
                     pageStack.replace(null, steamPage)
                 }
             }
@@ -651,15 +642,13 @@ ApplicationWindow {
                 console.log("DE1 entered Puffing substate")
                 if (Settings.brew.steamAutoFlushSeconds > 0) {
                     console.log("Starting auto-flush countdown:", Settings.brew.steamAutoFlushSeconds, "seconds")
-                    root.steamAutoFlushCountdown = Settings.brew.steamAutoFlushSeconds
+                    AppShell.steamAutoFlushCountdown = Settings.brew.steamAutoFlushSeconds
                     steamAutoFlushTimer.restart()
                 }
             }
         }
     }
 
-    // Auto-flush countdown value (for display on SteamPage)
-    property real steamAutoFlushCountdown: 0
 
     // Handle settings changes
     Connections {
@@ -669,7 +658,7 @@ ApplicationWindow {
                 var val = Settings.value("autoSleepMinutes", 60)
                 root.autoSleepMinutes = (val === undefined || val === null) ? 60 : parseInt(val)
                 // Update normal countdown to new value
-                if (!screensaverActive && root.autoSleepMinutes > 0) {
+                if (!root.screensaverActive && root.autoSleepMinutes > 0) {
                     root.sleepCountdownNormal = root.autoSleepMinutes
                 }
             } else if (key === "ui/configurePageScale") {
@@ -726,8 +715,6 @@ ApplicationWindow {
     property bool shuttingDown: false
 
 
-    // Defer scale dialogs until machine reaches Ready (event-driven, not timer-based)
-    property bool scaleDialogDeferred: false
     // True while a previously-connected scale is disconnected (a mid-session
     // drop). Set on scaleDisconnected, cleared on scaleConnected. Lets us defer
     // the "Scale Disconnected" notice until a reconnect actually FAILS
@@ -756,7 +743,7 @@ ApplicationWindow {
         // While scale dialogs are deferred, skip scale popups and show others
         var queue = pendingPopups.slice()
         var next
-        if (root.scaleDialogDeferred) {
+        if (AppShell.scaleDialogDeferred) {
             var idx = -1
             for (var i = 0; i < queue.length; i++) {
                 if (queue[i].id !== "flowScale" && queue[i].id !== "scaleDisconnected") {
@@ -831,9 +818,9 @@ ApplicationWindow {
         running: false
         repeat: true
         onTriggered: {
-            root.steamAutoFlushCountdown -= 0.1
-            if (root.steamAutoFlushCountdown <= 0) {
-                root.steamAutoFlushCountdown = 0
+            AppShell.steamAutoFlushCountdown -= 0.1
+            if (AppShell.steamAutoFlushCountdown <= 0) {
+                AppShell.steamAutoFlushCountdown = 0
                 steamAutoFlushTimer.stop()
                 console.log("Steam auto-flush countdown complete, requesting Idle state")
                 // Turn off steam heater if keepSteamHeaterOn is false
@@ -853,19 +840,28 @@ ApplicationWindow {
     onHeightChanged: updateScale()
     Connections {
         target: Theme
-        function onScaleMultiplierChanged() { updateScale() }
-        function onPageScaleMultiplierChanged() { updateScale() }
+        function onScaleMultiplierChanged() { root.updateScale() }
+        function onPageScaleMultiplierChanged() { root.updateScale() }
     }
-    // Raise all application windows together when this window is activated
+    // Raise all application windows together when this window is activated.
+    //
+    // Guard the MEMBER, not the name. `typeof GHCSimulator !== "undefined" && GHCSimulator` looks
+    // equivalent and is not: the type is registered wherever DECENZA_SIMULATOR is defined, but the
+    // instance exists only on a debug Windows/macOS build, and a registered-but-uninstanced
+    // singleton resolves to a TRUTHY wrapper whose member reads come back undefined. That guard
+    // therefore passed on Linux, on Windows/macOS Release and on Android/iOS Debug, and the call
+    // below threw a TypeError on every window activation. See decenzaOptionalSingleton() in
+    // src/core/contextsingletons_qml.h for the Qt sources.
     onActiveChanged: {
-        if (active && typeof GHCSimulator !== "undefined" && GHCSimulator) {
+        if (active && GHCSimulator.mainWindowActivated !== undefined) {
             GHCSimulator.mainWindowActivated()
         }
     }
 
-    // Listen for GHC window activation to raise ourselves (simulator mode only)
+    // Listen for GHC window activation to raise ourselves (simulator mode only).
+    // Same rule: a truthy-but-empty wrapper is not a valid Connections target.
     Connections {
-        target: typeof GHCSimulator !== "undefined" ? GHCSimulator : null
+        target: GHCSimulator.mainWindowActivated !== undefined ? GHCSimulator : null
         function onRaiseMainWindow() {
             root.raise()
         }
@@ -897,7 +893,7 @@ ApplicationWindow {
         ScreensaverManager.setKeepScreenOn(true)
 
         // Check for crash log from previous session
-        if (PreviousCrashLog && PreviousCrashLog.length > 0) {
+        if (CrashReporter.previousCrashLog && CrashReporter.previousCrashLog.length > 0) {
             // Delay showing crash dialog slightly to ensure UI is ready
             Qt.callLater(function() {
                 crashReportDialog.open()
@@ -916,7 +912,7 @@ ApplicationWindow {
             // If a crash dialog is about to open, defer the capability
             // warning until it's dismissed (see crashReportDialog handlers)
             // so the two modals don't stack on the same frame.
-            if (!(PreviousCrashLog && PreviousCrashLog.length > 0)) {
+            if (!(CrashReporter.previousCrashLog && CrashReporter.previousCrashLog.length > 0)) {
                 maybeShowLinuxBleCapabilityDialog()
             }
 
@@ -979,7 +975,7 @@ ApplicationWindow {
         id: accessibilityTapOverlay
         anchors.fill: parent
         z: 10000  // Above everything
-        enabled: typeof AccessibilityManager !== "undefined" && AccessibilityManager.enabled
+        enabled: typeof AccessibilityManager !== "undefined" && AccessibilityManager !== null && AccessibilityManager.enabled
         propagateComposedEvents: true
         Accessible.ignored: true
 
@@ -998,9 +994,9 @@ ApplicationWindow {
         }
 
         onPressed: function(mouse) {
-            var textItem = findTextAt(parent, mouse.x, mouse.y)
+            var textItem = root.findTextAt(parent, mouse.x, mouse.y)
             if (textItem && textItem.text && !isInsideInteractive(textItem)) {
-                AccessibilityManager.announceLabel(cleanForSpeech(textItem.text))
+                AccessibilityManager.announceLabel(AccessibilityManager.cleanForSpeech(textItem.text))
             }
             mouse.accepted = false
         }
@@ -1012,7 +1008,7 @@ ApplicationWindow {
     // Floating "Done Editing" button - appears when translation edit mode is active
     Rectangle {
         id: doneEditingButton
-        visible: typeof TranslationManager !== "undefined" && TranslationManager.editModeEnabled
+        visible: typeof TranslationManager !== "undefined" && TranslationManager !== null && TranslationManager.editModeEnabled
         z: 10002  // Above the translation overlay
 
         anchors.top: parent.top
@@ -1094,10 +1090,10 @@ ApplicationWindow {
         target: pageStack
         function onBusyChanged() {
             if (!pageStack.busy) {
-                navigationInProgress = false
+                root.navigationInProgress = false
                 // Retry deferred disconnect navigation (#575)
-                if (pendingDisconnectNavigation) {
-                    pendingDisconnectNavigation = false
+                if (root.pendingDisconnectNavigation) {
+                    root.pendingDisconnectNavigation = false
                     console.log("Retrying deferred disconnect navigation to idle")
                     pageStack.replace(null, idlePage)
                     root.returnToPageName = ""
@@ -1181,7 +1177,7 @@ ApplicationWindow {
             if (event.key === Qt.Key_Back || event.key === Qt.Key_Escape) {
                 if (pageStack.depth > 1) {
                     event.accepted = true
-                    goBack()
+                    root.goBack()
                 }
             }
         }
@@ -1327,8 +1323,8 @@ ApplicationWindow {
     Connections {
         target: pageStack
         function onCurrentItemChanged() {
-            updateCurrentPageScale()
-            announceCurrentPage()
+            root.updateCurrentPageScale()
+            root.announceCurrentPage()
             pageColorTimer.restart()  // Detect colors after page settles
             // Reset the auto-load countdown: clears off-Idle, full value back on Idle
             root.autoLoadResetCountdown()
@@ -1339,12 +1335,12 @@ ApplicationWindow {
     Timer {
         id: pageColorTimer
         interval: 300
-        onTriggered: updatePageColors()
+        onTriggered: root.updatePageColors()
     }
 
     // Announce page name for accessibility when page changes
     function announceCurrentPage() {
-        if (typeof AccessibilityManager === "undefined" || !AccessibilityManager.enabled) return
+        if (typeof AccessibilityManager === "undefined" || AccessibilityManager === null || !AccessibilityManager.enabled) return
         var pageName = pageStack.currentItem ? (pageStack.currentItem.objectName || "") : ""
         if (!pageName) return
 
@@ -1381,6 +1377,7 @@ ApplicationWindow {
     function updateCurrentPageScale() {
         var pageName = pageStack.currentItem ? (pageStack.currentItem.objectName || "") : ""
         Theme.currentPageObjectName = pageName
+        AppShell.currentPage = pageStack.currentItem
         if (pageName) {
             Theme.pageScaleMultiplier = parseFloat(Settings.value("pageScale/" + pageName, 1.0)) || 1.0
         } else {
@@ -1443,7 +1440,7 @@ ApplicationWindow {
         id: initPageScaleTimer
         interval: 100
         onTriggered: {
-            updateCurrentPageScale()
+            root.updateCurrentPageScale()
         }
         Component.onCompleted: start()
     }
@@ -1564,8 +1561,8 @@ ApplicationWindow {
             var msg = isLocation
                 ? "Please enable Location services.\nAndroid requires Location for Bluetooth scanning."
                 : error
-            if (screensaverActive) {
-                queuePopup("bleError", {errorMessage: msg, isLocationError: isLocation, isBluetoothError: isBluetooth})
+            if (root.screensaverActive) {
+                root.queuePopup("bleError", {errorMessage: msg, isLocationError: isLocation, isBluetoothError: isBluetooth})
                 return
             }
             bleErrorDialog.isLocationError = isLocation
@@ -1586,8 +1583,8 @@ ApplicationWindow {
             // never-connected startup shows "No scale detected".
             var popupId = root.scaleDropPending ? "scaleDisconnected" : "flowScale"
             var dialog = root.scaleDropPending ? scaleDisconnectedDialog : flowScaleDialog
-            if (screensaverActive) { queuePopup(popupId); return }
-            if (root.scaleDialogDeferred) { queuePopup(popupId); return }
+            if (root.screensaverActive) { root.queuePopup(popupId); return }
+            if (AppShell.scaleDialogDeferred) { root.queuePopup(popupId); return }
             dialog.open()
         }
         function onScaleDisconnected() {
@@ -1846,8 +1843,8 @@ ApplicationWindow {
         target: BatteryManager
 
         function onChargingMismatchDetected() {
-            if (screensaverActive) {
-                queuePopup("chargingMismatch")
+            if (root.screensaverActive) {
+                root.queuePopup("chargingMismatch")
                 return
             }
             chargingMismatchDialog.open()
@@ -1857,7 +1854,7 @@ ApplicationWindow {
             chargingMismatchDialog.close()
             // Remove any queued instance so it doesn't appear after screensaver wake
             // when the condition has already cleared.
-            pendingPopups = pendingPopups.filter(function(p) { return p.id !== "chargingMismatch" })
+            root.pendingPopups = root.pendingPopups.filter(function(p) { return p.id !== "chargingMismatch" })
         }
     }
 
@@ -1921,7 +1918,7 @@ ApplicationWindow {
         target: MachineState
         function onPhaseChanged() {
             if (MachineState.phase === MachineState.Phase.Refill) {
-                if (screensaverActive) { queuePopup("refill"); return }
+                if (root.screensaverActive) { root.queuePopup("refill"); return }
                 refillDialog.open()
             } else if (refillDialog.opened) {
                 refillDialog.close()
@@ -2003,7 +2000,7 @@ ApplicationWindow {
                             MainController.updateChecker.downloadAndInstall()
                         }
                         updateDialog.close()
-                        goToSettings("about")  // About tab has the update controls
+                        root.goToSettings("about")  // About tab has the update controls
 
                     }
                 }
@@ -2017,7 +2014,7 @@ ApplicationWindow {
         enabled: MainController.updateChecker !== null
 
         function onUpdatePromptRequested() {
-            if (screensaverActive) { queuePopup("update"); return }
+            if (root.screensaverActive) { root.queuePopup("update"); return }
             updateDialog.open()
         }
     }
@@ -2065,7 +2062,7 @@ ApplicationWindow {
 
             Text {
                 anchors.horizontalCenter: parent.horizontalCenter
-                text: completionMessage
+                text: root.completionMessage
                 color: Theme.textSecondaryColor
                 font: Theme.bodyFont
             }
@@ -2073,7 +2070,7 @@ ApplicationWindow {
             Text {
                 anchors.horizontalCenter: parent.horizontalCenter
                 text: {
-                    if (completionType === "hotwater") {
+                    if (root.completionType === "hotwater") {
                         return Math.max(0, MachineState.scaleWeight).toFixed(0) + "g"
                     } else {
                         return MachineState.shotTime.toFixed(1) + "s"
@@ -2104,8 +2101,8 @@ ApplicationWindow {
         id: completionTimer
         interval: 1500  // 1.5s: short enough not to feel slow (reduced from 3s per user feedback)
         onTriggered: {
-            if (_completionSuspendedForDialog) return
-            finishCompletion()
+            if (root._completionSuspendedForDialog) return
+            root.finishCompletion()
         }
     }
 
@@ -2259,8 +2256,8 @@ ApplicationWindow {
         radius: Theme.scaled(22)
         color: Theme.errorColor
 
-        visible: sawBypassedVisible || sawBypassedFadeOut.running
-        opacity: sawBypassedVisible ? 1 : 0
+        visible: root.sawBypassedVisible || sawBypassedFadeOut.running
+        opacity: root.sawBypassedVisible ? 1 : 0
         scale: 1.0
 
         SequentialAnimation {
@@ -2278,7 +2275,7 @@ ApplicationWindow {
         }
 
         Behavior on opacity {
-            enabled: sawBypassedVisible
+            enabled: root.sawBypassedVisible
             NumberAnimation { id: sawBypassedFadeOut; duration: 2000 }
         }
 
@@ -2299,11 +2296,10 @@ ApplicationWindow {
     Timer {
         id: sawBypassedTimer
         interval: 5000
-        onTriggered: sawBypassedVisible = false
+        onTriggered: root.sawBypassedVisible = false
     }
 
     // Espresso stop reason overlay (shown on top of any page)
-    property string stopReason: ""  // "manual", "weight", "machine", ""
     property bool stopOverlayVisible: false
     property bool wasEspressoOperation: false  // Track if the operation that just ended was espresso
 
@@ -2311,13 +2307,18 @@ ApplicationWindow {
     // saved shot records why it ended (manually-stopped shots have
     // arbitrary yield and must not drive dial-in advice). This single
     // handler covers every existing stop entry point that sets stopReason.
-    onStopReasonChanged: {
-        if (typeof MainController !== "undefined")
-            MainController.reportShotStopReason(stopReason)
+    // A Connections block rather than an onStopReasonChanged handler, because the
+    // property is AppShell's now, not this object's.
+    Connections {
+        target: AppShell
+        function onStopReasonChanged() {
+            if (typeof MainController !== "undefined" && MainController !== null)
+                MainController.reportShotStopReason(AppShell.stopReason)
+        }
     }
 
     function getStopReasonText() {
-        switch (stopReason) {
+        switch (AppShell.stopReason) {
             case "manual": return "Stopped manually"
             case "weight": return "Target weight reached"
             case "machine": return "Profile complete - DE1 stopped the shot"
@@ -2337,8 +2338,8 @@ ApplicationWindow {
         radius: Theme.scaled(22)
         color: Theme.warningColor
 
-        visible: stopOverlayVisible || fadeOutAnim.running
-        opacity: stopOverlayVisible ? 1 : 0
+        visible: root.stopOverlayVisible || fadeOutAnim.running
+        opacity: root.stopOverlayVisible ? 1 : 0
         scale: 1.0
 
         // Pop-in animation (punch effect: 100% → 110% → 100%)
@@ -2366,7 +2367,7 @@ ApplicationWindow {
 
         // Fade-out animation only (pop-in is instant)
         Behavior on opacity {
-            enabled: stopOverlayVisible  // Only animate when hiding
+            enabled: root.stopOverlayVisible  // Only animate when hiding
             NumberAnimation { id: fadeOutAnim; duration: 2000 }
         }
 
@@ -2377,7 +2378,7 @@ ApplicationWindow {
         Text {
             id: stopReasonText
             anchors.centerIn: parent
-            text: getStopReasonText()
+            text: root.getStopReasonText()
             color: "black"
             font: Theme.bodyFont
             Accessible.ignored: true
@@ -2388,28 +2389,28 @@ ApplicationWindow {
         id: stopOverlayTimer
         interval: 3000
         onTriggered: {
-            stopOverlayVisible = false
+            root.stopOverlayVisible = false
             if (root.pendingMetadataNavigation) {
                 root.pendingMetadataNavigation = false
                 // Settings.value() may return string on Windows (REG_SZ), coerce to Number
                 var timeout = Number(Settings.value("postShotReviewTimeout", 31))
                 if (timeout === 0) {
                     console.log("Post-shot review timeout is Instant, skipping review page")
-                    goToIdle()
+                    root.goToIdle()
                     return
                 }
                 if (root.pendingShotId > 0) {
-                    goToShotMetadata(root.pendingShotId)
+                    root.goToShotMetadata(root.pendingShotId)
                 } else {
                     console.warn("Post-shot navigation: no valid pendingShotId, going to idle")
-                    goToIdle()
+                    root.goToIdle()
                 }
             } else {
                 // pendingMetadataNavigation is set by onShotEndedShowMetadata only when
                 // the overlay was still visible at signal time. False here means either
                 // Edit After Shot is OFF, or the shot save arrived after the overlay
                 // expired (SAW settling outlasted 3s) and was handled directly.
-                goToIdle()
+                root.goToIdle()
             }
         }
     }
@@ -2417,13 +2418,13 @@ ApplicationWindow {
     Connections {
         target: MachineState
         function onTargetWeightReached() {
-            root.stopReason = "weight"
+            AppShell.stopReason = "weight"
         }
         function onSawBypassed() {
             root.sawBypassedVisible = true
             sawBypassedPopIn.start()
             sawBypassedTimer.start()
-            if (typeof AccessibilityManager !== "undefined") {
+            if (typeof AccessibilityManager !== "undefined" && AccessibilityManager !== null) {
                 AccessibilityManager.announce(sawBypassedText.text, true)
             }
         }
@@ -2433,7 +2434,7 @@ ApplicationWindow {
             root.wasEspressoOperation = (phase === MachineState.Phase.EspressoPreheating ||
                                          phase === MachineState.Phase.Preinfusion ||
                                          phase === MachineState.Phase.Pouring)
-            root.stopReason = ""
+            AppShell.stopReason = ""
             root.stopOverlayVisible = false
             root.sawBypassedVisible = false
             sawBypassedTimer.stop()
@@ -2447,14 +2448,14 @@ ApplicationWindow {
             }
 
             // If no reason set, DE1 ended the shot (profile complete or machine-initiated)
-            if (root.stopReason === "") {
-                root.stopReason = "machine"
+            if (AppShell.stopReason === "") {
+                AppShell.stopReason = "machine"
             }
             // Show the overlay with pop-in animation
             root.stopOverlayVisible = true
             popInAnim.start()
             stopOverlayTimer.start()
-            console.log("Stop overlay:", getStopReasonText())
+            console.log("Stop overlay:", root.getStopReasonText())
 
             // Reset for next operation
             root.wasEspressoOperation = false
@@ -2464,20 +2465,20 @@ ApplicationWindow {
     // Crash report dialog - shown on startup if app crashed previously
     CrashReportDialog {
         id: crashReportDialog
-        crashLog: PreviousCrashLog || ""
-        debugLogTail: PreviousDebugLogTail || ""
+        crashLog: CrashReporter.previousCrashLog || ""
+        debugLogTail: CrashReporter.previousDebugLogTail || ""
 
         onDismissed: {
             // Clear the crash log file
             MainController.clearCrashLog()
-            maybeShowLinuxBleCapabilityDialog()
-            maybeShowAutoRelaunchPrompt()
+            root.maybeShowLinuxBleCapabilityDialog()
+            root.maybeShowAutoRelaunchPrompt()
         }
         onReported: {
             // Clear the crash log file after successful report
             MainController.clearCrashLog()
-            maybeShowLinuxBleCapabilityDialog()
-            maybeShowAutoRelaunchPrompt()
+            root.maybeShowLinuxBleCapabilityDialog()
+            root.maybeShowAutoRelaunchPrompt()
         }
     }
 
@@ -2795,8 +2796,8 @@ ApplicationWindow {
                     // layout — never show the upgrade offer to them.
                     Settings.network.recipesUpgradeOffered = true
                     firstRunDialog.close()
-                    checkStorageSetup()
-                    maybeShowLinuxBleCapabilityDialog()
+                    root.checkStorageSetup()
+                    root.maybeShowLinuxBleCapabilityDialog()
                 }
             }
         }
@@ -2860,8 +2861,8 @@ ApplicationWindow {
                     onClicked: {
                         ProfileStorage.skipSetup()
                         storageSetupDialog.close()
-                        startBluetoothScan()
-                        maybeShowAutoRelaunchPrompt()
+                        root.startBluetoothScan()
+                        root.maybeShowAutoRelaunchPrompt()
                     }
                 }
 
@@ -3142,14 +3143,14 @@ ApplicationWindow {
         function onRecipesUpgradeOfferReady(willCreateStarterRecipe, milkPreselected) {
             // Don't stack on top of another modal that might still be
             // resolving (crash report, storage setup, auto-relaunch prompt).
-            if (PreviousCrashLog && PreviousCrashLog.length > 0) return
+            if (CrashReporter.previousCrashLog && CrashReporter.previousCrashLog.length > 0) return
             if (storageSetupDialog.opened || autoRelaunchPromptDialog.opened) return
             recipesUpgradeDialog.willCreateStarterRecipe = willCreateStarterRecipe
             recipesUpgradeDialog.hasMilkChoice = milkPreselected
             recipesUpgradeDialog.open()
         }
         function onRecipesUpgradeApplied(recipeName, starterRecipeFailed) {
-            recipesUpgradeToastText = starterRecipeFailed
+            root.recipesUpgradeToastText = starterRecipeFailed
                 ? trRecipesUpgradeToastRecipeFailed.text
                 : (recipeName.length > 0
                     ? trRecipesUpgradeToastWithRecipe.text.arg(recipeName)
@@ -3157,7 +3158,7 @@ ApplicationWindow {
             recipesUpgradeToast.opacity = 1
             recipesUpgradeToastTimer.restart()
             if (AccessibilityManager.enabled) {
-                AccessibilityManager.announce(recipesUpgradeToastText, starterRecipeFailed)
+                AccessibilityManager.announce(root.recipesUpgradeToastText, starterRecipeFailed)
             }
         }
     }
@@ -3202,7 +3203,7 @@ ApplicationWindow {
         Text {
             id: recipesUpgradeToastLabel
             anchors.centerIn: parent
-            text: recipesUpgradeToastText
+            text: root.recipesUpgradeToastText
             color: Theme.textColor
             font.pixelSize: Theme.scaled(13)
             Accessible.ignored: true
@@ -3225,13 +3226,13 @@ ApplicationWindow {
             // A bag with no roaster/coffee text would leave a dangling
             // "moved to " — fall back to a generic phrase.
             var bagName = targetBagName !== "" ? targetBagName : trRecipesRelinkBagFallback.text
-            recipesRelinkToastText = movedRecipeIds.length === 1
+            root.recipesRelinkToastText = movedRecipeIds.length === 1
                 ? trRecipesRelinkOne.text.arg(bagName)
                 : trRecipesRelinkMany.text.arg(movedRecipeIds.length).arg(bagName)
             recipesRelinkToast.opacity = 1
             recipesRelinkToastTimer.restart()
             if (AccessibilityManager.enabled)
-                AccessibilityManager.announce(recipesRelinkToastText)
+                AccessibilityManager.announce(root.recipesRelinkToastText)
         }
     }
     Tr {
@@ -3275,7 +3276,7 @@ ApplicationWindow {
         Text {
             id: recipesRelinkToastLabel
             anchors.centerIn: parent
-            text: recipesRelinkToastText
+            text: root.recipesRelinkToastText
             color: Theme.textColor
             font.pixelSize: Theme.scaled(13)
             Accessible.ignored: true
@@ -3294,7 +3295,7 @@ ApplicationWindow {
         // stack on top of the crash report or storage setup dialog. Each of
         // those dialogs calls maybeShowAutoRelaunchPrompt() in its close
         // handler, so the prompt eventually shows.
-        if (PreviousCrashLog && PreviousCrashLog.length > 0) return
+        if (CrashReporter.previousCrashLog && CrashReporter.previousCrashLog.length > 0) return
         if (storageSetupDialog.opened) return
         autoRelaunchPromptDialog.open()
     }
@@ -3315,8 +3316,8 @@ ApplicationWindow {
         function onFolderSelected(success) {
             if (storageSetupDialog.opened) {
                 storageSetupDialog.close()
-                checkFirstRunRestore()
-                maybeShowAutoRelaunchPrompt()
+                root.checkFirstRunRestore()
+                root.maybeShowAutoRelaunchPrompt()
             }
         }
     }
@@ -3345,7 +3346,7 @@ ApplicationWindow {
             if (shouldOffer) {
                 emptyDatabaseDialog.open();
             } else {
-                startBluetoothScan();
+                root.startBluetoothScan();
             }
         }
     }
@@ -3399,13 +3400,13 @@ ApplicationWindow {
                     if (!pageStack.busy) {
                         pageStack.replace(null, idlePage)
                     } else {
-                        pendingDisconnectNavigation = true
+                        root.pendingDisconnectNavigation = true
                     }
                 }
             } else {
                 // Clear deferred disconnect navigation on reconnect — machine is back,
                 // don't navigate away from whatever page the user is on now.
-                if (pendingDisconnectNavigation) pendingDisconnectNavigation = false
+                if (root.pendingDisconnectNavigation) root.pendingDisconnectNavigation = false
                 if (root.startupGracePeriod &&
                        phase !== MachineState.Phase.Sleep) {
                     root.startupGracePeriod = false
@@ -3439,7 +3440,7 @@ ApplicationWindow {
                 }
                 // Stop and reset auto-flush timer (steaming fully ended)
                 steamAutoFlushTimer.stop()
-                root.steamAutoFlushCountdown = 0
+                AppShell.steamAutoFlushCountdown = 0
             }
 
             // Update previous phase tracking
@@ -3453,32 +3454,32 @@ ApplicationWindow {
                 phase === MachineState.Phase.EspressoPreheating ||
                 phase === MachineState.Phase.Preinfusion ||
                 phase === MachineState.Phase.Pouring) {
-                if (completionPending) {
+                if (root.completionPending) {
                     console.log("Cancelling pending completion - new operation started (phase=" + phase + ")")
-                    completionPending = false
+                    root.completionPending = false
                     completionTimer.stop()
                     completionOverlay.opacity = 0
                 }
             }
 
             // Clear scale dialog deferral when machine reaches Ready or an active phase
-            if (root.scaleDialogDeferred) {
+            if (AppShell.scaleDialogDeferred) {
                 if (phase === MachineState.Phase.Idle ||
                     phase === MachineState.Phase.Ready ||
                     phase === MachineState.Phase.EspressoPreheating ||
                     phase === MachineState.Phase.Steaming ||
                     phase === MachineState.Phase.HotWater ||
                     phase === MachineState.Phase.Flushing) {
-                    root.scaleDialogDeferred = false
+                    AppShell.scaleDialogDeferred = false
                     // If a real physical scale connected during warmup, discard queued scale popups
                     // (FlowScale is always "connected" so don't let it suppress dialogs)
-                    if (ScaleDevice && ScaleDevice.connected && !ScaleDevice.isFlowScale) {
-                        removeQueuedScalePopups()
+                    if (ScaleDevice.connected && !ScaleDevice.isFlowScale) {
+                        root.removeQueuedScalePopups()
                     } else if (Settings.primaryScaleAddress !== "") {
-                        showNextPendingPopup()  // Show deferred dialog now
+                        root.showNextPendingPopup()  // Show deferred dialog now
                     }
                 } else if (phase === MachineState.Phase.Sleep) {
-                    root.scaleDialogDeferred = false
+                    AppShell.scaleDialogDeferred = false
                 }
             }
 
@@ -3492,17 +3493,17 @@ ApplicationWindow {
                 }
             } else if (phase === MachineState.Phase.Steaming) {
                 if (currentPage !== "steamPage" && !pageStack.busy) {
-                    saveReturnToPage(currentPage)
+                    root.saveReturnToPage(currentPage)
                     pageStack.replace(null, steamPage)
                 }
             } else if (phase === MachineState.Phase.HotWater) {
                 if (currentPage !== "hotWaterPage" && !pageStack.busy) {
-                    saveReturnToPage(currentPage)
+                    root.saveReturnToPage(currentPage)
                     pageStack.replace(null, hotWaterPage)
                 }
             } else if (phase === MachineState.Phase.Flushing) {
                 if (currentPage !== "flushPage" && !pageStack.busy) {
-                    saveReturnToPage(currentPage)
+                    root.saveReturnToPage(currentPage)
                     pageStack.replace(null, flushPage)
                 }
             } else if (phase === MachineState.Phase.Descaling) {
@@ -3520,10 +3521,10 @@ ApplicationWindow {
                 // Machine was put to sleep (e.g. via GHC stop button hold) - show screensaver
                 // Skip if machine has never been awake since connecting (initial connect reports
                 // Sleep before the wake command takes effect)
-                if (!screensaverActive && !root.startupGracePeriod && !root.shuttingDown) {
+                if (!root.screensaverActive && !root.startupGracePeriod && !root.shuttingDown) {
                     console.log("Machine entered Sleep - showing screensaver")
                     // Scale LCD disable is handled by C++ phaseChanged handler in main.cpp
-                    goToScreensaver()
+                    root.goToScreensaver()
                 }
             } else if (phase === MachineState.Phase.Idle || phase === MachineState.Phase.Ready) {
                 // DE1 went to idle - if we're on an operation page, show completion.
@@ -3532,14 +3533,14 @@ ApplicationWindow {
                 console.log("Phase Idle/Ready: currentPage=" + currentPage + " completionOverlay.opacity=" + completionOverlay.opacity)
 
                 if (currentPage === "steamPage") {
-                    showCompletion(trSteamComplete.text, "steam")
+                    root.showCompletion(trSteamComplete.text, "steam")
                 } else if (currentPage === "hotWaterPage") {
-                    showCompletion(trHotWaterComplete.text, "hotwater")
+                    root.showCompletion(trHotWaterComplete.text, "hotwater")
                 } else if (currentPage === "flushPage") {
-                    if (root.userExitedFlush) {
+                    if (AppShell.userExitedFlush) {
                         console.log("Phase Idle/Ready: flush exited by user, skipping completion overlay")
                     } else {
-                        showCompletion(trFlushComplete.text, "flush")
+                        root.showCompletion(trFlushComplete.text, "flush")
                     }
                 } else {
                     console.log("Phase Idle/Ready: NOT on operation page, no completion shown")
@@ -3549,9 +3550,63 @@ ApplicationWindow {
                 // (synchronous back-handler navigation typically changes the page
                 // before this async phase signal arrives). Without this, the flag
                 // would strand and suppress a later legitimate flush completion.
-                root.userExitedFlush = false
+                AppShell.userExitedFlush = false
             }
         }
+    }
+
+    // The shell side of the AppShell contract. Every navigation function below is
+    // unchanged — the guard, the return-to-page handling, the operation-page replace
+    // all still live here, because this object owns pageStack. All that moved is how
+    // a page asks: it emits a request on a declared type instead of finding `root` by
+    // name through the context it happened to be created in.
+    Connections {
+        target: AppShell
+        function onBackRequested() { root.goBack() }
+        function onIdleRequested() { root.goToIdle() }
+        function onIdleFromScreensaverRequested() { root.goToIdleFromScreensaver() }
+        function onProfileEditorRequested() { root.goToProfileEditor() }
+        function onProfileSelectorRequested() { root.goToProfileSelector() }
+        function onProfileImportRequested() { root.goToProfileImport() }
+        function onVisualizerBrowserRequested() { root.goToVisualizerBrowser() }
+        function onDescalingRequested() { root.goToDescaling() }
+        function onTransportRequested() { root.goToTransport() }
+        function onBrewSettingsRequested() { root.openBrewSettings() }
+        function onScreensaverRequested() { root.goToScreensaver() }
+        function onEspressoRequested() { root.goToEspresso() }
+        function onSteamRequested() { root.goToSteam() }
+        function onHotWaterRequested() { root.goToHotWater() }
+        function onFlushRequested() { root.goToFlush() }
+        function onSettingsRequested(tabId) { root.goToSettings(tabId) }
+        function onRecipeEditorRequested() { root.goToRecipeEditor() }
+        function onRecipesRequested() { root.goToRecipes() }
+        function onRecipeWizardRequested(mode, options) { root.goToRecipeWizard(mode, options) }
+        function onShotHistoryRequested(filter) { root.goToShotHistory(filter) }
+        function onShotDetailRequested(shotId, shotIds) { root.goToShotDetail(shotId, shotIds) }
+        function onShotComparisonRequested() { root.goToShotComparison() }
+        function onPostShotReviewRequested(shotId, autoClose) { root.goToPostShotReview(shotId, autoClose) }
+        function onProfileInfoRequested(profileFilename, profileName) { root.goToProfileInfo(profileFilename, profileName) }
+        function onBeanInfoRequested() { root.goToBeanInfo() }
+        function onEquipmentRequested() { root.goToEquipment() }
+        function onAutoFavoritesRequested() { root.goToAutoFavorites() }
+        function onAutoFavoriteInfoRequested(options) { root.goToAutoFavoriteInfo(options) }
+        function onCommunityBrowserRequested() { root.goToCommunityBrowser() }
+        function onVisualizerMultiImportRequested() { root.goToVisualizerMultiImport() }
+        function onFlowCalibrationRequested() { root.goToFlowCalibration() }
+        function onAiSettingsRequested() { root.goToAISettings() }
+        function onStringBrowserRequested() { root.goToStringBrowser() }
+        function onAddLanguageRequested() { root.goToAddLanguage() }
+        // Back where there is somewhere to go back to, idle otherwise. Which applies depends on
+        // whether the page was pushed or replaced, and that is the shell's business, not the
+        // page's.
+        function onDismissRequested() {
+            if (pageStack.depth > 1)
+                root.goBack()
+            else
+                root.goToIdle()
+        }
+        function onCompletionSuspendRequested() { root.suspendCompletionForDialog() }
+        function onCompletionFinishRequested() { root.finishCompletion() }
     }
 
     // Helper functions for navigation
@@ -3580,30 +3635,49 @@ ApplicationWindow {
         root.returnToShotId = 0
     }
 
+    // Push `component` unless that page is already on top of the stack.
+    //
+    // The status bar lives INSIDE pageStack at z: 600 and is visible on every page but the
+    // screensaver, so the widgets in it are tappable from their own destination. Without this
+    // guard, tapping the Settings widget while already in Settings pushed a SECOND SettingsPage
+    // and Back returned to the duplicate instead of to idle. The three operation pages always had
+    // the guard written out inline; every other destination reachable from a status-bar widget
+    // did not, and those call sites used to `replace`, which hid it.
+    //
+    // startNavigation() does not cover this: it clears via Qt.callLater, so it only blocks
+    // re-entry inside one event-loop turn, not a second deliberate tap.
+    function pushUnlessCurrent(component, pageObjectName, props) {
+        if (pageStack.currentItem && pageStack.currentItem.objectName === pageObjectName)
+            return null
+        return props ? pageStack.push(component, props) : pageStack.push(component)
+    }
+
     function goToEspresso() {
         if (!startNavigation()) return
-        if (pageStack.currentItem && pageStack.currentItem.objectName !== "espressoPage") {
-            pageStack.replace(null, espressoPage)
-        }
+        pushUnlessCurrent(espressoPage, "espressoPage")
     }
 
     function goToSteam() {
         if (!startNavigation()) return
-        if (pageStack.currentItem && pageStack.currentItem.objectName !== "steamPage") {
-            pageStack.replace(null, steamPage)
-        }
+        pushUnlessCurrent(steamPage, "steamPage")
     }
 
     function goToHotWater() {
         if (!startNavigation()) return
-        if (pageStack.currentItem && pageStack.currentItem.objectName !== "hotWaterPage") {
-            pageStack.replace(null, hotWaterPage)
-        }
+        pushUnlessCurrent(hotWaterPage, "hotWaterPage")
     }
 
     function goToSettings(tabId) {
         if (!startNavigation()) return
-        if (tabId !== undefined && tabId !== "" && SettingsTabs.indexOf(tabId) >= 0) {
+        var wantTab = (tabId !== undefined && tabId !== "" && SettingsTabs.indexOf(tabId) >= 0)
+        // Already in Settings: switch tab in place rather than stacking a second copy. Assigning
+        // requestedTabId would do nothing — the page consumes it only in StackView.onActivated.
+        if (pageStack.currentItem && pageStack.currentItem.objectName === "settingsPage") {
+            if (wantTab)
+                pageStack.currentItem.showTab(tabId)
+            return
+        }
+        if (wantTab) {
             pageStack.push(settingsPage, {requestedTabId: tabId})
         } else {
             pageStack.push(settingsPage)
@@ -3683,7 +3757,106 @@ ApplicationWindow {
 
     function goToFlush() {
         if (!startNavigation()) return
-        pageStack.push(flushPage)
+        pushUnlessCurrent(flushPage, "flushPage")
+    }
+
+    // Destinations reached from widgets and other pages. Each is the ONE implementation of
+    // "go here": the caller states intent through an AppShell signal, this decides how.
+    //
+    // They all push rather than replace, including the operation pages above. The rule is not
+    // "operation pages replace" — it is REPLACE WHEN THE MACHINE DROVE THE CHANGE, PUSH WHEN THE
+    // USER DID. The phase handler still replaces, because there the user did not navigate and
+    // there is no meaningful back. A user tapping a widget did navigate, and back to idle must
+    // work. CustomItem used to replace here by copying the phase handler's line rather than its
+    // reason, which also left pageStack.depth at 1 — so goBack()'s `depth > 1` test silently made
+    // the back control dead.
+
+    function goToRecipes() {
+        if (!startNavigation()) return
+        pushUnlessCurrent(recipesPage, "recipesPage")
+    }
+
+    // options carries the wizard's own properties (promoteShotId, editRecipeId, prefill).
+    function goToRecipeWizard(mode, options) {
+        if (!startNavigation()) return
+        var props = options ? Object.assign({}, options) : ({})
+        props.mode = mode
+        pageStack.push(recipeWizardPage, props)
+    }
+
+    function goToShotHistory(filter) {
+        if (!startNavigation()) return
+        pushUnlessCurrent(shotHistoryPage, "shotHistoryPage", filter || ({}))
+    }
+
+    function goToShotDetail(shotId, shotIds) {
+        if (!startNavigation()) return
+        pageStack.push(shotDetailPage, { shotId: shotId, shotIds: shotIds || [] })
+    }
+
+    function goToShotComparison() {
+        if (!startNavigation()) return
+        pageStack.push(shotComparisonPage)
+    }
+
+    function goToPostShotReview(shotId, autoClose) {
+        if (!startNavigation()) return
+        pageStack.push(postShotReviewPage, { editShotId: shotId, autoClose: autoClose })
+    }
+
+    function goToProfileInfo(profileFilename, profileName) {
+        if (!startNavigation()) return
+        pageStack.push(profileInfoPage, { profileFilename: profileFilename, profileName: profileName })
+    }
+
+    function goToBeanInfo() {
+        if (!startNavigation()) return
+        pushUnlessCurrent(beanInfoPage, "bagInventoryPage")
+    }
+
+    function goToEquipment() {
+        if (!startNavigation()) return
+        pushUnlessCurrent(equipmentPage, "equipmentPage")
+    }
+
+    function goToAutoFavorites() {
+        if (!startNavigation()) return
+        pushUnlessCurrent(autoFavoritesPage, "autoFavoritesPage")
+    }
+
+    function goToAutoFavoriteInfo(options) {
+        if (!startNavigation()) return
+        pageStack.push(autoFavoriteInfoPage, options || ({}))
+    }
+
+    function goToCommunityBrowser() {
+        if (!startNavigation()) return
+        pushUnlessCurrent(communityBrowserPage, "communityBrowserPage")
+    }
+
+    function goToVisualizerMultiImport() {
+        if (!startNavigation()) return
+        pageStack.push(visualizerMultiImportPage)
+    }
+
+    function goToFlowCalibration() {
+        if (!startNavigation()) return
+        pageStack.push(flowCalibrationPage)
+    }
+
+    function goToAISettings() {
+        if (!startNavigation()) return
+        pageStack.push(aiSettingsPage)
+    }
+
+    function goToStringBrowser() {
+        if (!startNavigation()) return
+        pageStack.push(stringBrowserPage)
+    }
+
+    function goToAddLanguage() {
+        if (!startNavigation()) return
+        pageStack.push(addLanguagePage)
     }
 
     function goToVisualizerBrowser() {
@@ -3705,36 +3878,12 @@ ApplicationWindow {
 
     // Helper to announce arbitrary text for accessibility (used for non-page announcements)
     function announceNavigation(text) {
-        if (typeof AccessibilityManager !== "undefined" && AccessibilityManager.enabled) {
+        if (typeof AccessibilityManager !== "undefined" && AccessibilityManager !== null && AccessibilityManager.enabled) {
             AccessibilityManager.announce(text)
         }
     }
 
     // Clean up text for TTS (replace underscores, expand units, etc.)
-    function cleanForSpeech(text) {
-        if (!text) return ""
-        var cleaned = text
-        // Remove common file extensions
-        cleaned = cleaned.replace(/\.(json|tcl|txt)$/i, "")
-        // Replace underscores and hyphens with spaces
-        cleaned = cleaned.replace(/[_-]/g, " ")
-        // Expand units for natural speech. Both the °C/°F symbols and a bare "88C"
-        // (common in Celsius-authored profile names like gagne_88C) always denote
-        // their own unit regardless of the display setting, so map them literally —
-        // the app's own converted read-outs always emit an explicit "°F"/"°C", never
-        // a bare number+C, so this never mislabels a converted value.
-        cleaned = cleaned.replace(/°F/g, " degrees Fahrenheit")
-        cleaned = cleaned.replace(/°C/g, " degrees Celsius")
-        cleaned = cleaned.replace(/(\d)\s*C\b/g, "$1 degrees Celsius")  // bare "88C" (Celsius-authored)
-        cleaned = cleaned.replace(/(\d)\s*ml\b/gi, "$1 milliliters")
-        cleaned = cleaned.replace(/(\d)\s*g\b/g, "$1 grams")
-        cleaned = cleaned.replace(/(\d)\s*bar\b/gi, "$1 bar")
-        cleaned = cleaned.replace(/(\d)\s*s\b/g, "$1 seconds")
-        cleaned = cleaned.replace(/(\d)\s*%/g, "$1 percent")
-        // Remove multiple spaces
-        cleaned = cleaned.replace(/\s+/g, " ")
-        return cleaned.trim()
-    }
 
     property bool screensaverActive: false
 
@@ -3812,6 +3961,82 @@ ApplicationWindow {
         ScreensaverPage {}
     }
 
+    // These fourteen complete a pattern this file already used for nineteen pages. They exist
+    // because widgets and pages used to reach these screens with
+    // `pageStack.push(Qt.resolvedUrl("../../../pages/X.qml"))`, which instantiates a DIFFERENT
+    // component from the one declared here — two mechanisms for one screen. Every navigation now
+    // goes through the Component declared once, in this file.
+
+    Component {
+        id: recipesPage
+        RecipesPage {}
+    }
+
+    Component {
+        id: recipeWizardPage
+        RecipeWizardPage {}
+    }
+
+    Component {
+        id: shotHistoryPage
+        ShotHistoryPage {}
+    }
+
+    Component {
+        id: shotDetailPage
+        ShotDetailPage {}
+    }
+
+    Component {
+        id: shotComparisonPage
+        ShotComparisonPage {}
+    }
+
+    Component {
+        id: equipmentPage
+        EquipmentPage {}
+    }
+
+    Component {
+        id: autoFavoritesPage
+        AutoFavoritesPage {}
+    }
+
+    Component {
+        id: autoFavoriteInfoPage
+        AutoFavoriteInfoPage {}
+    }
+
+    Component {
+        id: communityBrowserPage
+        CommunityBrowserPage {}
+    }
+
+    Component {
+        id: visualizerMultiImportPage
+        VisualizerMultiImportPage {}
+    }
+
+    Component {
+        id: flowCalibrationPage
+        FlowCalibrationPage {}
+    }
+
+    Component {
+        id: aiSettingsPage
+        AISettingsPage {}
+    }
+
+    Component {
+        id: stringBrowserPage
+        StringBrowserPage {}
+    }
+
+    Component {
+        id: addLanguagePage
+        AddLanguagePage {}
+    }
+
     // Touch capture to reset sleep countdown (transparent, doesn't block input)
     MouseArea {
         anchors.fill: parent
@@ -3820,7 +4045,7 @@ ApplicationWindow {
         onPressed: function(mouse) {
             // Reset the inactivity countdown on user touch (the scheduled
             // stay-awake window is independent of activity)
-            if (root.autoSleepMinutes > 0 && !screensaverActive) {
+            if (root.autoSleepMinutes > 0 && !root.screensaverActive) {
                 var prev = root.sleepCountdownNormal
                 root.sleepCountdownNormal = root.autoSleepMinutes
                 if (prev <= 5) console.log("[AutoSleep] Reset by touch: " + prev + " -> " + root.sleepCountdownNormal)
@@ -3923,7 +4148,7 @@ ApplicationWindow {
                 ScaleDevice.disableLcd()
             }
             DE1Device.goToSleep()
-            goToScreensaver()
+            root.goToScreensaver()
         }
     }
 
@@ -3933,7 +4158,7 @@ ApplicationWindow {
         z: -1  // Behind all controls
         minimumTouchPoints: 2
         maximumTouchPoints: 2
-        enabled: typeof AccessibilityManager !== "undefined" && AccessibilityManager.enabled
+        enabled: typeof AccessibilityManager !== "undefined" && AccessibilityManager !== null && AccessibilityManager.enabled
 
         property var startPoints: []
 
@@ -3946,7 +4171,7 @@ ApplicationWindow {
 
         onReleased: function(touchPoints) {
             // Check for 2-finger swipe left (back gesture) when accessibility is on
-            if (typeof AccessibilityManager !== "undefined" && AccessibilityManager.enabled &&
+            if (typeof AccessibilityManager !== "undefined" && AccessibilityManager !== null && AccessibilityManager.enabled &&
                 startPoints.length === 2 && touchPoints.length === 2) {
                 var deltaX1 = touchPoints[0].x - startPoints[0].x
                 var deltaX2 = touchPoints[1].x - startPoints[1].x
@@ -3956,11 +4181,22 @@ ApplicationWindow {
                 if (avgDeltaX < -100) {
                     // Two-finger swipe left = go back
                     AccessibilityManager.announce(trAnnounceGoingBack.text)
-                    if (stackView.depth > 1) {
-                        stackView.pop()
-                    } else {
-                        goToIdle()
-                    }
+                    // Was `stackView.depth`/`stackView.pop()` — no such id exists in this file
+                    // (the StackView is `pageStack`), so this threw a ReferenceError and took the
+                    // whole handler with it, else-branch included. The two-finger back gesture has
+                    // never worked, and it only runs with a screen reader active, which is why
+                    // nobody hit it.
+                    //
+                    // Both branches are needed. `pageStack.replace(null, X)` CLEARS the stack, and
+                    // that is how every machine-driven page is entered (espresso, steam, hot water,
+                    // flush, descaling, transport) plus the screensaver — so those pages sit at
+                    // depth 1 with a non-idle currentItem, and goBack() alone would do nothing
+                    // there while the announcement above had already said it went back. This is the
+                    // same idiom onDismissRequested uses, for the same reason.
+                    if (pageStack.depth > 1)
+                        root.goBack()
+                    else
+                        root.goToIdle()
                 }
             }
             startPoints = []
@@ -4013,9 +4249,9 @@ ApplicationWindow {
                 var timeout = Number(Settings.value("postShotReviewTimeout", 31))
                 if (timeout === 0) {
                     console.log("Post-shot review: Instant timeout, going to idle")
-                    goToIdle()
+                    root.goToIdle()
                 } else if (root.pendingShotId > 0) {
-                    goToShotMetadata(root.pendingShotId)
+                    root.goToShotMetadata(root.pendingShotId)
                 } else {
                     console.warn("Post-shot navigation: no valid pendingShotId after overlay expired")
                 }
@@ -4029,8 +4265,8 @@ ApplicationWindow {
 
         function onAutoWakeTriggered() {
             console.log("[Main] Auto-wake triggered")
-            if (screensaverActive) {
-                goToIdleFromScreensaver()
+            if (root.screensaverActive) {
+                root.goToIdleFromScreensaver()
             }
             // No stay-awake arming here: the window is evaluated live from
             // the schedule by AutoWakeManager.isWithinStayAwakeWindow(), so
@@ -4040,18 +4276,18 @@ ApplicationWindow {
 
         function onRemoteSleepRequested() {
             console.log("[Main] Remote sleep requested via MQTT/REST API")
-            if (!screensaverActive) {
-                goToScreensaver()
+            if (!root.screensaverActive) {
+                root.goToScreensaver()
             }
         }
 
         function onFlowCalibrationAutoUpdated(profileTitle, oldValue, newValue) {
-            flowCalToastText = TranslationManager.translate("main.flowCalUpdated",
+            root.flowCalToastText = TranslationManager.translate("main.flowCalUpdated",
                 "Flow cal updated for %1: %2 → %3").arg(profileTitle).arg(oldValue.toFixed(2)).arg(newValue.toFixed(2))
             flowCalToast.opacity = 1
             flowCalToastTimer.restart()
             if (AccessibilityManager.enabled) {
-                AccessibilityManager.announce(flowCalToastText)
+                AccessibilityManager.announce(root.flowCalToastText)
             }
         }
 
@@ -4157,7 +4393,7 @@ ApplicationWindow {
         Text {
             id: flowCalToastLabel
             anchors.centerIn: parent
-            text: flowCalToastText
+            text: root.flowCalToastText
             color: Theme.textColor
             font.pixelSize: Theme.scaled(13)
             Accessible.ignored: true
@@ -4198,7 +4434,7 @@ ApplicationWindow {
         Text {
             id: shotExportToastLabel
             anchors.centerIn: parent
-            text: shotExportToastText
+            text: root.shotExportToastText
             color: Theme.textColor
             font.pixelSize: Theme.scaled(13)
             Accessible.ignored: true
@@ -4225,13 +4461,13 @@ ApplicationWindow {
         function onBagPushRejected(localBagId, bagName, message) {
             // Name the bag: a 422 can arrive from the retry drain long after
             // the edit, when a bare "the bag update" identifies nothing.
-            bagPushToastText = trBagPushRejected.text.arg(bagName).arg(message)
+            root.bagPushToastText = trBagPushRejected.text.arg(bagName).arg(message)
             bagPushToast.opacity = 1
             bagPushToastTimer.restart()
             if (AccessibilityManager.enabled) {
                 // Assertive: this is the only trace that the local and remote
                 // bags have permanently diverged.
-                AccessibilityManager.announce(bagPushToastText, true)
+                AccessibilityManager.announce(root.bagPushToastText, true)
             }
         }
     }
@@ -4258,7 +4494,7 @@ ApplicationWindow {
             id: bagPushToastLabel
             anchors.centerIn: parent
             width: Math.min(implicitWidth, bagPushToast.width - Theme.scaled(32))
-            text: bagPushToastText
+            text: root.bagPushToastText
             color: Theme.textColor
             font.pixelSize: Theme.scaled(13)
             wrapMode: Text.WordWrap
@@ -4436,18 +4672,18 @@ ApplicationWindow {
                 return
             }
             if (failed > 0) {
-                shotExportToastText = TranslationManager.translate(
+                root.shotExportToastText = TranslationManager.translate(
                     "main.toast.exportShotsPartial",
                     "Exported %1 shots; %2 failed").arg(written).arg(failed)
             } else {
-                shotExportToastText = TranslationManager.translate(
+                root.shotExportToastText = TranslationManager.translate(
                     "main.toast.exportShotsDone",
                     "Exported %1 shots").arg(written)
             }
             shotExportToast.opacity = 1
             shotExportToastTimer.restart()
             if (AccessibilityManager.enabled) {
-                AccessibilityManager.announce(shotExportToastText)
+                AccessibilityManager.announce(root.shotExportToastText)
             }
         }
     }
@@ -4552,10 +4788,12 @@ ApplicationWindow {
 
     Connections {
         target: ScaleDevice
-        enabled: AccessibilityManager.enabled && ScaleDevice !== null
+        // Not `ScaleDevice !== null`: the singleton proxy always exists, so that test was always
+        // true and guarded nothing. Gate on the state, never on the object.
+        enabled: AccessibilityManager.enabled
 
         function onConnectedChanged() {
-            if (ScaleDevice && ScaleDevice.connected) {
+            if (ScaleDevice.connected) {
                 AccessibilityManager.announce(trAnnounceScaleConnected.text + " " + ScaleDevice.name)
             }
             // Disconnection is handled by scaleDisconnectedDialog
@@ -4565,11 +4803,10 @@ ApplicationWindow {
     // Discard stale scale popups when scale reconnects
     Connections {
         target: ScaleDevice
-        enabled: ScaleDevice !== null
 
         function onConnectedChanged() {
-            if (ScaleDevice && ScaleDevice.connected && !ScaleDevice.isFlowScale) {
-                removeQueuedScalePopups()
+            if (ScaleDevice.connected && !ScaleDevice.isFlowScale) {
+                root.removeQueuedScalePopups()
             }
         }
     }
@@ -4579,7 +4816,7 @@ ApplicationWindow {
     // Uses scaledBase() to maintain consistent size regardless of current page scale
     Rectangle {
         id: pageScaleOverlay
-        visible: root.appInitialized && Theme.configurePageScaleEnabled && !screensaverActive && Theme.currentPageObjectName !== ""
+        visible: root.appInitialized && Theme.configurePageScaleEnabled && !root.screensaverActive && Theme.currentPageObjectName !== ""
         z: 800  // Above most content, below dialogs
 
 
@@ -4627,7 +4864,7 @@ ApplicationWindow {
 
     // ============ GLOBAL HIDE KEYBOARD BUTTON ============
     // Appears when a text input has focus (= keyboard should be showing).
-    // Qt.inputMethod.visible is unreliable on Android (goes false after 1s),
+    // Keyboard.visible is unreliable on Android (goes false after 1s),
     // so we check if the active focus item has a cursorPosition property
     // (present on TextInput/TextArea but not on Text or Button).
     property bool _textInputFocused: {
@@ -4648,7 +4885,7 @@ ApplicationWindow {
     }
     Rectangle {
         id: globalHideKeyboardButton
-        visible: _textInputFocused && (Qt.platform.os === "android" || Qt.platform.os === "ios")
+        visible: root._textInputFocused && (Qt.platform.os === "android" || Qt.platform.os === "ios")
         anchors.right: parent.right
         anchors.top: parent.top
         anchors.rightMargin: Theme.standardMargin
@@ -4682,7 +4919,7 @@ ApplicationWindow {
                 var window = globalHideKeyboardButton.Window.window
                 if (window && window.activeFocusItem)
                     window.activeFocusItem.focus = false
-                Qt.inputMethod.hide()
+                Keyboard.hide()
             }
         }
     }
@@ -4737,10 +4974,10 @@ ApplicationWindow {
     Connections {
         target: WidgetLibrary
         function onEntryAdded(entryId) {
-            triggerLibraryThumbnailCapture(entryId)
+            root.triggerLibraryThumbnailCapture(entryId)
         }
         function onRequestThumbnailCapture(entryId) {
-            triggerLibraryThumbnailCapture(entryId)
+            root.triggerLibraryThumbnailCapture(entryId)
         }
     }
 
@@ -4806,7 +5043,7 @@ ApplicationWindow {
                     accessibleName: TranslationManager.translate("main.emptydb.skipAccessible", "Skip restore and start fresh")
                     onClicked: {
                         emptyDatabaseDialog.close();
-                        startBluetoothScan();
+                        root.startBluetoothScan();
                     }
                 }
 
@@ -4816,8 +5053,8 @@ ApplicationWindow {
                     accessibleName: TranslationManager.translate("main.emptydb.restoreAccessible", "Open restore settings")
                     onClicked: {
                         emptyDatabaseDialog.close();
-                        startBluetoothScan();
-                        goToSettings("historyData");  // History & Data tab has restore
+                        root.startBluetoothScan();
+                        root.goToSettings("historyData");  // History & Data tab has restore
                     }
                 }
             }

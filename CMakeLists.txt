@@ -213,9 +213,26 @@ endif()
 set(PAHO_HIGH_PERFORMANCE OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(paho_mqtt_c)
 
-# mjansson/mdns: header-only mDNS library for resolving .local hostnames on Android
-# (Android's getaddrinfo doesn't reliably handle mDNS)
-if(ANDROID)
+# mjansson/mdns: header-only mDNS library. Two jobs:
+#  - resolving .local hostnames on Android (Android's getaddrinfo doesn't
+#    reliably handle mDNS), which is what it was originally pulled in for;
+#  - the _decentscale._tcp DNS-SD service browse, which QHostInfo cannot do at
+#    all (it resolves names, it does not enumerate services).
+#
+# Everywhere EXCEPT iOS.
+#
+# iOS is excluded because a raw multicast socket to 224.0.0.251 there requires
+# the com.apple.developer.networking.multicast entitlement, which Apple grants
+# only by per-app application; iOS browses through mDNSResponder instead and
+# must not even carry this code.
+#
+# macOS DOES build it, despite shipping the Bonjour backend by default. macOS is
+# the only desktop that can be tested against real scales here, and without this
+# the mjansson browse — the backend Android and Windows/Linux actually use —
+# could not be exercised anywhere except by deploying to a tablet. The backend
+# is selectable at runtime (MdnsResolver::setBrowseBackend), so a macOS build
+# can A/B the two against the same LAN and confirm they agree.
+if(NOT IOS)
     FetchContent_Declare(
         mdns_lib
         GIT_REPOSITORY https://github.com/mjansson/mdns.git
@@ -644,6 +661,7 @@ set(SOURCES
     src/ble/de1device.cpp
     src/ble/bletransport.cpp
     src/ble/scaledevice.cpp
+    src/ble/scaledeviceproxy.cpp
     src/ble/scales/scalefactory.cpp
     src/ble/scales/scaletypeids.cpp
     src/ble/scales/decentscale.cpp
@@ -656,6 +674,7 @@ set(SOURCES
     src/ble/scales/smartchefscale.cpp
     src/ble/scales/difluidscale.cpp
     src/ble/refractometers/refractometerdevice.cpp
+    src/ble/refractometers/refractometerproxy.cpp
     src/ble/refractometers/difluidr2.cpp
     src/ble/refractometers/difluidr1.cpp
     src/ble/refractometers/aes128.cpp
@@ -757,6 +776,7 @@ set(SOURCES
     src/mcp/mcptools_ai_conversations.cpp
     src/network/mqttclient.cpp
     src/network/mdnsresolver.cpp
+    src/network/wifiscaleresult.cpp
     src/network/webdebuglogger.cpp
     src/network/locationprovider.cpp
     src/network/shotreporter.cpp
@@ -769,6 +789,7 @@ set(SOURCES
     src/core/datamigrationclient.cpp
     src/core/databasebackupmanager.cpp
     src/core/documentformatter.cpp
+    src/core/keyboard.cpp
     src/weather/weathermanager.cpp
 )
 
@@ -788,23 +809,25 @@ endif()
 # every configuration. Whether any of it actually compiles is decided by
 # DECENZA_SIMULATOR (see the target_compile_definitions block below), which the
 # files themselves guard on.
+#
+# ghcsimulator is here rather than behind a platform test because what it actually
+# depends on is DE1Simulator, not a platform: it drives that class's signals and
+# cannot compile without it. Tying it to the same condition says so directly, and
+# means it is available in every build where the simulator is — all desktop
+# configurations, and Debug on Android and iOS.
+#
+# It used to be `if(WIN32 OR (APPLE AND NOT IOS))`, which had a second cost beyond
+# being the wrong condition: GHCSimulator is a registered QML singleton, and a
+# registered type only reaches Decenza.qmltypes on a platform that COMPILES it. The
+# qmllint baseline is generated on macOS and the gate runs on Linux, so a
+# macOS-and-Windows-only type produced a ceiling CI could not achieve — the exact
+# shape #1684 added detection for.
 list(APPEND SOURCES
     src/simulator/de1simulator.cpp
     src/simulator/simulatedscale.cpp
+    src/simulator/ghcsimulator.cpp
 )
 
-# GHC simulator window - desktop only. It opens a second top-level window,
-# which is meaningless on a tablet. (It is not a QWidget despite what this
-# comment said for years: GHCSimulator is a plain QObject and the window is a
-# QtQuick Window in its own QQmlApplicationEngine.)
-# NOT `if(WIN32 OR APPLE)`: APPLE is true for iOS too, so that spelling compiled
-# this into every iPad build despite the comment. It drives DE1Simulator's
-# signals, so with the simulator absent it would not even compile there.
-if(WIN32 OR (APPLE AND NOT IOS))
-    list(APPEND SOURCES
-        src/simulator/ghcsimulator.cpp
-    )
-endif()
 
 # Native CoreBluetooth transport and iOS brightness helpers
 if(APPLE)
@@ -831,6 +854,10 @@ set(HEADERS
     # qmltyperegistrar sees the type; it is compiled by no other target, which is the point
     # (settings.h stays free of QtQml — see the file's own comment).
     src/core/settings_qml.h
+    # Same reason, for the objects main() owns and used to publish with setContextProperty():
+    # their class headers are compiled by test and tool targets that link no Qt6::Qml, so the
+    # registration lives in a file only this target compiles.
+    src/core/contextsingletons_qml.h
     src/core/settings_mqtt.h
     src/core/settings_autowake.h
     src/core/settings_hardware.h
@@ -867,6 +894,7 @@ set(HEADERS
     src/ble/de1device.h
     src/ble/bletransport.h
     src/ble/scaledevice.h
+    src/ble/scaledeviceproxy.h
     src/ble/scales/scalefactory.h
     src/ble/scales/scaletypeids.h
     src/ble/scales/decentscale.h
@@ -941,6 +969,7 @@ set(HEADERS
     src/network/shotserver.h
     src/network/mqttclient.h
     src/network/mdnsresolver.h
+    src/network/wifiscaleresult.h
     src/network/webdebuglogger.h
     src/network/locationprovider.h
     src/network/shotreporter.h
@@ -952,6 +981,7 @@ set(HEADERS
     src/mcp/mcpsession.h
     src/mcp/mcptoolregistry.h
     src/mcp/mcpresourceregistry.h
+    src/mcp/mcpremoteaccess.h
     src/core/settingsserializer.h
     src/core/datamigrationclient.h
     src/core/databasebackupmanager.h
@@ -975,14 +1005,9 @@ endif()
 list(APPEND HEADERS
     src/simulator/de1simulator.h
     src/simulator/simulatedscale.h
+    src/simulator/ghcsimulator.h
 )
 
-# GHC simulator window header - desktop only (see source section note on iOS)
-if(WIN32 OR (APPLE AND NOT IOS))
-    list(APPEND HEADERS
-        src/simulator/ghcsimulator.h
-    )
-endif()
 
 # Native CoreBluetooth transport header (iOS and macOS)
 if(APPLE)
@@ -1171,14 +1196,25 @@ target_include_directories(Decenza PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/models
     ${CMAKE_CURRENT_SOURCE_DIR}/src/network
     ${CMAKE_CURRENT_SOURCE_DIR}/src/profile
+    # Added when the last runtime qmlRegisterType<> calls became QML_ELEMENT: fastlinerenderer.h,
+    # jscanvaspainteritem.h, strangeattractorrenderer.h and pipegeometry.h. Verified non-ambiguous
+    # by the command above before adding.
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/rendering
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/screensaver
 )
-if(ANDROID)
+if(NOT IOS)
     # SYSTEM: mjansson/mdns is vendored third-party code, and it is header-only,
     # so without this it compiles INSIDE our translation units and inherits
     # -Werror. Android caught -Wcast-align on its sockaddr -> sockaddr_in casts,
     # which is idiomatic BSD-socket code we are in no position to "fix".
     # SYSTEM keeps our diagnostics on our code, matching the reason the warning
     # options sit after the FetchContent blocks.
+    #
+    # Must stay SYSTEM on every platform this is enabled for, not just Android:
+    # the header is equally -Wcast-align-dirty under MSVC and desktop GCC/Clang,
+    # and those builds are -Werror too. Keep this guard in step with the
+    # FetchContent block above.
     target_include_directories(Decenza SYSTEM PRIVATE ${mdns_lib_SOURCE_DIR})
 endif()
 if(IOS)
@@ -1186,6 +1222,7 @@ if(IOS)
 endif()
 
 # QML module - mark singletons
+set_source_files_properties(qml/AppShell.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
 set_source_files_properties(qml/Theme.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
 set_source_files_properties(qml/components/SettingsTabs.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
 set_source_files_properties(qml/components/layout/WidgetColor.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
@@ -1195,6 +1232,7 @@ set_source_files_properties(qml/components/LastShotChartSource.qml PROPERTIES QT
 # Define QML files list for dependency tracking
 set(QML_FILES
     qml/main.qml
+    qml/AppShell.qml
     qml/Theme.qml
     qml/pages/IdlePage.qml
     qml/pages/EspressoPage.qml
@@ -1426,7 +1464,16 @@ set(QML_FILES
 # `WIN32 OR APPLE` would include iOS, which shipped this window's compiled QML
 # in every IPA — dead weight for a window iOS never loads, and whose
 # GHCSimulator context property does not exist there at all.
-if(WIN32 OR (APPLE AND NOT IOS))
+#
+# Linux is in the list even though main.cpp never loads this window there — its load site is
+# `#if (Q_OS_WIN || Q_OS_MACOS) && QT_DEBUG`. It is here so the module's file set does not vary
+# by desktop platform, because the qmllint gate's file set is derived from it. Nightly CI is the
+# only automated lint run and it is Linux: with the file excluded there, CI linted 216 files
+# against a 217-file baseline, and this file's 57 diagnostics were checked by nobody. The gate
+# caught that on its first CI run. Cost of carrying it is a few KB of compiled QML in a Linux
+# desktop build; the alternative — NOT_IN_MODULE_BY_DESIGN in scripts/qmllint_report.py — buys
+# the same green at the price of never linting the file again.
+if(NOT ANDROID AND NOT IOS)
     list(APPEND QML_FILES
         qml/simulator/GHCSimulatorWindow.qml
     )
@@ -1440,10 +1487,23 @@ if(ENABLE_QUICK3D AND Qt6Quick3D_FOUND)
     )
 endif()
 
+# DEPENDENCIES is what lets qmllint follow a Decenza type's PROTOTYPE into another module.
+# Without it, PipeCylinderGeometry's base QQuick3DGeometry is a name the linter cannot link, and
+# every use of those types reports "used but it is not resolved" — even though Qt ships
+# Quick3D.qmltypes and its qml directory is already on the import path. The import path resolves
+# what QML *imports*; this resolves what our own registered types *inherit*.
+# Conditional for the same reason the sources are: pipegeometry.* is not compiled without Quick3D,
+# so naming the dependency there would declare one the module does not have.
+set(DECENZA_QML_DEPENDENCIES "")
+if(ENABLE_QUICK3D AND Qt6Quick3D_FOUND)
+    list(APPEND DECENZA_QML_DEPENDENCIES QtQuick3D)
+endif()
+
 qt_add_qml_module(Decenza
     URI Decenza
     VERSION 1.1
     QML_FILES ${QML_FILES}
+    DEPENDENCIES ${DECENZA_QML_DEPENDENCIES}
     NO_GENERATE_EXTRA_QMLDIRS
 )
 
@@ -1730,9 +1790,34 @@ if(APPLE AND NOT IOS)
     target_link_libraries(Decenza PRIVATE
         "-framework CoreBluetooth"
     )
+    # Bundle ID, overridable for local dev builds — mirrors IOS_BUNDLE_ID above:
+    #   cmake ... -DMACOS_BUNDLE_ID=io.github.kulitorum.decenza.jefftest
+    #
+    # Why you would want to: macOS keys the Local Network privacy grant to the
+    # app's identity, and a dev build that shares the shipping bundle id also
+    # shares (and fights over) that one grant. On macOS 15+ the permission prompt
+    # frequently never appears, and there is no way to reset the grant —
+    # `tccutil` does not manage Local Network — so a wedged dev build ends up
+    # needing a reboot. Giving dev builds their own id makes them a separate
+    # subject, which re-triggers the prompt and leaves the shipping app's grant
+    # untouched.
+    #
+    # Safe for user data: settings and app storage are addressed by
+    # organization/application name ("DecentEspresso"/"Decenza", see
+    # appsettings.cpp) and QStandardPaths, never by bundle id, so changing this
+    # does not orphan an existing install's shots, profiles or preferences.
+    # A CACHE variable rather than the plain `if(NOT ...)` form used for
+    # IOS_BUNDLE_ID: this one needs to be settable on an EXISTING build
+    # directory. Qt Creator's "Initial Configuration" is only applied to a fresh
+    # cache, so a plain reconfigure silently ignores anything added there — which
+    # is exactly how a first attempt at this failed. As a cache entry it appears
+    # in Qt Creator's CMake settings and can be edited in place.
+    set(MACOS_BUNDLE_ID "io.github.kulitorum.decenza" CACHE STRING
+        "macOS bundle identifier. Override for local dev builds to get a separate Local Network permission subject.")
     set_target_properties(Decenza PROPERTIES
         MACOSX_BUNDLE TRUE
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/macos/Info.plist"
+        MACOSX_BUNDLE_GUI_IDENTIFIER "${MACOS_BUNDLE_ID}"
         MACOSX_BUNDLE_ICON_FILE "AppIcon.icns"
     )
     # Add macOS app icon to bundle
@@ -1786,6 +1871,17 @@ if(APPLE AND NOT IOS)
     #      to quote) or any unique substring of its name:
     #        -DDECENZA_MACOS_CODESIGN_IDENTITY=DFA23C5D…the SHA-1…
     #
+    # CAVEAT, learned 2026-07-28: a stable signature is necessary but may not be
+    # sufficient. Local Network identity also involves the UUID of the main
+    # executable, which the linker regenerates on every relink, and on macOS 15+
+    # the permission prompt often never appears at all — so a rebuild can still
+    # read as an unapproved app and have its LAN traffic dropped silently
+    # (instant EHOSTUNREACH, no local port bound, while the internet works).
+    # Apple confirms the immediate-failure behaviour is by design and that there
+    # is no way to reset or force the prompt. When that happens, MACOS_BUNDLE_ID
+    # above is the lever that does not require a reboot: a different bundle id is
+    # unambiguously a different subject, so the prompt fires again.
+    #
     # Non-deep on purpose: only the top-level bundle is re-signed, which is what
     # carries the identity TCC keys on. The linker's ad-hoc signatures on the
     # nested Qt frameworks are left intact — re-signing them adds launch-failure
@@ -1798,7 +1894,7 @@ if(APPLE AND NOT IOS)
             COMMAND codesign --force
                     --sign "${DECENZA_MACOS_CODESIGN_IDENTITY}"
                     "$<TARGET_BUNDLE_DIR:Decenza>"
-            COMMENT "Re-signing with stable dev identity '${DECENZA_MACOS_CODESIGN_IDENTITY}' — keeps the Local Network grant across rebuilds"
+            COMMENT "Re-signing with stable dev identity '${DECENZA_MACOS_CODESIGN_IDENTITY}' — stable identity for the TCC/Local Network grant (see CAVEAT in CMakeLists.txt)"
             VERBATIM
         )
     endif()

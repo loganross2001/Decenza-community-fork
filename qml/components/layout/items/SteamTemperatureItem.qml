@@ -1,7 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
 import Decenza
-import "../.."
 
 Item {
     id: root
@@ -62,7 +61,7 @@ Item {
             anchors.fill: parent
             anchors.margins: -Theme.spacingSmall
             onClicked: {
-                if (typeof AccessibilityManager !== "undefined" && AccessibilityManager.enabled) {
+                if (typeof AccessibilityManager !== "undefined" && AccessibilityManager !== null && AccessibilityManager.enabled) {
                     AccessibilityManager.announceLabel(
                         "Steam temperature: " + Theme.cToDisplay(root.currentTemp).toFixed(0) +
                         " degrees, target: " + Theme.cToDisplay(root.targetTemp).toFixed(0) + " degrees")
@@ -120,7 +119,7 @@ Item {
         MouseArea {
             anchors.fill: parent
             onClicked: {
-                if (typeof AccessibilityManager !== "undefined" && AccessibilityManager.enabled) {
+                if (typeof AccessibilityManager !== "undefined" && AccessibilityManager !== null && AccessibilityManager.enabled) {
                     AccessibilityManager.announceLabel(
                         "Steam temperature: " + Theme.cToDisplay(root.currentTemp).toFixed(0) +
                         " degrees, target: " + Theme.cToDisplay(root.targetTemp).toFixed(0) + " degrees")

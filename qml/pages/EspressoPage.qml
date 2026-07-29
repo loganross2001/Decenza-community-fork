@@ -3,7 +3,6 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Effects
 import Decenza
-import "../components"
 
 Page {
     id: espressoPage
@@ -61,7 +60,7 @@ Page {
     // Accessibility: announce next value
     function announceNextValue() {
         accessibilityValueIndex = (accessibilityValueIndex + 1) % accessibilityValueNames.length
-        if (typeof AccessibilityManager !== "undefined" && AccessibilityManager.enabled) {
+        if (typeof AccessibilityManager !== "undefined" && AccessibilityManager !== null && AccessibilityManager.enabled) {
             AccessibilityManager.announce(getAccessibilityValue(accessibilityValueIndex), true)
         }
     }
@@ -69,14 +68,14 @@ Page {
     // Accessibility: announce previous value
     function announcePreviousValue() {
         accessibilityValueIndex = (accessibilityValueIndex - 1 + accessibilityValueNames.length) % accessibilityValueNames.length
-        if (typeof AccessibilityManager !== "undefined" && AccessibilityManager.enabled) {
+        if (typeof AccessibilityManager !== "undefined" && AccessibilityManager !== null && AccessibilityManager.enabled) {
             AccessibilityManager.announce(getAccessibilityValue(accessibilityValueIndex), true)
         }
     }
 
     // Accessibility: announce full status
     function announceFullStatus() {
-        if (typeof AccessibilityManager !== "undefined" && AccessibilityManager.enabled) {
+        if (typeof AccessibilityManager !== "undefined" && AccessibilityManager !== null && AccessibilityManager.enabled) {
             var status = "Shot status. "
             status += getAccessibilityValue(0) + ". "  // Frame
             status += getAccessibilityValue(1) + ". "  // Time
@@ -89,20 +88,20 @@ Page {
 
     // Keyboard shortcuts to stop and go back
     Keys.onEscapePressed: {
-        root.stopReason = "manual"
+        AppShell.stopReason = "manual"
         DE1Device.stopOperation()
-        root.goToIdle()
+        AppShell.idleRequested()
     }
 
     Keys.onSpacePressed: {
-        root.stopReason = "manual"
+        AppShell.stopReason = "manual"
         DE1Device.stopOperation()
-        root.goToIdle()
+        AppShell.idleRequested()
     }
 
     // Additional keyboard navigation for accessibility
     Keys.onPressed: function(event) {
-        if (typeof AccessibilityManager !== "undefined" && AccessibilityManager.enabled) {
+        if (typeof AccessibilityManager !== "undefined" && AccessibilityManager !== null && AccessibilityManager.enabled) {
             if (event.key === Qt.Key_Left) {
                 announcePreviousValue()
                 event.accepted = true
@@ -116,9 +115,9 @@ Page {
         }
         // Backspace also goes back
         if (event.key === Qt.Key_Backspace) {
-            root.stopReason = "manual"
+            AppShell.stopReason = "manual"
             DE1Device.stopOperation()
-            root.goToIdle()
+            AppShell.idleRequested()
             event.accepted = true
         }
     }
@@ -138,7 +137,7 @@ Page {
 
     // Helper to check if accessibility announcements are enabled
     function accessibilityEnabled() {
-        return typeof AccessibilityManager !== "undefined" && AccessibilityManager.enabled
+        return typeof AccessibilityManager !== "undefined" && AccessibilityManager !== null && AccessibilityManager.enabled
     }
 
     // Get phase announcement text
@@ -638,15 +637,15 @@ Page {
 
         activeFocusOnTab: true
         Keys.onReturnPressed: {
-            root.stopReason = "manual"
+            AppShell.stopReason = "manual"
             DE1Device.stopOperation()
-            root.goToIdle()
+            AppShell.idleRequested()
             event.accepted = true
         }
         Keys.onSpacePressed: {
-            root.stopReason = "manual"
+            AppShell.stopReason = "manual"
             DE1Device.stopOperation()
-            root.goToIdle()
+            AppShell.idleRequested()
             event.accepted = true
         }
 
@@ -665,9 +664,9 @@ Page {
             accessibleName: TranslationManager.translate("espresso.accessible.stopShot", "Stop espresso shot")
             accessibleItem: espressoStopButton
             onAccessibleClicked: {
-                root.stopReason = "manual"
+                AppShell.stopReason = "manual"
                 DE1Device.stopOperation()
-                root.goToIdle()
+                AppShell.idleRequested()
             }
         }
     }
@@ -711,20 +710,20 @@ Page {
                 Accessible.name: TranslationManager.translate("espresso.accessible.stop", "Stop and go back")
                 Accessible.focusable: true
                 Accessible.onPressAction: {
-                    root.stopReason = "manual"
+                    AppShell.stopReason = "manual"
                     DE1Device.stopOperation()
-                    root.goToIdle()
+                    AppShell.idleRequested()
                 }
                 Keys.onReturnPressed: {
-                    root.stopReason = "manual"
+                    AppShell.stopReason = "manual"
                     DE1Device.stopOperation()
-                    root.goToIdle()
+                    AppShell.idleRequested()
                     event.accepted = true
                 }
                 Keys.onSpacePressed: {
-                    root.stopReason = "manual"
+                    AppShell.stopReason = "manual"
                     DE1Device.stopOperation()
-                    root.goToIdle()
+                    AppShell.idleRequested()
                     event.accepted = true
                 }
 
@@ -749,9 +748,9 @@ Page {
                     accessibleName: TranslationManager.translate("espresso.accessible.stopAndGoBack", "Stop shot and go back")
                     accessibleItem: espressoBackButton
                     onAccessibleClicked: {
-                        root.stopReason = "manual"
+                        AppShell.stopReason = "manual"
                         DE1Device.stopOperation()
-                        root.goToIdle()
+                        AppShell.idleRequested()
                     }
                 }
             }
@@ -1094,7 +1093,7 @@ Page {
         id: infoBarSwipeArea
         anchors.fill: infoBar
         anchors.leftMargin: Theme.scaled(80)  // Don't cover back button
-        enabled: typeof AccessibilityManager !== "undefined" && AccessibilityManager.enabled
+        enabled: typeof AccessibilityManager !== "undefined" && AccessibilityManager !== null && AccessibilityManager.enabled
         propagateComposedEvents: true
 
         property real startX: 0
@@ -1135,7 +1134,7 @@ Page {
     MultiPointTouchArea {
         anchors.fill: infoBar
         anchors.leftMargin: Theme.scaled(80)  // Don't cover back button
-        enabled: typeof AccessibilityManager !== "undefined" && AccessibilityManager.enabled
+        enabled: typeof AccessibilityManager !== "undefined" && AccessibilityManager !== null && AccessibilityManager.enabled
         minimumTouchPoints: 2
         maximumTouchPoints: 2
 
@@ -1150,7 +1149,7 @@ Page {
     MouseArea {
         id: chartTapArea
         anchors.fill: extractionViewLoader
-        enabled: typeof AccessibilityManager !== "undefined" && AccessibilityManager.enabled
+        enabled: typeof AccessibilityManager !== "undefined" && AccessibilityManager !== null && AccessibilityManager.enabled
 
         property real startX: 0
         property real startY: 0
@@ -1179,7 +1178,7 @@ Page {
     // Two-finger tap on chart for full status announcement
     MultiPointTouchArea {
         anchors.fill: extractionViewLoader
-        enabled: typeof AccessibilityManager !== "undefined" && AccessibilityManager.enabled
+        enabled: typeof AccessibilityManager !== "undefined" && AccessibilityManager !== null && AccessibilityManager.enabled
         minimumTouchPoints: 2
         maximumTouchPoints: 2
 

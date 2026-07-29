@@ -252,7 +252,7 @@ Rectangle {
         property real _androidKeyboardHeight: {
             if (Qt.platform.os !== "android") return 0
             if (!conversationKeyboardContainer.textFieldFocused) return 0
-            var kbh = Qt.inputMethod.keyboardRectangle.height / Screen.devicePixelRatio
+            var kbh = Keyboard.rectangle.height / Screen.devicePixelRatio
             return kbh > 0 ? kbh : overlay.height * 0.45
         }
 
@@ -683,7 +683,7 @@ Rectangle {
                         // Returns true if the message was actually sent, so callers
                         // (e.g. submitIntake) can avoid dismissing UI on a refused send.
                         function sendFollowUp() {
-                            Qt.inputMethod.commit()
+                            Keyboard.commit()
                             if (text.length === 0) return false
                             if (!MainController.aiManager || !MainController.aiManager.conversation) return false
 
@@ -734,7 +734,7 @@ Rectangle {
                                 text = ""
                                 // Dismiss keyboard after sending
                                 conversationInput.focus = false
-                                Qt.inputMethod.hide()
+                                Keyboard.hide()
                                 if (hasShotData)
                                     overlay.pendingShotSummaryCleared()
                             }
@@ -933,7 +933,7 @@ Rectangle {
         // Android uses adjustPan (window shifts), so always full height.
         property real keyboardHeight: {
             if (!inputDialogTextArea.activeFocus) return 0
-            var kbh = Qt.inputMethod.keyboardRectangle.height
+            var kbh = Keyboard.rectangle.height
             return kbh > 0 ? kbh : parent.height * 0.45
         }
 
@@ -984,7 +984,7 @@ Rectangle {
                     primary: true
                     enabled: inputDialogTextArea.text.length > 0 && inputRow.canSend
                     onClicked: {
-                        Qt.inputMethod.commit()
+                        Keyboard.commit()
                         // Stage the message and close; inputDialog.onClosed runs
                         // sendFollowUp() once the dialog + keyboard transitions
                         // are complete, so the overlay isn't being mutated on
@@ -1167,6 +1167,7 @@ Rectangle {
                 property real buttonHeight: Theme.scaled(50)
 
                 AccessibleButton {
+                    id: cancelButton
                     width: parent.buttonWidth
                     height: parent.buttonHeight
                     text: TranslationManager.translate("aiReport.cancel", "Cancel")
@@ -1180,7 +1181,7 @@ Rectangle {
                         border.color: Theme.textSecondaryColor
                     }
                     contentItem: Text {
-                        text: parent.text
+                        text: cancelButton.text
                         font: Theme.bodyFont
                         color: Theme.textColor
                         horizontalAlignment: Text.AlignHCenter
@@ -1189,6 +1190,7 @@ Rectangle {
                 }
 
                 AccessibleButton {
+                    id: openWebButton
                     width: parent.buttonWidth
                     height: parent.buttonHeight
                     enabled: MainController.shotServer && MainController.shotServer.running
@@ -1203,10 +1205,10 @@ Rectangle {
                     background: Rectangle {
                         implicitHeight: Theme.scaled(60)
                         radius: Theme.buttonRadius
-                        color: parent.down ? Qt.darker(Theme.primaryColor, 1.2) : Theme.primaryColor
+                        color: openWebButton.down || openWebButton.isPressed ? Qt.darker(Theme.primaryColor, 1.2) : Theme.primaryColor
                     }
                     contentItem: Text {
-                        text: parent.text
+                        text: openWebButton.text
                         font: Theme.bodyFont
                         color: Theme.primaryContrastColor
                         horizontalAlignment: Text.AlignHCenter

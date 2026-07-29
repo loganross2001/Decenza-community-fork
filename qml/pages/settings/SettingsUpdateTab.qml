@@ -3,7 +3,6 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Effects
 import Decenza
-import "../../components"
 
 Item {
     id: updateTab
@@ -12,7 +11,7 @@ Item {
     property int versionTapCount: 0
     property var lastTapTime: 0
 
-    readonly property var fw: typeof MainController !== "undefined" && MainController
+    readonly property var fw: typeof MainController !== "undefined" && MainController !== null && MainController
                               ? MainController.firmwareUpdater : null
 
 
@@ -66,7 +65,7 @@ Item {
 
                         Text {
                             Layout.alignment: Qt.AlignHCenter
-                            text: "v" + AppVersion
+                            text: "v" + MainController.updateChecker.currentVersion
                             color: Theme.accentColor
                             font.pixelSize: Theme.scaled(18)
                             font.bold: true
@@ -74,7 +73,7 @@ Item {
 
                         Text {
                             Layout.alignment: Qt.AlignHCenter
-                            text: TranslationManager.translate("update.build", "Build %1").arg(AppVersionCode)
+                            text: TranslationManager.translate("update.build", "Build %1").arg(MainController.updateChecker.currentVersionCode)
                             color: Theme.textSecondaryColor
                             font.pixelSize: Theme.scaled(12)
                         }
@@ -101,7 +100,7 @@ Item {
                         anchors.bottom: parent.bottom
                         anchors.right: manualButton.left
                         anchors.rightMargin: Theme.scaled(6)
-                        accessibleName: TranslationManager.translate("update.versionBuild", "Version %1, Build %2").arg(AppVersion).arg(AppVersionCode)
+                        accessibleName: TranslationManager.translate("update.versionBuild", "Version %1, Build %2").arg(MainController.updateChecker.currentVersion).arg(MainController.updateChecker.currentVersionCode)
                         onAccessibleClicked: {
                             var now = Date.now()
                             // Reset counter if more than 2 seconds since last tap
@@ -604,7 +603,7 @@ Item {
                         Text {
                             text: MainController.updateChecker.updateAvailable
                                   ? TranslationManager.translate("settings.update.pendingNotes", "What's New in v%1").arg(MainController.updateChecker.latestVersion)
-                                  : TranslationManager.translate("settings.update.currentNotes", "Release Notes — v%1").arg(AppVersion)
+                                  : TranslationManager.translate("settings.update.currentNotes", "Release Notes — v%1").arg(MainController.updateChecker.currentVersion)
                             color: Theme.textColor
                             font.pixelSize: Theme.scaled(12)
                             font.bold: true
@@ -797,7 +796,7 @@ Item {
                         text: {
                             var version = MainController.updateChecker.updateAvailable
                                 ? MainController.updateChecker.latestVersion
-                                : AppVersion
+                                : MainController.updateChecker.currentVersion
                             return TranslationManager.translate("settings.update.whatsnew", "What's New?") +
                                   (version ? " - v" + version : "")
                         }

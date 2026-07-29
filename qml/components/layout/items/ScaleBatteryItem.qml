@@ -1,8 +1,12 @@
+// `layer.effect` declares an inline component, so ids from this file are not statically
+// resolvable inside it without this pragma. No delegate in this file takes model roles,
+// so no `required property` is needed — see PresetPillRow.qml for the case that does.
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Effects
 import QtQuick.Layouts
 import Decenza
-import "../.."
 
 Item {
     id: root
@@ -118,7 +122,7 @@ Item {
             accessibleName: root.accessibleText
             accessibleItem: compactContent
             onAccessibleClicked: {
-                if (typeof AccessibilityManager !== "undefined" && AccessibilityManager.enabled) {
+                if (typeof AccessibilityManager !== "undefined" && AccessibilityManager !== null && AccessibilityManager.enabled) {
                     AccessibilityManager.announceLabel(root.accessibleText)
                 }
             }
@@ -181,7 +185,7 @@ Item {
             accessibleName: root.accessibleText
             accessibleItem: fullContent
             onAccessibleClicked: {
-                if (typeof AccessibilityManager !== "undefined" && AccessibilityManager.enabled) {
+                if (typeof AccessibilityManager !== "undefined" && AccessibilityManager !== null && AccessibilityManager.enabled) {
                     AccessibilityManager.announceLabel(root.accessibleText)
                 }
             }

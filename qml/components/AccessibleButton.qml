@@ -1,3 +1,8 @@
+// `layer.effect` declares an inline component, so ids from this file are not statically
+// resolvable inside it without this pragma. No delegate in this file takes model roles,
+// so no `required property` is needed — see PresetPillRow.qml for the case that does.
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Effects
@@ -170,7 +175,7 @@ Button {
 
     // Clear lastAnnouncedItem when destroyed to prevent dangling pointer crash
     Component.onDestruction: {
-        if (typeof AccessibilityManager !== "undefined" &&
+        if (typeof AccessibilityManager !== "undefined" && AccessibilityManager !== null &&
             AccessibilityManager.lastAnnouncedItem === root) {
             AccessibilityManager.lastAnnouncedItem = null
         }
@@ -188,7 +193,7 @@ Button {
         }
 
         onClicked: {
-            var accessibilityMode = typeof AccessibilityManager !== "undefined" && AccessibilityManager.enabled
+            var accessibilityMode = typeof AccessibilityManager !== "undefined" && AccessibilityManager !== null && AccessibilityManager.enabled
 
             if (accessibilityMode) {
                 if (AccessibilityManager.lastAnnouncedItem === root) {
@@ -210,7 +215,7 @@ Button {
     // Accessible.name, not accessibleName: the former folds in accessibleDescription,
     // and callers use that to carry state the label itself doesn't say.
     onActiveFocusChanged: {
-        if (activeFocus && typeof AccessibilityManager !== "undefined" && AccessibilityManager.enabled) {
+        if (activeFocus && typeof AccessibilityManager !== "undefined" && AccessibilityManager !== null && AccessibilityManager.enabled) {
             AccessibilityManager.lastAnnouncedItem = root
             AccessibilityManager.announce(root.Accessible.name)
         }

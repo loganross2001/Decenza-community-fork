@@ -4,10 +4,16 @@ import QtQuick.Layouts
 import QtQuick.Effects
 import QtQuick.Window
 import Decenza
-import "../.."
 
 Item {
     id: root
+
+    // `Window` is an ATTACHED property: it resolves against the current scope, so it is read here
+    // on the item itself rather than as `root.appWindow` from inside the popup below. That
+    // spelling works at runtime but is an attached lookup through an id, which qmllint cannot see
+    // — it reports `Member "Window" not found on type "SteamItem"`. Reading it once also removes the
+    // duplicate lookups.
+    readonly property var appWindow: Window.window
     property bool isCompact: false
     property string itemId: ""
 
@@ -45,9 +51,7 @@ Item {
     }
 
     function goToSteam() {
-        if (typeof pageStack !== "undefined") {
-            pageStack.push(Qt.resolvedUrl("../../../pages/SteamPage.qml"))
-        }
+            AppShell.steamRequested()
     }
 
     // --- COMPACT MODE ---
@@ -121,12 +125,12 @@ Item {
                 var rootTopInPage = root.mapToItem(root.idlePage, 0, 0).y
                 root.idlePage.requestPanelClearance(rootTopInPage + presetPopup.y, presetPopup.height)
             }
-            if (typeof MachineState !== "undefined") MachineState.tareScale()
+            if (typeof MachineState !== "undefined" && MachineState !== null) MachineState.tareScale()
 
             // Full-mode steam path runs IdlePage.onActivePresetFunctionChanged which
             // announces the preset list to TalkBack. The compact-mode popup bypasses
             // that path, so announce here directly to keep feature parity.
-            if (typeof AccessibilityManager === "undefined" || !AccessibilityManager.enabled) return
+            if (typeof AccessibilityManager === "undefined" || AccessibilityManager === null || !AccessibilityManager.enabled) return
             var presets = Settings.brew.steamPitcherPresets
             if (presets.length === 0) return
             var names = []
@@ -145,14 +149,14 @@ Item {
         }
 
         width: {
-            var win = root.Window.window
+            var win = root.appWindow
             var w = Theme.scaled(600) + 2 * padding
             return win ? Math.min(w, win.width) : w
         }
 
         y: {
             var _v = visible // Force re-evaluation when popup opens (mapToItem is not reactive)
-            var win = root.Window.window
+            var win = root.appWindow
             if (win) {
                 var globalY = root.mapToItem(null, 0, 0).y
                 var spaceBelow = win.height - globalY - root.height - Theme.spacingSmall
@@ -165,7 +169,7 @@ Item {
 
         x: {
             var _v = visible // Force re-evaluation when popup opens (mapToItem is not reactive)
-            var win = root.Window.window
+            var win = root.appWindow
             if (win) {
                 var globalX = root.mapToItem(null, 0, 0).x
                 var centered = -width / 2 + parent.width / 2
@@ -190,6 +194,8 @@ Item {
         }
 
         contentItem: Item {
+            id: popupContent
+
             implicitWidth: popupPillRow.implicitWidth
             implicitHeight: popupPillRow.implicitHeight
 
@@ -198,7 +204,7 @@ Item {
             Connections {
                 target: MachineState
                 function onScaleWeightChanged() {
-                    if (presetPopup.visible) popupPillRow.parent.popupSuffixVersion++
+                    if (presetPopup.visible) popupContent.popupSuffixVersion++
                 }
             }
 
@@ -239,13 +245,11 @@ Item {
                         // same helper the idle pill tap and steam-plan display use (their
                         // milk FALLBACKS differ per surface) — so this popup can't program
                         // an unscaled duration while the plan shows a scaled one. Net milk
-                        // on the scale now, else this session's captured milk. (If the
-                        // window's sessionMeasuredMilkG is ever renamed this silently reads
-                        // 0 → base duration; SteamPlanText's one-time warn is the canary.)
+                        // on the scale now, else this session's captured milk.
                         var milk = (ScaleDevice && ScaleDevice.connected && !ScaleDevice.isFlowScale)
                                    ? Settings.brew.netMilkForPitcher(index, MachineState.scaleWeight) : 0
-                        if (milk <= 0 && root.Window.window)
-                            milk = root.Window.window.sessionMeasuredMilkG || 0
+                        if (milk <= 0)
+                            milk = AppShell.sessionMeasuredMilkG
                         Settings.brew.steamTimeout = Settings.brew.effectiveSteamDurationSec(index, milk)
                         Settings.brew.steamFlow = preset.flow !== undefined ? preset.flow : 150
                         Settings.brew.steamTemperature = (preset.temperature !== undefined) ? preset.temperature : Settings.brew.steamTemperature
@@ -257,7 +261,7 @@ Item {
                             DE1Device.startSteam()
                         } else {
                             console.log("Cannot start steam - machine not ready, phase:", MachineState.phase)
-                            if (typeof AccessibilityManager !== "undefined" && AccessibilityManager.enabled)
+                            if (typeof AccessibilityManager !== "undefined" && AccessibilityManager !== null && AccessibilityManager.enabled)
                                 AccessibilityManager.announce(TranslationManager.translate("machine.notReady", "Machine is not ready"))
                         }
                     }

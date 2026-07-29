@@ -1,3 +1,8 @@
+// `layer.effect` declares an inline component, so ids from this file are not statically
+// resolvable inside it without this pragma. No delegate in this file takes model roles,
+// so no `required property` is needed — see PresetPillRow.qml for the case that does.
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Effects
@@ -112,7 +117,7 @@ RoundButton {
 
     // Announce button name when focused via keyboard
     onActiveFocusChanged: {
-        if (activeFocus && typeof AccessibilityManager !== "undefined" && AccessibilityManager.enabled) {
+        if (activeFocus && typeof AccessibilityManager !== "undefined" && AccessibilityManager !== null && AccessibilityManager.enabled) {
             AccessibilityManager.lastAnnouncedItem = root
             AccessibilityManager.announce(root.accessibleName)
         }

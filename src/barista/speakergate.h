@@ -42,6 +42,7 @@ private:
     void reevaluate();
     bool anySpeaking() const;
     void setQuiet(bool q);
+    int routeDrainMs() const;   // per-route acoustic window: Bluetooth ~400ms, wired/USB/built-in ~150ms
 
     AssistantVoice* m_conv = nullptr;
     AssistantVoice* m_coaching = nullptr;

@@ -1,6 +1,20 @@
 #include "speakergate.h"
 
 #include "assistantvoice.h"
+#include "baristadiagnostics.h"
+
+#ifdef Q_OS_ANDROID
+#include <QCoreApplication>
+#include <QJniObject>
+#endif
+
+namespace {
+// Per-route acoustic-tail windows (ms). Bluetooth A2DP buffers ~100-300ms + room decay → keep a real guard;
+// USB-C / wired / built-in are low-latency (Phase-0 measured ~0 tail on built-in), so a short window is safe
+// and keeps the mic snappy. Route is detected live (SpeakerGate::routeDrainMs).
+constexpr int kBluetoothDrainMs = 400;
+constexpr int kWiredDrainMs     = 150;
+}  // namespace
 
 SpeakerGate::SpeakerGate(AssistantVoice* conv, AssistantVoice* coaching, QObject* parent)
     : QObject(parent), m_conv(conv), m_coaching(coaching)
@@ -37,9 +51,29 @@ void SpeakerGate::reevaluate()
         return;
     }
     // Nothing speaking now. Don't declare quiet yet — wait out the acoustic tail. If we were already
-    // quiet (idle), keep it; otherwise arm the drain window.
-    if (!m_quiet && !m_drain.isActive())
+    // quiet (idle), keep it; otherwise arm the drain window sized to the route we just spoke through.
+    if (!m_quiet && !m_drain.isActive()) {
+        const int prev = m_drainMs;
+        m_drainMs = routeDrainMs();
+        if (m_drainMs != prev)
+            BaristaDiagnostics::record(QStringLiteral("gate"), QStringLiteral("drain_ms"),
+                {{QStringLiteral("ms"), m_drainMs}});
         m_drain.start(m_drainMs);
+    }
+}
+
+int SpeakerGate::routeDrainMs() const
+{
+#ifdef Q_OS_ANDROID
+    const QJniObject ctx = QNativeInterface::QAndroidApplication::context();
+    if (ctx.isValid()) {
+        const bool bt = QJniObject::callStaticMethod<jboolean>(
+            "io/github/kulitorum/decenza_de1/DecenzaSpeech", "outputIsBluetooth",
+            "(Landroid/content/Context;)Z", ctx.object());
+        return bt ? kBluetoothDrainMs : kWiredDrainMs;
+    }
+#endif
+    return kBluetoothDrainMs;   // desktop / unknown → conservative
 }
 
 void SpeakerGate::setDrainMs(int ms)

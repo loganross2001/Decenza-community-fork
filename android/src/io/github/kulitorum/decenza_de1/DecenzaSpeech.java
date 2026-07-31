@@ -114,6 +114,28 @@ public class DecenzaSpeech {
         }
     }
 
+    // [barista-fork] Two-way-comms redesign: is the barista's TTS going out over a Bluetooth speaker? Bluetooth
+    // A2DP buffers ~100-300ms, so the speaker keeps emitting after playback "ends" (the acoustic-tail echo the
+    // mic could transcribe); USB-C / wired / built-in are low-latency (tens of ms). The SpeakerGate calls this to
+    // pick its drain window (BT → ~400ms, else → ~150ms). Qt's QMediaDevices can't tell on this tablet (it always
+    // reports "Built in speaker"), so we ask AudioManager directly. Connected == the active media route, since
+    // Android routes media to A2DP when a BT speaker is present.
+    public static boolean outputIsBluetooth(Context ctx) {
+        try {
+            if (audio == null)
+                audio = (AudioManager) ctx.getApplicationContext().getSystemService(Context.AUDIO_SERVICE);
+            if (audio == null) return false;
+            for (AudioDeviceInfo d : audio.getDevices(AudioManager.GET_DEVICES_OUTPUTS)) {
+                int t = d.getType();
+                if (t == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP || t == AudioDeviceInfo.TYPE_BLUETOOTH_SCO)
+                    return true;
+            }
+            return false;   // USB-C / wired / built-in → low latency
+        } catch (Throwable t) {
+            return false;    // unknown → treat as low-latency (the self-echo text filter still backstops)
+        }
+    }
+
     public static void start(final Context ctx, final boolean preferOffline) {
         main.post(new Runnable() {
             @Override public void run() {

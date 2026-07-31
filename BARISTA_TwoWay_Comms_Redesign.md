@@ -233,3 +233,23 @@ DEFERRED — both turned out LARGER than "hardening"/"deletion"; each needs its 
 
 - **Forced `respond(text, end_conversation)` (Phase 2 structural bit).** BLOCKER discovered: forcing `tool_choice` to a single `respond` tool is INCOMPATIBLE with the barista's multi-tool loop — the model must be free to call `getShotHistory`/`web_search`/`applyDial`/`end_conversation` mid-turn, and a forced single-tool choice forbids that. The workable shape is Anthropic `tool_choice:"any"` (model must call SOME tool; `respond` is the only "answer" tool so every final reply carries the bit) — but that means the model can NEVER emit free text, so the "let me check" lead-in prose (currently emitted as pre-tool text, `interimText`) has to be re-plumbed through a tool arg. That is a turn-protocol change touching the exact aiprovider.cpp tool loop just merged (#1691/#1694). MUST be Anthropic-only (barista's provider) and scoped to `analyzeConversation` ONLY — never `analyze`/`analyzeUrl`/advisor, or it wrecks recipe URL extraction. Fail-safe: a reply without a `respond` call falls back to today's text path + looksLikeClose/end_conversation. Do as a dedicated session with a Bluetooth-speaker on-device test.
 - **Phase 4 (delete old path).** NOT a mechanical deletion. The `_nc` path in `AssistantOverlay.qml` (2709 lines, UNLINTED) still depends on `AssistantOrchestrator` for shot-tracking/exchange/recency (`markExchangeCompleted`, `lastShotId`, `markShotDiscussed`, `recencyBucket`). Removing the orchestrator/flag requires migrating that shared infra out of QML first. **Keep the `useNewConversation` flag** — it is the only on-device rollback if the new path has a latent bug. Do as its own session after Phase-2-forced is validated.
+
+## 16. Session close / next-session handoff (2026-07-30)
+
+**State: feat/barista at `0e2df8ef`, 0 behind upstream, pushed to the PRIVATE `backup` remote (Decenza-private). App builds green; tst_closeintent 42/42.**
+
+Latest testable APK: `~/Downloads/Decenza-barista-default-on-tested-vc3460574.apk` (all earlier vc346xxxx APKs are superseded). Contains: upstream merge + stale-data fix + close/stall hardening + the "no more questions" close fix + new engine default-ON.
+
+Shipped this session (commits, newest first):
+- `0e2df8ef` — extracted looksLikeClose/looksLikeStall → `src/barista/closeintent.{h,cpp}`; added `tests/tst_closeintent.cpp` (42 cases, RUN locally 42/42); the test caught a real bug (bare "no more questions" didn't close — prefix stripper ate "no") → fixed (commas→spaces, "no" no longer a stripped prefix). Flipped `AssistantSettings::useNewConversation` default → **true** (flag kept as rollback).
+- `8ab759ec` — stall fix: model ending a turn with only "let me check on that" (no tool call) dropped to Listening. Now `looksLikeStall()` treats a bare promise-to-continue as a lead-in: speak it, keep turnInFlight true (→ Thinking → tone), and send ONE continuation (`continuationRequested` → overlay `followUp`, deferred via Qt.callLater) to fetch the real answer. Bounded by kMaxAutoContinues=1, skipped when closing.
+- `b778868d` — close hardening: prefix-aware `looksLikeClose()` (fixes "thanks, that'll be all") + NeedsTap walk-away auto-close (m_needsTapIdle 45s).
+- `9b1c0e5c` — upstream merge (37 commits): migration 38 = enrichment heal (renumbered from upstream 35; see [[decenza-fork-schema-divergence]]); aiprovider.cpp #1691/#1694 truncation+thinking-off interleaved with the barista tool loops; FINAL Q_PROPERTY conflicts; test "latest" assertions → 38.
+
+Verify a fix engaged on-device via `~/Downloads/barista-diagnostics.log`: `close_intent_local`, `stall_autocontinue`, `needstap_idle_autoclose`.
+
+STILL DEFERRED (each its own validated session — see §15 for the full analysis; NOT started):
+1. **Forced `respond(text, end_conversation)`** — conflicts with the multi-tool loop (needs Anthropic `tool_choice:"any"` + lead-in re-plumbing), Anthropic-only, scoped to analyzeConversation ONLY. Low marginal value now that close/stall are fixed + tested; do only if the heuristic close proves insufficient on-device.
+2. **Phase 4 (delete legacy path)** — for a single user this is pure code-hygiene with ZERO behavior change and real "barista won't load" risk; the `_nc` path still leans on AssistantOrchestrator for shot/exchange/recency. Keep the `useNewConversation` flag until done.
+
+Open validation gap: the barista overlay QML is unlinted/untest-covered — on-device run is the only proof for anything touching AssistantOverlay.qml. Owner has built-in-speaker testing (no Bluetooth); the BT-speaker acoustic-drain (SpeakerGate D) validation for Phase 3 remains unrun.

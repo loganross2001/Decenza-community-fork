@@ -408,6 +408,42 @@ Rectangle {
                         }
                     }
 
+                    // [barista-fork] Two-way-comms redesign — experimental engine flag (parallel path). ON drives
+                    // the live conversation with the new state machine; OFF = the current engine (default). Safe to
+                    // flip on-device; turn back off if the new path misbehaves.
+                    BaristaSectionCard {
+                        caption: TranslationManager.translate("barista.settings.newConvEngine", "Conversation engine (experimental)")
+
+                        Tr {
+                            Layout.fillWidth: true
+                            key: "barista.settings.newConvEngineDesc"
+                            fallback: "Use the new conversation state machine (cleaner mic + close). Experimental — turn it off if the barista misbehaves."
+                            color: Theme.textSecondaryColor; font: Theme.labelFont; wrapMode: Text.WordWrap
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.spacingSmall
+                            Switch {
+                                id: newConvSwitch
+                                checked: root._settings ? root._settings.useNewConversation : false
+                                onToggled: if (root._settings) root._settings.useNewConversation = checked
+                                Accessible.role: Accessible.CheckBox
+                                Accessible.name: trNewConv.text
+                                Accessible.checked: checked
+                                Accessible.focusable: true
+                                Accessible.onToggleAction: toggle()
+                            }
+                            Tr {
+                                id: trNewConv
+                                Layout.fillWidth: true
+                                key: "barista.settings.newConvEngineOn"
+                                fallback: "New conversation engine"
+                                color: Theme.textColor; font: Theme.bodyFont; wrapMode: Text.WordWrap
+                            }
+                        }
+                    }
+
                     // [barista-fork] Diagnostics — the always-on voice/coaching timeline recorder. Lets the
                     // owner reproduce a glitch and hand back the exported log; stays on the device.
                     BaristaSectionCard {

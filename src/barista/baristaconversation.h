@@ -80,6 +80,7 @@ private:
     void updateMicLive();                         // the arbiter — the ONLY caller of VoiceInput.setActive
     void onVoiceSpeakingChanged();                // AssistantVoice.speakingChanged → Speaking transitions
     void onGateQuietChanged();                    // SpeakerGate.quiet → re-evaluate the arbiter
+    void updateThinkingTone();                    // play the thinking earcon while Thinking / the synth gap
     void setDisplay(const QString& t);
     void setPartial(const QString& t);
     void setMessage(const QString& t);
@@ -107,8 +108,7 @@ private:
 
     // Timers (single-shot unless noted) — the only ones the whole subsystem needs.
     QTimer m_primingTimeout;   // Priming → Listening safety (3s)
-    QTimer m_turnTimeout;      // Thinking → Speaking safety (10s)
+    QTimer m_turnTimeout;      // hung-turn guard, reset on model activity (20s)
     QTimer m_silence;          // Listening (micLive) → NeedsTap (8s)
-    QTimer m_filler;           // Thinking: speak one filler if no speakable in ~1.2s
     QTimer m_closingWatchdog;  // Closing → Idle if sign-off TTS never reports done (2.5s)
 };

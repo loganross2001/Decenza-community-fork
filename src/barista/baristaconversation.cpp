@@ -10,9 +10,12 @@
 namespace {
 // [barista-fork] Timers (design §13). Single, named, in one place — replacing the scattered QML timers.
 constexpr int kPrimingTimeoutMs = 3000;
-constexpr int kTurnTimeoutMs     = 10000;
+// [barista-fork] A HUNG-turn guard, not an SLA. It is RESET on every model activity (each interim/lead-in and on
+// re-entering Thinking), so a slow-but-progressing tool turn (lead-in → tool → 2nd round-trip → answer, easily
+// 15-25s total) never trips it — only genuine dead air does. Was 10s, which wrongly abandoned tool turns to
+// Listening mid-answer.
+constexpr int kTurnTimeoutMs     = 20000;
 constexpr int kSilenceMs         = 8000;
-constexpr int kFillerMs          = 1200;   // no speakable within this of entering Thinking → one filler
 constexpr int kClosingWatchdogMs = 2500;
 
 // Generous local close-intent (a latency accelerator only — the forced per-turn close bit is the real
@@ -36,14 +39,17 @@ BaristaConversation::BaristaConversation(AssistantVoice* voice, AssistantVoice* 
       m_gate(new SpeakerGate(voice, coaching, this))
 {
     connect(m_gate, &SpeakerGate::quietChanged, this, &BaristaConversation::onGateQuietChanged);
-    if (m_voice)
+    if (m_voice) {
         connect(m_voice, &AssistantVoice::speakingChanged, this, &BaristaConversation::onVoiceSpeakingChanged);
+        // Real audio starting/stopping toggles the thinking earcon (it must not play OVER audible speech, and
+        // must resume in the silent gaps — same rule the old overlay used).
+        connect(m_voice, &AssistantVoice::audibleChanged, this, &BaristaConversation::updateThinkingTone);
+    }
 
     const auto oneShot = [](QTimer& t, int ms) { t.setSingleShot(true); t.setInterval(ms); };
     oneShot(m_primingTimeout, kPrimingTimeoutMs);
     oneShot(m_turnTimeout, kTurnTimeoutMs);
     oneShot(m_silence, kSilenceMs);
-    oneShot(m_filler, kFillerMs);
     oneShot(m_closingWatchdog, kClosingWatchdogMs);
 
     connect(&m_primingTimeout, &QTimer::timeout, this, [this]() {
@@ -63,15 +69,9 @@ BaristaConversation::BaristaConversation(AssistantVoice* voice, AssistantVoice* 
             setState(State::NeedsTap);
         }
     });
-    connect(&m_filler, &QTimer::timeout, this, [this]() {
-        // Thinking is slow and nothing has spoken yet → one short filler. (Filler-content sourcing is
-        // refined in the filler-move increment; a canned line keeps the everyday timeline honest for now.)
-        if (m_state == State::Thinking && m_voice && !m_voice->speaking()) {
-            diag(QStringLiteral("filler_spoken"));
-            setState(State::Speaking);
-            m_voice->speak(QStringLiteral("One sec."));
-        }
-    });
+    // [barista-fork] No canned "One sec" filler: the model emits its own lead-in ("let me check") via
+    // onModelSpeakable, and the thinking earcon fills the silent gaps — a canned line would talk over the
+    // model's lead-in. (A model-generated quick-filler can return in a later increment.)
     connect(&m_closingWatchdog, &QTimer::timeout, this, [this]() {
         if (m_state == State::Closing) { diag(QStringLiteral("closing_watchdog")); setState(State::Idle); }
     });
@@ -102,7 +102,7 @@ void BaristaConversation::setState(State s)
     // Per-state entry actions.
     switch (s) {
     case State::Idle:
-        m_primingTimeout.stop(); m_turnTimeout.stop(); m_silence.stop(); m_filler.stop(); m_closingWatchdog.stop();
+        m_primingTimeout.stop(); m_turnTimeout.stop(); m_silence.stop(); m_closingWatchdog.stop();
         m_closingArmed = false; m_turnInFlight = false; m_pendingAnswer.clear();
         if (m_voice) m_voice->stop();
         break;
@@ -115,12 +115,10 @@ void BaristaConversation::setState(State s)
         break;
     case State::Thinking:
         m_turnInFlight = true;
-        m_turnTimeout.start();
-        m_filler.start();
+        m_turnTimeout.start();   // (re)started on every Thinking entry → resets on model activity
         break;
     case State::Speaking:
         m_turnTimeout.stop();
-        m_filler.stop();
         break;
     case State::Closing:
         m_closingWatchdog.start();
@@ -134,10 +132,26 @@ void BaristaConversation::setState(State s)
     if (active() != wasActive)
         emit activeChanged();
     updateMicLive();
+    updateThinkingTone();
     if (s == State::Closing) {
         // Sign-off has already been spoken by the turn that armed closing; this is pure teardown.
         emit closingConfirmed();
     }
+}
+
+void BaristaConversation::updateThinkingTone()
+{
+    if (!m_voice)
+        return;
+    // The thinking earcon fills the SILENT waits: while Thinking (waiting on the model, incl. after a "let me
+    // check" lead-in), and during the synth/network gap of Speaking before real audio is out. Never over
+    // audible speech. Mirrors the old overlay's _updateThinkingLoop, minus the scattered flags.
+    const bool want = (m_state == State::Thinking)
+                      || (m_state == State::Speaking && !m_voice->audible());
+    if (want)
+        m_voice->startThinkingLoop();
+    else
+        m_voice->stopThinkingLoop();
 }
 
 void BaristaConversation::updateMicLive()

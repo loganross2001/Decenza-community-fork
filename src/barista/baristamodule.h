@@ -3,6 +3,7 @@
 #include <QObject>
 
 #include "voiceinput.h"            // complete type needed for the Q_PROPERTY(VoiceInput*) metatype
+#include "baristaconversation.h"   // [barista-fork] complete type for the Q_PROPERTY(BaristaConversation*) metatype
 #include "baristaknowledge.h"      // ditto for Q_PROPERTY(BaristaKnowledge*)
 #include "baristaactions.h"        // ditto for Q_PROPERTY(BaristaActions*)
 #include "baristacontextbuilder.h" // ditto for Q_PROPERTY(BaristaContextBuilder*)
@@ -36,6 +37,9 @@ class BaristaModule : public QObject {
     Q_PROPERTY(AssistantVoice* voice READ voice CONSTANT)
     Q_PROPERTY(AssistantVoice* coachingVoice READ coachingVoice CONSTANT)
     Q_PROPERTY(VoiceInput* voiceInput READ voiceInput CONSTANT)
+    // [barista-fork] Two-way-comms redesign: the new conversation state machine (QML reaches it as
+    // Barista.conversation when the useNewConversation flag is on). Present but inert while the flag is off.
+    Q_PROPERTY(BaristaConversation* conversation READ conversation CONSTANT)
     Q_PROPERTY(BaristaKnowledge* knowledge READ knowledge CONSTANT)
     Q_PROPERTY(BaristaActions* actions READ actions CONSTANT)
     Q_PROPERTY(BaristaContextBuilder* contextBuilder READ contextBuilder CONSTANT)
@@ -70,6 +74,7 @@ public:
     AssistantVoice* voice() const { return m_voice; }
     AssistantVoice* coachingVoice() const { return m_coachingVoice; }
     VoiceInput* voiceInput() const { return m_voiceInput; }
+    BaristaConversation* conversation() const { return m_conversation; }   // [barista-fork]
     BaristaKnowledge* knowledge() const { return m_knowledge; }
     BaristaActions* actions() const { return m_actions; }
     BaristaContextBuilder* contextBuilder() const { return m_contextBuilder; }
@@ -93,6 +98,9 @@ private:
     AssistantVoice* m_coachingVoice = nullptr;   // [barista-fork] separate voice for the live coaches
     CoachPhrasebook* m_coachPhrasebook = nullptr; // [barista-fork] model-generated varied cue phrasing + gameplan
     VoiceInput* m_voiceInput = nullptr;
+    // [barista-fork] Two-way-comms redesign state machine. Declared AFTER the voices + voiceInput so the ctor
+    // init-list can hand them to it. Inert until the useNewConversation flag engages it from QML.
+    BaristaConversation* m_conversation = nullptr;
     BaristaKnowledge* m_knowledge = nullptr;
     BaristaActions* m_actions = nullptr;
     BaristaContextBuilder* m_contextBuilder = nullptr;

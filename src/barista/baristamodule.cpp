@@ -75,6 +75,14 @@ BaristaModule::BaristaModule(MainController* mainController, MachineState* machi
     connect(m_settings, &AssistantSettings::enabledChanged,
             this, &BaristaModule::enabledChanged);
 
+    // [barista-fork] Two-way-comms redesign: construct the new conversation state machine (in the ctor BODY so
+    // the voices + voiceInput are fully built, and to avoid an init-list reorder warning). It owns the
+    // SpeakerGate + self-wires the conversational voice. Feed it the mic's finished utterances — harmless while
+    // the useNewConversation flag is off, since the controller ignores finalText until QML engages it (it stays
+    // Idle). The rest of the wiring (AI dispatch + QML delegation behind the flag) is the next increment.
+    m_conversation = new BaristaConversation(m_voice, m_coachingVoice, m_voiceInput, this);
+    connect(m_voiceInput, &VoiceInput::finalText, m_conversation, &BaristaConversation::onFinalText);
+
     // [barista-fork] Verbal-feedback KB wiring. assistant.db lives in the SAME app-data directory as shots.db
     // (derived from its path), so it self-relocates with the shot DB and never collides with shots.db's
     // migration chain. Initialize it and hand it to AIManager for the log_tasting_feedback write tool and the

@@ -679,6 +679,17 @@ void AssistantSettings::setVoiceIdMaybe(double v) {
     emit voiceIdMaybeChanged();
 }
 
+bool AssistantSettings::useNewConversation() const {
+    return m_settings.value(QStringLiteral("barista/useNewConversation"), false).toBool();
+}
+
+void AssistantSettings::setUseNewConversation(bool on) {
+    if (useNewConversation() == on)
+        return;
+    m_settings.setValue(QStringLiteral("barista/useNewConversation"), on);
+    emit useNewConversationChanged();
+}
+
 bool AssistantSettings::avatarEnabled() const {
     return m_settings.value(QStringLiteral("barista/avatarEnabled"), true).toBool();
 }

@@ -66,6 +66,10 @@ class AssistantSettings : public QObject {
     Q_PROPERTY(double voiceIdConfidence READ voiceIdConfidence WRITE setVoiceIdConfidence NOTIFY voiceIdConfidenceChanged)
     Q_PROPERTY(double voiceIdMargin READ voiceIdMargin WRITE setVoiceIdMargin NOTIFY voiceIdMarginChanged)
     Q_PROPERTY(double voiceIdMaybe READ voiceIdMaybe WRITE setVoiceIdMaybe NOTIFY voiceIdMaybeChanged)
+    // [barista-fork] Two-way-comms redesign migration flag (default OFF). When on, the barista's live
+    // conversation is driven by the new BaristaConversation state machine (parallel path) instead of the
+    // legacy QML latch/timer logic — so the rewrite can be flipped on-device and rolled back with a toggle.
+    Q_PROPERTY(bool useNewConversation READ useNewConversation WRITE setUseNewConversation NOTIFY useNewConversationChanged)
     Q_PROPERTY(bool avatarEnabled READ avatarEnabled WRITE setAvatarEnabled NOTIFY avatarEnabledChanged)
     Q_PROPERTY(QString avatarStyle READ avatarStyle WRITE setAvatarStyle NOTIFY avatarStyleChanged)
     // [barista-fork] Size of the avatar on the collapsed EDGE TAB (the pull-tab on the screen edge). Owner-
@@ -186,6 +190,8 @@ public:
     double voiceIdMaybe() const;                  // "maybe, confirm" cosine threshold (default 0.55)
     void setVoiceIdMaybe(double v);
 
+    bool useNewConversation() const;              // [barista-fork] migration flag (default off)
+    void setUseNewConversation(bool on);
     bool avatarEnabled() const;                   // show the animated character face (default on)
     void setAvatarEnabled(bool e);
 
@@ -252,6 +258,7 @@ signals:
     void voiceIdConfidenceChanged();
     void voiceIdMarginChanged();
     void voiceIdMaybeChanged();
+    void useNewConversationChanged();
     void avatarEnabledChanged();
     void avatarStyleChanged();
     void avatarTabSizeChanged();

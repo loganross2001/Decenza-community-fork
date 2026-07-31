@@ -74,6 +74,7 @@ public slots:
     void onModelSpeakable(const QString& text);   // filler / lead-in to speak now
     void onModelFinal(const QString& text, bool endConversation);  // final answer + forced close bit
     void onModelError(const QString& message);    // turn failed
+    void onCloseRequested();                      // model called end_conversation → arm closing (deterministic teardown)
 
 private:
     void setState(State s);

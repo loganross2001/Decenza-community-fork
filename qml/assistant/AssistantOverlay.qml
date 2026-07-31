@@ -1514,10 +1514,10 @@ Item {
         // onResponseReceived / onSpeakingChanged then ends the session once the sign-off finishes (never cut off).
         // If we're not actually in a live conversation, ignore it (a stray late emit must not dismiss nothing).
         function onDismissRequested() {
-            if (root._state === "conversing") {
-                root._endAfterReply = true
-                dismissFallbackTimer.restart()   // [barista-fork] guarantee the close even if the sign-off never speaks
-            }
+            if (root._state !== "conversing") return
+            if (root._nc) { root._nc.onCloseRequested(); return }   // [barista-fork] new path: arm the controller's deterministic close
+            root._endAfterReply = true
+            dismissFallbackTimer.restart()   // [barista-fork] guarantee the close even if the sign-off never speaks
         }
     }
 
@@ -2003,6 +2003,9 @@ Item {
                           ? TranslationManager.translate("barista.mic.stopAccessible", "Stop listening")
                           : TranslationManager.translate("barista.mic.chatAccessible", "Talk to the assistant")
                     onClicked: {
+                        // [barista-fork] new path: one gesture — the controller interprets it by state
+                        // (NeedsTap→Listening to resume; Speaking→skip/barge-in; else no-op).
+                        if (root._nc) { root._nc.tap(); return }
                         if (!root._voiceInput) return
                         if (root._voiceInput.listening) root._voiceInput.stop()
                         else {

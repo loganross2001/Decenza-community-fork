@@ -82,6 +82,10 @@ BaristaModule::BaristaModule(MainController* mainController, MachineState* machi
     // Idle). The rest of the wiring (AI dispatch + QML delegation behind the flag) is the next increment.
     m_conversation = new BaristaConversation(m_voice, m_coachingVoice, m_voiceInput, this);
     connect(m_voiceInput, &VoiceInput::finalText, m_conversation, &BaristaConversation::onFinalText);
+    // [barista-fork] VoiceInput.error fires only on a genuinely exhausted recogniser (it retries transient
+    // errors internally). Route it to the controller → NeedsTap (a visible "tap to talk"), so the new path
+    // never silently re-listens. Harmless while the flag is off (controller Idle → onSttError returns).
+    connect(m_voiceInput, &VoiceInput::error, m_conversation, &BaristaConversation::onSttError);
 
     // [barista-fork] Verbal-feedback KB wiring. assistant.db lives in the SAME app-data directory as shots.db
     // (derived from its path), so it self-relocates with the shot DB and never collides with shots.db's

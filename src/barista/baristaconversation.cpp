@@ -15,7 +15,10 @@ constexpr int kPrimingTimeoutMs = 3000;
 // 15-25s total) never trips it — only genuine dead air does. Was 10s, which wrongly abandoned tool turns to
 // Listening mid-answer.
 constexpr int kTurnTimeoutMs     = 20000;
-constexpr int kSilenceMs         = 8000;
+// [barista-fork] "Walked away" guard, not a turn-taking limit. 8s (the review's value) would drop the mic on a
+// normal think-pause and force a tap; 30s only fires when the user has genuinely stopped. VoiceInput handles the
+// sub-second no-match churn itself, so this only needs to catch true abandonment.
+constexpr int kSilenceMs         = 30000;
 constexpr int kClosingWatchdogMs = 2500;
 
 // Generous local close-intent (a latency accelerator only — the forced per-turn close bit is the real
@@ -252,6 +255,23 @@ void BaristaConversation::onModelFinal(const QString& text, bool endConversation
     }
     setState(State::Speaking);
     if (m_voice) m_voice->speak(text);
+}
+
+void BaristaConversation::onCloseRequested()
+{
+    // The model called end_conversation (its sign-off is in the same reply). Arm closing; the deterministic
+    // teardown fires when that reply finishes speaking (Speaking→Closing), or the closing watchdog backstops it.
+    // This is a SECOND close signal on top of the local looksLikeClose() accelerator — either is sufficient, so a
+    // farewell the local matcher misses still closes when the model calls the tool, and vice-versa. (The forced
+    // per-turn respond(text,end_conversation) protocol — the structural can't-miss version — is a later hardening
+    // that needs on-device validation because it changes the turn protocol per provider.)
+    if (m_state == State::Idle)
+        return;
+    m_closingArmed = true;
+    diag(QStringLiteral("close_requested_tool"));
+    // If nothing is left to speak (muted/text reply already done and we're idling in Listening), close now.
+    if (m_state == State::Listening)
+        setState(State::Closing);
 }
 
 void BaristaConversation::onModelError(const QString& message)

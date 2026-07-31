@@ -91,6 +91,13 @@ if(DECENZA_BARISTA)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/assistantvoice.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/voiceinput.h
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/voiceinput.cpp
+        # [barista-fork] Two-way-comms redesign (Phase 1): the single authoritative conversation state machine
+        # + the acoustic half of its mic arbiter. Behind the useNewConversation runtime flag (parallel path);
+        # inert until wired + flag on. See BARISTA_TwoWay_Comms_Redesign.md.
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/speakergate.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/speakergate.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristaconversation.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristaconversation.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristaknowledge.h
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristaknowledge.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristaactions.h

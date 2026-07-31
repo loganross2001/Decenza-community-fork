@@ -31,6 +31,10 @@ public:
     Q_INVOKABLE void stop();        // close the mic (end the session)
     Q_INVOKABLE void pauseMic();    // stop the recogniser but keep the session (e.g. while TTS speaks)
     Q_INVOKABLE void resumeMic();   // resume after pauseMic() if the session is still open
+    // [barista-fork] Two-way-comms redesign: the single mic control the new BaristaConversation arbiter uses.
+    // "Should the mic be hearing right now?" — a thin wrapper over the proven start/pause/resume surface so the
+    // frequent arbiter toggles (every TTS start/stop) reuse the session instead of tearing down the recogniser.
+    Q_INVOKABLE void setActive(bool on);
 
     // Reached from the Android JNI callbacks (already hopped to the main thread).
     void handleFinal(const QString& text);

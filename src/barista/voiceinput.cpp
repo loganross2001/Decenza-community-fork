@@ -148,6 +148,19 @@ void VoiceInput::stop() {
     stopRecogniser();
 }
 
+void VoiceInput::setActive(bool on) {
+    // [barista-fork] The new arbiter's one mic call. Reuse the open session across TTS toggles: open it on the
+    // first activate, then pause/resume for the frequent on/off; the session itself is closed by stop() on
+    // dismiss/Idle. This keeps setActive cheap (no recogniser teardown per toggle) while presenting the clean
+    // binary the state machine wants.
+    if (on) {
+        if (!m_listening) start();
+        else if (m_paused) resumeMic();
+    } else {
+        if (m_listening && !m_paused) pauseMic();
+    }
+}
+
 void VoiceInput::pauseMic() {
     if (!m_listening || m_paused)
         return;

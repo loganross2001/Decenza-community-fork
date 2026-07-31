@@ -56,6 +56,42 @@ class tst_McpToolsWrite : public QObject {
     Q_OBJECT
 
 private:
+    // Wait for a storage's background DB work to actually finish, before letting it
+    // go out of scope.
+    //
+    // This replaced five copies of `for (i < 20) { processEvents(); msleep(25); }`
+    // — a fixed 500 ms guess at how long a background write takes. That is the
+    // "timers as guards" anti-pattern CLAUDE.md forbids by name, and it behaved
+    // exactly as that rule predicts: fine when run alone, fine on retry, and
+    // intermittently NOT fine in the full parallel suite, where every binary is
+    // ASan- and UBSan-instrumented and competing for cores. A duration cannot be
+    // long enough, because the thing it is standing in for has no bound.
+    //
+    // Waiting matters rather than just being tidy: ~SerialDbWorker quit()s, which
+    // DISCARDS queued-but-unstarted tasks, and close() calls
+    // QSqlDatabase::removeDatabase(), which qWarns if a connection is still in use
+    // — and init()'s failOnWarning turns that into a failure. So a task still in
+    // flight at scope exit is either silently dropped or a warning, depending on
+    // timing. QTRY_VERIFY spins the event loop (which is what delivers the result
+    // callbacks) and fails loudly if the work never completes, instead of
+    // continuing regardless the way the sleep did.
+    // Drain, THEN close -- in that order, and only if the drain succeeded.
+    //
+    // The two were previously written as a `drainDbWork(storage); storage.close();` pair at
+    // all 12 call sites. That is a drift opportunity (nothing enforces the order, or that
+    // both are present), and it also mishandles failure: QTRY_VERIFY inside a non-slot
+    // helper returns from the HELPER, so a timed-out drain fell straight through to the
+    // close() it exists to protect, whose warning then became a second, louder failure that
+    // buried the first. Returning early here instead leaves the close to
+    // ~ShotHistoryStorage, which resets the worker (and WAITS) before closing -- so the
+    // teardown is safe even on the failure path.
+    static void drainDbWorkAndClose(ShotHistoryStorage& storage) {
+        QTRY_VERIFY(storage.isDbWorkIdle());
+        // One more pass for anything the final callback itself posted.
+        QCoreApplication::processEvents();
+        storage.close();
+    }
+
     // Load a minimal D-Flow profile
     static void loadDFlowProfile(McpTestFixture& f, const QString& title = "D-Flow / Test") {
         QJsonObject json;
@@ -393,11 +429,11 @@ private slots:
         QVERIFY(result3["success"].toBool());
         QVERIFY(!result3["bag"].toObject().contains("beanBase"));
 
-        storage.close();
-        for (int i = 0; i < 20; i++) {
-            QCoreApplication::processEvents();
-            QThread::msleep(25);
-        }
+        // Drain BEFORE close(). close() calls QSqlDatabase::removeDatabase(), which
+        // qWarns "connection is still in use" if background work still holds one —
+        // and failOnWarning makes that a failure. Closing first was the original
+        // order, with the sleep afterwards hoping the work had already finished.
+        drainDbWorkAndClose(storage);
     }
 
     // equipment_update: a name-only rename must be REPORTED as a success, not
@@ -445,11 +481,86 @@ private slots:
         });
         QCOMPARE(stored, QString("Bench Grinder (renamed)"));
 
-        storage.close();
-        for (int i = 0; i < 20; i++) {
-            QCoreApplication::processEvents();
-            QThread::msleep(25);
-        }
+        // Drain BEFORE close(). close() calls QSqlDatabase::removeDatabase(), which
+        // qWarns "connection is still in use" if background work still holds one —
+        // and failOnWarning makes that a failure. Closing first was the original
+        // order, with the sleep afterwards hoping the work had already finished.
+        drainDbWorkAndClose(storage);
+    }
+
+    // equipment_merge: the repair path for a grinder that got split in two
+    // (#1713). Pinned at the tool layer because the destructive part — the source
+    // package really is deleted and its shots really do move — is what an AI will
+    // be asked to run on a user's live history, and the only signal it has that
+    // the merge happened is this response.
+    void equipmentMergeMovesHistoryAndDeletesSource()
+    {
+        McpTestFixture f;
+        ShotHistoryStorage storage;
+        QVERIFY(storage.initialize(f.tempDir.filePath("eqmerge.db")));
+        registerWriteTools(&f.registry, &f.profileManager, &storage, &f.settings,
+                          nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+
+        qint64 source = -1, target = -1, movedShot = -1;
+        withTempDb(storage.databasePath(), "eqmerge_seed", [&](QSqlDatabase& db) {
+            EquipmentPackage a;
+            a.name = QStringLiteral("Eureka (with burrs)");
+            source = EquipmentStorage::createPackageWithGrinderStatic(
+                db, a, QStringLiteral("Eureka"), QStringLiteral("Mignon Single Dose"),
+                QStringLiteral("Lebrew Sweet"), QString(), QString(), QString());
+            EquipmentPackage b;
+            b.name = QStringLiteral("Eureka");
+            target = EquipmentStorage::createPackageWithGrinderStatic(
+                db, b, QStringLiteral("Eureka"), QStringLiteral("Mignon Single Dose"),
+                QString(), QString(), QString(), QString());
+            // The real schema, not the minimal one the storage tests build: uuid,
+            // timestamp, profile_name and duration_seconds are NOT NULL.
+            QSqlQuery q(db);
+            q.prepare("INSERT INTO shots (uuid, timestamp, profile_name, duration_seconds, equipment_id) "
+                      "VALUES ('eqmerge-shot-1', 1000, 'P', 25.0, ?)");
+            q.addBindValue(source);
+            QVERIFY2(q.exec(), qPrintable(q.lastError().text()));
+            movedShot = q.lastInsertId().toLongLong();
+        });
+        QVERIFY2(source > 0 && target > 0, "seed packages should be created");
+
+        QJsonObject args;
+        args["sourcePackageId"] = source;
+        args["targetPackageId"] = target;
+        const QJsonObject result = f.callAsyncTool("equipment_merge", args);
+        QVERIFY2(result["success"].toBool(), qPrintable(QJsonDocument(result).toJson()));
+        QCOMPARE(result["shotsMoved"].toInteger(), (qint64)1);
+        QCOMPARE(result["package"].toObject()["id"].toInteger(), target);
+        // The survivor now HOLDS that shot, so the response must say so. Reporting
+        // shotCount 0 here would tell an assistant the package it just moved history
+        // onto is disposable — the same defect equipment_update was fixed for.
+        QCOMPARE(result["package"].toObject()["shotCount"].toInteger(), (qint64)1);
+
+        // On disk, not just in the response.
+        qint64 shotEquipment = -1, sourceRows = -1;
+        withTempDb(storage.databasePath(), "eqmerge_check", [&](QSqlDatabase& db) {
+            QSqlQuery q(db);
+            q.prepare("SELECT equipment_id FROM shots WHERE id = ?");
+            q.addBindValue(movedShot);
+            if (q.exec() && q.next()) shotEquipment = q.value(0).toLongLong();
+            QSqlQuery c(db);
+            c.prepare("SELECT COUNT(*) FROM equipment_packages WHERE id = ?");
+            c.addBindValue(source);
+            if (c.exec() && c.next()) sourceRows = c.value(0).toLongLong();
+        });
+        QCOMPARE(shotEquipment, target);
+        QCOMPARE(sourceRows, (qint64)0);
+
+        // Two ids that name one package is a refusal, not a self-merge that
+        // deletes the package it was asked to keep.
+        QJsonObject same;
+        same["sourcePackageId"] = target;
+        same["targetPackageId"] = target;
+        const QJsonObject refused = f.callAsyncTool("equipment_merge", same);
+        QVERIFY(!refused["success"].toBool());
+        QVERIFY(refused.contains("error"));
+
+        drainDbWorkAndClose(storage);
     }
 
     // bag_create (add-recipe-wizard-tea): kind stamped at creation, gated in
@@ -500,11 +611,11 @@ private slots:
         QJsonObject empty; empty["kind"] = "tea";
         QVERIFY(f.callAsyncTool("bag_create", empty).contains("error"));
 
-        storage.close();
-        for (int i = 0; i < 20; i++) {
-            QCoreApplication::processEvents();
-            QThread::msleep(25);
-        }
+        // Drain BEFORE close(). close() calls QSqlDatabase::removeDatabase(), which
+        // qWarns "connection is still in use" if background work still holds one —
+        // and failOnWarning makes that a failure. Closing first was the original
+        // order, with the sleep afterwards hoping the work had already finished.
+        drainDbWorkAndClose(storage);
     }
 
     // bag_update kind gate runs on the static path (nullptr bagStorage): tea
@@ -543,11 +654,11 @@ private slots:
         QVERIFY2(r["success"].toBool(), qPrintable(QJsonDocument(r).toJson()));
         QCOMPARE(r["bag"].toObject()["teaType"].toString(), QString("black"));
 
-        storage.close();
-        for (int i = 0; i < 20; i++) {
-            QCoreApplication::processEvents();
-            QThread::msleep(25);
-        }
+        // Drain BEFORE close(). close() calls QSqlDatabase::removeDatabase(), which
+        // qWarns "connection is still in use" if background work still holds one —
+        // and failOnWarning makes that a failure. Closing first was the original
+        // order, with the sleep afterwards hoping the work had already finished.
+        drainDbWorkAndClose(storage);
     }
 
     // The linked-bag case is where the MCP wiring does real work: the tool
@@ -603,11 +714,11 @@ private slots:
         QCOMPARE(result2["bag"].toObject()["beanBase"].toObject()
                      ["canonical"].toObject()["origin"].toString(), QString("Colombia"));
 
-        storage.close();
-        for (int i = 0; i < 20; i++) {
-            QCoreApplication::processEvents();
-            QThread::msleep(25);
-        }
+        // Drain BEFORE close(). close() calls QSqlDatabase::removeDatabase(), which
+        // qWarns "connection is still in use" if background work still holds one —
+        // and failOnWarning makes that a failure. Closing first was the original
+        // order, with the sleep afterwards hoping the work had already finished.
+        drainDbWorkAndClose(storage);
     }
 
     // ===== recipe_get/set/clear_auto_load (recipe-auto-load) =====
@@ -658,6 +769,7 @@ private slots:
         QCOMPARE(result["recipeId"].toInteger(), recipeId);
         QCOMPARE(result["name"].toString(), QString("Morning Latte"));
         QCOMPARE(result["revertMinutes"].toInt(), 15);
+        drainDbWorkAndClose(storage);
     }
 
     void recipeGetAutoLoadStaleIdReturnsNullNotError()
@@ -675,6 +787,7 @@ private slots:
         QJsonObject result = f.callAsyncTool("recipe_get_auto_load", {});
         QVERIFY(result["recipeId"].isNull());
         QVERIFY(!result.contains("error"));
+        drainDbWorkAndClose(storage);
     }
 
     void recipeGetAutoLoadConfiguredButStorageUnavailableIsError()
@@ -717,6 +830,7 @@ private slots:
         QCOMPARE(f.settings.dye()->autoLoadRecipeId(), static_cast<int>(recipeId));
         // Mutual exclusion: setting a recipe auto-load clears the profile side.
         QCOMPARE(f.settings.app()->autoLoadProfileFilename(), QString());
+        drainDbWorkAndClose(storage);
     }
 
     void recipeSetAutoLoadMissingRecipeIdIsError()
@@ -779,6 +893,7 @@ private slots:
         QJsonObject result = f.callAsyncTool("recipe_set_auto_load", args);
         QCOMPARE(result["error"].toString(), QString("Recipe not found: 99999"));
         QCOMPARE(f.settings.dye()->autoLoadRecipeId(), before);
+        drainDbWorkAndClose(storage);
     }
 
     void recipeSetAutoLoadArchivedIsError()
@@ -798,6 +913,7 @@ private slots:
         QJsonObject result = f.callAsyncTool("recipe_set_auto_load", args);
         QCOMPARE(result["error"].toString(), QString("Recipe is archived"));
         QCOMPARE(f.settings.dye()->autoLoadRecipeId(), before);
+        drainDbWorkAndClose(storage);
     }
 
     void recipeSetAutoLoadOverwritesExistingPin()
@@ -827,6 +943,7 @@ private slots:
         QVERIFY2(resultSecond["success"].toBool(), qPrintable(QJsonDocument(resultSecond).toJson()));
         QCOMPARE(resultSecond["recipeId"].toInteger(), second);
         QCOMPARE(f.settings.dye()->autoLoadRecipeId(), static_cast<int>(second));
+        drainDbWorkAndClose(storage);
     }
 
     void recipeSetAutoLoadOptionalRevertMinutesUpdatesSharedSetting()
@@ -848,6 +965,7 @@ private slots:
         QCOMPARE(result["revertMinutes"].toInt(), 33);
         // Shared with the profile side.
         QCOMPARE(f.settings.app()->autoLoadRevertMinutes(), 33);
+        drainDbWorkAndClose(storage);
     }
 
     void recipeClearAutoLoadSuccessPreservesRevertMinutes()

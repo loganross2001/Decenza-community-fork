@@ -574,6 +574,10 @@ Ephemeral (non-SSE) session state SHALL be released by a reaping pass bounded we
 ### Requirement: Debug log tools support substring/regex filtering
 `debug_get_log` and `shots_get_debug_log` SHALL accept an optional `filter` string parameter and an optional `regex` boolean parameter. When `filter` is provided, only lines matching it are eligible for pagination/tail; matching is case-insensitive substring containment by default, or a case-insensitive regular expression match when `regex` is `true`. Filtering SHALL be applied before offset/limit or tail is applied.
 
+`debug_get_log`'s tool description SHALL name the subsystem markers a caller can filter on (`[Scale]`, `[DE1]`) and the severity convention that separates each subsystem's user-facing narrative from its developer detail, so retrieving what a device panel shows requires no knowledge of the source. The description SHALL also warn that a bracketed marker is a substring, not a regular expression — passed with `regex: true` it is a character class that matches almost every line, which fails by returning too much rather than erroring.
+
+No dedicated preset parameter is provided: `filter` plus `minLevel` already express these queries in a single call, and a second way to say the same thing would need precedence rules against them.
+
 #### Scenario: Substring filter narrows an app-log request
 - **WHEN** an MCP client calls `debug_get_log` with `filter: "R2 error"`
 - **THEN** the response's `log`/`lines` contain only lines whose text contains "R2 error" (case-insensitive), and `returnedLines`/pagination fields are computed against the filtered set, not the full log
@@ -585,6 +589,37 @@ Ephemeral (non-SSE) session state SHALL be released by a reaping pass bounded we
 #### Scenario: No filter reproduces existing behavior
 - **WHEN** an MCP client calls either tool without a `filter` parameter
 - **THEN** the response is identical in shape and content to the tool's behavior before this change
+
+#### Scenario: A caller can reproduce a device panel from the tool description alone
+- **WHEN** an MCP client has only `debug_get_log`'s description and wants the lines the connections page's scale view shows
+- **THEN** the description tells it to pass the `[Scale]` marker as `filter` with `minLevel: "INFO"` and `session: -1`, and that call returns that set
+
+#### Scenario: The marker-as-regex trap is documented
+- **WHEN** an MCP client reads the description before filtering on a marker
+- **THEN** it is told to pass the marker as a substring, because `[Scale]` under `regex: true` is a character class that matches nearly every line
+
+### Requirement: Debug log discloses what its markers do not cover
+
+`debug_get_log` SHALL accept an optional `families` boolean. When `true`, it SHALL return a census of the addressed log's line prefixes instead of log lines, computed from the file in hand rather than from any list in the source, partitioning every line into exactly one of: a REGISTERED subsystem marker, an unregistered bracketed prefix, a bare `ClassName:` prefix, or no prefix at all. Each reported prefix SHALL carry its line count and a ready-to-use `filter` expression, ordered by line count descending.
+
+The requirement exists because the tool's description names only the registered markers. A caller that searches `[Scale]`, gets a complete answer, and infers the log is marker-organised has been misled by a tool that told it only the true part — most of the log carries no registered marker, and a subsystem absent from the description is not absent from the log. The census converts "this subsystem does not exist" into "this subsystem is not searchable by marker", which is a cheaper mistake to recover from.
+
+The response SHALL state that the census describes THAT FILE and not the current build, because the log is a ring buffer spanning app versions and an unregistered prefix in it may be one since converted. An empty census SHALL name its cause — no such file, a file that could not be opened, or a file that is genuinely empty — rather than report zeros that read as a quiet log.
+
+#### Scenario: A caller with no prior knowledge finds the subsystems that exist
+
+- **WHEN** an MCP client calls `debug_get_log` with `families: true`
+- **THEN** the response lists registered markers, unregistered bracketed prefixes, and `ClassName:` prefixes separately, each with a line count and a `filter` expression that retrieves it
+
+#### Scenario: The unregistered families are not presented as searchable-in-full
+
+- **WHEN** the census reports an unregistered prefix
+- **THEN** the response states that its `filter` is a plain substring over one hand-written prefix and may be incomplete where a subsystem logs under more than one spelling
+
+#### Scenario: An unreadable log is not reported as an empty one
+
+- **WHEN** an MCP client calls `debug_get_log` with `families: true` and the log file is missing or cannot be opened
+- **THEN** the response names the path and which of those states it is in, rather than returning all-zero counts
 
 ### Requirement: App debug log supports a minimum-severity filter
 `debug_get_log` SHALL accept an optional `minLevel` parameter (`"DEBUG" | "INFO" | "WARN" | "ERROR" | "FATAL"`, ordered ascending) that restricts returned lines to that level or higher, based on the level tag already present on every persisted log line. `minLevel` SHALL combine with `filter` (a line must satisfy both to be returned). An unrecognized `minLevel` value SHALL be rejected with an `{"error": ...}` response rather than silently matching every line. `shots_get_debug_log` SHALL accept `minLevel` without error but ignore it, since the shot debug log carries no level tagging.

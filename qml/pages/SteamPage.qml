@@ -8,12 +8,13 @@ pragma ComponentBehavior: Bound
 
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Templates as T
 import QtQuick.Layouts
 import QtQuick.Effects
 import QtQuick.Window
 import Decenza
 
-Page {
+T.Page {
     id: steamPage
     objectName: "steamPage"
     // suppressShotChart: this page draws its own graph, and the last-shot chart
@@ -73,11 +74,16 @@ Page {
     // the three-term test.
     readonly property bool realScaleConnected: ScaleDevice.connected && !ScaleDevice.isFlowScale
 
-    // Repeater.itemAt() is typed QQuickItem, so the delegate's own `focusTarget`
-    // is not statically known and every call site was an unchecked member access.
-    // Kept to this one place rather than repeated at the sites that need it.
+    // Repeater.itemAt() is typed QQuickItem, so reaching the delegate's own `focusTarget`
+    // needs the cast to its declared root type. Kept to this one place rather than
+    // repeated at the sites that need it.
     function pitcherFocusTarget(i: int): Item {
-        var it = pitcherRepeater.itemAt(i)
+        // Range-checked as well as null-checked: Repeater.count is the MODEL size and is
+        // emitted before the delegates exist (regenerate() returns early until
+        // componentComplete(), qquickrepeater.cpp:379-396), so `count > 0` with a null
+        // itemAt() is normal while a creation-time binding first evaluates.
+        if (i < 0 || i >= pitcherRepeater.count) return null
+        var it = pitcherRepeater.itemAt(i) as RepeaterDelegateItem
         return it ? it.focusTarget : null
     }
 
@@ -151,14 +157,14 @@ Page {
             steamSoftStopped = false
             _lastAnnouncedSteamWeight = 0
             // Apply the weight-scaled steam time NOW, at steam-start, using the same direct
-            // calc as the "Expected steam time" readout (falling back to the last on-scale
-            // reading once the pitcher is lifted). The auto-capture can't be relied on here,
-            // so this is what actually makes the steam scale. setSteamTimeoutImmediate pushes
-            // it to the DE1 and takes effect even mid-steam.
+            // calc as the "Expected steam time" readout. The auto-capture can't be relied on
+            // here, so this is what actually makes the steam scale. setSteamTimeoutImmediate
+            // pushes it to the DE1 and takes effect even mid-steam.
             // Respect a manual ±5 override: if the user dialed the time by hand, don't
             // overwrite it with the weight-scaled value at steam-start. Otherwise use the
-            // live scaled time, falling back to the milk captured this session once the
-            // pitcher is lifted to the wand.
+            // live scaled time, falling back to capturedMilkForScaling()'s two sources in
+            // priority order (this session's capture, then the last on-scale reading) once
+            // the pitcher is lifted to the wand.
             var _scaledNow = steamPage.steamTimeoutUserAdjusted ? 0 : steamPage.scaledSteamTimeout()
             if (_scaledNow <= 0 && !steamPage.steamTimeoutUserAdjusted) {
                 var _cm = steamPage.capturedMilkForScaling()
@@ -168,6 +174,10 @@ Page {
                 Settings.brew.steamTimeout = _scaledNow
                 steamPage.steamTimeoutScaled = true
                 MainController.setSteamTimeoutImmediate(_scaledNow)
+                steamPage.logSteamScalingDecision("steam-start", _scaledNow, _scaledNow, "scaled")
+            } else {
+                steamPage.logSteamScalingDecision("steam-start", _scaledNow, Settings.brew.steamTimeout,
+                    steamPage.steamTimeoutUserAdjusted ? "user-adjusted, unchanged" : "fixed-fallback")
             }
             // Drop any banner left over from a prior session so it doesn't
             // carry into the new one. SteamHealthTracker re-arms its per-session
@@ -418,16 +428,46 @@ Page {
         return steamPage.lastOnScaleMilk
     }
 
+    // Shared diagnostic for weight-timed steaming's scale-vs-fallback decision, called from
+    // both call sites that can apply it (steam-start in onIsSteamingChanged, and here) so
+    // they can't drift on which fields they report (see CLAUDE.md's centralization rule —
+    // the [USB Scale] prefix drifted at 21 of 73 hand-copied sites for exactly this reason).
+    // Includes the raw inputs behind currentMeasuredMilk()'s own silent zero-outs
+    // (SettingsBrew::netMilkForPitcher: no saved pitcherWeightG, or reading outside
+    // [50, 1500] g) — without rawScaleWeight/pitcherWeightG, a milk value of 0 in the log
+    // can't be told apart from "no pitcher on the scale" versus "pitcher on the scale but
+    // untared or out of range".
+    function logSteamScalingDecision(tag, scaledResult, appliedDuration, appliedSource) {
+        var pitcher = Settings.brew.getSteamPitcherPreset(Settings.brew.selectedSteamPitcher)
+        console.log("SteamPage:", tag, "scaling decision —",
+                    "sessionMeasuredMilkG=", AppShell.sessionMeasuredMilkG,
+                    "lastOnScaleMilk=", steamPage.lastOnScaleMilk,
+                    "rawScaleWeight=", MachineState.scaleWeight,
+                    "scaleConnected=", ScaleDevice.connected,
+                    "pitcher=", pitcher ? pitcher.name : "<none>",
+                    "pitcherWeightG=", pitcher ? pitcher.pitcherWeightG : 0,
+                    "pitcherDisabled=", pitcher ? pitcher.disabled === true : false,
+                    "milkAutoCaptureEnabled=", Settings.brew.milkAutoCaptureEnabled,
+                    "steamSecondsPerGram=", Settings.brew.steamSecondsPerGram,
+                    "scaledResult=", scaledResult,
+                    "appliedDuration=", appliedDuration,
+                    "appliedSource=", appliedSource)
+    }
+
     // Sync steamTimeout to the selected preset WITHOUT clobbering a weight-scaled
-    // value. Milk to scale against = the scale reading now, else the milk captured
-    // this session (or the last reading seen on this page — lastOnScaleMilk survives
-    // session end); the scaled-or-base resolution itself is the shared SettingsBrew
-    // helper. Kept-current cases: a calibrated preset already scaled for this
-    // selection with nothing to scale against right now (pitcher lifted to the wand,
-    // or weight-timing toggled off while the scaled flag is still latched) — writing
-    // the base duration then would discard the measured-milk scaling.
+    // value. Milk to scale against = the scale reading now, else capturedMilkForScaling()'s
+    // two sources in priority order (this session's capture, then the last reading seen on
+    // this page — lastOnScaleMilk survives session end); the scaled-or-base resolution
+    // itself is the shared SettingsBrew helper. Kept-current cases: a calibrated preset
+    // already scaled for this selection with nothing to scale against right now (pitcher
+    // lifted to the wand, or weight-timing toggled off while the scaled flag is still
+    // latched) — writing the base duration then would discard the measured-milk scaling.
     function syncSteamTimeout() {
-        if (isCurrentPitcherDisabled()) return   // heater is off — keep whatever's set
+        if (isCurrentPitcherDisabled()) {
+            steamPage.logSteamScalingDecision("syncSteamTimeout", 0, Settings.brew.steamTimeout,
+                "skipped-pitcher-disabled")
+            return   // heater is off — keep whatever's set
+        }
         var milk = currentMeasuredMilk()
         if (milk <= 0) milk = capturedMilkForScaling()   // pitcher lifted: use the captured milk
         var scaled = steamTimeForMilk(milk)
@@ -439,6 +479,11 @@ Page {
         if (scaled > 0 || Settings.brew.steamSecondsPerGram <= 0 || !steamPage.steamTimeoutScaled) {
             Settings.brew.steamTimeout = Settings.brew.effectiveSteamDurationSec(
                 Settings.brew.selectedSteamPitcher, milk)
+            steamPage.logSteamScalingDecision("syncSteamTimeout", scaled, Settings.brew.steamTimeout,
+                scaled > 0 ? "scaled" : "fixed-fallback")
+        } else {
+            steamPage.logSteamScalingDecision("syncSteamTimeout", scaled, Settings.brew.steamTimeout,
+                "kept-existing-scaled")
         }
     }
 
@@ -511,7 +556,7 @@ Page {
     }
 
     // Post-session warning dialog
-    Dialog {
+    DecenzaDialog {
         id: steamWarningDialog
         property string warningMessage: ""
         title: TranslationManager.translate("steam.warning.title", "Steam Warning")
@@ -1353,7 +1398,7 @@ Page {
                             id: pitcherRepeater
                             model: Settings.brew.steamPitcherPresets
 
-                            Item {
+                            RepeaterDelegateItem {
                                 id: pitcherDelegate
 
                                 required property int index
@@ -1362,13 +1407,13 @@ Page {
                                 width: pitcherPill.width
                                 height: Theme.scaled(36)
 
-                                property int pitcherIndex: pitcherDelegate.index
-                                property Item focusTarget: pitcherPill
+                                itemIndex: pitcherDelegate.index
+                                focusTarget: pitcherPill
 
                                 Rectangle {
                                     id: pitcherPill
                                     readonly property bool pitcherDisabled: pitcherDelegate.modelData.disabled === true
-                                    readonly property bool pitcherSelected: pitcherDelegate.pitcherIndex === Settings.brew.selectedSteamPitcher
+                                    readonly property bool pitcherSelected: pitcherDelegate.itemIndex === Settings.brew.selectedSteamPitcher
 
                                     width: pitcherText.implicitWidth + 24
                                     height: Theme.scaled(36)
@@ -1381,7 +1426,7 @@ Page {
                                     opacity: dragArea.drag.active ? 0.8 : 1.0
 
                                     function applyPitcher(reason) {
-                                        Settings.brew.selectedSteamPitcher = pitcherDelegate.pitcherIndex
+                                        Settings.brew.selectedSteamPitcher = pitcherDelegate.itemIndex
                                         if (pitcherPill.pitcherDisabled) {
                                             MainController.turnOffSteamHeater()
                                             return
@@ -1497,14 +1542,14 @@ Page {
                                         onPositionChanged: {
                                             if (dragArea.drag.active) {
                                                 dragArea.moved = true
-                                                pitcherPresetsRow.draggedIndex = pitcherDelegate.pitcherIndex
+                                                pitcherPresetsRow.draggedIndex = pitcherDelegate.itemIndex
                                             }
                                         }
 
                                         onDoubleClicked: {
                                             holdTimer.stop()
                                             dragArea.held = true  // Prevent single-click selection on release
-                                            steamPage.editingPitcherIndex = pitcherDelegate.pitcherIndex
+                                            steamPage.editingPitcherIndex = pitcherDelegate.itemIndex
                                             editPitcherNameInput.text = pitcherDelegate.modelData.name
                                             editPitcherPopup.open()
                                         }
@@ -1515,7 +1560,7 @@ Page {
                                             onTriggered: {
                                                 if (!dragArea.moved) {
                                                     dragArea.held = true
-                                                    steamPage.editingPitcherIndex = pitcherDelegate.pitcherIndex
+                                                    steamPage.editingPitcherIndex = pitcherDelegate.itemIndex
                                                     editPitcherNameInput.text = pitcherDelegate.modelData.name
                                                     editPitcherPopup.open()
                                                 }
@@ -1527,8 +1572,15 @@ Page {
                                 DropArea {
                                     anchors.fill: parent
                                     onEntered: function(drag) {
-                                        var fromIndex = drag.source.pitcherIndex
-                                        var toIndex = pitcherDelegate.pitcherIndex
+                                        // Guarded like the DelegateModel drop targets in
+                                        // FavoritesListView / LayoutEditorZone. `itemIndex` is a
+                                        // SHARED property now, so a drag from an unrelated
+                                        // reorderable list would answer with a plausible integer
+                                        // instead of undefined and silently reorder this list.
+                                        var src = drag.source as RepeaterDelegateItem
+                                        if (!src || src === pitcherDelegate) return
+                                        var fromIndex = src.itemIndex
+                                        var toIndex = pitcherDelegate.itemIndex
                                         if (fromIndex !== toIndex) {
                                             Settings.brew.moveSteamPitcherPreset(fromIndex, toIndex)
                                         }
@@ -2396,7 +2448,7 @@ Page {
 
 
     // Edit Pitcher Popup (rename/delete)
-    Dialog {
+    DecenzaDialog {
         id: editPitcherPopup
         x: (parent.width - width) / 2
         y: editPitcherPopupAtTop ? Theme.scaled(40) : (parent.height - height) / 2
@@ -2535,7 +2587,7 @@ Page {
     }
 
     // Add Pitcher Dialog
-    Dialog {
+    DecenzaDialog {
         id: addPitcherDialog
         x: (parent.width - width) / 2
         y: addPitcherDialogAtTop ? Theme.scaled(40) : (parent.height - height) / 2

@@ -505,6 +505,30 @@ add_decenza_test(tst_translationsourcedrift
 )
 target_link_libraries(tst_translationsourcedrift PRIVATE Qt6::Qml)
 
+# --- tst_translationscan: the QML string scan, and that it stays off the calling stack ---
+# The scan is what feeds AI translation and community upload, so its three patterns are pinned
+# here. The asynchrony is pinned for a different reason: as a synchronous scan it pumped
+# processEvents() per file, and that nested pump crashed shipped iOS 2.0.0 (#1692) — an event
+# delivered inside it destroyed the settings page while its TabBar handler was still running.
+#
+# The fixture resource is mounted at the SAME prefix the scanner hardcodes
+# (":/qt/qml/Decenza/qml", src/core/translationmanager.cpp). Without it the app's QML module —
+# which belongs to the Decenza target, not to this binary — is absent, the scan finds zero files,
+# and the worker loop, the file reads, the progress posts and the registry-writing tail all go
+# unexecuted while the tests still pass. This is resource DATA, not a QML harness: nothing here is
+# loaded or instantiated, the scanner reads it as text.
+add_decenza_test(tst_translationscan
+    tst_translationscan.cpp
+)
+qt_add_resources(tst_translationscan "translationscan_fixtures"
+    PREFIX "/qt/qml/Decenza/qml"
+    BASE "${CMAKE_CURRENT_SOURCE_DIR}/data/qmlscan"
+    FILES
+        data/qmlscan/AlphaPage.qml
+        data/qmlscan/BetaPage.qml
+)
+target_link_libraries(tst_translationscan PRIVATE Qt6::Qml)
+
 # --- tst_markdownrenderer: markdown -> HTML, incl. the raw-HTML security claim ---
 add_decenza_test(tst_markdownrenderer
     tst_markdownrenderer.cpp
@@ -527,6 +551,18 @@ add_decenza_test(tst_textescaping
     tst_textescaping.cpp
 )
 target_link_libraries(tst_textescaping PRIVATE Qt6::Qml)
+
+# --- tst_customwidgethtml: the two segmentsToHtml implementations, and DocumentFormatter ---
+# Differential: runs the web editor's JS copy (lifted out of src/network/shotserver_layout.cpp)
+# in a QJSEngine and diffs it against the C++ one, so the app and ShotServer surfaces cannot
+# drift again. Also covers DocumentFormatter's colour round trip.
+add_decenza_test(tst_customwidgethtml
+    tst_customwidgethtml.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/documentformatter.cpp
+)
+# Qt6::Quick, not just Qml: documentformatter.h includes <QQuickTextDocument>, which is a
+# Quick header even though nothing in this test constructs one.
+target_link_libraries(tst_customwidgethtml PRIVATE Qt6::Qml Qt6::Quick)
 
 # --- tst_recipesearch: Recipes-page tokenized search matcher ---
 # Runs the real JS out of qml/components/RecipeSearch.js in a QJSEngine, so it guards
@@ -658,8 +694,10 @@ target_include_directories(tst_aimanager PRIVATE ${CMAKE_BINARY_DIR})
 # Pins availableModels()/setModel()/shortModelName()/modelName() for the
 # user-selectable providers (OpenAI, Anthropic, Gemini): catalog order,
 # constructor default = first entry, and the empty/unknown/valid setModel
-# branches that AIManager drives from Settings.ai.providerModel(). Pure logic,
-# so the target only needs aiprovider.cpp (no network/mocking).
+# branches that AIManager drives from Settings.ai.providerModel(). Also pins the
+# request shape and the stop/finish-reason handling for all five providers,
+# which needs a canned-response server (FakeProviderServer) on loopback —
+# Qt6::Network comes in via add_decenza_test.
 add_decenza_test(tst_aiproviders
     tst_aiproviders.cpp
     ${CMAKE_SOURCE_DIR}/src/ai/aiprovider.cpp
@@ -758,6 +796,13 @@ add_decenza_test(tst_bleserviceerror
 #     may interrupt the user vs. belong to the reconnect ladder (#1658) ---
 add_decenza_test(tst_blecontrollererror
     tst_blecontrollererror.cpp
+)
+
+# --- tst_serialstall: the USB serial stall decision. Header-only predicate, so
+#     no QSerialPort link and no platform guard — which is why it was split out
+#     of SerialTransport in the first place (that class needs a real port). ---
+add_decenza_test(tst_serialstall
+    tst_serialstall.cpp
 )
 
 # --- tst_bletransporterror: the #1658 contract itself — a controller error
@@ -931,6 +976,11 @@ else()
     find_package(OpenSSL REQUIRED)
     target_link_libraries(tst_difluidr1 PRIVATE OpenSSL::Crypto)
 endif()
+
+# --- tst_logcollapse: the shared repeat-collapsing log gate (header-only, so no extra sources) ---
+add_decenza_test(tst_logcollapse
+    tst_logcollapse.cpp
+)
 
 # --- tst_weightprocessor: WeightProcessor edge cases (LSLR, oscillation, per-frame) ---
 add_decenza_test(tst_weightprocessor

@@ -1,3 +1,11 @@
+// Bound so the scale-picker ComboBox delegate resolves this file's `scalePicker` id
+// instead of reading it as unqualified access. All three delegates in this file declare
+// every injected model role they use as a required property in the same edit: without
+// that, ComponentBehavior: Bound stops role injection and breaks them at RUNTIME,
+// silently. (`connectionsTab` and `discoveredDevicesList` are read only from sibling
+// scopes, which resolve without the pragma.)
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
@@ -10,7 +18,7 @@ Item {
     readonly property bool usbAvailable: Qt.platform.os !== "ios"
 
     // Share Log Dialog
-    Dialog {
+    DecenzaDialog {
         id: shareLogDialog
         modal: true
         anchors.centerIn: parent
@@ -77,7 +85,9 @@ Item {
                     spacing: Theme.scaled(8)
 
                     Text {
-                        text: emailBox.copied ? "✓ Copied!" : "decenzalogs@kulitorum.com"
+                        text: emailBox.copied
+                              ? TranslationManager.translate("common.copied", "✓ Copied!")
+                              : "decenzalogs@kulitorum.com"
                         color: Theme.accentColor
                         font.pixelSize: Theme.scaled(15)
                         font.bold: true
@@ -144,9 +154,15 @@ Item {
 
                 // Cancel button
                 Text {
+                    id: shareLogCancel
                     text: TranslationManager.translate("common.cancel", "Cancel")
                     color: Theme.accentColor
                     font.pixelSize: Theme.scaled(14)
+
+                    Accessible.role: Accessible.Button
+                    Accessible.name: shareLogCancel.text
+                    Accessible.focusable: true
+                    Accessible.onPressAction: shareLogDialog.close()
 
                     MouseArea {
                         anchors.fill: parent
@@ -183,8 +199,12 @@ Item {
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
                         onClicked: {
+                            // The SYSTEM log, not the scale log. Users have been
+                            // asked for the system log for a while now, and the
+                            // scale-only file was a subset that omitted the DE1 and
+                            // everything else that ran alongside the failure.
                             shareLogDialog.close()
-                            BLEManager.shareScaleLog()
+                            BLEManager.shareSystemLog()
                         }
                     }
                 }
@@ -194,7 +214,7 @@ Item {
 
     // Add WiFi Scale Dialog — enter an IP address or mDNS name to connect a
     // WiFi scale that isn't being advertised/discovered right now.
-    Dialog {
+    DecenzaDialog {
         id: addWifiScaleDialog
         parent: Overlay.overlay
         anchors.centerIn: parent
@@ -417,7 +437,7 @@ Item {
     // the user would silently end up with a poisoned saved primary that the
     // app keeps redialing on every reconnect cycle (see #1281).
     property string lastManualWifiHost: ""
-    Dialog {
+    DecenzaDialog {
         id: manualWifiFailedDialog
         parent: Overlay.overlay
         anchors.centerIn: parent
@@ -525,7 +545,7 @@ Item {
                 ColumnLayout {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-                    visible: usbAvailable && USBManager.de1Connected
+                    visible: connectionsTab.usbAvailable && USBManager.de1Connected
                     spacing: Theme.scaled(10)
 
                     // Title row with status badge
@@ -569,17 +589,17 @@ Item {
 
                     // Port info
                     Text {
-                        text: TranslationManager.translate("settings.connections.port", "Port:") + " " + (usbAvailable ? USBManager.portName : "")
+                        text: TranslationManager.translate("settings.connections.port", "Port:") + " " + (connectionsTab.usbAvailable ? USBManager.portName : "")
                         color: Theme.textSecondaryColor
                         font.pixelSize: Theme.scaled(13)
                     }
 
                     // Serial number
                     Text {
-                        text: TranslationManager.translate("settings.connections.serial", "Serial:") + " " + (usbAvailable ? USBManager.serialNumber : "")
+                        text: TranslationManager.translate("settings.connections.serial", "Serial:") + " " + (connectionsTab.usbAvailable ? USBManager.serialNumber : "")
                         color: Theme.textSecondaryColor
                         font.pixelSize: Theme.scaled(13)
-                        visible: usbAvailable && USBManager.serialNumber !== ""
+                        visible: connectionsTab.usbAvailable && USBManager.serialNumber !== ""
                     }
 
                     // Firmware version
@@ -606,54 +626,30 @@ Item {
                         onClicked: USBManager.disconnectUsb()
                     }
 
-                    // USB-C connection log
-                    Rectangle {
+                    // USB-C connection log. Reads [DE1] out of the system log, exactly
+                    // like the BLE branch below — this panel and that one are the same
+                    // machine, reached over a different wire, so they must not disagree
+                    // about what happened to it.
+                    //
+                    // This replaced two hand-rolled `Connections` handlers appending to
+                    // an uncapped `text +=`, and one of them had gone dead: it listened
+                    // for BLEManager's `de1LogMessage`, which this change deleted. QML
+                    // resolves signal handlers at runtime, so nothing failed at build
+                    // time and the panel simply stopped showing DE1Device and
+                    // SerialTransport lines — including this change's own new inbound
+                    // stall warning, on the one screen a user with a silent USB machine
+                    // would be looking at. Reading the log by marker cannot rot that
+                    // way: there is no per-signal wiring left to go stale.
+                    //
+                    // [Bluetooth] rides along because the radio sits beneath the whole
+                    // page. A machine on USB does not need it, but the scale paired in
+                    // the panel below does, and an adapter that is off or wedged is a
+                    // fault neither device's marker reports.
+                    SubsystemLogView {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
-                        color: Qt.darker(Theme.cardBackgroundColor, 1.2)
-                        radius: Theme.scaled(4)
-
-                        ScrollView {
-                            id: usbLogScroll
-                            anchors.fill: parent
-                            anchors.margins: Theme.scaled(8)
-                            clip: true
-
-                            TextArea {
-                                id: usbLogText
-                                readOnly: true
-                                color: Theme.textSecondaryColor
-                                font.pixelSize: Theme.scaled(11)
-                                font.family: Theme.monoFontFamily
-                                wrapMode: Text.Wrap
-                                background: null
-                                text: ""
-
-                                Accessible.role: Accessible.EditableText
-                                Accessible.name: TranslationManager.translate("settings.connections.usbLog", "USB connection log")
-                                Accessible.description: Theme.capAccessibleText(text)
-                                Accessible.focusable: true
-                                activeFocusOnTab: true
-                            }
-                        }
-
-                        Connections {
-                            target: usbAvailable ? USBManager : null
-                            function onLogMessage(message) {
-                                usbLogText.text += message + "\n"
-                                usbLogScroll.ScrollBar.vertical.position = 1.0 - usbLogScroll.ScrollBar.vertical.size
-                            }
-                        }
-
-                        // Also show DE1 transport logs (SerialTransport TX/RX) in the USB log panel
-                        Connections {
-                            target: BLEManager
-                            enabled: usbAvailable && USBManager.de1Connected
-                            function onDe1LogMessage(message) {
-                                usbLogText.text += message + "\n"
-                                usbLogScroll.ScrollBar.vertical.position = 1.0 - usbLogScroll.ScrollBar.vertical.size
-                            }
-                        }
+                        markers: ["[DE1]", "[Bluetooth]"]
+                        accessibleName: TranslationManager.translate("settings.connections.usbLog", "USB connection log")
                     }
                 }
 
@@ -661,7 +657,7 @@ Item {
                 ColumnLayout {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-                    visible: !usbAvailable || !USBManager.de1Connected
+                    visible: !connectionsTab.usbAvailable || !USBManager.de1Connected
                     spacing: Theme.scaled(10)
 
                     Tr {
@@ -764,6 +760,7 @@ Item {
                     }
 
                     ListView {
+                        id: de1DeviceList
                         Layout.fillWidth: true
                         Layout.preferredHeight: Theme.scaled(60)
                         clip: true
@@ -772,71 +769,69 @@ Item {
 
                         delegate: ItemDelegate {
                             id: delegate
+                            required property var modelData
+
                             width: ListView.view.width
                             contentItem: Text {
-                                text: modelData.name + " (" + modelData.address + ")"
+                                text: delegate.modelData.name + " (" + delegate.modelData.address + ")"
                                 color: Theme.textColor
                             }
                             background: Rectangle {
                                 color: delegate.hovered ? Theme.accentColor : "transparent"
                                 radius: Theme.scaled(4)
                             }
-                            onClicked: DE1Device.connectToDevice(modelData.address)
+
+                            // The row sets contentItem rather than `text`, so Qt has no
+                            // string to derive a default accessible name from.
+                            Accessible.role: Accessible.Button
+                            Accessible.name: delegate.modelData.name + " (" + delegate.modelData.address + ")"
+                            Accessible.focusable: true
+                            Accessible.onPressAction: delegate.clicked()
+
+                            onClicked: DE1Device.connectToDevice(delegate.modelData.address)
                         }
 
+                        // A visual child of a ListView is reparented to its
+                        // contentItem (qquickflickable.cpp:2442), so `parent`
+                        // here is NOT the ListView: `parent.count` was undefined
+                        // and this placeholder never once appeared. Read count
+                        // off the list by id, and centre against the list's own
+                        // height — contentItem is zero-high when the list is empty.
                         Tr {
-                            anchors.centerIn: parent
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            y: (de1DeviceList.height - height) / 2
                             key: "settings.bluetooth.noDevices"
                             fallback: "No devices found"
-                            visible: parent.count === 0
+                            visible: de1DeviceList.count === 0
                             color: Theme.textSecondaryColor
                         }
                     }
 
-                    // DE1 scan log
-                    Rectangle {
+                    // DE1 connection log — the machine's story at INFO and above,
+                    // read from the system log rather than from a private signal.
+                    //
+                    // This used to follow BLEManager::de1LogMessage, which reached
+                    // ONLY this window: none of it was in a submitted log, so the
+                    // machine's discovery story could not be read after the fact.
+                    // Now the same [DE1] lines a user's log contains are the ones on
+                    // screen, and the view gains the two things it never had — a cap
+                    // and a Clear button.
+                    // [Bluetooth] is here because the radio sits BENEATH the machine:
+                    // when the adapter is off or wedged the DE1 cannot connect, and
+                    // that fault carries neither device's marker. Without it this view
+                    // says "the machine never appeared" and cannot say why — the one
+                    // answer a log reader must never be given.
+                    SubsystemLogView {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
-                        color: Qt.darker(Theme.surfaceColor, 1.2)
-                        radius: Theme.scaled(4)
-
-                        ScrollView {
-                            id: de1LogScroll
-                            anchors.fill: parent
-                            anchors.margins: Theme.scaled(8)
-                            clip: true
-
-                            TextArea {
-                                id: de1LogText
-                                readOnly: true
-                                color: Theme.textSecondaryColor
-                                font.pixelSize: Theme.scaled(11)
-                                font.family: Theme.monoFontFamily
-                                wrapMode: Text.Wrap
-                                background: null
-                                text: ""
-
-                                Accessible.role: Accessible.EditableText
-                                Accessible.name: TranslationManager.translate("settings.connections.de1Log", "DE1 connection log")
-                                Accessible.description: Theme.capAccessibleText(text)
-                                Accessible.focusable: true
-                                activeFocusOnTab: true
-                            }
-                        }
-
-                        Connections {
-                            target: BLEManager
-                            function onDe1LogMessage(message) {
-                                de1LogText.text += message + "\n"
-                                de1LogScroll.ScrollBar.vertical.position = 1.0 - de1LogScroll.ScrollBar.vertical.size
-                            }
-                        }
+                        markers: ["[DE1]", "[Bluetooth]"]
+                        accessibleName: TranslationManager.translate("settings.connections.de1Log", "DE1 connection log")
                     }
                 }
 
                 // Serial USB toggle — not available on iOS
                 RowLayout {
-                    visible: usbAvailable
+                    visible: connectionsTab.usbAvailable
                     Layout.fillWidth: true
                     spacing: Theme.scaled(15)
 
@@ -964,7 +959,9 @@ Item {
 
                         AccessibleButton {
                             text: BLEManager.scanning ? TranslationManager.translate("settings.bluetooth.scanning", "Scanning...") : TranslationManager.translate("settings.bluetooth.scanForDevices", "Scan for Devices")
-                            accessibleName: BLEManager.scanning ? "Scanning for devices" : "Scan for Bluetooth DE1, scales, and refractometers"
+                            accessibleName: BLEManager.scanning
+                                ? TranslationManager.translate("settings.bluetooth.accessible.scanning", "Scanning for devices")
+                                : TranslationManager.translate("settings.bluetooth.accessible.scan", "Scan for Bluetooth DE1, scales, and refractometers")
                             enabled: !BLEManager.scanning
                             onClicked: BLEManager.scanForDevices()
                         }
@@ -1245,6 +1242,9 @@ Item {
                                 // Per-row delegate: star (filled on primary) + name + transport badge.
                                 delegate: ItemDelegate {
                                     id: scaleRowDelegate
+                                    required property var modelData
+                                    required property int index
+
                                     // Yield the scrollbar's strip when one is
                                     // showing — the bar overlays the flickable,
                                     // and a full-width row puts it on top of the
@@ -1279,7 +1279,7 @@ Item {
                                             source: "qrc:/icons/star.svg"
                                             sourceSize.width: Theme.scaled(14)
                                             sourceSize.height: Theme.scaled(14)
-                                            opacity: modelData.isPrimary ? 1.0 : 0.25
+                                            opacity: scaleRowDelegate.modelData.isPrimary ? 1.0 : 0.25
                                             Accessible.ignored: true
                                         }
 
@@ -1288,14 +1288,14 @@ Item {
                                             text: scaleRowDelegate._label
                                             color: Theme.textColor
                                             font.pixelSize: Theme.scaled(13)
-                                            font.bold: modelData.isPrimary
+                                            font.bold: scaleRowDelegate.modelData.isPrimary
                                             elide: Text.ElideRight
                                             verticalAlignment: Text.AlignVCenter
                                             Accessible.ignored: true
                                         }
 
                                         Rectangle {
-                                            property string badge: scalePicker.transportLabel(modelData.type)
+                                            property string badge: scalePicker.transportLabel(scaleRowDelegate.modelData.type)
                                             visible: badge.length > 0
                                             Layout.preferredWidth: rowBadgeText.implicitWidth + Theme.scaled(10)
                                             Layout.preferredHeight: Theme.scaled(18)
@@ -1314,7 +1314,7 @@ Item {
                                     }
 
                                     background: Rectangle {
-                                        color: highlighted
+                                        color: scaleRowDelegate.highlighted
                                                ? Qt.rgba(Theme.accentColor.r, Theme.accentColor.g, Theme.accentColor.b, 0.18)
                                                : "transparent"
                                     }
@@ -1730,6 +1730,8 @@ Item {
 
                         delegate: ItemDelegate {
                             id: delegate2
+                            required property var modelData
+
                             width: ListView.view.width
 
                             Accessible.role: Accessible.Button
@@ -1746,7 +1748,7 @@ Item {
 
                             contentItem: RowLayout {
                                 Text {
-                                    text: modelData.deviceName
+                                    text: delegate2.modelData.deviceName
                                     color: Theme.textColor
                                     Layout.fillWidth: true
                                     Accessible.ignored: true
@@ -1756,17 +1758,17 @@ Item {
                                     Layout.preferredWidth: discoveredBadgeText.implicitWidth + Theme.scaled(8)
                                     Layout.preferredHeight: Theme.scaled(18)
                                     radius: Theme.scaled(9)
-                                    color: modelData.deviceClass === "refractometer"
+                                    color: delegate2.modelData.deviceClass === "refractometer"
                                         ? Qt.rgba(Theme.primaryColor.r, Theme.primaryColor.g, Theme.primaryColor.b, 0.2)
                                         : Qt.rgba(Theme.accentColor.r, Theme.accentColor.g, Theme.accentColor.b, 0.2)
 
                                     Text {
                                         id: discoveredBadgeText
                                         anchors.centerIn: parent
-                                        text: modelData.deviceClass === "refractometer"
+                                        text: delegate2.modelData.deviceClass === "refractometer"
                                             ? TranslationManager.translate("connections.refractometer", "Refractometer")
-                                            : modelData.deviceType
-                                        color: modelData.deviceClass === "refractometer" ? Theme.primaryColor : Theme.accentColor
+                                            : delegate2.modelData.deviceType
+                                        color: delegate2.modelData.deviceClass === "refractometer" ? Theme.primaryColor : Theme.accentColor
                                         font.pixelSize: Theme.scaled(10)
                                         font.bold: true
                                         Accessible.ignored: true
@@ -1785,11 +1787,15 @@ Item {
                             }
                         }
 
+                        // Same contentItem-reparenting trap as the DE1 list above:
+                        // `parent` is the contentItem, so `parent.count` was
+                        // undefined and this never showed.
                         Tr {
-                            anchors.centerIn: parent
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            y: (discoveredDevicesList.height - height) / 2
                             key: "settings.bluetooth.noDevices"
                             fallback: "No devices found"
-                            visible: parent.count === 0
+                            visible: discoveredDevicesList.count === 0
                             color: Theme.textSecondaryColor
                         }
                     }
@@ -1815,72 +1821,24 @@ Item {
                         }
                     }
 
-                    // Scale scan log
-                    Rectangle {
+                    // Scale connection log, at INFO and above.
+                    //
+                    // Matches [Refractometer] as well as [Scale]. They are separate
+                    // subsystems for QUERYING — a TDS problem and a weight problem
+                    // are different questions — but they share this screen, so the
+                    // view asks for both. That is the whole reason the filter takes a
+                    // list rather than one marker.
+                    //
+                    // [Bluetooth] joins them for the same reason it appears on the
+                    // machine panel: the adapter is beneath every device paired here,
+                    // and "the scale never appeared" with no radio line is a dead end.
+                    SubsystemLogView {
                         Layout.fillWidth: true
                         Layout.preferredHeight: Theme.scaled(150)
-                        color: Qt.darker(Theme.surfaceColor, 1.2)
-                        radius: Theme.scaled(4)
-
-                        ColumnLayout {
-                            anchors.fill: parent
-                            anchors.margins: Theme.scaled(8)
-                            spacing: Theme.scaled(4)
-
-                            ScrollView {
-                                id: scaleLogScroll
-                                Layout.fillWidth: true
-                                Layout.fillHeight: true
-                                clip: true
-
-                                TextArea {
-                                    id: scaleLogText
-                                    readOnly: true
-                                    color: Theme.textSecondaryColor
-                                    font.pixelSize: Theme.scaled(11)
-                                    font.family: Theme.monoFontFamily
-                                    wrapMode: Text.Wrap
-                                    background: null
-                                    text: ""
-
-                                    Accessible.role: Accessible.EditableText
-                                    Accessible.name: TranslationManager.translate("settings.connections.bleScaleLog", "Bluetooth scale connection log")
-                                    Accessible.description: Theme.capAccessibleText(text)
-                                    Accessible.focusable: true
-                                    activeFocusOnTab: true
-                                }
-                            }
-
-                            RowLayout {
-                                Layout.fillWidth: true
-                                spacing: Theme.scaled(8)
-
-                                Item { Layout.fillWidth: true }
-
-                                AccessibleButton {
-                                    text: TranslationManager.translate("settings.bluetooth.clearLog", "Clear")
-                                    accessibleName: TranslationManager.translate("connections.clearScaleLog", "Clear scale log")
-                                    onClicked: {
-                                        scaleLogText.text = ""
-                                        BLEManager.clearScaleLog()
-                                    }
-                                }
-
-                                AccessibleButton {
-                                    text: TranslationManager.translate("settings.bluetooth.shareLog", "Share Log")
-                                    accessibleName: TranslationManager.translate("connections.shareScaleDebugLog", "Share scale debug log")
-                                    onClicked: shareLogDialog.open()
-                                }
-                            }
-                        }
-
-                        Connections {
-                            target: BLEManager
-                            function onScaleLogMessage(message) {
-                                scaleLogText.text += message + "\n"
-                                scaleLogScroll.ScrollBar.vertical.position = 1.0 - scaleLogScroll.ScrollBar.vertical.size
-                            }
-                        }
+                        markers: ["[Scale]", "[Refractometer]", "[Bluetooth]"]
+                        showShare: true
+                        accessibleName: TranslationManager.translate("settings.connections.bleScaleLog", "Bluetooth scale connection log")
+                        onShareRequested: shareLogDialog.open()
                     }
                 }
 

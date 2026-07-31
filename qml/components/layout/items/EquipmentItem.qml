@@ -1,3 +1,8 @@
+// `layer.effect` declares an inline component, so this file's ids are not statically
+// resolvable inside it without this pragma. No delegate in this file takes an injected
+// model role, so no `required property` is needed -- see ThemedIcon.qml for the same case.
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
@@ -13,7 +18,7 @@ import "../PillFit.js" as PillFit
 // compiles "equipment" to a CustomItem (action togglePreset:equipment +
 // navigate:equipment on long/double), so this file renders only in the compact
 // (top/bottom/statusBar) zones.
-Item {
+LayoutWidgetItem {
     id: root
 
     // `Window` is an ATTACHED property: it resolves against the current scope, so it is read here
@@ -22,8 +27,6 @@ Item {
     // — it reports `Member "Window" not found on type "EquipmentItem"`. Reading it once also removes the
     // duplicate lookups.
     readonly property var appWindow: Window.window
-    property bool isCompact: false
-    property string itemId: ""
 
     property var idlePage: {
         var p = root.parent
@@ -176,7 +179,7 @@ Item {
     // Dialog (not Popup) so TalkBack can trap focus inside the pill list, mirroring
     // BeansItem. modal traps focus; dim:false keeps the dropdown look; header/footer
     // null strip the Dialog chrome.
-    Dialog {
+    DecenzaDialog {
         id: presetPopup
         modal: true
         dim: false

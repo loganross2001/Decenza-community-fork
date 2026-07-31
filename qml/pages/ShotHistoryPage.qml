@@ -2,10 +2,11 @@ pragma ComponentBehavior: Bound
 
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Templates as T
 import QtQuick.Layouts
 import Decenza
 
-Page {
+T.Page {
     id: shotHistoryPage
     // Declarative so it re-evaluates on a language change. This used to be an
     // imperative assignment in onCompleted/onActivated, which ran once and left
@@ -1020,7 +1021,7 @@ Page {
         onBackClicked: AppShell.backRequested()
     }
 
-    Dialog {
+    DecenzaDialog {
         id: bulkDeleteConfirmDialog
         parent: Overlay.overlay
         anchors.centerIn: parent
@@ -1105,7 +1106,7 @@ Page {
     }
 
     // Saved searches dialog
-    Dialog {
+    DecenzaDialog {
         id: savedSearchesDialog
         parent: Overlay.overlay
         anchors.centerIn: parent
@@ -1271,7 +1272,7 @@ Page {
     }
 
     // Search syntax help dialog
-    Dialog {
+    DecenzaDialog {
         id: searchHelpDialog
         parent: Overlay.overlay
         anchors.centerIn: parent

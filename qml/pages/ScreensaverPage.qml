@@ -5,6 +5,7 @@ pragma ComponentBehavior: Bound
 
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Templates as T
 import QtMultimedia
 import Decenza
 
@@ -16,7 +17,7 @@ import Decenza
 // "attractor" - Strange attractor visualization
 // "shotmap"   - Shot location map
 
-Page {
+T.Page {
     id: screensaverPage
     objectName: "screensaverPage"
     background: Rectangle { color: "black" }
@@ -174,7 +175,8 @@ Page {
     // caught well before it reaches SIGBUS territory.
     readonly property real videoRssCeilingMB: MemoryMonitor.instrumentedBuild ? 2000 : 500
     property string pendingVideoSource: ""  // Source queued for next video after decoder teardown
-    property real preDestroyRss: 0  // RSS before MediaPlayer destroy (for delta logging)
+    property real preDestroyRss: 0  // RSS at the last transition line PRINTED (for delta logging)
+    property int videoTransitionsSinceLog: 0  // transitions folded into the next line that speaks
 
     // Track app suspend state to stop rendering when display is off.
     // On Android, the EGL surface is destroyed when the display turns off
@@ -185,6 +187,12 @@ Page {
 
     Connections {
         target: Qt.application
+        // qmllint disable missing-property
+        // `Qt.application.state` is real: in a QtQuick app the object is a QQuickApplication
+        // (qtdeclarative/src/quick/util/qquickglobal.cpp:239-241), which declares `state`
+        // (qtdeclarative/src/quick/util/qquickapplication_p.h:38). qmllint types it as the
+        // qtqml base class QQmlApplication, which does not — a tool limitation, not a
+        // missing property.
         function onStateChanged() {
             if (Qt.application.state === Qt.ApplicationSuspended) {
                 screensaverPage.appSuspended = true
@@ -216,6 +224,7 @@ Page {
                 }
             }
         }
+        // qmllint enable missing-property
     }
 
     function playNextMedia() {
@@ -265,11 +274,50 @@ Page {
                 // decoded frame's CVPixelBuffer/IOSurface on macOS.
                 videoTransitionCount++
                 var liveRss = MemoryMonitor.liveRssMB()
-                var delta = videoTransitionCount > 1 ? " delta:" + (liveRss - preDestroyRss).toFixed(1) + " MB" : ""
-                console.log("[Screensaver] Video transition #" + videoTransitionCount +
-                            " RSS:" + liveRss.toFixed(1) + " MB" + delta +
-                            " src:" + source.substring(source.lastIndexOf("/") + 1))
-                preDestroyRss = liveRss
+
+                // Speak only when RSS has MOVED 5 MB from the last line printed.
+                //
+                // This logged every transition, and a screensaver left running
+                // overnight put 116 and 84 lines into two runs of a single session
+                // (3,190 across a real tablet's whole 24,000-line buffer — the
+                // largest subsystem in it) to report that memory was flat. Flat is
+                // the expected outcome, so it is the one thing not worth 200 lines.
+                // What the line exists to catch is RSS CLIMBING across transitions,
+                // i.e. the Qt FFmpeg/VideoToolbox leak handled below.
+                //
+                // HYSTERESIS AGAINST THE LAST LINE PRINTED, NOT A FIXED BUCKET. The
+                // first version of this bucketed on Math.floor(rss/5), the same
+                // shape as MemoryMonitor's own gate, and measuring it against the
+                // real log showed why that is wrong here: RSS sits at ~135 MB and
+                // jitters ±3 MB, which straddles a bucket edge, so it would have
+                // re-logged on every crossing — 36 lines of 116 rather than 2.
+                // MemoryMonitor gets away with buckets because it samples once a
+                // minute; this fires on every transition. Measuring against the last
+                // PRINTED value has no edge to oscillate across: on the same real
+                // data it prints 2 lines per run, and a genuine leak still prints
+                // one line per 5 MB climbed.
+                //
+                // Hand-rolled because no QML-side LogCollapse helper exists yet. If
+                // one is added, this is a caller — but it would need this
+                // magnitude-threshold mode, not just the identical-text collapse.
+                //
+                // Suppressed transitions are counted and reported on the next line
+                // that speaks, so the record never implies the screensaver stopped
+                // cycling.
+                videoTransitionsSinceLog++
+                var movedMB = liveRss - preDestroyRss
+                if (videoTransitionCount === 1 || Math.abs(movedMB) >= 5) {
+                    var delta = videoTransitionCount > 1
+                        ? " delta:" + movedMB.toFixed(1) + " MB" : ""
+                    var folded = videoTransitionsSinceLog > 1
+                        ? " (+" + (videoTransitionsSinceLog - 1) +
+                          " transitions within 5 MB of the last line)" : ""
+                    console.log("[Screensaver] Video transition #" + videoTransitionCount +
+                                " RSS:" + liveRss.toFixed(1) + " MB" + delta + folded +
+                                " src:" + source.substring(source.lastIndexOf("/") + 1))
+                    videoTransitionsSinceLog = 0
+                    preDestroyRss = liveRss
+                }
 
                 // Qt's FFmpeg/VideoToolbox backend leaks ~5-10 MB per video transition
                 // on macOS (CVPixelBufferPool not fully released). Restart the screensaver
@@ -325,8 +373,18 @@ Page {
         // Ignore stale signals from a destroyed MediaPlayer
         if (!mediaPlayerLoader.item) return
 
+        // The video surface is an inline sourceComponent, so `mediaPlayerLoader.item` has no type
+        // name to cast to and every read of its `player`/`output` aliases is a QObject member
+        // access. Extracting it to a file is the real fix and is deliberately NOT done here: the
+        // component reaches back into this page for seven things (playNextMedia,
+        // handleVideoFailure, videoFailCount, lastFailedSource, isVideosMode, mediaPlaying,
+        // isCurrentItemImage), so the extraction is an interface design, and this screen carries
+        // the Qt FFmpeg MediaCodec leak history that makes an untested change here expensive.
+        // Left as a marked debt rather than a silent one.
+        // qmllint disable missing-property
         // Prevent handling the same failure twice
         var playerSource = mediaPlayerLoader.item.player.source.toString()
+        // qmllint enable missing-property
         if (playerSource === lastFailedSource) return
         lastFailedSource = playerSource
 
@@ -442,9 +500,12 @@ Page {
         }
 
         onLoaded: {
+            // Inline sourceComponent — see handleVideoFailure for why this is not extracted.
+            // qmllint disable missing-property
             item.player.videoOutput = item.output
             item.player.source = screensaverPage.pendingVideoSource
             item.player.play()
+            // qmllint enable missing-property
         }
     }
 
@@ -543,7 +604,10 @@ Page {
     Rectangle {
         id: fallbackBackground
         anchors.fill: parent
+        // Inline sourceComponent — see handleVideoFailure for why this is not extracted.
+        // qmllint disable missing-property
         visible: screensaverPage.isVideosMode && (!screensaverPage.mediaPlaying || (!screensaverPage.isCurrentItemImage && (!mediaPlayerLoader.item || mediaPlayerLoader.item.player.playbackState !== MediaPlayer.PlayingState)))
+        // qmllint enable missing-property
         z: 1
 
         Rectangle {
@@ -594,10 +658,13 @@ Page {
                                ScreensaverManager.showDateOnPersonal &&
                                ScreensaverManager.currentMediaDate.length > 0
 
+        // Inline sourceComponent — see handleVideoFailure for why this is not extracted.
+        // qmllint disable missing-property
         visible: screensaverPage.isVideosMode &&
                  (showDate || ScreensaverManager.currentVideoAuthor.length > 0) &&
                  ((mediaPlayerLoader.item && mediaPlayerLoader.item.player.playbackState === MediaPlayer.PlayingState) ||
                   (screensaverPage.isCurrentItemImage && screensaverPage.mediaPlaying))
+        // qmllint enable missing-property
 
         Text {
             anchors.centerIn: parent

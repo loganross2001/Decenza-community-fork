@@ -1,5 +1,11 @@
+// The bag-card Repeater delegate below reads this file's ids (`flickable`,
+// `changeBeansDialog`); Bound makes them statically resolvable. The delegate declares
+// its one injected model role required in the same edit -- without that, Bound stops
+// role injection and `modelData` goes undefined at RUNTIME, silently.
+pragma ComponentBehavior: Bound
+
 import QtQuick
-import QtQuick.Controls
+import QtQuick.Templates as T
 import QtQuick.Layouts
 import Decenza
 
@@ -8,7 +14,7 @@ import Decenza
 // tapping a card selects it (sets activeBagId), and the Change Beans dialog
 // handles search/creation. There are no editable bean text fields here —
 // bag edits go through the dialog's Edit Bag form.
-Page {
+T.Page {
     id: bagInventoryPage
     // Declarative so it re-evaluates on a language change. This used to be an
     // imperative assignment in onCompleted/onActivated, which ran once and left
@@ -150,6 +156,8 @@ Page {
                     model: bagInventoryPage.inventoryBags
 
                     BagCard {
+                        required property var modelData
+
                         bag: modelData
                         width: {
                             var avail = flickable.width

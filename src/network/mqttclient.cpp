@@ -1,4 +1,6 @@
 #include "mqttclient.h"
+
+#include <QDateTime>
 #include "../ble/de1device.h"
 #include "../machine/machinestate.h"
 #include "../core/settings.h"
@@ -176,10 +178,57 @@ void MqttClient::onConnectSuccess(void* context, MQTTAsync_successData* /*respon
     emit self->internalConnected();
 }
 
+// Decode an MQTT 3.1.1 CONNACK return code into something a user can act on.
+// Returns a null QString for anything that is not a CONNACK code — in
+// particular the negative MQTTASYNC_* transport errors, where Paho's own
+// `message` ("TCP connect timeout", "TCP/TLS connect failure", …) is already
+// self-describing and a bare number would only add noise.
+static QString connackReasonText(int code)
+{
+    switch (code) {
+    case 1: return QStringLiteral("broker rejected the MQTT protocol version");
+    case 2: return QStringLiteral("broker rejected this client ID");
+    case 3: return QStringLiteral("broker unavailable");
+    case 4: return QStringLiteral("bad username or password");
+    case 5: return QStringLiteral("not authorized");
+    default: return QString();
+    }
+}
+
 void MqttClient::onConnectFailure(void* context, MQTTAsync_failureData* response)
 {
     MqttClient* self = static_cast<MqttClient*>(context);
-    QString error = response && response->message ? QString::fromUtf8(response->message) : "Connection failed";
+    // Paho's `message` for a broker that answered but REJECTED the session is
+    // the constant string "CONNACK return code" — it carries no information at
+    // all. The reason lives in `code`, which Paho sets unconditionally
+    // (MQTTAsyncUtils.c nextOrClose): either an MQTT CONNACK return code, or a
+    // negative MQTTASYNC_* error for a failure before CONNACK. Dropping it made
+    // every rejection read identically in the log AND in the status text the
+    // MQTT settings tab shows the user, so "wrong password" was indistinguish-
+    // able from "broker doesn't want this client id".
+    //
+    // Decode rather than print the raw number: the status string reaches the
+    // user verbatim (see setStatus below and SettingsHomeAutomationTab.qml), and
+    // "(code 4)" is no more actionable to them than no code at all. The raw
+    // number is still appended when it is NOT a known CONNACK value, so an
+    // unexpected code is never swallowed. Note the common "broker unreachable"
+    // failures arrive as MQTTASYNC_FAILURE (-1) with a descriptive message, so
+    // they deliberately get no suffix.
+    //
+    // v3 only, by construction: connect() registers onFailure (not onFailure5)
+    // and sets no MQTTVersion, so MQTTVERSION_DEFAULT applies and the codes
+    // below are the 3.1.1 set. MQTTAsync_failureData has no reasonCode field —
+    // that is failureData5 — so nothing is lost by not reading one.
+    QString error = QStringLiteral("Connection failed");
+    if (response) {
+        if (response->message)
+            error = QString::fromUtf8(response->message);
+        const QString reason = connackReasonText(response->code);
+        if (!reason.isEmpty())
+            error = reason;
+        else
+            error += QStringLiteral(" (code %1)").arg(response->code);
+    }
     emit self->internalConnectionFailed(error);
 }
 
@@ -369,7 +418,18 @@ void MqttClient::connectWithHost(const QString& host)
     m_status = "Connecting...";
     emit statusChanged();
 
-    qDebug() << "MqttClient: Connecting to" << serverUri;
+    // Collapsed: a broker that is down produces this every retry forever, and
+    // "connecting to the address you configured" is not news the second time.
+    // A CHANGED address still emits at once — LogCollapse keys on the text.
+    {
+        LogCollapse::Collapsed collapsed;
+        const QString text = QStringLiteral("Connecting to ") + serverUri;
+        if (m_logCollapse.shouldLog(QStringLiteral("connecting"), text,
+                                    QDateTime::currentMSecsSinceEpoch(), &collapsed)) {
+            qDebug().noquote() << QStringLiteral("MqttClient: ") + text
+                                      + m_logCollapse.suffix(collapsed);
+        }
+    }
 
     rc = MQTTAsync_connect(m_client, &connOpts);
     if (rc != MQTTASYNC_SUCCESS) {
@@ -435,7 +495,33 @@ void MqttClient::disconnectFromBroker()
 
 void MqttClient::onInternalConnected()
 {
-    qDebug() << "MqttClient: Connected to broker";
+    // Close the books on the outage, if there was one.
+    //
+    // The three collapsed ladders above stop being called the moment this fires, so nothing would
+    // ever flush their pending counts — the tally would ride out on the first line of the NEXT
+    // outage, dating an old failure to a new one. Flushing here also makes the recovery itself
+    // visible: an outage announced at WARN whose end is only a DEBUG "Connected to broker" reads,
+    // to anyone filtering at INFO, as a broker that never came back. Same defect the BatteryManager
+    // threshold had, same fix.
+    //
+    // The suppressed count is reported rather than dropped because it is the honest statement that
+    // the log UNDERCOUNTS: 47 attempts of which 45 were never printed is a different picture from
+    // 2 attempts, and collapsing is what made them look alike.
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    const int failedAttempts = m_reconnectAttempts;
+    m_logCollapse.flush(QStringLiteral("connecting"), nowMs);
+    m_logCollapse.flush(QStringLiteral("retry"), nowMs);
+    const LogCollapse::Collapsed unprinted = m_logCollapse.flush(QStringLiteral("failed"), nowMs);
+
+    if (failedAttempts > 0) {
+        QString line = QStringLiteral("MqttClient: Connected to broker after %1 failed attempt(s)")
+                           .arg(failedAttempts);
+        if (unprinted.suppressed > 0)
+            line += QStringLiteral(" (%1 collapsed, never printed)").arg(unprinted.suppressed);
+        qInfo().noquote() << line;
+    } else {
+        qDebug() << "MqttClient: Connected to broker";
+    }
 
     {
         QMutexLocker locker(&m_mutex);
@@ -522,7 +608,31 @@ void MqttClient::onInternalDisconnected()
 
 void MqttClient::onInternalConnectionFailed(const QString& error)
 {
-    qWarning() << "MqttClient: Connection failed -" << error;
+    // Repeating a failure whose reason has not changed does not add information — it
+    // only spends the tier that is supposed to mean "look here", which is the habit
+    // this subsystem's audit was about. A DIFFERENT error still warns immediately (a
+    // broker that moved from "connection refused" to "bad username or password" is
+    // genuinely new), and the one-shot "backing off" warning below still marks the
+    // giving-up moment.
+    //
+    // Where the volume claim comes from, since it is easy to overstate: the pathological
+    // case is a MAINTAINER's machine with an unreachable broker left configured, which
+    // produced hundreds of these at WARN in a single capture. A real user's 25,720-line
+    // log is the opposite shape — 262 MqttClient lines, of which 5 are WARN, and the
+    // four "TCP/TLS connect failure" ones RECOVERED. So this collapse is worth having,
+    // but it is not what a typical user's log looks like, and sizing it from the
+    // maintainer's log alone is how the earlier version of this comment ended up
+    // asserting a cause ("a broker that was simply switched off") that the user log
+    // does not support.
+    {
+        LogCollapse::Collapsed collapsed;
+        const QString text = QStringLiteral("Connection failed - ") + error;
+        if (m_logCollapse.shouldLog(QStringLiteral("failed"), text,
+                                    QDateTime::currentMSecsSinceEpoch(), &collapsed)) {
+            qWarning().noquote() << QStringLiteral("MqttClient: ") + text
+                                        + m_logCollapse.suffix(collapsed);
+        }
+    }
 
     {
         QMutexLocker locker(&m_mutex);
@@ -573,12 +683,22 @@ void MqttClient::scheduleReconnect(const QString& reason)
                    << "attempts - backing off to one retry every" << delay / 60000
                    << "min. Reason:" << reason;
     }
-    qDebug() << "MqttClient: Retrying in" << delay / 1000 << "seconds -" << reason;
+    {
+        LogCollapse::Collapsed collapsed;
+        const QString text = QStringLiteral("Retrying in %1 seconds - %2")
+                                 .arg(delay / 1000).arg(reason);
+        if (m_logCollapse.shouldLog(QStringLiteral("retry"), text,
+                                    QDateTime::currentMSecsSinceEpoch(), &collapsed)) {
+            qDebug().noquote() << QStringLiteral("MqttClient: ") + text
+                                      + m_logCollapse.suffix(collapsed);
+        }
+    }
     m_reconnectTimer.start(delay);
 
     // Keep the broker's own words. The caller has usually just set an "Error: …"
     // status, and both assignments land in one event-loop turn, so a bare
-    // reconnectStatusText() would erase "Bad user name or password" before it could
+    // reconnectStatusText() would erase "bad username or password" (the decoded
+    // CONNACK 4 text from connackReasonText()) before it could
     // ever be painted — and the status line (Home Automation tab, and the ShotServer
     // settings page which mirrors it) is the main place
     // that reason reaches the user. With retries no longer stopping, there would be
@@ -1018,12 +1138,31 @@ void MqttClient::publishDiscoveryConfig(const QString& component, const QString&
     QString payload = QJsonDocument(config).toJson(QJsonDocument::Compact);
 
     publish(topic, payload, true);
-    qDebug() << "MqttClient: Published discovery for" << objectId;
+
+    // COUNTED, not logged one line per entity.
+    //
+    // This was a qDebug() naming each objectId, so a startup carried 22 lines
+    // emitted inside 50 ms, followed by a summary line that already said the same
+    // thing. On a real tablet that made MqttClient the single largest class prefix
+    // in a startup session — 30 of 247 lines, 12% — and it repeats on every
+    // reconnect, not just launch.
+    //
+    // The list carries no per-run information: it is a fixed set compiled into
+    // publishHomeAssistantDiscovery(), identical every time, so a reader learns
+    // nothing from the 22nd line that the 1st did not tell them. What IS per-run
+    // is a FAILURE to publish one, and publish() already reports that at WARN
+    // (see its MQTTASYNC_SUCCESS check) — which the DEBUG line never did, since
+    // it printed unconditionally whether or not the send succeeded.
+    ++m_discoveryEntityCount;
 }
 
 void MqttClient::publishHomeAssistantDiscovery()
 {
     if (!m_settingsMqtt) return;
+
+    // Reset per call, not per process: this runs again on every reconnect, and a
+    // cumulative count would report 44 entities on the second pass.
+    m_discoveryEntityCount = 0;
 
     QString baseTopic = m_settingsMqtt->mqttBaseTopic();
     QJsonObject device = buildDeviceInfo();
@@ -1316,5 +1455,9 @@ void MqttClient::publishHomeAssistantDiscovery()
     }
 
     m_discoveryPublished = true;
-    qDebug() << "MqttClient: Home Assistant discovery published";
+    // The count is the part a reader can act on: it says the set was complete
+    // without spending a line per member. A short count is the signal that
+    // something returned early.
+    qDebug() << "MqttClient: Home Assistant discovery published —"
+             << m_discoveryEntityCount << "entities";
 }

@@ -1,10 +1,18 @@
+// The tab-loading Repeater delegate reads this file's ids (`settingsPage`,
+// `saveThemeDialog`); Bound makes them statically resolvable. It and the tab-button
+// delegate both already declare every injected model role they use as a required
+// property, so Bound cannot break role injection here. (The tab-button delegate reads
+// no file id; it only needs its roles.)
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Templates as T
 import QtQuick.Layouts
 import QtQuick.Window
 import Decenza
 
-Page {
+T.Page {
     id: settingsPage
     // Declarative so it re-evaluates on a language change. This used to be an
     // imperative assignment in onCompleted/onActivated, which ran once and left
@@ -259,17 +267,19 @@ Page {
 
                 onLoaded: {
                     // Themes tab emits a signal requesting the Save Theme dialog
-                    if (tabId === "themes" && item) {
-                        item.openSaveThemeDialog.connect(function() {
+                    var themesTab = item as SettingsThemesTab
+                    if (themesTab) {
+                        themesTab.openSaveThemeDialog.connect(function() {
                             saveThemeDialog.open()
                         })
                     }
                     // Machine tab's Maintenance card forwards to global navigation
-                    if (tabId === "machine" && item) {
-                        item.openDescaling.connect(function() {
+                    var machineTab = item as SettingsMachineTab
+                    if (machineTab) {
+                        machineTab.openDescaling.connect(function() {
                             AppShell.descalingRequested()
                         })
-                        item.openTransport.connect(function() {
+                        machineTab.openTransport.connect(function() {
                             AppShell.transportRequested()
                         })
                     }
@@ -279,7 +289,7 @@ Page {
     }
 
     // Save Theme Dialog
-    Dialog {
+    DecenzaDialog {
         id: saveThemeDialog
         modal: true
         x: (parent.width - width) / 2
@@ -298,7 +308,7 @@ Page {
             target: Keyboard
             function onVisibleChanged() {
                 if (Keyboard.visible && saveThemeDialog.visible) {
-                    saveThemeDialog.keyboardOffset = parent.height * 0.25
+                    saveThemeDialog.keyboardOffset = saveThemeDialog.parent.height * 0.25
                 } else {
                     saveThemeDialog.keyboardOffset = 0
                 }
@@ -328,9 +338,10 @@ Page {
 
         function doSave(name) {
             Settings.theme.saveCurrentTheme(name)
-            var themesLoader = tabLoaders.itemAt(SettingsTabs.indexOf("themes"))
-            if (themesLoader && themesLoader.item && themesLoader.item.refreshPresets) {
-                themesLoader.item.refreshPresets()
+            var themesLoader = tabLoaders.itemAt(SettingsTabs.indexOf("themes")) as Loader
+            var themesTab = themesLoader ? themesLoader.item as SettingsThemesTab : null
+            if (themesTab) {
+                themesTab.refreshPresets()
             }
             saveThemeDialog.close()
         }
@@ -410,7 +421,7 @@ Page {
             settingsPage.highlightCardId = cardId || ""
             settingsPage.markTabLoaded(tabIndex)
             tabBar.currentIndex = tabIndex
-            if (cardId) scrollToCard(tabIndex, cardId)
+            if (cardId) settingsPage.scrollToCard(tabIndex, cardId)
         }
     }
 

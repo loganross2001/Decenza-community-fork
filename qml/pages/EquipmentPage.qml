@@ -1,5 +1,11 @@
+// The equipment-card Repeater delegate below reads this file's ids (`flickable`,
+// `switchEquipmentDialog`); Bound makes them statically resolvable. The delegate declares
+// its one injected model role required in the same edit -- without that, Bound stops
+// role injection and `modelData` goes undefined at RUNTIME, silently.
+pragma ComponentBehavior: Bound
+
 import QtQuick
-import QtQuick.Controls
+import QtQuick.Templates as T
 import QtQuick.Layouts
 import Decenza
 
@@ -7,7 +13,7 @@ import Decenza
 // packages with inInventory = true as cards; "Add Equipment" opens the create
 // dialog. Equipment is switched per-bag from Brew Settings, so there is no
 // global selection here — cards are informational + edit/remove.
-Page {
+T.Page {
     id: equipmentPage
     // Declarative so it re-evaluates on a language change. This used to be an
     // imperative assignment in onCompleted/onActivated, which ran once and left
@@ -121,6 +127,8 @@ Page {
                     model: equipmentPage.inventoryPackages
 
                     EquipmentCard {
+                        required property var modelData
+
                         pkg: modelData
                         width: {
                             var avail = flickable.width

@@ -1,3 +1,8 @@
+// `layer.effect` declares an inline component, so this file's ids are not statically
+// resolvable inside it without this pragma. No delegate in this file takes an injected
+// model role, so no `required property` is needed -- see ThemedIcon.qml for the same case.
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
@@ -5,7 +10,7 @@ import QtQuick.Effects
 import QtQuick.Window
 import Decenza
 
-Item {
+LayoutWidgetItem {
     id: root
 
     // `Window` is an ATTACHED property: it resolves against the current scope, so it is read here
@@ -14,8 +19,6 @@ Item {
     // — it reports `Member "Window" not found on type "SteamItem"`. Reading it once also removes the
     // duplicate lookups.
     readonly property var appWindow: Window.window
-    property bool isCompact: false
-    property string itemId: ""
 
     // See EspressoItem.qml for rationale.
     readonly property bool canStartOperations: DE1Device.isHeadless || DE1Device.simulationMode
@@ -110,7 +113,7 @@ Item {
     // dialog role that screen readers use to trap focus, which `Popup { modal }`
     // alone (already set below) does not provide. header/footer null strip the
     // Dialog chrome so it still renders as the same bare dropdown.
-    Dialog {
+    DecenzaDialog {
         id: presetPopup
         modal: true
         dim: false

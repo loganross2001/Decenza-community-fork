@@ -2,12 +2,13 @@ pragma ComponentBehavior: Bound
 
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Templates as T
 import QtQuick.Layouts
 import QtQuick.Effects
 import Decenza
 import "../components/layout/ShotPlanConfig.js" as ShotPlanConfig
 
-Page {
+T.Page {
     id: shotDetailPage
     // Declarative so it re-evaluates on a language change. This used to be an
     // imperative assignment in onCompleted/onActivated, which ran once and left
@@ -80,11 +81,6 @@ Page {
         }
     }
 
-    // Re-assert on every activation, not just creation — returning here after a
-    // page was pushed on top would otherwise keep that page's header title.
-    StackView.onActivated: {
-    }
-
     // RecipeField (labeled component row) is a shared component in
     // qml/components/RecipeField.qml.
 
@@ -124,7 +120,7 @@ Page {
             // Defer both calls until after layout has updated: returnToBounds() needs
             // final content bounds, and enterAnimation must start after new content is laid out.
             Qt.callLater(function() {
-                scrollView.contentItem.returnToBounds()
+                (scrollView.contentItem as Flickable).returnToBounds()
                 if (wasNavigating)
                     enterAnimation.start()
             })
@@ -740,7 +736,7 @@ Page {
 
                         onReleased: {
                             Settings.setValue("shotDetail/graphHeight", shotDetailPage.graphHeight)
-                            Qt.callLater(function() { scrollView.contentItem.returnToBounds() })
+                            Qt.callLater(function() { (scrollView.contentItem as Flickable).returnToBounds() })
                         }
                     }
                 }
@@ -1431,7 +1427,7 @@ Page {
     }
 
     // Debug log dialog
-    Dialog {
+    DecenzaDialog {
         id: debugLogDialog
         parent: Overlay.overlay
         anchors.centerIn: parent
@@ -1497,7 +1493,7 @@ Page {
     }
 
     // Delete confirmation dialog
-    Dialog {
+    DecenzaDialog {
         id: deleteConfirmDialog
         parent: Overlay.overlay
         anchors.centerIn: parent

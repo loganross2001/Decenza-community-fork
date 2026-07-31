@@ -385,11 +385,32 @@ public:
     // directly without bypassing the settings cache and NOTIFY.
     qint64 migratedActiveBagId() const { return m_migratedActiveBagId; }
 
+    // Equipment package the active selection was moved to when migration 35
+    // merged an enrichment fork away, or -1. Adopted through SettingsDye's setter
+    // by MainController for the same reason as the bag id above: the selection is
+    // a QSettings value, and the merged-away id now names a deleted row.
+    qint64 healedActiveEquipmentId() const { return m_healedActiveEquipmentId; }
+
     // Invalidate all cached getDistinct*() results (call after save/delete/import/update)
     void invalidateDistinctCache();
 
     // Close the database (for factory reset before file deletion)
     void close();
+
+    // True when no background DB work is queued, running, or waiting to deliver
+    // its result — covering BOTH the FIFO CRUD worker and the one-shot read
+    // threads from runDetachedDbThread(). False only while something is in flight.
+    //
+    // "Waiting to deliver its result" is exact for the CRUD worker. For a detached
+    // read thread it means the thread has finished touching the DB FILE; its
+    // result callback is already posted and m_destroyed guards it. That is the
+    // granularity callers actually need — it is what makes deleting the file safe.
+    //
+    // For callers that must not continue until the DB work has really finished —
+    // a test tearing this object down, a factory reset about to delete the file —
+    // so they can wait on the CONDITION instead of guessing a duration. Always
+    // true when no async work has ever been posted (the worker is lazily created).
+    bool isDbWorkIdle() const;
 
     // Checkpoint WAL to main database file
     void checkpoint();
@@ -448,6 +469,16 @@ private:
     // marshals results back to the main thread itself. Heavy one-shot ops
     // (backup/import) deliberately stay on their own threads.
     void runOnDbThread(std::function<void()> task);
+
+    // Run `body` on a one-shot background thread for a read query that does NOT
+    // need the FIFO ordering runOnDbThread() provides (and for the two heavy
+    // one-shot ops, backup and import). The thread deletes itself when it
+    // finishes and is counted, so isDbWorkIdle() covers it.
+    //
+    // ALWAYS spawn through this, never a bare QThread::create — that boilerplate
+    // was hand-copied at eleven sites, none of which was counted, and one of which
+    // had already drifted to calling start() before the deleteLater connect.
+    void runDetachedDbThread(std::function<void()> body);
 
     bool createTables();
     bool runMigrations();
@@ -512,11 +543,18 @@ private:
     bool m_schemaVersionAtStartKnown = false;  // false until read successfully; suppresses phantom crossings
     qint64 m_lastSavedShotId = 0;
     qint64 m_migratedActiveBagId = -1;
+    qint64 m_healedActiveEquipmentId = -1;
     std::atomic<bool> m_backupInProgress{false};  // Prevent concurrent backup/export operations (thread-safe)
     std::atomic<bool> m_importInProgress{false};   // Prevent concurrent import/restore operations (thread-safe)
 
     // Cache for getDistinct*() results (invalidated on save/delete/import)
     QHash<QString, QStringList> m_distinctCache;
+    // Deduped narration of what grindStepForGrinder() derived — see its definition.
+    void reportGrindStep(const QString& grinderModel, qsizetype sampleCount, double step);
+    // Last "<grinder>:<count>:<step>" passed to reportGrindStep(), so the
+    // derivation is logged when it CHANGES rather than on every QML binding
+    // re-evaluation. Not a cache — it is only ever compared, never read back.
+    QString m_lastGrindStepReport;
     bool m_distinctCacheRefreshing = false;  // Debounce guard for requestDistinctCache()
     bool m_distinctCacheDirty = false;       // Re-queue flag: set when invalidation arrives during refresh
     QSet<QString> m_pendingDistinctKeys;     // De-duplicate in-flight requestDistinctValueAsync() calls
@@ -529,6 +567,11 @@ private:
     // Atomic because the flag is written on the main thread (destructor) and
     // read on background threads (before QMetaObject::invokeMethod).
     std::shared_ptr<std::atomic<bool>> m_destroyed = std::make_shared<std::atomic<bool>>(false);
+
+    // Number of runDetachedDbThread() threads currently touching the DB file.
+    // shared_ptr for the same reason as m_destroyed — a thread may outlive `this`
+    // and still has to decrement. Read by isDbWorkIdle().
+    std::shared_ptr<std::atomic<int>> m_detachedDbThreads = std::make_shared<std::atomic<int>>(0);
 
     // Serializes shot-CRUD background work onto one FIFO worker thread so
     // successive writes to the same shot row apply in submission order

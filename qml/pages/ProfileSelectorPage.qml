@@ -1,10 +1,20 @@
+// The profile-list delegate reads `profileSelectorPage`, `allProfilesList`,
+// `profileActionsDialog` and `knowledgeDialog`; the new-profile type tiles read
+// `newProfileDialog`. Bound makes those statically resolvable, and both delegates
+// declare every injected role they use required in the same edit -- without that, Bound
+// stops role injection and the whole profile list renders blank at RUNTIME, silently.
+// (The trailing-action Component and the `layer.effect` blocks read no file id, so they
+// need nothing from the pragma.)
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Templates as T
 import QtQuick.Layouts
 import QtQuick.Effects
 import Decenza
 
-Page {
+T.Page {
     id: profileSelectorPage
     // Declarative so it re-evaluates on a language change. This used to be an
     // imperative assignment in onCompleted/onActivated, which ran once and left
@@ -344,12 +354,15 @@ Page {
 
                     delegate: Rectangle {
                         id: profileDelegate
+                        required property var modelData
+                        required property int index
+
                         width: allProfilesList.width
                         height: Math.max(Theme.scaled(60), profileContentRow.implicitHeight + Theme.scaled(10) * 2)
                         radius: Theme.scaled(6)
 
                         // ProfileSource enum: 0=BuiltIn, 1=Downloaded, 2=UserCreated
-                        property int profileSource: modelData.source || 0
+                        property int profileSource: profileDelegate.modelData.source || 0
                         property bool isBuiltIn: profileSource === 0
                         property bool isDownloaded: profileSource === 1
                         property bool isUserCreated: profileSource === 2
@@ -357,18 +370,18 @@ Page {
                         property bool isSelected: {
                             if (isBuiltIn) {
                                 var list = Settings.app.selectedBuiltInProfiles  // Create dependency
-                                return Settings.app.isSelectedBuiltInProfile(modelData.name)
+                                return Settings.app.isSelectedBuiltInProfile(profileDelegate.modelData.name)
                             } else {
                                 var hidden = Settings.app.hiddenProfiles  // Create dependency
-                                return !Settings.app.isHiddenProfile(modelData.name)
+                                return !Settings.app.isHiddenProfile(profileDelegate.modelData.name)
                             }
                         }
                         property bool isFavorite: {
                             var list = Settings.app.favoriteProfiles  // Create dependency
-                            return Settings.app.isFavoriteProfile(modelData.name)
+                            return Settings.app.isFavoriteProfile(profileDelegate.modelData.name)
                         }
-                        property bool isCurrentProfile: modelData.name === ProfileManager.currentProfileName
-                        readonly property bool isAutoLoad: modelData && modelData.name === Settings.app.autoLoadProfileFilename && Settings.app.autoLoadProfileFilename !== ""
+                        property bool isCurrentProfile: profileDelegate.modelData.name === ProfileManager.currentProfileName
+                        readonly property bool isAutoLoad: profileDelegate.modelData && profileDelegate.modelData.name === Settings.app.autoLoadProfileFilename && Settings.app.autoLoadProfileFilename !== ""
 
                         // Source-based colors
                         property color sourceColor: isBuiltIn ? Theme.sourceBadgeBlueColor :      // Blue for Decent
@@ -381,7 +394,7 @@ Page {
                                 return Qt.rgba(Theme.primaryColor.r, Theme.primaryColor.g, Theme.primaryColor.b, 0.25)
                             }
                             // Subtle source color tint
-                            var baseColor = index % 2 === 0 ? Theme.rowAlternateColor : Theme.rowAlternateLightColor
+                            var baseColor = profileDelegate.index % 2 === 0 ? Theme.rowAlternateColor : Theme.rowAlternateLightColor
                             return Qt.tint(baseColor, Qt.rgba(sourceColor.r, sourceColor.g, sourceColor.b, 0.15))
                         }
 
@@ -417,8 +430,8 @@ Page {
                                     Layout.fillWidth: true
                                     Layout.alignment: Qt.AlignVCenter
                                     text: {
-                                        var name = modelData.title
-                                        if (isCurrentProfile && ProfileManager.profileModified) {
+                                        var name = profileDelegate.modelData.title
+                                        if (profileDelegate.isCurrentProfile && ProfileManager.profileModified) {
                                             return ProfileManager.isCurrentProfileReadOnly
                                                 ? name + " " + TranslationManager.translate("profileselector.modified_suffix", "(modified)") : "*" + name
                                         }
@@ -451,7 +464,7 @@ Page {
 
                                 Image {
                                     id: sparkleIcon
-                                    visible: modelData.hasKnowledgeBase === true
+                                    visible: profileDelegate.modelData.hasKnowledgeBase === true
                                     source: "qrc:/icons/sparkle.svg"
                                     sourceSize.width: Theme.scaled(14)
                                     sourceSize.height: Theme.scaled(14)
@@ -475,8 +488,8 @@ Page {
                                         accessibleName: TranslationManager.translate("profileselector.accessible.view_knowledge", "View AI knowledge base")
                                         accessibleItem: sparkleIcon
                                         onAccessibleClicked: {
-                                            knowledgeDialog.profileTitle = modelData.title
-                                            knowledgeDialog.content = ProfileManager.profileKnowledgeContent(modelData.title)
+                                            knowledgeDialog.profileTitle = profileDelegate.modelData.title
+                                            knowledgeDialog.content = ProfileManager.profileKnowledgeContent(profileDelegate.modelData.title)
                                             knowledgeDialog.open()
                                         }
                                     }
@@ -488,11 +501,11 @@ Page {
                                 Layout.preferredWidth: Theme.scaled(28)
                                 Layout.preferredHeight: Theme.scaled(28)
                                 Layout.alignment: Qt.AlignVCenter
-                                profileFilename: modelData.name
-                                profileName: modelData.title
+                                profileFilename: profileDelegate.modelData.name
+                                profileName: profileDelegate.modelData.title
 
                                 onClicked: {
-                                    AppShell.profileInfoRequested(modelData.name, modelData.title)
+                                    AppShell.profileInfoRequested(profileDelegate.modelData.name, profileDelegate.modelData.title)
                                 }
                             }
 
@@ -510,21 +523,21 @@ Page {
                                 onClicked: {
                                     if (profileDelegate.isBuiltIn) {
                                         if (profileDelegate.isSelected) {
-                                            Settings.app.removeSelectedBuiltInProfile(modelData.name)
+                                            Settings.app.removeSelectedBuiltInProfile(profileDelegate.modelData.name)
                                             AccessibilityManager.announce(TranslationManager.translate("profileselector.announce.removed_from_selected", "Removed from selected"))
                                             profileSelectorPage.showToast(TranslationManager.translate("profileselector.toast.removed_from_selected", "Removed from selected"))
                                         } else {
-                                            Settings.app.addSelectedBuiltInProfile(modelData.name)
+                                            Settings.app.addSelectedBuiltInProfile(profileDelegate.modelData.name)
                                             AccessibilityManager.announce(TranslationManager.translate("profileselector.announce.added_to_selected", "Added to selected"))
                                             profileSelectorPage.showToast(TranslationManager.translate("profileselector.toast.added_to_selected", "Added to selected"))
                                         }
                                     } else {
                                         if (profileDelegate.isSelected) {
-                                            Settings.app.addHiddenProfile(modelData.name)
+                                            Settings.app.addHiddenProfile(profileDelegate.modelData.name)
                                             AccessibilityManager.announce(TranslationManager.translate("profileselector.announce.removed_from_selected", "Removed from selected"))
                                             profileSelectorPage.showToast(TranslationManager.translate("profileselector.toast.removed_from_selected", "Removed from selected"))
                                         } else {
-                                            Settings.app.removeHiddenProfile(modelData.name)
+                                            Settings.app.removeHiddenProfile(profileDelegate.modelData.name)
                                             AccessibilityManager.announce(TranslationManager.translate("profileselector.announce.added_to_selected", "Added to selected"))
                                             profileSelectorPage.showToast(TranslationManager.translate("profileselector.toast.added_to_selected", "Added to selected"))
                                         }
@@ -548,14 +561,14 @@ Page {
                                         // Find and remove from favorites
                                         var favs = Settings.app.favoriteProfiles
                                         for (var i = 0; i < favs.length; i++) {
-                                            if (favs[i].filename === modelData.name) {
+                                            if (favs[i].filename === profileDelegate.modelData.name) {
                                                 Settings.app.removeFavoriteProfile(i)
                                                 break
                                             }
                                         }
                                         profileSelectorPage.showToast(TranslationManager.translate("profileselector.toast.removed_from_favorites", "Removed from favorites"))
                                     } else {
-                                        Settings.app.addFavoriteProfile(modelData.title, modelData.name)
+                                        Settings.app.addFavoriteProfile(profileDelegate.modelData.title, profileDelegate.modelData.name)
                                         profileSelectorPage.showToast(TranslationManager.translate("profileselector.toast.added_to_favorites", "Added to favorites"))
                                     }
                                 }
@@ -572,11 +585,11 @@ Page {
                                 Layout.alignment: Qt.AlignVCenter
                                 icon.source: "qrc:/icons/more-vertical.svg"
                                 inactiveColor: Theme.textColor
-                                accessibleName: TranslationManager.translate("profileselector.accessible.more_options", "More options for") + " " + modelData.title
+                                accessibleName: TranslationManager.translate("profileselector.accessible.more_options", "More options for") + " " + profileDelegate.modelData.title
 
                                 onClicked: {
-                                    profileActionsDialog.profileFilename = modelData.name
-                                    profileActionsDialog.profileTitle = modelData.title
+                                    profileActionsDialog.profileFilename = profileDelegate.modelData.name
+                                    profileActionsDialog.profileTitle = profileDelegate.modelData.title
                                     profileActionsDialog.profileIsBuiltIn = profileDelegate.isBuiltIn
                                     profileActionsDialog.profileIsSelected = profileDelegate.isSelected
                                     profileActionsDialog.profileIsFavorite = profileDelegate.isFavorite
@@ -593,8 +606,8 @@ Page {
                             anchors.fill: parent
                             z: -1
                             onClicked: {
-                                if (!modelData) return
-                                ProfileManager.loadProfile(modelData.name)
+                                if (!profileDelegate.modelData) return
+                                ProfileManager.loadProfile(profileDelegate.modelData.name)
                             }
                         }
 
@@ -605,7 +618,7 @@ Page {
                             var fav = profileDelegate.isFavorite ? ", " + TranslationManager.translate("profileselector.accessible.favorite", "favorite") : ""
                             var modified = (profileDelegate.isCurrentProfile && ProfileManager.profileModified) ? ", " + TranslationManager.translate("profileselector.accessible.unsaved_changes", "unsaved changes") : ""
                             var current = profileDelegate.isCurrentProfile ? ", " + TranslationManager.translate("profileselector.accessible.currently_selected", "currently selected") : ""
-                            return source + " " + TranslationManager.translate("profileselector.accessible.profile_label", "profile:") + " " + modelData.title + fav + modified + current
+                            return source + " " + TranslationManager.translate("profileselector.accessible.profile_label", "profile:") + " " + profileDelegate.modelData.title + fav + modified + current
                         }
                         Accessible.focusable: true
                         Accessible.onPressAction: profileMouseArea.clicked(null)
@@ -679,7 +692,9 @@ Page {
                     border.width: 2
 
                     Accessible.role: Accessible.Button
-                    Accessible.name: (ProfileManager.currentProfileName || "Loaded Profile") + ", " + TranslationManager.translate("profileselector.accessible.edit_profile", "Edit profile")
+                    Accessible.name: (ProfileManager.currentProfileName
+                                      || TranslationManager.translate("profileselector.loadedProfile", "Loaded Profile"))
+                                     + ", " + TranslationManager.translate("profileselector.accessible.edit_profile", "Edit profile")
                     Accessible.focusable: true
                     Accessible.onPressAction: nonFavPillMouseArea.clicked(null)
 
@@ -691,7 +706,8 @@ Page {
                         // Profile name
                         Text {
                             Layout.fillWidth: true
-                            text: ProfileManager.currentProfileName || "Loaded Profile"
+                            text: ProfileManager.currentProfileName
+                                  || TranslationManager.translate("profileselector.loadedProfile", "Loaded Profile")
                             color: Theme.primaryContrastColor
                             font.family: Theme.bodyFont.family
                             font.pixelSize: Theme.bodyFont.pixelSize
@@ -765,19 +781,32 @@ Page {
                     }
 
                     trailingActionDelegate: Component {
-                        StyledIconButton {
-                            anchors.fill: parent
-                            icon.source: "qrc:/icons/edit.svg"
-                            icon.width: Theme.scaled(18)
-                            icon.height: Theme.scaled(18)
-                            icon.color: parent.selected ? Theme.primaryContrastColor : Theme.textColor
-                            accessibleName: parent.row ? (TranslationManager.translate("profileselector.accessible.edit", "Edit") + " " + AccessibilityManager.cleanForSpeech(parent.row.name)) : ""
+                        FavoritesRowAction {
+                            id: editFavoriteAction
 
-                            onClicked: {
-                                if (!parent.row) return
-                                Settings.app.selectedFavoriteProfile = parent.rowIndex
-                                ProfileManager.loadProfile(parent.row.filename)
-                                AppShell.profileEditorRequested()
+                            StyledIconButton {
+                                anchors.fill: parent
+                                icon.source: "qrc:/icons/edit.svg"
+                                icon.width: Theme.scaled(18)
+                                icon.height: Theme.scaled(18)
+                                icon.color: editFavoriteAction.selected ? Theme.primaryContrastColor
+                                                                        : Theme.textColor
+                                accessibleName: editFavoriteAction.row
+                                    ? (TranslationManager.translate("profileselector.accessible.edit", "Edit") + " "
+                                       + AccessibilityManager.cleanForSpeech(editFavoriteAction.row.name))
+                                    : ""
+
+                                onClicked: {
+                                    if (!editFavoriteAction.row) {
+                                        // A tap that does nothing at all is the hardest kind of
+                                        // defect to report; say so in the log.
+                                        console.warn("ProfileSelectorPage: edit tapped with no row bound")
+                                        return
+                                    }
+                                    Settings.app.selectedFavoriteProfile = editFavoriteAction.rowIndex
+                                    ProfileManager.loadProfile(editFavoriteAction.row.filename)
+                                    AppShell.profileEditorRequested()
+                                }
                             }
                         }
                     }
@@ -818,7 +847,7 @@ Page {
     // proper modal Dialog. Menus don't surface role/focus to screen readers
     // reliably; Dialog does. Follows the same shape as the bean-info preset
     // dialogs: centered, modal, AccessibleButton stack.
-    Dialog {
+    DecenzaDialog {
         id: profileActionsDialog
         x: (parent.width - width) / 2
         y: (parent.height - height) / 2
@@ -965,7 +994,7 @@ Page {
     }
 
     // Delete confirmation dialog
-    Dialog {
+    DecenzaDialog {
         id: deleteDialog
         anchors.centerIn: parent
         width: Theme.scaled(350)
@@ -1054,7 +1083,7 @@ Page {
     }
 
     // New profile type picker dialog
-    Dialog {
+    DecenzaDialog {
         id: newProfileDialog
         anchors.centerIn: parent
         width: Theme.scaled(350)
@@ -1095,6 +1124,9 @@ Page {
                 ]
 
                 delegate: Rectangle {
+                    id: newTypeTile
+                    required property var modelData
+
                     Layout.fillWidth: true
                     Layout.leftMargin: Theme.scaled(12)
                     Layout.rightMargin: Theme.scaled(12)
@@ -1102,14 +1134,14 @@ Page {
                     radius: Theme.scaled(6)
                     color: typeMouseArea.containsMouse ? Qt.rgba(Theme.primaryColor.r, Theme.primaryColor.g, Theme.primaryColor.b, 0.2) : Theme.insetBackgroundColor
                     Accessible.role: Accessible.Button
-                    Accessible.name: modelData.label
+                    Accessible.name: newTypeTile.modelData.label
                     Accessible.focusable: true
                     Accessible.onPressAction: typeMouseArea.clicked(null)
 
                     Text {
                         anchors.fill: parent
                         anchors.leftMargin: Theme.scaled(16)
-                        text: modelData.label
+                        text: newTypeTile.modelData.label
                         color: Theme.textColor
                         font: Theme.bodyFont
                         verticalAlignment: Text.AlignVCenter
@@ -1123,7 +1155,7 @@ Page {
                         Accessible.ignored: true
                         onClicked: {
                             newProfileDialog.close()
-                            var profileType = modelData.type
+                            var profileType = newTypeTile.modelData.type
                             if (profileType === "pressure") {
                                 ProfileManager.createNewPressureProfile("New Pressure Profile")
                                 AppShell.profileEditorRequested()
@@ -1156,7 +1188,7 @@ Page {
     }
 
     // Copy profile dialog
-    Dialog {
+    DecenzaDialog {
         id: copyProfileDialog
         anchors.centerIn: parent
         width: Theme.scaled(400)
@@ -1289,7 +1321,7 @@ Page {
     }
 
     // Rename profile dialog
-    Dialog {
+    DecenzaDialog {
         id: renameProfileDialog
         anchors.centerIn: parent
         width: Theme.scaled(400)

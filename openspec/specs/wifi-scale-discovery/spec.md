@@ -371,7 +371,6 @@ The driver SHALL request `rate 10k` on connect and SHALL NOT attempt to downgrad
 - **WHEN** the firmware skips a write tick because the socket is not writable
 - **THEN** the driver receives a frame later than the requested interval; the weight pipeline's EMA tracks the actual cadence and does not trigger spurious stalls so long as gaps stay under `kScaleStaleMs` (2 s)
 
-
 ### Requirement: The recognition window is armed before the socket is opened
 
 `attemptTarget` SHALL start the recognition timer BEFORE calling `open()`, never after. Opening a WebSocket against an address the operating system rejects at the routing layer fails synchronously, inside the `open()` call, so an error handler that stops the recognition timer runs before a timer started after `open()` exists.
@@ -426,11 +425,11 @@ This does not apply to a USB scale being physically unplugged, which removes its
 
 #### Scenario: Stale instance that never resolves
 - **WHEN** the browse returns an instance name whose SRV/address resolution does not complete within the resolve deadline
-- **THEN** no row appears for that instance, and the scale log records the instance name and that it was dropped at resolve
+- **THEN** no row appears for that instance, and the scale narrative in the system log records the instance name and that it was dropped at resolve
 
 #### Scenario: Instance withdrawn mid-scan
 - **WHEN** an instance is listed and the system resolver subsequently withdraws it because nobody answered a re-query
-- **THEN** its row remains in the list for the rest of the scan cycle, and the withdrawal is recorded in the scale log only
+- **THEN** its row remains in the list for the rest of the scan cycle, and the withdrawal is recorded in the scale narrative only
 
 #### Scenario: Departed device disappears on the next scan
 - **WHEN** a scale that was listed in the previous scan is no longer present and the user scans again
@@ -494,19 +493,19 @@ The DNS-SD browse SHALL be available on Windows, macOS, Linux, Android and iOS. 
 
 ### Requirement: Discovery diagnostics cover the browse
 
-The scale debug log SHALL record what the browse did, at the same level of detail the existing A-record probe records, so a user-shared log explains a discovery failure without needing a console.
+The scale narrative in the system log SHALL record what the browse did, at the same level of detail the existing A-record probe records, so a user-shared log explains a discovery failure without needing a console. These records are part of the user-facing narrative — they are what a discovery complaint is diagnosed from — so they SHALL be logged at INFO or above and therefore appear in the connections page's scale view as well as in the shared log.
 
 #### Scenario: Browse produces results
 - **WHEN** a browse completes and returns one or more services
-- **THEN** the scale log records the service type queried, the number of results, and each result's instance name, host, address and firmware version
+- **THEN** the scale narrative records the service type queried, the number of results, and each result's instance name, host, address and firmware version
 
 #### Scenario: Browse returns nothing
 - **WHEN** a browse completes with no results
-- **THEN** the scale log records that the browse ran and found nothing, distinguishably from the browse not having been attempted
+- **THEN** the scale narrative records that the browse ran and found nothing, distinguishably from the browse not having been attempted
 
 #### Scenario: Fallback names are logged individually
 - **WHEN** the multi-name A-record fallback runs
-- **THEN** the scale log records the outcome for each of `hds.local`, `hds-2.local` and `hds-3.local` separately, so a partial result is diagnosable
+- **THEN** the scale narrative records the outcome for each of `hds.local`, `hds-2.local` and `hds-3.local` separately, so a partial result is diagnosable
 
 #### Scenario: A lookup could not be performed at all
 - **WHEN** the query socket cannot be opened, or every query send fails
@@ -515,3 +514,42 @@ The scale debug log SHALL record what the browse did, at the same level of detai
 #### Scenario: A diagnostic reads an empty result set
 - **WHEN** a diagnostic surface reports the results of the most recent discovery and there are none
 - **THEN** it also reports whether each transport actually ran, so "permission denied" is not indistinguishable from "no scales on this network"
+
+### Requirement: The retry narrative names the address dialled and why
+
+Each WiFi scale connection attempt SHALL record, at INFO, which address it dialled and
+which of the driver's address sources supplied it: a freshly-resolved address, a
+successful re-resolution, or the persisted cache after a resolution failure.
+
+Announcing an intent to re-resolve SHALL NOT stand alone as the account of an attempt.
+When resolution fails and the driver falls back to the cached address — which it does
+deliberately, because a remembered address beats opening no socket at all — that fallback
+SHALL be recorded at INFO. Recording it only at DEBUG leaves the INFO narrative asserting
+a re-resolve that did not happen, and a reader diagnosing a scale that moved sees repeated
+failures against an address the log implies was freshly obtained.
+
+#### Scenario: A cache fallback after failed resolution is visible at INFO
+
+- **WHEN** mDNS resolution for the scale's hostname fails and the driver dials the cached
+  address instead
+- **THEN** the log records at INFO that resolution failed and names the cached address it
+  dialled
+
+#### Scenario: A successful re-resolution is distinguishable from a cache dial
+
+- **WHEN** re-resolution succeeds and the driver dials the freshly-resolved address
+- **THEN** the log at INFO distinguishes that attempt from one that fell back to the cache
+
+#### Scenario: A stale cached address is diagnosable from the log alone
+
+- **WHEN** a scale has moved to a new address and the cached address is repeatedly
+  unreachable
+- **THEN** an INFO-level reading of the session shows the same cached address being dialled
+  each cycle and resolution failing each cycle, without requiring the DEBUG tier
+
+#### Scenario: A user-supplied address is still identified as such
+
+- **WHEN** the caller supplies an address from a scan selection or the dialog's "Use"
+  action and the driver dials it ahead of both the cache and a re-resolve
+- **THEN** the log identifies that address as the caller-supplied one
+

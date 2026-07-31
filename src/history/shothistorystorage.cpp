@@ -4,6 +4,7 @@
 #include "coffeebagstorage.h"
 #include "baristastorage.h"
 #include "equipmentstorage.h"
+#include "equipmentlogging.h"
 #include "core/settings.h"   // Settings::testQSettingsPath() under DECENZA_TESTING
 #include "recipestorage.h"
 #include "ai/conductance.h"
@@ -75,6 +76,65 @@ void ShotHistoryStorage::runOnDbThread(std::function<void()> task)
     if (!m_dbWorker)
         m_dbWorker = std::make_unique<SerialDbWorker>(QStringLiteral("ShotHistoryStorageWorker"));
     m_dbWorker->post(std::move(task));
+}
+
+void ShotHistoryStorage::runDetachedDbThread(std::function<void()> body)
+{
+    // Counted, so isDbWorkIdle() can see it. The counter is a shared_ptr for the
+    // same reason m_destroyed is: the thread may outlive `this`, and it must still
+    // be able to decrement without touching a destroyed object.
+    // The decrement is RAII rather than a trailing statement, so an exception escaping
+    // body() cannot latch the counter above zero for the rest of the process. That matters
+    // because a stuck counter makes isDbWorkIdle() permanently false, turning any future
+    // wait on it — a factory reset about to delete the file, a shutdown drain — from a wait
+    // into a hang.
+    //
+    // NOT covered: thread->start() failing. Qt only warns there, run() never executes, and
+    // `finished` never fires, so the QThread is never deleteLater'd and the lambda holding
+    // this guard is never destroyed either. Accepted rather than worked around: it means
+    // the OS refused a thread, the process has bigger problems, and the tests' failOnWarning
+    // would surface Qt's warning immediately. Stated because the first draft of this comment
+    // claimed the guard handled it, which is wrong in a way that reads as reassuring.
+    struct InFlightGuard {
+        std::shared_ptr<std::atomic<int>> counter;
+        explicit InFlightGuard(std::shared_ptr<std::atomic<int>> c) : counter(std::move(c)) {
+            counter->fetch_add(1, std::memory_order_relaxed);
+        }
+        InFlightGuard(InFlightGuard&& other) noexcept : counter(std::move(other.counter)) {}
+        InFlightGuard(const InFlightGuard&) = delete;
+        InFlightGuard& operator=(const InFlightGuard&) = delete;
+        ~InFlightGuard() {
+            // Release, paired with the acquire in isDbWorkIdle(): a reader that sees zero
+            // must also see everything the thread did to the DB file before it. Guarded
+            // because a moved-from copy holds nothing.
+            if (counter)
+                counter->fetch_sub(1, std::memory_order_release);
+        }
+    };
+
+    QThread* thread = QThread::create(
+        [body = std::move(body), guard = InFlightGuard(m_detachedDbThreads)]() mutable {
+            body();
+        });
+    connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+    thread->start();
+}
+
+bool ShotHistoryStorage::isDbWorkIdle() const
+{
+    // No worker means nothing was ever posted, which is idle by definition — the
+    // worker is created lazily on first use (runOnDbThread).
+    //
+    // The detached count is the other half, and it used to be missing: the eleven
+    // read queries spawn one-shot threads that never go through m_dbWorker, so a
+    // caller that waited on this was told "idle" while a thread was mid-SELECT.
+    // initialize() itself starts one (the distinct-cache pre-warm), so EVERY user
+    // of this class had one running. It surfaced as tst_mcptools_write failing
+    // with `disk I/O error Unable to execute statement` — a test's QTemporaryDir
+    // deleting the .db out from under the previous test's still-running pre-warm,
+    // with the warning landing in whichever test happened to be running next.
+    return (!m_dbWorker || m_dbWorker->isIdle())
+        && m_detachedDbThreads->load(std::memory_order_acquire) == 0;
 }
 
 void ShotHistoryStorage::close()
@@ -1888,6 +1948,101 @@ bool ShotHistoryStorage::runMigrations()
                        << repair.lastError().text();
     }
 
+    // Migration 38: heal packages split by a pre-enrichment identity fork
+    // (fix-equipment-enrichment-fork, upstream #1713 — adopted into the fork chain).
+    // [barista-fork] Upstream shipped this as its migration 35, but the fork already
+    // spent 35 (yield_ratio), 36 (yield specs) and 37 (prime-first-frame), so it is
+    // renumbered to 38 to sit at the top of the sequential chain — a fork DB is already
+    // at 37, and a lower/duplicate number would never fire its gate. The heal logic is
+    // upstream's, unchanged.
+    // Until this change, recording burrs on a
+    // grinder that already had shots forked a new package and retired the old
+    // one — and because grinder calibration matches on model AND burrs while
+    // dial-in grouping keys on equipment_id, the grinder read as brand new with
+    // no history (#1713). The fork rule is fixed going forward; this repairs the
+    // users it already happened to, which is most of them: the signature is
+    // narrow (a lineage pair differing ONLY by empty-vs-set burrs) and everything
+    // else is left alone. See EquipmentStorage::healEnrichmentForksStatic.
+    //
+    // Data-only and NOT idempotent in effect (a second run simply finds nothing),
+    // so the heal commits together with the version bump.
+    //
+    // DbWriteTxn, not the raw m_db.transaction() the migrations around this one
+    // use: the heal SELECTs its lineage pairs before it writes, and that is
+    // exactly the read-then-write shape a DEFERRED BEGIN cannot upgrade under
+    // contention (dbutils.h). It also removes the failure mode a plain
+    // transaction() has here — a false return there would have let the merges run
+    // and autocommit one by one, with the `if (txn) rollback()` guard doing
+    // nothing, so a mid-heal failure left a half-applied merge behind. A guard
+    // that failed to begin now aborts before anything is written.
+    //
+    // The heal itself uses the UNLOCKED merge, because DbWriteTxn refuses to nest
+    // (adopting an outer transaction would let an inner rejection leave partial
+    // writes staged in it).
+    if (currentVersion >= 37 && currentVersion < 38) {
+        EQUIP_LOG_STDERR("Migration", "38: healing enrichment forks");
+
+        // Release the schema_version read at the top of this function before taking
+        // the write lock. That SELECT ends in LIMIT 1 and is stepped exactly once,
+        // so it never reaches SQLITE_DONE and Qt never resets it
+        // (qtbase/src/plugins/sqldrivers/sqlite/qsql_sqlite.cpp:326-332 resets only
+        // on SQLITE_DONE or error) — the connection is therefore still inside an
+        // implicit read transaction. DbWriteTxn says so in its PRECONDITION: a
+        // SELECT that returned rows and was not stepped to exhaustion blocks
+        // BEGIN IMMEDIATE, and SQLite skips the busy handler entirely while the
+        // connection sits in one, so the failure is instant and a retry cannot fix
+        // it. The migrations in between only re-exec `query` when they RUN, and on
+        // the common upgrade path (a database already at 37) not one of them does.
+        // The older migrations get away with it because QSqlDatabase::transaction()
+        // is a DEFERRED BEGIN that takes no write lock; this is the first one that
+        // takes the lock up front.
+        query.finish();
+        // attempts = 1: this runs on the GUI thread during startup, before any
+        // other storage has opened the file, so there is no writer to wait out.
+        DbWriteTxn txn = DbWriteTxn::begin(m_db, "migration 38 enrichment-fork heal", 1);
+        if (!txn.ok()) {
+            EQUIP_WARN_STDERR("Migration",
+                              "38 could not start a transaction - will retry next launch");
+        } else {
+            QHash<qint64, qint64> remap;
+            qsizetype healed = 0;
+            // A failed heal leaves its writes staged for this transaction to roll
+            // back, and the version must NOT advance — otherwise the split packages
+            // are never looked at again and the user is left repairing them by hand
+            // over MCP.
+            bool ok = EquipmentStorage::healEnrichmentForksStatic(m_db, &remap, &healed);
+            if (ok) {
+                query.exec ("DELETE FROM schema_version");
+                ok = query.exec ("INSERT INTO schema_version (version) VALUES (38)");
+            }
+            if (ok && txn.commit()) {
+                currentVersion = 38;
+                // Logged even at zero: "ran, found nothing" and "never ran" are the
+                // same silence otherwise, and this migration is the first thing to
+                // check when a user reports the grinder still looks split.
+                EQUIP_INFO_STDERR("Migration",
+                                  QString("38 complete - merged %1 package(s) that a burr edit had split off")
+                                      .arg(healed));
+                if (healed > 0) {
+                    // The active selection lives in QSettings, not this database, so a
+                    // merged-away id would leave the app pointing at a deleted package.
+                    // Resolved here and adopted through SettingsDye's setter by
+                    // MainController (a raw write would bypass the cache and NOTIFY).
+                    AppSettings settings;
+                    const qint64 activeId = settings.value("dye/activeEquipmentId", -1).toLongLong();
+                    if (activeId > 0 && remap.contains(activeId)) {
+                        m_healedActiveEquipmentId = remap.value(activeId);
+                        EQUIP_INFO_STDERR("Migration",
+                                          QString("38 moved the active equipment from package %1 to %2")
+                                              .arg(activeId).arg(m_healedActiveEquipmentId));
+                    }
+                }
+            } else {
+                EQUIP_WARN_STDERR("Migration", "38 incomplete - will retry next launch");
+            }
+        }
+    }
+
     m_schemaVersion = currentVersion;
     return true;
 }
@@ -3641,7 +3796,7 @@ void ShotHistoryStorage::requestCreateBackup(const QString& destPath)
     const QString dbPath = m_dbPath;
     auto destroyed = m_destroyed;
 
-    QThread* thread = QThread::create([this, dbPath, destPath, destroyed]() {
+    runDetachedDbThread([this, dbPath, destPath, destroyed]() {
         QString resultPath = createBackupStatic(dbPath, destPath);
 
         if (*destroyed) return;
@@ -3655,8 +3810,6 @@ void ShotHistoryStorage::requestCreateBackup(const QString& destPath)
         }, Qt::QueuedConnection);
     });
 
-    connect(thread, &QThread::finished, thread, &QObject::deleteLater);
-    thread->start();
 }
 
 void ShotHistoryStorage::checkpoint()
@@ -3747,7 +3900,7 @@ void ShotHistoryStorage::requestImportDatabase(const QString& filePath, bool mer
     const QString dbPath = m_dbPath;
     auto destroyed = m_destroyed;
 
-    QThread* thread = QThread::create([this, dbPath, cleanPath, merge, destroyed]() {
+    runDetachedDbThread([this, dbPath, cleanPath, merge, destroyed]() {
         bool success = importDatabaseStatic(dbPath, cleanPath, merge);
 
         if (*destroyed) return;
@@ -3767,8 +3920,6 @@ void ShotHistoryStorage::requestImportDatabase(const QString& filePath, bool mer
         }, Qt::QueuedConnection);
     });
 
-    connect(thread, &QThread::finished, thread, &QObject::deleteLater);
-    thread->start();
 }
 
 // ============================================================================
@@ -3919,7 +4070,7 @@ bool ShotHistoryStorage::importDatabaseStatic(const QString& destDbPath, const Q
             // map — bags/shots then null their equipment_id, same as before.
             QHash<qint64, qint64> packageIdMap;
             if (!EquipmentStorage::importEquipmentStatic(srcDb, destDb, merge, packageIdMap)) {
-                qWarning() << "ShotHistoryStorage::importDatabaseStatic: Equipment import failed";
+            EQUIP_WARN_STDERR("Import", QStringLiteral("database import failed - equipment packages not imported"));
                 destDb.rollback();
                 goto cleanup;
             }

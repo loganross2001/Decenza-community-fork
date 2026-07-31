@@ -2,6 +2,7 @@ pragma ComponentBehavior: Bound
 
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Templates as T
 import QtQuick.Layouts
 import Decenza
 
@@ -13,7 +14,7 @@ import Decenza
  *
  * Set profileType to "flow" or "pressure" to switch behavior.
  */
-Page {
+T.Page {
     id: editorPage
     // Declarative so it re-evaluates on a language change. This used to be an
     // imperative assignment in onCompleted/onActivated, which ran once and left
@@ -115,14 +116,14 @@ Page {
             default: return
         }
         scrollingFromSelection = true
-        var scrollTarget = Math.max(0, targetY - editorScrollView.height / 4)
-        editorScrollView.contentItem.contentY = scrollTarget
+        var flick = editorScrollView.contentItem as Flickable
+        flick.contentY = Math.max(0, targetY - editorScrollView.height / 4)
         // Clear flag after synchronous binding updates have propagated
         Qt.callLater(function() { scrollingFromSelection = false })
     }
 
     function findCenteredSection() {
-        var viewCenter = editorScrollView.contentItem.contentY + editorScrollView.height / 2
+        var viewCenter = (editorScrollView.contentItem as Flickable).contentY + editorScrollView.height / 2
         var sections = [
             { name: "preinfusion", item: preinfusionSection },
             { name: "hold", item: holdSection },
@@ -314,7 +315,7 @@ Page {
                     Connections {
                         target: editorScrollView.contentItem
                         function onMovingChanged() {
-                            if (!editorScrollView.contentItem.moving && !editorPage.scrollingFromSelection) {
+                            if (!(editorScrollView.contentItem as Flickable).moving && !editorPage.scrollingFromSelection) {
                                 var section = editorPage.findCenteredSection()
                                 var frameIdx = editorPage.sectionToFrame(section)
                                 if (frameIdx >= 0 && frameIdx !== editorPage.selectedFrameIndex) {
@@ -323,7 +324,7 @@ Page {
                             }
                         }
                         function onDraggingChanged() {
-                            if (editorScrollView.contentItem.dragging) {
+                            if ((editorScrollView.contentItem as Flickable).dragging) {
                                 editorPage.scrollingFromSelection = false
                             }
                         }
@@ -692,7 +693,7 @@ Page {
     } // KeyboardAwareContainer
 
     // === Temperature Steps Dialog ===
-    Dialog {
+    DecenzaDialog {
         id: tempStepsDialog
         anchors.centerIn: parent
         width: Math.min(parent.width - Theme.scaled(40), Theme.scaled(400))
@@ -843,7 +844,7 @@ Page {
     }
 
     // Save error dialog
-    Dialog {
+    DecenzaDialog {
         id: saveErrorDialog
         anchors.centerIn: parent
         width: Theme.scaled(350)
@@ -946,7 +947,7 @@ Page {
     }
 
     // Save As dialog
-    Dialog {
+    DecenzaDialog {
         id: saveAsDialog
         anchors.centerIn: parent
         width: Math.min(parent.width - Theme.scaled(40), Theme.scaled(400))
@@ -1100,7 +1101,7 @@ Page {
     }
 
     // Overwrite confirmation dialog
-    Dialog {
+    DecenzaDialog {
         id: overwriteDialog
         anchors.centerIn: parent
         width: Math.min(parent.width - Theme.scaled(40), Theme.scaled(400))
@@ -1209,7 +1210,7 @@ Page {
     }
 
     // Built-in profile name collision dialog
-    Dialog {
+    DecenzaDialog {
         id: builtInNameDialog
         anchors.centerIn: parent
         width: Math.min(parent.width - Theme.scaled(40), Theme.scaled(400))

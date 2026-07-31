@@ -1,3 +1,10 @@
+// The day-button delegate reads this file's `autoWakeContent` id; Bound makes it
+// statically resolvable. All three delegates here declare every injected role they use
+// required in the same edit -- without that, Bound stops role injection and the day
+// buttons, the category list and the overlay chips all render blank at RUNTIME,
+// silently. (`categoryList` is read only from sibling scopes, which need no pragma.)
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
@@ -11,7 +18,7 @@ Item {
     property int autoSleepMinutes: Settings.value("autoSleepMinutes", 60)
 
     // Dialog to offer clearing video cache when switching away from videos
-    Dialog {
+    DecenzaDialog {
         id: clearCacheDialog
         modal: true
         anchors.centerIn: parent
@@ -118,7 +125,7 @@ Item {
     }
 
     // Dialog to confirm clearing personal media
-    Dialog {
+    DecenzaDialog {
         id: clearPersonalMediaDialog
         modal: true
         anchors.centerIn: parent
@@ -272,13 +279,43 @@ Item {
         spacing: Theme.scaled(15)
 
         // Column 1: Auto-Wake + Screen Timing (always visible)
+        //
+        // fillWidth with a maximum, NOT a bare preferredWidth: `Layout.fillWidth: false` makes a
+        // child FIXED — the layout will not shrink it either. With both fixed columns holding
+        // their full width, a window narrower than their sum starves column 3 (the only fill
+        // child) to zero width, and their own contents paint outside them.
         Item {
-            Layout.preferredWidth: Theme.scaled(280)
-            Layout.fillWidth: false
+            // 340, not the old 280: the Wake row (label + switch + two time steppers) needs
+            // roughly 300 scaled units, so 280 never actually fitted it — which is what made
+            // the row overrun the card in the first place.
+            Layout.preferredWidth: Theme.scaled(340)
+            Layout.maximumWidth: Theme.scaled(340)
+            // Never below what the Wake row itself needs (~sc(292) plus the card's sc(10)
+            // margins). The Flickable below only scrolls VERTICALLY, so a width under that
+            // leaves the minute stepper clipped by two clip:true layers and unreachable —
+            // strictly worse than the overrun this change replaced, which was at least visible
+            // and tappable.
+            Layout.minimumWidth: Theme.scaled(315)
+            Layout.fillWidth: true
             Layout.fillHeight: true
+            clip: true
+
+            // Scrollable rather than sized to fit: this column's height is content-driven
+            // (three cards, the last of which grows with the Auto-Wake rows), and a longer
+            // translation or a larger accessibility font size pushes it past the page. Fitting
+            // it for today's strings would only move the problem. Matches the Flickable pattern
+            // in SettingsMachineTab.
+            Flickable {
+                anchors.fill: parent
+                contentHeight: column1Layout.implicitHeight
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                flickableDirection: Flickable.VerticalFlick
+                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
             ColumnLayout {
-                anchors.fill: parent
+                id: column1Layout
+                width: parent.width
                 spacing: Theme.scaled(10)
 
             // Screen card (Sleep only)
@@ -456,14 +493,18 @@ Item {
                                 model: ["M", "T", "W", "T", "F", "S", "S"]
 
                                 Rectangle {
+                                    id: dayButton
+                                    required property string modelData
+                                    required property int index
+
                                     Layout.fillWidth: true
                                     Layout.preferredHeight: Theme.scaled(28)
                                     radius: Theme.scaled(5)
 
-                                    property bool isSelected: autoWakeContent.selectedDay === index
+                                    property bool isSelected: autoWakeContent.selectedDay === dayButton.index
                                     property bool isEnabled: {
                                         var sched = Settings.autoWake.autoWakeSchedule
-                                        return sched[index] ? sched[index].enabled : false
+                                        return sched[dayButton.index] ? sched[dayButton.index].enabled : false
                                     }
 
                                     color: isSelected ? Qt.lighter(Theme.primaryColor, 1.3) :
@@ -484,7 +525,7 @@ Item {
                                         TranslationManager.translate("common.day.saturday", "Saturday"),
                                         TranslationManager.translate("common.day.sunday", "Sunday")
                                     ]
-                                        return dayNames[index] +
+                                        return dayNames[dayButton.index] +
                                                (isEnabled ? ", " + TranslationManager.translate("accessibility.enabled", "enabled") : "") +
                                                (isSelected ? ", " + TranslationManager.translate("accessibility.selected", "selected") : "")
                                     }
@@ -493,7 +534,7 @@ Item {
 
                                     Text {
                                         anchors.centerIn: parent
-                                        text: modelData
+                                        text: dayButton.modelData
                                         color: parent.isSelected || parent.isEnabled ? Theme.primaryContrastColor : Theme.textSecondaryColor
                                         font.pixelSize: Theme.scaled(12)
                                         font.bold: parent.isSelected || parent.isEnabled
@@ -503,7 +544,7 @@ Item {
                                     MouseArea {
                                         id: dayArea
                                         anchors.fill: parent
-                                        onClicked: autoWakeContent.selectedDay = index
+                                        onClicked: autoWakeContent.selectedDay = dayButton.index
                                     }
                                 }
                             }
@@ -529,7 +570,15 @@ Item {
                             Item { Layout.fillWidth: true }
 
                             ValueInput {
-                                Layout.preferredWidth: Theme.scaled(80)
+                                // Natural width, no cap. A cap of sc(80) alongside
+                                // `minimumWidth: implicitWidth` was dead: ValueInput's
+                                // implicitWidth is sc(56) + text metrics + sc(16) ≈ sc(91), so
+                                // the minimum EXCEEDED the maximum and Qt resolves that in
+                                // favour of the minimum (qgridlayoutengine.cpp:87,
+                                // q_maximumSize = qMax(q_minimumSize, maxMax)) — the steppers
+                                // ended up wider than the sc(80) they had before, which is the
+                                // opposite of what the cap was for.
+                                Layout.preferredWidth: implicitWidth
                                 Layout.preferredHeight: Theme.scaled(34)
                                 from: 0
                                 to: 23
@@ -553,7 +602,15 @@ Item {
                             }
 
                             ValueInput {
-                                Layout.preferredWidth: Theme.scaled(80)
+                                // Natural width, no cap. A cap of sc(80) alongside
+                                // `minimumWidth: implicitWidth` was dead: ValueInput's
+                                // implicitWidth is sc(56) + text metrics + sc(16) ≈ sc(91), so
+                                // the minimum EXCEEDED the maximum and Qt resolves that in
+                                // favour of the minimum (qgridlayoutengine.cpp:87,
+                                // q_maximumSize = qMax(q_minimumSize, maxMax)) — the steppers
+                                // ended up wider than the sc(80) they had before, which is the
+                                // opposite of what the cap was for.
+                                Layout.preferredWidth: implicitWidth
                                 Layout.preferredHeight: Theme.scaled(34)
                                 from: 0
                                 to: 59
@@ -617,15 +674,19 @@ Item {
                     }
                 }
 
-            Item { Layout.fillHeight: true }
             } // ColumnLayout
+            } // Flickable
         }
 
         // Column 2: Video Category (videos mode only, full height)
         Item {
-            Layout.preferredWidth: Theme.scaled(220)
-            Layout.fillWidth: false
+            // See column 1 — fixed width is what let these two overrun the page.
+            Layout.preferredWidth: Theme.scaled(260)
+            Layout.maximumWidth: Theme.scaled(260)
+            Layout.minimumWidth: Theme.scaled(150)
+            Layout.fillWidth: true
             Layout.fillHeight: true
+            clip: true
             visible: ScreensaverManager.screensaverType === "videos"
 
             Rectangle {
@@ -676,9 +737,11 @@ Item {
 
                         delegate: ItemDelegate {
                             id: delegate
+                            required property var modelData
+
                             width: ListView.view ? ListView.view.width : 0
                             height: Theme.scaled(36)
-                            highlighted: modelData && modelData.id === ScreensaverManager.selectedCategoryId
+                            highlighted: delegate.modelData && delegate.modelData.id === ScreensaverManager.selectedCategoryId
 
                             background: Rectangle {
                                 color: delegate.highlighted ? Theme.primaryColor :
@@ -687,7 +750,7 @@ Item {
                             }
 
                             contentItem: Text {
-                                text: modelData ? modelData.name : ""
+                                text: delegate.modelData ? delegate.modelData.name : ""
                                 color: delegate.highlighted ? Theme.primaryContrastColor : Theme.textColor
                                 font.pixelSize: Theme.scaled(14)
                                 font.bold: delegate.highlighted
@@ -695,26 +758,40 @@ Item {
                                 leftPadding: Theme.scaled(10)
                             }
 
+                            // contentItem is set rather than `text`, so Qt derives no
+                            // default accessible name from this row.
+                            Accessible.role: Accessible.Button
+                            Accessible.name: delegate.modelData ? delegate.modelData.name : ""
+                            Accessible.focusable: true
+                            Accessible.checkable: true
+                            Accessible.checked: delegate.highlighted
+                            Accessible.onPressAction: delegate.clicked()
+
                             onClicked: {
-                                if (modelData) {
-                                    ScreensaverManager.selectedCategoryId = modelData.id
+                                if (delegate.modelData) {
+                                    ScreensaverManager.selectedCategoryId = delegate.modelData.id
                                 }
                             }
                         }
 
+                        // `parent` here is the ListView's contentItem
+                        // (qquickflickable.cpp:2442), not the ListView -- `parent.count` was
+                        // undefined, so neither of these placeholders has ever appeared.
                         Tr {
-                            anchors.centerIn: parent
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            y: (categoryList.height - height) / 2
                             key: "settings.screensaver.loading"
                             fallback: "Loading..."
-                            visible: parent.count === 0 && ScreensaverManager.isFetchingCategories
+                            visible: categoryList.count === 0 && ScreensaverManager.isFetchingCategories
                             color: Theme.textSecondaryColor
                         }
 
                         Tr {
-                            anchors.centerIn: parent
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            y: (categoryList.height - height) / 2
                             key: "settings.screensaver.noCategories"
                             fallback: "No categories"
-                            visible: parent.count === 0 && !ScreensaverManager.isFetchingCategories
+                            visible: categoryList.count === 0 && !ScreensaverManager.isFetchingCategories
                             color: Theme.textSecondaryColor
                         }
                     }
@@ -770,9 +847,10 @@ Item {
 
                             Rectangle {
                                 id: overlayChip
+                                required property string modelData
 
                                 function chipValue() {
-                                    switch (modelData) {
+                                    switch (overlayChip.modelData) {
                                     case "clock":
                                         switch (ScreensaverManager.screensaverType) {
                                         case "videos": return ScreensaverManager.videosShowClock
@@ -790,7 +868,7 @@ Item {
                                 }
 
                                 function toggleChip() {
-                                    switch (modelData) {
+                                    switch (overlayChip.modelData) {
                                     case "clock":
                                         switch (ScreensaverManager.screensaverType) {
                                         case "videos": ScreensaverManager.videosShowClock = !ScreensaverManager.videosShowClock; break
@@ -809,14 +887,14 @@ Item {
                                 readonly property bool isOn: chipValue()
                                 readonly property string chipLabel: {
                                     var _ = TranslationManager.translationVersion
-                                    switch (modelData) {
+                                    switch (overlayChip.modelData) {
                                     case "clock": return TranslationManager.translate("layoutEditor.chipTime", "Time")
                                     case "waterLevel": return TranslationManager.translate("layoutEditor.chipWater", "Water")
                                     case "shotPlan": return TranslationManager.translate("layoutEditor.chipShotPlan", "Shot Plan")
                                     case "battery": return TranslationManager.translate("layoutEditor.chipBattery", "Battery")
                                     case "linkButton": return TranslationManager.translate("settings.screensaver.linkButton", "Link Button")
                                     }
-                                    return modelData
+                                    return overlayChip.modelData
                                 }
 
                                 width: chipText.implicitWidth + Theme.scaled(24)

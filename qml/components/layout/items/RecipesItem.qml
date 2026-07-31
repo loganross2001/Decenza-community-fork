@@ -1,3 +1,8 @@
+// `layer.effect` declares an inline component, so this file's ids are not statically
+// resolvable inside it without this pragma. No delegate in this file takes an injected
+// model role, so no `required property` is needed -- see ThemedIcon.qml for the same case.
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
@@ -13,7 +18,7 @@ import "../PillFit.js" as PillFit
 // recipe's own grind + steam, via MainController's single activation path). Double-tap
 // or long-press opens the Recipes management page; with zero recipes a plain
 // tap goes straight there. MRU replaces any favorite flag.
-Item {
+LayoutWidgetItem {
     id: root
 
     // `Window` is an ATTACHED property: it resolves against the current scope, so it is read here
@@ -22,8 +27,6 @@ Item {
     // — it reports `Member "Window" not found on type "RecipesItem"`. Reading it once also removes the
     // duplicate lookups.
     readonly property var appWindow: Window.window
-    property bool isCompact: false
-    property string itemId: ""
 
     property var idlePage: {
         var p = root.parent
@@ -214,7 +217,7 @@ Item {
     // --- RECIPE PILL POPUP ---
     // Dialog (not Popup) so TalkBack can trap focus inside the pill list —
     // same reasoning as BeansItem's bag pill popup.
-    Dialog {
+    DecenzaDialog {
         id: presetPopup
         modal: true
         dim: false

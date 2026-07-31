@@ -1,3 +1,11 @@
+// The extraction-view Repeater delegate reads this file's `extractionViewContent` id;
+// Bound makes it statically resolvable. It and the charging-mode and refill-kit
+// delegates each declare the injected role they use required in the same edit (`model`
+// for the ListModel-backed extraction-view list, `modelData` for the other two) --
+// without that, Bound stops role injection and all three option rows render blank at
+// RUNTIME, silently. (The other two read no file id; they only need their roles.)
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
@@ -128,7 +136,7 @@ KeyboardAwareContainer {
                             font.pixelSize: Theme.scaled(12)
                         }
 
-                        Row {
+                        RowLayout {
                             Layout.fillWidth: true
                             Layout.preferredHeight: Theme.scaled(42)
                             spacing: Theme.scaled(8)
@@ -142,12 +150,14 @@ KeyboardAwareContainer {
 
                                 delegate: Rectangle {
                                     id: chargingModeButton
-                                    width: (parent.width - 2 * parent.spacing) / 3
-                                    height: parent.height
+                                    required property var modelData
+
+                                    Layout.fillWidth: true
+                                    Layout.fillHeight: true
                                     radius: Theme.scaled(6)
-                                    color: BatteryManager.chargingMode === modelData.value ?
+                                    color: BatteryManager.chargingMode === chargingModeButton.modelData.value ?
                                            Theme.primaryColor : Theme.backgroundColor
-                                    border.color: BatteryManager.chargingMode === modelData.value ?
+                                    border.color: BatteryManager.chargingMode === chargingModeButton.modelData.value ?
                                                   Theme.primaryColor : Theme.textSecondaryColor
                                     border.width: 1
 
@@ -156,8 +166,8 @@ KeyboardAwareContainer {
                                         spacing: Theme.scaled(2)
 
                                         Text {
-                                            text: modelData.label
-                                            color: BatteryManager.chargingMode === modelData.value ?
+                                            text: chargingModeButton.modelData.label
+                                            color: BatteryManager.chargingMode === chargingModeButton.modelData.value ?
                                                    Theme.primaryContrastColor : Theme.textColor
                                             font.pixelSize: Theme.scaled(14)
                                             font.bold: true
@@ -165,8 +175,8 @@ KeyboardAwareContainer {
                                         }
 
                                         Text {
-                                            text: modelData.desc
-                                            color: BatteryManager.chargingMode === modelData.value ?
+                                            text: chargingModeButton.modelData.desc
+                                            color: BatteryManager.chargingMode === chargingModeButton.modelData.value ?
                                                    Qt.rgba(1, 1, 1, 0.7) : Theme.textSecondaryColor
                                             font.pixelSize: Theme.scaled(10)
                                             Layout.alignment: Qt.AlignHCenter
@@ -175,10 +185,12 @@ KeyboardAwareContainer {
 
                                     AccessibleMouseArea {
                                         anchors.fill: parent
-                                        accessibleName: modelData.label + " charging mode. " + modelData.desc +
-                                                       (BatteryManager.chargingMode === modelData.value ? ", selected" : "")
+                                        accessibleName: TranslationManager.translate("settings.machine.accessible.chargingMode", "%1 charging mode. %2")
+                                                            .arg(chargingModeButton.modelData.label).arg(chargingModeButton.modelData.desc)
+                                                        + (BatteryManager.chargingMode === chargingModeButton.modelData.value
+                                                           ? ", " + TranslationManager.translate("accessibility.selected", "selected") : "")
                                         accessibleItem: chargingModeButton
-                                        onAccessibleClicked: BatteryManager.chargingMode = modelData.value
+                                        onAccessibleClicked: BatteryManager.chargingMode = chargingModeButton.modelData.value
                                     }
                                 }
                             }
@@ -557,7 +569,13 @@ KeyboardAwareContainer {
                             font.underline: true
                             wrapMode: Text.WordWrap
 
+                            Accessible.role: Accessible.Button
+                            Accessible.name: text
+                            Accessible.focusable: true
+                            Accessible.onPressAction: locationEnableArea.clicked(null)
+
                             MouseArea {
+                                id: locationEnableArea
                                 anchors.fill: parent
                                 cursorShape: Qt.PointingHandCursor
                                 onClicked: {
@@ -1009,15 +1027,17 @@ KeyboardAwareContainer {
 
                             delegate: Rectangle {
                                 id: viewOptionCard
+                                required property var model
+
                                 Layout.fillWidth: true
                                 Layout.preferredHeight: Theme.scaled(44)
                                 radius: Theme.scaled(8)
-                                color: extractionViewContent.currentMode === model.mode
+                                color: extractionViewContent.currentMode === viewOptionCard.model.mode
                                     ? Qt.rgba(Theme.primaryColor.r, Theme.primaryColor.g, Theme.primaryColor.b, 0.15)
                                     : Theme.backgroundColor
-                                border.color: extractionViewContent.currentMode === model.mode
+                                border.color: extractionViewContent.currentMode === viewOptionCard.model.mode
                                     ? Theme.primaryColor : Theme.borderColor
-                                border.width: extractionViewContent.currentMode === model.mode
+                                border.width: extractionViewContent.currentMode === viewOptionCard.model.mode
                                     ? Theme.scaled(2) : Theme.scaled(1)
 
                                 Accessible.ignored: true
@@ -1029,14 +1049,14 @@ KeyboardAwareContainer {
                                     spacing: Theme.scaled(10)
 
                                     Image {
-                                        source: model.icon
+                                        source: viewOptionCard.model.icon
                                         sourceSize.width: Theme.scaled(20)
                                         sourceSize.height: Theme.scaled(20)
                                         Layout.alignment: Qt.AlignVCenter
                                     }
 
                                     Text {
-                                        text: TranslationManager.translate(model.labelKey, model.labelFallback)
+                                        text: TranslationManager.translate(viewOptionCard.model.labelKey, viewOptionCard.model.labelFallback)
                                         color: Theme.textColor
                                         font.family: Theme.bodyFont.family
                                         font.pixelSize: Theme.bodyFont.pixelSize
@@ -1049,7 +1069,7 @@ KeyboardAwareContainer {
                                         Layout.preferredWidth: Theme.scaled(18)
                                         Layout.preferredHeight: Theme.scaled(18)
                                         radius: Theme.scaled(9)
-                                        border.color: extractionViewContent.currentMode === model.mode
+                                        border.color: extractionViewContent.currentMode === viewOptionCard.model.mode
                                             ? Theme.primaryColor : Theme.textSecondaryColor
                                         border.width: Theme.scaled(2)
                                         color: "transparent"
@@ -1061,18 +1081,18 @@ KeyboardAwareContainer {
                                             height: Theme.scaled(8)
                                             radius: Theme.scaled(4)
                                             color: Theme.primaryColor
-                                            visible: extractionViewContent.currentMode === model.mode
+                                            visible: extractionViewContent.currentMode === viewOptionCard.model.mode
                                         }
                                     }
                                 }
 
                                 AccessibleMouseArea {
                                     anchors.fill: parent
-                                    accessibleName: TranslationManager.translate(model.labelKey, model.labelFallback)
+                                    accessibleName: TranslationManager.translate(viewOptionCard.model.labelKey, viewOptionCard.model.labelFallback)
                                     accessibleItem: viewOptionCard
                                     onAccessibleClicked: {
-                                        extractionViewContent.currentMode = model.mode
-                                        Settings.setValue("espresso/extractionView", model.mode)
+                                        extractionViewContent.currentMode = viewOptionCard.model.mode
+                                        Settings.setValue("espresso/extractionView", viewOptionCard.model.mode)
                                     }
                                 }
                             }
@@ -1571,7 +1591,7 @@ KeyboardAwareContainer {
                             font.pixelSize: Theme.scaled(12)
                         }
 
-                        Row {
+                        RowLayout {
                             Layout.fillWidth: true
                             Layout.preferredHeight: Theme.scaled(42)
                             spacing: Theme.scaled(8)
@@ -1585,12 +1605,14 @@ KeyboardAwareContainer {
 
                                 delegate: Rectangle {
                                     id: refillKitButton
-                                    width: (parent.width - 2 * parent.spacing) / 3
-                                    height: parent.height
+                                    required property var modelData
+
+                                    Layout.fillWidth: true
+                                    Layout.fillHeight: true
                                     radius: Theme.scaled(6)
-                                    color: Settings.app.refillKitOverride === modelData.value ?
+                                    color: Settings.app.refillKitOverride === refillKitButton.modelData.value ?
                                            Theme.primaryColor : Theme.backgroundColor
-                                    border.color: Settings.app.refillKitOverride === modelData.value ?
+                                    border.color: Settings.app.refillKitOverride === refillKitButton.modelData.value ?
                                                   Theme.primaryColor : Theme.textSecondaryColor
                                     border.width: 1
 
@@ -1599,8 +1621,8 @@ KeyboardAwareContainer {
                                         spacing: Theme.scaled(2)
 
                                         Text {
-                                            text: modelData.label
-                                            color: Settings.app.refillKitOverride === modelData.value ?
+                                            text: refillKitButton.modelData.label
+                                            color: Settings.app.refillKitOverride === refillKitButton.modelData.value ?
                                                    Theme.primaryContrastColor : Theme.textColor
                                             font.pixelSize: Theme.scaled(14)
                                             font.bold: true
@@ -1608,8 +1630,8 @@ KeyboardAwareContainer {
                                         }
 
                                         Text {
-                                            text: modelData.desc
-                                            color: Settings.app.refillKitOverride === modelData.value ?
+                                            text: refillKitButton.modelData.desc
+                                            color: Settings.app.refillKitOverride === refillKitButton.modelData.value ?
                                                    Qt.rgba(1, 1, 1, 0.7) : Theme.textSecondaryColor
                                             font.pixelSize: Theme.scaled(10)
                                             Layout.alignment: Qt.AlignHCenter
@@ -1618,10 +1640,12 @@ KeyboardAwareContainer {
 
                                     AccessibleMouseArea {
                                         anchors.fill: parent
-                                        accessibleName: modelData.label + " refill kit mode. " + modelData.desc +
-                                                       (Settings.app.refillKitOverride === modelData.value ? ", selected" : "")
+                                        accessibleName: TranslationManager.translate("settings.machine.accessible.refillKitMode", "%1 refill kit mode. %2")
+                                                            .arg(refillKitButton.modelData.label).arg(refillKitButton.modelData.desc)
+                                                        + (Settings.app.refillKitOverride === refillKitButton.modelData.value
+                                                           ? ", " + TranslationManager.translate("accessibility.selected", "selected") : "")
                                         accessibleItem: refillKitButton
-                                        onAccessibleClicked: Settings.app.refillKitOverride = modelData.value
+                                        onAccessibleClicked: Settings.app.refillKitOverride = refillKitButton.modelData.value
                                     }
                                 }
                             }
@@ -1834,7 +1858,7 @@ KeyboardAwareContainer {
     }
 
     // Map Test Popup
-    Dialog {
+    DecenzaDialog {
         id: mapTestPopup
         parent: Overlay.overlay
         anchors.centerIn: parent
@@ -1908,7 +1932,9 @@ KeyboardAwareContainer {
                     var lat = MainController.shotReporter.latitude.toFixed(1)
                     var lon = MainController.shotReporter.longitude.toFixed(1)
                     var city = MainController.shotReporter.currentCity()
-                    return "Location: " + city + " at coordinates " + lat + ", " + lon
+                    return TranslationManager.translate("settings.machine.locationSummary",
+                                                        "Location: %1 at coordinates %2, %3")
+                           .arg(city).arg(lat).arg(lon)
                 }
                 color: Theme.textSecondaryColor
                 font.pixelSize: Theme.scaled(12)

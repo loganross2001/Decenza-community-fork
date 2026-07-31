@@ -1,5 +1,8 @@
 #include "qtscalebletransport.h"
+
+#include "ble/scales/scalelogging.h"
 #include "../blecapability.h"
+#include "../bledeviceid.h"
 #include "../blecontrollererror.h"
 #include "../bleserviceerror.h"
 #include "../blemanager.h"
@@ -46,9 +49,7 @@ int64_t QtScaleBleTransport::nowMs() {
 }
 
 void QtScaleBleTransport::log(const QString& message) {
-    QString msg = QString("[BLE QtTransport] ") + message;
-    qDebug().noquote() << msg;
-    emit logMessage(msg);
+    SCALE_LOG_TAGGED("BLE QtTransport", message);
 }
 
 void QtScaleBleTransport::warn(const QString& message) {
@@ -58,9 +59,7 @@ void QtScaleBleTransport::warn(const QString& message) {
     // Originally scoped to connection-priority events; broadened when service
     // errors joined it, since anything that reaches the user through error()
     // needs to be findable in the log they send in (#1586).
-    QString msg = QString("[BLE QtTransport] ") + message;
-    qWarning().noquote() << msg;
-    emit logMessage(msg);
+    SCALE_WARN_TAGGED("BLE QtTransport", message);
 }
 
 QtScaleBleTransport::~QtScaleBleTransport() {
@@ -75,10 +74,7 @@ void QtScaleBleTransport::connectToDevice(const QString& address, const QString&
 }
 
 void QtScaleBleTransport::connectToDevice(const QBluetoothDeviceInfo& device) {
-    // Get device identifier (UUID on iOS, address on other platforms)
-    QString deviceId = device.address().isNull()
-        ? device.deviceUuid().toString()
-        : device.address().toString();
+    const QString deviceId = getDeviceIdentifier(device);
 
     // Diagnostic logging - detect duplicate connect calls
     QT_TRANSPORT_LOG(QString("connectToDevice() called for %1 (%2). controller=%3 state=%4")
@@ -103,7 +99,6 @@ void QtScaleBleTransport::connectToDevice(const QBluetoothDeviceInfo& device) {
         disconnectFromDevice();
     }
 
-    m_deviceAddress = device.address().toString();
     m_deviceName = device.name();
     m_deviceId = deviceId;
 

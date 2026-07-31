@@ -1,5 +1,7 @@
 #include "corebluetoothscalebletransport.h"
 
+#include "ble/scales/scalelogging.h"
+
 #include <QDebug>
 #include <QTimer>
 #include <QMetaObject>
@@ -549,9 +551,7 @@ CoreBluetoothScaleBleTransport::~CoreBluetoothScaleBleTransport() {
 }
 
 void CoreBluetoothScaleBleTransport::log(const QString& msg) {
-    QString fullMsg = QString("[BLE CoreBluetooth] ") + msg;
-    qDebug().noquote() << fullMsg;
-    emit logMessage(fullMsg);
+    SCALE_LOG_TAGGED("BLE CoreBluetooth", msg);
 }
 
 bool CoreBluetoothScaleBleTransport::isConnected() const {

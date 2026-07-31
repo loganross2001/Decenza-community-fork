@@ -2,10 +2,11 @@ pragma ComponentBehavior: Bound
 
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Templates as T
 import QtQuick.Layouts
 import Decenza
 
-Page {
+T.Page {
     id: profileEditorPage
     // Declarative so it re-evaluates on a language change. This used to be an
     // imperative assignment in onCompleted/onActivated, which ran once and left
@@ -416,7 +417,7 @@ Page {
     }
 
     // Profile Settings Popup
-    Dialog {
+    DecenzaDialog {
         id: profileSettingsPopup
         parent: Overlay.overlay
         x: (parent.width - width) / 2
@@ -569,7 +570,7 @@ Page {
     }
 
     // Limits Popup
-    Dialog {
+    DecenzaDialog {
         id: limitsPopup
         parent: Overlay.overlay
         x: (parent.width - width) / 2
@@ -821,7 +822,7 @@ Page {
     } // KeyboardAwareContainer
 
     // Save As dialog - just title input, filename derived automatically
-    Dialog {
+    DecenzaDialog {
         id: saveAsDialog
         parent: Overlay.overlay
         x: (parent.width - width) / 2
@@ -943,7 +944,7 @@ Page {
     }
 
     // Overwrite confirmation dialog
-    Dialog {
+    DecenzaDialog {
         id: overwriteDialog
         parent: Overlay.overlay
         x: (parent.width - width) / 2
@@ -1019,7 +1020,7 @@ Page {
     }
 
     // Built-in profile name collision dialog
-    Dialog {
+    DecenzaDialog {
         id: builtInNameDialog
         parent: Overlay.overlay
         x: (parent.width - width) / 2
@@ -1078,7 +1079,7 @@ Page {
     }
 
     // Save error dialog
-    Dialog {
+    DecenzaDialog {
         id: saveErrorDialog
         parent: Overlay.overlay
         x: (parent.width - width) / 2
@@ -1468,7 +1469,7 @@ Page {
     }
 
     // Profile name edit dialog
-    Dialog {
+    DecenzaDialog {
         id: profileNameDialog
         parent: Overlay.overlay
         anchors.centerIn: parent

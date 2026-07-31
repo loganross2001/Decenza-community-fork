@@ -11,9 +11,8 @@ import QtQuick.Window
 import Decenza
 import "../PillFit.js" as PillFit
 
-Item {
+LayoutWidgetItem {
     id: root
-    property bool isCompact: false
 
     // `Window` is an ATTACHED property: it resolves against the current scope, so it is read
     // here on the item itself rather than as `root.Window.window` from inside the popup below.
@@ -21,7 +20,6 @@ Item {
     // cannot see — it reports `Member "Window" not found on type "EspressoItem"`. Reading it
     // once also removes three duplicate lookups.
     readonly property var appWindow: Window.window
-    property string itemId: ""
 
     // True when the app is allowed to start machine operations on-screen.
     // The hardware Group Head Controller (GHC), when present and active, takes
@@ -176,7 +174,7 @@ Item {
     // dialog role that screen readers use to trap focus, which `Popup { modal }`
     // alone (already set below) does not provide. header/footer null strip the
     // Dialog chrome so it still renders as the same bare dropdown.
-    Dialog {
+    DecenzaDialog {
         id: presetPopup
         modal: true
         dim: false

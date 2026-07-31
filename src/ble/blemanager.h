@@ -16,6 +16,7 @@
 #include <atomic>
 
 #include "blecapability.h"
+#include "bledeviceid.h"
 #include "network/wifiscaleresult.h"
 
 class ScaleDevice;
@@ -52,42 +53,9 @@ struct ScaleEntry {
                                    // non-Android — see connectToScale()).
 };
 
-// Canonical identity for a discovered BLE device — the string persisted as a
-// saved scale / DE1 / refractometer address.
-//
-// The check is at RUNTIME, on whether the backend actually gave us a MAC. It
-// used to be `#ifdef Q_OS_IOS`, which was wrong on macOS: Qt's Bluetooth
-// backend there is CoreBluetooth too, and CoreBluetooth never exposes MAC
-// addresses. So `address().toString()` returned the null address
-// "00:00:00:00:00:00" for EVERY device, and every scale, DE1 and refractometer
-// paired on a Mac was persisted under that one colliding identity — which also
-// made deviceIdentifiersMatch() below return true for any device at all.
-//
-// The rest of the codebase already used this null-check form
-// (difluidr1.cpp, difluidr2.cpp, bletransport.cpp, qtscalebletransport.cpp,
-// bookooscale.cpp); only these two helpers — the ones whose output is written
-// to settings — did not. A runtime check is correct on every platform and does
-// not require maintaining a list of which backends expose MACs.
-inline QString getDeviceIdentifier(const QBluetoothDeviceInfo& device) {
-    return device.address().isNull() ? device.deviceUuid().toString()
-                                     : device.address().toString();
-}
-
-// Compare a discovered device against a saved identifier. Must derive the
-// device's side through getDeviceIdentifier so the two stay in lockstep — a
-// direct address()/deviceUuid() comparison here is how the platform-guard bug
-// above stayed hidden.
-//
-// Identifiers persisted by a pre-fix build on macOS are the null address, which
-// identifies nothing. Those are deliberately NOT special-cased: such an entry
-// matches no real device now, so the stale pairing simply stops connecting and
-// the user re-scans. (Before this fix it matched EVERY device, which is worse
-// than not matching — with two BLE scales paired, it connected whichever was
-// seen first.)
-inline bool deviceIdentifiersMatch(const QBluetoothDeviceInfo& device, const QString& identifier) {
-    if (identifier.isEmpty()) return false;
-    return getDeviceIdentifier(device).compare(identifier, Qt::CaseInsensitive) == 0;
-}
+// getDeviceIdentifier() / deviceIdentifiersMatch() moved to ble/bledeviceid.h so
+// layers below BLEManager can use them instead of hand-copying the expression.
+// Still reachable through this header for every existing includer.
 
 class BLEManager : public QObject {
     Q_OBJECT
@@ -553,11 +521,172 @@ public:
     // Reset connection state flags so retry attempts can proceed
     void resetScaleConnectionState();
 
-    // Scale debug logging
-    Q_INVOKABLE void clearScaleLog();
-    Q_INVOKABLE void shareScaleLog();
-    Q_INVOKABLE QString getScaleLogPath() const;
-    void appendScaleLog(const QString& message);  // For use by scale implementations
+    // Share the system log (debug.log) — the only log share there is now.
+    // clearScaleLog(), shareScaleLog(), getScaleLogPath() and appendScaleLog() are
+    // gone with the private scale-log channel; see the note where they used to be
+    // defined in blemanager.cpp. Clearing is now view-local (SubsystemLogView).
+    Q_INVOKABLE void shareSystemLog();
+
+    // Public, unlike their scale siblings below, because BLEManager is not the
+    // only narrator of this subsystem: main.cpp owns the Refractometer instance
+    // and drives its creation, teardown and reconnect tick. Those lines are part
+    // of the same story as the ones in here and must carry the same marker and
+    // land in the same view, so they go through the same two tiers rather than a
+    // second copy of the shape. See the tier note under `private:`.
+    //
+    // `source` is the bracketed source tag and therefore MUST name who actually
+    // wrote the line — it is defaulted only for this class's own calls. A shared
+    // forwarder that hard-coded its own class name would stamp main.cpp's
+    // lifecycle lines "BLEManager", and nothing in the log would contradict it.
+    void refractometerDebug(const QString& message,
+                            const QString& source = QStringLiteral("BLEManager"));
+    void refractometerInfo(const QString& message,
+                           const QString& source = QStringLiteral("BLEManager"));
+
+    // How the scale subsystem's narrative is logged. Pick by AUDIENCE, per the
+    // tier rules in core/logtags.h:
+    //
+    //   scaleDebug  developer detail — periodic probes, ignored transients,
+    //               mechanism notes. Below what the connections view shows.
+    //   scaleInfo   the narrative a user needs: scanning, found, connecting,
+    //               connected, disconnected, transport fallback, reconnects.
+    //   scaleWarn   problems: refusals, timeouts, unreachable, teardowns.
+    //
+    // Public for the same reason as the refractometer pair above: main.cpp drives
+    // the scale reconnect ladder and its lines belong to this subsystem's story.
+    // They used to go through appendScaleLog(), which reached only the in-app view
+    // — so the ladder was absent from every submitted log. `source` must name who
+    // actually wrote the line; it is defaulted only for this class's own calls.
+    //
+    // BLEManager cannot use the SCALE_* macros directly: those `emit
+    // logMessage(...)`, which this class does not have.
+    void scaleDebug(const QString& message,
+                    const QString& source = QStringLiteral("BLEManager"));
+    void scaleInfo(const QString& message,
+                   const QString& source = QStringLiteral("BLEManager"));
+    void scaleWarn(const QString& message,
+                   const QString& source = QStringLiteral("BLEManager"));
+
+    // The same three tiers for the DE1 half, carrying [DE1] instead of [Scale].
+    //
+    // BLEManager narrates the machine too — permissions, scan lifecycle, "found
+    // DE1", direct wake. MOST of those lines went only to de1LogMessage, i.e.
+    // only to the connections-page window, so they were absent from every
+    // submitted log and the machine's discovery story could not be read after the
+    // fact. Four DID also reach stderr — "Found DE1", the two direct-wake lines
+    // and the scan error — but each did so in DIFFERENT WORDS from its emitted
+    // twin, which is the drift these helpers exist to make impossible. Both
+    // problems have the one fix: log once, at a tier, from one call.
+    // `source` defaulted the same way as scaleDebug/Info/Warn above, and for the
+    // same reason: main.cpp drives the DE1 reconnect ladder through these
+    // forwarders too, and its lines must not be stamped "BLEManager". Public for
+    // the same reason scaleDebug/Info/Warn are — main.cpp calls it directly.
+    void de1Debug(const QString& message,
+                  const QString& source = QStringLiteral("BLEManager"));
+    void de1Info(const QString& message,
+                 const QString& source = QStringLiteral("BLEManager"));
+    void de1Warn(const QString& message,
+                 const QString& source = QStringLiteral("BLEManager"));
+
+private:
+    //
+    // refractometerDebug/refractometerInfo (declared public above) exist because
+    // BLEManager narrates both subsystems and a refractometer line must carry
+    // [Refractometer], not [Scale]. There are two tiers rather than the INFO-only
+    // one this class used to have because the refractometer's own story — hunt
+    // on/off, instance churn, why an auto-reconnect did nothing — has a developer
+    // half too, and that half was written as bare `qDebug() << "[R2-diag] ..."`:
+    // 17 lines under an ad-hoc debug-session prefix that no registered marker
+    // matched, so a [Refractometer] search returned the driver's packets and NOT
+    // the connect/churn story they were added to explain.
+    //
+    // There is deliberately no refractometerWarn: nothing BLEManager or main.cpp
+    // reports about this device is a problem — the failures all belong to the
+    // driver, which has R2_WARN. Add one when a call site needs it, not before.
+
+    // A connect failure that REPEATS while nothing changes. Logs at its normal
+    // tier for the first few, then drops to DEBUG until the next successful
+    // connect.
+    //
+    // The failure is real every time, but the reconnect ladder retries forever,
+    // so at a flat WARN an absent scale produced 46 "connection timeout" and 24
+    // "unreachable" warnings in one 48 h capture — enough to train a reader to
+    // skim past the tier that is supposed to mean "look here". The first ones
+    // carry the diagnosis; the rest only carry "still absent", which the ladder
+    // lines already say.
+    //
+    // `tier` is the level the message would carry if it were not repeating, so
+    // the budget suppresses WITHOUT re-tiering: a WARN-only budget would have to
+    // promote any narrative routed through it, making the quiet lines loud.
+    //
+    // Accuracy note, because the first version of this comment justified `tier`
+    // with lines that do not use it: it cited the WiFi driver's "resolving again"
+    // and "dialing remembered address" as the INFO half of a failing cycle. Those
+    // are DEBUG (WIFI_LOG), were demoted in the same change that wrote this, and
+    // do not go through the sink at all. RepeatTier::Info is therefore reachable
+    // in source (main.cpp translates the sink's bool) but never produced at
+    // runtime — the sole sink call passes warn=true. The enum is kept because the
+    // no-re-tiering property is the right design and a second caller is cheap to
+    // add; it is NOT kept because something currently needs it. Wire a narrative
+    // line through the sink or delete the enum, but do not read this paragraph as
+    // evidence that the INFO path is exercised.
+    //
+    // `source` names who wrote the line, so a driver routing through this class's
+    // budget still reads as the driver. Without it the driver's suppressed lines
+    // would be stamped "BLEManager" and a reader would go looking in the wrong
+    // file.
+    // Public for the same reason scaleDebug/Info/Warn are: code outside this
+    // class emits lines belonging to this subsystem's failing cycle, and the
+    // budget only works if it sees ALL of them.
+    //
+    // That was the defect. The manager's three ladder lines were budgeted and
+    // DecentScaleWifi's three were not, so past the budget the manager fell
+    // silent while the driver kept warning every 60 s — a repeating fragment
+    // carrying neither the attempt number nor the outcome. Noisier than
+    // suppressing nothing and less useful than suppressing everything.
+    //
+    // ONE store, deliberately: a second counter in the driver would be a second
+    // policy, and resetRepeatFailureBudget() would not reach it, so a scale that
+    // reconnected would re-arm half its messages.
+    //
+    // Two overloads, and the split is the point: the defaults that are correct
+    // for this class are WRONG for everyone else, and a default cannot tell which
+    // caller it has. While `source` defaulted on the public signature,
+    // `scaleRepeatFailure(msg)` from any other file compiled cleanly and stamped
+    // the line "BLEManager" — sending a reader to the wrong file, which is
+    // verbatim the hazard logtags.h documents for a shared forwarder that
+    // hard-codes its own name. The default was safe only while this was private,
+    // and it stopped being private in the same change that kept it.
+    //
+    // So: the convenience form is private and means "this class wrote it"; every
+    // caller outside states both tier and source, because outside this class
+    // neither has a defensible default.
+private:
+    void scaleRepeatFailure(const QString& message);
+
+public:
+    enum class RepeatTier { Info, Warn };
+    void scaleRepeatFailure(const QString& message,
+                            RepeatTier tier,
+                            const QString& source);
+private:
+    // The DE1 equivalent, sharing the budget map. Same shape, [DE1] marker.
+    void de1RepeatFailure(const QString& message);
+    // Clears every message's warn budget. Call on a successful connect (either
+    // device) and on any fresh user-initiated attempt — see the definition for
+    // why the latter is not optional.
+    //
+    // Coarse on purpose: it clears both subsystems' budgets. Re-arming a warning
+    // that did not need re-arming costs one line; failing to re-arm one costs a
+    // silent failure, so the coarse direction is the safe one.
+    void resetRepeatFailureBudget();
+    // Keyed per MESSAGE, deliberately: a subsystem-wide counter suppressed a
+    // genuinely NEW failure arriving mid-run, because an unrelated repeat had
+    // already spent the budget.
+    QHash<QString, int> m_repeatFailureCounts;
+    static constexpr int kScaleFailuresAtWarn = 3;
+
+public:
 
 public slots:
     Q_INVOKABLE void tryDirectConnectToDE1();
@@ -624,8 +753,11 @@ signals:
     // owns UsbScaleManager, so BLEManager asks rather than calling directly.
     void usbProbeRequested();
     void errorOccurred(const QString& error);
-    void de1LogMessage(const QString& message);
-    void scaleLogMessage(const QString& message);
+    // No de1LogMessage / scaleLogMessage. Both existed only to feed the two
+    // connections-page views, which now read the system log directly, and being
+    // view-only was their defect: everything sent through them was absent from
+    // every log a user submitted. Their content reaches the log through the tier
+    // helpers instead.
     void flowScaleFallback();  // Emitted when no physical scale found, using FlowScale (gated to fire once per saved-scale cycle so the "No Scale Found" dialog doesn't re-show on every retry)
     void scaleRetryNeeded();   // Emitted on EVERY connection-failure path (including the post-WiFi→BLE-fallback give-up), regardless of the flowScaleFallback gate, so the persistent reconnect ladder in main.cpp survives the scale-type-change timer stop. Don't bind UI to this — it's for re-arming the retry timer only.
     void scaleDisconnected();  // Emitted when physical scale disconnects
@@ -991,19 +1123,18 @@ private:
     // Handles for the two connections setRefractometerDevice() installs, so it
     // can sever exactly those. It must NOT use a blanket
     // disconnect(device, nullptr, this, nullptr): main.cpp also connects the
-    // device's logMessage to appendScaleLog and errorOccurred to our
-    // errorOccurred, and those have to survive until the device is actually
-    // destroyed. Forget nulls the holder BEFORE disconnecting the device (that
+    // device's errorOccurred to our errorOccurred, and that has to survive until
+    // the device is actually destroyed. Forget nulls the holder BEFORE disconnecting the device (that
     // order is load-bearing — see the timer-stop note on
     // disconnectRefractometerRequested in main.cpp), so a blanket disconnect
     // there silently swallowed every log line the disconnect itself produced.
     QMetaObject::Connection m_refractometerConnectedConn;
     QMetaObject::Connection m_refractometerDestroyedConn;
 
-    // Scale debug log
-    QStringList m_scaleLogMessages;
-    QString m_scaleLogFilePath;
-    void writeScaleLogToFile();
+    // Last observe/enforce value we announced, so the mode is logged on
+    // transition instead of on every settings load (it was 11 identical WARNs
+    // in a 48 h capture). Not the mode itself — that is m_backoffMode.
+    bool m_loggedObserveMode = false;
 
     static BLEManager* s_instance;
 };

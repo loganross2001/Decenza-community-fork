@@ -3,6 +3,7 @@
 #include <QHash>
 #include <QList>
 #include <QRegularExpression>
+#include <QSet>
 #include <QString>
 #include <QStringList>
 
@@ -19,10 +20,14 @@ namespace McpLogFilter {
 // `lastLine` are only meaningful after dedupeConsecutive() — a plain
 // filterLines() result always has count == 1 and lastLine == line.
 struct LineMatch {
-    qsizetype line;      // absolute line number of the first occurrence
-    QString text;        // text of the first occurrence
-    qsizetype count = 1; // consecutive occurrences collapsed into this entry
-    qsizetype lastLine = -1; // absolute line number of the last occurrence
+    qsizetype line = 0;      // absolute line number of the first occurrence
+    QString text;            // text of the first occurrence
+    qsizetype count = 1;     // consecutive occurrences collapsed into this entry
+    // Absolute line of the last occurrence. Defaults to match `line` rather than to
+    // a -1 sentinel: no code path ever leaves it at -1 (filterLines() sets it equal
+    // to `line`, dedupeConsecutive() only widens it), and a sentinel that cannot
+    // occur invites a check for it that can never fire.
+    qsizetype lastLine = 0;
 };
 
 // DEBUG < INFO < WARN < ERROR < FATAL; -1 for anything else (session markers,
@@ -47,6 +52,71 @@ inline QString lineLevel(const QString& line)
     static const QRegularExpression re(QStringLiteral(R"(^\[[^\]]*\]\s*([A-Za-z]+))"));
     const auto m = re.match(line);
     return m.hasMatch() ? m.captured(1).toUpper() : QString();
+}
+
+// True when `line` belongs to any of the given subsystems. `markers` are the
+// BRACKETED tokens ("[Scale]", "[DE1]") that DecenzaLog::markerFilter() composes;
+// an empty list matches nothing, which is what a caller asking for no subsystem
+// should get rather than everything.
+//
+// Case-SENSITIVE, unlike filterLines()' `filter` below, and the asymmetry is
+// deliberate. That one takes a free string a human typed and being forgiving is a
+// kindness. A marker is a fixed token emitted by a macro: "[scale]" is not one,
+// and matching it would only ever be a false positive on prose that happened to
+// contain the word.
+//
+// Substring, never a pattern. A bracketed marker read as a regex is a character
+// class — "[Scale]" would match any line containing S, c, a, l or e, i.e. very
+// nearly every line — so this deliberately offers no regex mode to reach for.
+//
+// Lives here rather than beside its caller so that "a line belonging to subsystem
+// X" has one definition shared by the connections-page views and the MCP tools.
+// Two implementations of that predicate would be free to disagree about exactly
+// the queries the markers were introduced to make answerable.
+inline bool matchesAnyMarker(const QString& line, const QStringList& markers)
+{
+    for (const QString& marker : markers) {
+        if (!marker.isEmpty() && line.contains(marker, Qt::CaseSensitive)) return true;
+    }
+    return false;
+}
+
+// The prefix a line carries, and which of the four grammars it is written in.
+//
+// Four is not a design, it is what accreted, and the census built on this is how
+// a reader finds that out. `debug_get_log`'s description is generated from the
+// marker registry, so it names the registered subsystems and is silent about
+// every other family — an assistant that searches [Scale], gets a complete
+// answer, and infers the log is marker-organised has been misled by a tool
+// telling it only the true part. Reporting the other three kinds turns "this
+// subsystem does not exist" into "this subsystem is not searchable by marker",
+// which is a different and much cheaper mistake to recover from.
+enum class PrefixKind { RegisteredMarker, UnregisteredBracket, ClassPrefix, None };
+
+struct LinePrefix {
+    PrefixKind kind = PrefixKind::None;
+    QString token;  // "Scale", "MqttClient", … ; empty for None
+};
+
+inline LinePrefix linePrefix(const QString& line, const QSet<QString>& registeredTokens)
+{
+    // Skip the leading "[<time>] LEVEL " field; what follows is the message.
+    static const QRegularExpression head(QStringLiteral(R"(^\[[^\]]*\]\s*[A-Za-z]+\s+)"));
+    const auto hm = head.match(line);
+    if (!hm.hasMatch()) return {};
+    const QString msg = line.mid(hm.capturedLength(0));
+
+    static const QRegularExpression bracket(QStringLiteral(R"(^\[([A-Za-z][A-Za-z0-9 _.\-]*)\])"));
+    const auto bm = bracket.match(msg);
+    if (bm.hasMatch()) {
+        const QString tok = bm.captured(1);
+        return {registeredTokens.contains(tok) ? PrefixKind::RegisteredMarker
+                                               : PrefixKind::UnregisteredBracket, tok};
+    }
+    static const QRegularExpression cls(QStringLiteral(R"(^([A-Z][A-Za-z0-9]*):\s)"));
+    const auto cm = cls.match(msg);
+    if (cm.hasMatch()) return {PrefixKind::ClassPrefix, cm.captured(1)};
+    return {};
 }
 
 // Filters `lines` (whose element 0 is absolute line number `startLine` within
@@ -88,10 +158,16 @@ inline QList<LineMatch> filterLines(const QStringList& lines, qsizetype startLin
     return result;
 }
 
-// Strips a leading "[<elapsed>] " field (WebDebugLogger's persisted line
-// format — see lineLevel() above) so two lines that differ only in when they
-// were logged compare equal. Lines with no such prefix (shot debug log lines,
-// session markers) are returned unchanged.
+// Strips a leading "[<elapsed>] " field (WebDebugLogger's persisted line format —
+// see lineLevel() above) so two lines that differ only in when they were logged
+// compare equal. Lines with no such prefix (shot debug log lines, session
+// markers) are returned unchanged.
+//
+// This said "[<HH:mm:ss.zzz>]", which is the CONSOLE pattern
+// (qSetMessagePattern in main.cpp), not the persisted one — two different
+// timestamps for the same message, and only the elapsed one ever reaches here.
+// The regex is "[^]]*" so it worked either way; the comment was the part that
+// misled.
 inline QString stripTimestampPrefix(const QString& line)
 {
     static const QRegularExpression re(QStringLiteral(R"(^\[[^\]]*\]\s*)"));
@@ -138,7 +214,12 @@ inline QList<LineMatch> paginate(const QList<LineMatch>& matches, qsizetype offs
         return matches.mid(start);
     }
     if (offset < 0 || offset >= matches.size()) return {};
-    return matches.mid(offset, limit);
+    // Clamp here, not only at the callers. QList::mid() treats a NEGATIVE length as
+    // "to the end", so an unclamped limit < 0 would silently return the whole log
+    // from `offset` — an unbounded MCP response that looks like an ordinary page.
+    // Both call sites currently qBound() it, which means the policy already exists
+    // twice; this is the copy that cannot be forgotten.
+    return matches.mid(offset, qMax(qsizetype(0), limit));
 }
 
 } // namespace McpLogFilter

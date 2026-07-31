@@ -1,9 +1,14 @@
+// `Overlay.modal` takes a Component, so `root` is not statically resolvable inside it
+// without this pragma. This file declares no delegate and no injected model role, so
+// nothing here needs a `required property`.
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import Decenza
 
-Dialog {
+DecenzaDialog {
     id: root
     parent: Overlay.overlay
     x: (parent.width - width) / 2

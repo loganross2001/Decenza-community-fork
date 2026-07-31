@@ -49,7 +49,7 @@ void ShotHistoryStorage::requestDistinctCache()
 
     const QString dbPath = m_dbPath;
     auto destroyed = m_destroyed;
-    QThread* thread = QThread::create([this, dbPath, destroyed]() {
+    runDetachedDbThread([this, dbPath, destroyed]() {
         QHash<QString, QStringList> results;
         bool opened = withTempDb(dbPath, "shs_distinct", [&](QSqlDatabase& db) {
             static const QStringList columns = {
@@ -94,8 +94,6 @@ void ShotHistoryStorage::requestDistinctCache()
             }
         }, Qt::QueuedConnection);
     });
-    thread->start();
-    connect(thread, &QThread::finished, thread, &QObject::deleteLater);
 }
 
 void ShotHistoryStorage::requestDistinctValueAsync(const QString& cacheKey, const QString& sql,
@@ -108,7 +106,7 @@ void ShotHistoryStorage::requestDistinctValueAsync(const QString& cacheKey, cons
     auto destroyed = m_destroyed;
     bool needsGrinderSort = cacheKey.startsWith("grinder_setting");
 
-    QThread* thread = QThread::create([this, dbPath, cacheKey, sql, bindValues, needsGrinderSort, destroyed]() {
+    runDetachedDbThread([this, dbPath, cacheKey, sql, bindValues, needsGrinderSort, destroyed]() {
         QStringList values;
         bool opened = withTempDb(dbPath, "shs_dv", [&](QSqlDatabase& db) {
             QSqlQuery query(db);
@@ -146,8 +144,6 @@ void ShotHistoryStorage::requestDistinctValueAsync(const QString& cacheKey, cons
             emit distinctCacheReady();
         }, Qt::QueuedConnection);
     });
-    connect(thread, &QThread::finished, thread, &QObject::deleteLater);
-    thread->start();
 }
 
 ShotFilter ShotHistoryStorage::parseFilterMap(const QVariantMap& filterMap)
@@ -440,7 +436,7 @@ void ShotHistoryStorage::requestShotsFiltered(const QVariantMap& filterMap, int 
     }
 
     auto destroyed = m_destroyed;
-    QThread* thread = QThread::create(
+    runDetachedDbThread(
         [this, dbPath, sql, countSql, bindValues, countBindValues, serial, isAppend, destroyed]() {
             QVariantList results;
             int totalCount = 0;
@@ -513,8 +509,6 @@ void ShotHistoryStorage::requestShotsFiltered(const QVariantMap& filterMap, int 
                 Qt::QueuedConnection);
         });
 
-    connect(thread, &QThread::finished, thread, &QObject::deleteLater);
-    thread->start();
 }
 
 
@@ -527,7 +521,7 @@ void ShotHistoryStorage::requestRecentShotsByKbId(const QString& kbId, int limit
 
     const QString dbPath = m_dbPath;
     auto destroyed = m_destroyed;
-    QThread* thread = QThread::create([this, dbPath, kbId, limit, destroyed]() {
+    runDetachedDbThread([this, dbPath, kbId, limit, destroyed]() {
         QVariantList results;
         withTempDb(dbPath, "shs_kbid", [&](QSqlDatabase& db) {
             results = loadRecentShotsByKbIdStatic(db, kbId, limit);
@@ -543,8 +537,6 @@ void ShotHistoryStorage::requestRecentShotsByKbId(const QString& kbId, int limit
         }, Qt::QueuedConnection);
     });
 
-    connect(thread, &QThread::finished, thread, &QObject::deleteLater);
-    thread->start();
 }
 
 QVariantList ShotHistoryStorage::loadRecentShotsByKbIdStatic(QSqlDatabase& db, const QString& kbId, int limit, qint64 excludeShotId)
@@ -660,7 +652,7 @@ void ShotHistoryStorage::requestRankedProfilesForBean(const QString& beanBrand,
 
     const QString dbPath = m_dbPath;
     auto destroyed = m_destroyed;
-    QThread* thread = QThread::create([this, dbPath, beanBrand, beanType, roastLevel, teaType, destroyed]() {
+    runDetachedDbThread([this, dbPath, beanBrand, beanType, roastLevel, teaType, destroyed]() {
         QVariantMap result;
         withTempDb(dbPath, "shs_rankedprof", [&](QSqlDatabase& db) {
             result = loadRankedProfilesForBeanStatic(db, beanBrand, beanType, roastLevel, teaType);
@@ -677,8 +669,6 @@ void ShotHistoryStorage::requestRankedProfilesForBean(const QString& beanBrand,
         }, Qt::QueuedConnection);
     });
 
-    connect(thread, &QThread::finished, thread, &QObject::deleteLater);
-    thread->start();
 }
 
 QVariantMap ShotHistoryStorage::loadRankedProfilesForBeanStatic(QSqlDatabase& db,
@@ -776,7 +766,7 @@ void ShotHistoryStorage::requestLatestShotForBeanProfile(const QString& beanBran
 
     const QString dbPath = m_dbPath;
     auto destroyed = m_destroyed;
-    QThread* thread = QThread::create([this, dbPath, beanBrand, beanType, profileName, destroyed]() {
+    runDetachedDbThread([this, dbPath, beanBrand, beanType, profileName, destroyed]() {
         QVariantMap shot;
         withTempDb(dbPath, "shs_beanprof", [&](QSqlDatabase& db) {
             shot = loadLatestShotForBeanProfileStatic(db, beanBrand, beanType, profileName);
@@ -789,8 +779,6 @@ void ShotHistoryStorage::requestLatestShotForBeanProfile(const QString& beanBran
         }, Qt::QueuedConnection);
     });
 
-    connect(thread, &QThread::finished, thread, &QObject::deleteLater);
-    thread->start();
 }
 
 QVariantMap ShotHistoryStorage::loadLatestShotForBeanProfileStatic(QSqlDatabase& db,
@@ -860,7 +848,7 @@ void ShotHistoryStorage::requestLatestGrindForBean(const QString& beanBrand,
 
     const QString dbPath = m_dbPath;
     auto destroyed = m_destroyed;
-    QThread* thread = QThread::create([this, dbPath, beanBrand, beanType, roastLevel, destroyed]() {
+    runDetachedDbThread([this, dbPath, beanBrand, beanType, roastLevel, destroyed]() {
         QVariantMap grind;
         withTempDb(dbPath, "shs_beangrind", [&](QSqlDatabase& db) {
             grind = loadLatestGrindForBeanStatic(db, beanBrand, beanType, roastLevel);
@@ -879,8 +867,6 @@ void ShotHistoryStorage::requestLatestGrindForBean(const QString& beanBrand,
         }, Qt::QueuedConnection);
     });
 
-    connect(thread, &QThread::finished, thread, &QObject::deleteLater);
-    thread->start();
 }
 
 QVariantMap ShotHistoryStorage::loadLatestGrindForBeanStatic(QSqlDatabase& db,
@@ -1000,7 +986,7 @@ static double grinderWideStep(QSqlDatabase& db, const QString& grinderModel)
     q.prepare(QStringLiteral(
         "SELECT DISTINCT grinder_setting FROM shots "
         "WHERE equipment_id IN (SELECT package_id FROM equipment_items "
-        "WHERE kind = 'grinder' AND model = :model) "
+        "WHERE kind = 'grinder' AND LOWER(TRIM(IFNULL(model,''))) = LOWER(TRIM(:model))) "
         "AND grinder_setting IS NOT NULL AND grinder_setting != ''"));
     q.bindValue(":model", grinderModel);
     if (!q.exec()) {
@@ -1030,7 +1016,7 @@ static double grinderWideRpmStep(QSqlDatabase& db, const QString& grinderModel)
     q.prepare(QStringLiteral(
         "SELECT DISTINCT rpm FROM shots "
         "WHERE equipment_id IN (SELECT package_id FROM equipment_items "
-        "WHERE kind = 'grinder' AND model = :model) "
+        "WHERE kind = 'grinder' AND LOWER(TRIM(IFNULL(model,''))) = LOWER(TRIM(:model))) "
         "AND rpm > 0"));
     q.bindValue(":model", grinderModel);
     if (!q.exec()) {
@@ -1067,7 +1053,7 @@ GrinderContext ShotHistoryStorage::queryGrinderContext(QSqlDatabase& db,
     QString sql = QStringLiteral(
         "SELECT DISTINCT grinder_setting FROM shots "
         "WHERE equipment_id IN (SELECT package_id FROM equipment_items "
-        "WHERE kind = 'grinder' AND model = :model) "
+        "WHERE kind = 'grinder' AND LOWER(TRIM(IFNULL(model,''))) = LOWER(TRIM(:model))) "
         "AND beverage_type = :bev "
         "AND grinder_setting != ''");
     if (!beanBrand.isEmpty()) {
@@ -1136,7 +1122,7 @@ GrinderContext ShotHistoryStorage::queryGrinderContext(QSqlDatabase& db,
         QString rpmSql = QStringLiteral(
             "SELECT DISTINCT rpm FROM shots "
             "WHERE equipment_id IN (SELECT package_id FROM equipment_items "
-            "WHERE kind = 'grinder' AND model = :model) "
+            "WHERE kind = 'grinder' AND LOWER(TRIM(IFNULL(model,''))) = LOWER(TRIM(:model))) "
             "AND beverage_type = :bev "
             "AND rpm > 0");
         if (!beanBrand.isEmpty())
@@ -1352,7 +1338,7 @@ void ShotHistoryStorage::requestAutoFavorites(const QString& groupBy, int maxIte
         "LIMIT %4"
     ).arg(selectColumns, groupColumns, joinConditions).arg(maxItems).arg(yieldCol, bucketCol);
 
-    QThread* thread = QThread::create([this, dbPath, sql, destroyed]() {
+    runDetachedDbThread([this, dbPath, sql, destroyed]() {
         QVariantList results;
         if (!withTempDb(dbPath, "shs_raf", [&](QSqlDatabase& db) {
             QSqlQuery query(db);
@@ -1397,8 +1383,6 @@ void ShotHistoryStorage::requestAutoFavorites(const QString& groupBy, int maxIte
         }, Qt::QueuedConnection);
     });
 
-    connect(thread, &QThread::finished, thread, &QObject::deleteLater);
-    thread->start();
 }
 
 void ShotHistoryStorage::requestAutoFavoriteGroupDetails(const QString& groupBy,
@@ -1484,7 +1468,7 @@ void ShotHistoryStorage::requestAutoFavoriteGroupDetails(const QString& groupBy,
         " AND espresso_notes IS NOT NULL AND espresso_notes != '' "
         "ORDER BY timestamp DESC";
 
-    QThread* thread = QThread::create([this, dbPath, statsSql, notesSql, bindValues, destroyed]() {
+    runDetachedDbThread([this, dbPath, statsSql, notesSql, bindValues, destroyed]() {
         QVariantMap result;
         if (!withTempDb(dbPath, "shs_ragd", [&](QSqlDatabase& db) {
             // Stats query
@@ -1538,8 +1522,6 @@ void ShotHistoryStorage::requestAutoFavoriteGroupDetails(const QString& groupBy,
         }, Qt::QueuedConnection);
     });
 
-    connect(thread, &QThread::finished, thread, &QObject::deleteLater);
-    thread->start();
 }
 
 
@@ -1628,14 +1610,60 @@ QStringList ShotHistoryStorage::getDistinctGrinderSettingsForGrinder(const QStri
 
     // Settings are per-shot dial-in (grinder_setting stays on shots); the grinder
     // model resolves through the equipment_id pointer (task 4.2).
+    //
+    // The model compare is case- and whitespace-FOLDED, so it agrees with the
+    // identity lookup that decides two packages are the same gear
+    // (findPackageByGrinderIdentityStatic, which has always used LOWER).
+    // An exact compare here meant a model string differing
+    // only in case or padding — two packages the write path considers the same
+    // grinder — read back as a grinder with NO history. That is invisible: an
+    // empty result is indistinguishable from a new grinder, so the step silently
+    // falls back to 1.0 and the wheel loses the resolution the user actually
+    // dials. Every model-scoped lookup in this file and in the AI grinder
+    // calibration block folds the same way; they must agree.
     requestDistinctValueAsync(cacheKey,
         "SELECT DISTINCT grinder_setting FROM shots "
         "WHERE equipment_id IN (SELECT package_id FROM equipment_items "
-        "WHERE kind = 'grinder' AND model = ?) "
+        "WHERE kind = 'grinder' AND LOWER(TRIM(IFNULL(model,''))) = LOWER(TRIM(?))) "
         "AND grinder_setting IS NOT NULL AND grinder_setting != '' "
         "ORDER BY grinder_setting",
         {grinderModel});
     return {};
+}
+
+// Say what was derived and from how much, ONCE per (grinder, sample size, answer).
+//
+// This line exists because #1713 could not be diagnosed from the 25,720-line log
+// attached to it: "grind" appeared three times, none of them reporting the step,
+// and the reported symptom (whole numbers only, no 1.2) is entirely a consequence
+// of what grindStepForGrinder() returns. That value is derived from the user's OWN
+// history, so it differs per install and cannot be inferred from the version number
+// — exactly the kind of fact a log has to carry, because nobody can reconstruct it
+// afterwards.
+//
+// One function rather than one call site per return, because grindStepForGrinder()
+// has two ways to answer 0 and they must not describe it in two wordings.
+//
+// Deduped: the caller is a QML binding that re-evaluates on every
+// distinctCacheReady() and grinder change. The answer is what matters, not how
+// often it was asked.
+void ShotHistoryStorage::reportGrindStep(const QString& grinderModel, qsizetype sampleCount,
+                                         double step)
+{
+    const QString observed = QStringLiteral("%1:%2:%3")
+                                 .arg(grinderModel).arg(sampleCount).arg(step);
+    if (m_lastGrindStepReport == observed)
+        return;
+    m_lastGrindStepReport = observed;
+    qDebug().noquote()
+        << QStringLiteral("ShotHistoryStorage: grind step for %1 = %2, derived from %3 "
+                          "distinct numeric setting(s)%4")
+               .arg(grinderModel.isEmpty() ? QStringLiteral("(no grinder)") : grinderModel)
+               .arg(step)
+               .arg(sampleCount)
+               .arg(step > 0.0 ? QString()
+                               : QStringLiteral(" — too thin to derive; the caller's "
+                                                "fallback step is used instead"));
 }
 
 double ShotHistoryStorage::grindStepForGrinder(const QString& grinderModel)
@@ -1644,8 +1672,20 @@ double ShotHistoryStorage::grindStepForGrinder(const QString& grinderModel)
     // grinders). On a cold cache it returns {} and kicks off the async fetch;
     // we return 0 and QML recomputes when distinctCacheReady() fires.
     const QStringList settings = getDistinctGrinderSettingsForGrinder(grinderModel);
-    if (settings.isEmpty())
+    if (settings.isEmpty()) {
+        // Report this return too. It is the SAME answer as the thin-history case
+        // below — 0, the value behind #1713 — and leaving it silent means the one
+        // path a reader most needs to see is the one that says nothing. A log
+        // showing the derivation line only sometimes reads as the function not
+        // having run, when in fact it ran and returned the interesting value.
+        //
+        // Cold cache and genuinely-no-history are deliberately not separated
+        // here: the caller behaves identically for both, and a cold cache
+        // resolves into a second line moments later, which is a clearer signal
+        // than a word this function would have to guess at.
+        reportGrindStep(grinderModel, 0, 0.0);
         return 0.0;
+    }
 
     // Numeric subset only — letter/compound notations don't define a numeric
     // step and are stepped by their own path in the widget.
@@ -1658,7 +1698,9 @@ double ShotHistoryStorage::grindStepForGrinder(const QString& grinderModel)
     }
     QList<double> numeric(numericSet.begin(), numericSet.end());
     std::sort(numeric.begin(), numeric.end());
-    return deriveGrindStep(numeric);
+    const double step = deriveGrindStep(numeric);
+    reportGrindStep(grinderModel, numeric.size(), step);
+    return step;
 }
 
 double ShotHistoryStorage::grindRpmStepForGrinder(const QString& grinderModel)
@@ -1680,7 +1722,7 @@ double ShotHistoryStorage::grindRpmStepForGrinder(const QString& grinderModel)
         requestDistinctValueAsync(cacheKey,
             "SELECT DISTINCT rpm FROM shots "
             "WHERE equipment_id IN (SELECT package_id FROM equipment_items "
-            "WHERE kind = 'grinder' AND model = ?) "
+            "WHERE kind = 'grinder' AND LOWER(TRIM(IFNULL(model,''))) = LOWER(TRIM(?))) "
             "AND rpm > 0 "
             "ORDER BY rpm",
             {grinderModel});

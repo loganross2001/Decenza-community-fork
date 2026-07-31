@@ -1,13 +1,16 @@
+// `sourceComponent: HistoryShotGraph { ... }` wraps its value in an implicit Component,
+// so this file's `root` id is not statically resolvable inside either graph without
+// this pragma. Neither Component takes an injected model role, so nothing here needs
+// a `required property`.
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Effects
 import Decenza
 
-Item {
+LayoutWidgetItem {
     id: root
-    property bool isCompact: false
-    property string itemId: ""
-    property var modelData: ({})
 
     implicitWidth: isCompact ? compactContent.implicitWidth : fullContent.implicitWidth
     implicitHeight: isCompact ? compactContent.implicitHeight : fullContent.implicitHeight
@@ -48,7 +51,7 @@ Item {
         target: MainController.shotHistory
         function onShotReady(shotId, shot) {
             if (shotId !== root._pendingShotId) return
-            shotData = shot
+            root.shotData = shot
         }
         function onMostRecentShotIdReady(shotId) {
             if (shotId > 0 && root._pendingShotId <= 0) {

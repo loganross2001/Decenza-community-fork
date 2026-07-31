@@ -1,3 +1,9 @@
+// Bound so the popup's ListView delegate can resolve this file's own ids (`root`,
+// `suggestionList`) instead of reading them as unqualified access. The one delegate in this
+// file takes injected model roles, so both are declared required in the same edit — without
+// that, ComponentBehavior: Bound breaks them at RUNTIME and silently.
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Effects
@@ -7,6 +13,12 @@ import Decenza
 // Autocomplete text field that shows filtered suggestions as you type
 Item {
     id: root
+
+    // Attached-property lookups are only typed when written unprefixed in the scope they
+    // attach to; `root.Window.window` reads as a plain member of this file's own type.
+    // `var`, not `Window`: the attached property hands back a QQuickWindow, and the QML
+    // `Window` type is QQuickWindowQmlImpl — a narrower type the assignment cannot satisfy.
+    readonly property var hostWindow: Window.window
 
     property string label: ""
     property string text: ""
@@ -156,7 +168,7 @@ Item {
             // persisted value stays in sync. Popup open/close is handled by
             // onDisplayTextChanged instead, because on Android `text` doesn't
             // update during composition and this signal wouldn't fire per keystroke.
-            isActivelyTyping = true
+            root.isActivelyTyping = true
             // Don't set root.text here - that breaks the parent binding!
             // Just emit the signal and let parent update via its binding
             root.textEdited(text)
@@ -168,12 +180,12 @@ Item {
         // On Android this is what makes suggestions appear immediately instead of
         // waiting for a space or delete to commit the composition.
         onDisplayTextChanged: {
-            if (!activeFocus || justSelected) return
+            if (!activeFocus || root.justSelected) return
             if (displayText.length === 0) {
                 suggestionPopup.close()
             } else {
-                isActivelyTyping = true
-                if (getFilteredSuggestions().length > 0) {
+                root.isActivelyTyping = true
+                if (root.getFilteredSuggestions().length > 0) {
                     suggestionPopup.open()
                 }
             }
@@ -181,8 +193,8 @@ Item {
 
         onActiveFocusChanged: {
             if (activeFocus) {
-                justSelected = false  // Reset so typing works again
-                isActivelyTyping = false  // Reset - show all suggestions initially
+                root.justSelected = false  // Reset so typing works again
+                root.isActivelyTyping = false  // Reset - show all root.suggestions initially
                 root.inputFocused(textInput)
                 // Intentionally do NOT auto-open the popup on focus. The popup is a
                 // filter-as-you-type dropdown; it appears once the user starts typing.
@@ -195,7 +207,7 @@ Item {
                 root.inputBlurred()
                 // Defer popup close — if the user clicked a popup item,
                 // selectSuggestion() will have set justSelected = true by now
-                Qt.callLater(closeSuggestionsIfBlurred)
+                Qt.callLater(root.closeSuggestionsIfBlurred)
             }
         }
 
@@ -205,7 +217,7 @@ Item {
             // top match when the typed text isn't already an exact entry.
             // Otherwise commit the typed text (keeps brand-new names intact).
             if (suggestionPopup.visible && suggestionList.count > 0) {
-                var matches = getFilteredSuggestions()
+                var matches = root.getFilteredSuggestions()
                 var pick = -1
                 if (suggestionList.currentIndex >= 0)
                     pick = suggestionList.currentIndex
@@ -288,8 +300,8 @@ Item {
                 accessibleName: TranslationManager.translate("suggestionfield.clear", "Clear text")
                 accessibleItem: parent
                 onAccessibleClicked: {
-                    justSelected = false
-                    isActivelyTyping = false
+                    root.justSelected = false
+                    root.isActivelyTyping = false
                     textInput.text = ""
                     root.textEdited("")
                     // Don't re-open the popup — it's a type-to-filter dropdown,
@@ -341,7 +353,7 @@ Item {
     // Accessibility mode: separate row of labeled buttons below the text field
     Row {
         id: a11yButtons
-        visible: root._accessibilityMode && (textInput.text.length > 0 || suggestions.length > 0)
+        visible: root._accessibilityMode && (textInput.text.length > 0 || root.suggestions.length > 0)
         anchors.left: textInput.left
         anchors.right: textInput.right
         anchors.top: textInput.bottom
@@ -357,19 +369,19 @@ Item {
             accessibleName: TranslationManager.translate("suggestionfield.clear", "Clear text")
 
             onClicked: {
-                justSelected = false
-                isActivelyTyping = false
+                root.justSelected = false
+                root.isActivelyTyping = false
                 textInput.text = ""
                 root.textEdited("")
                 // After clearing, open suggestions dialog so user can browse
-                if (suggestions.length > 0) {
+                if (root.suggestions.length > 0) {
                     root.openSuggestionsDialog()
                 }
             }
         }
 
         AccessibleButton {
-            visible: suggestions.length > 0
+            visible: root.suggestions.length > 0
             width: visible ? implicitWidth : 0
             height: Theme.scaled(44)
             text: TranslationManager.translate("suggestionfield.openDropdown", "Open suggestions")
@@ -403,7 +415,7 @@ Item {
         y: {
             var _v = visible  // re-evaluate on open — mapToItem is not reactive
             var below = textInput.y + textInput.height
-            var win = root.Window.window
+            var win = root.hostWindow
             if (win) {
                 var fieldTopGlobal = textInput.mapToItem(null, 0, 0).y
                 var fieldBottomGlobal = fieldTopGlobal + textInput.height
@@ -428,24 +440,24 @@ Item {
         contentItem: ListView {
             id: suggestionList
             clip: true
-            model: getFilteredSuggestions()
+            model: root.getFilteredSuggestions()
             currentIndex: -1
-
-            // Store reference to root for delegate access
-            property var suggestionRoot: root
 
             delegate: ItemDelegate {
                 id: suggestionDelegate
+
+                required property var modelData
+                required property int index
+
                 width: suggestionList.width
                 // Taller rows when a differentiator subtitle is shown so both lines fit.
                 height: suggestionDelegate.itemDesc.length > 0 ? Theme.scaled(58) : Theme.scaled(44)
-                highlighted: index === suggestionList.currentIndex
+                highlighted: suggestionDelegate.index === suggestionList.currentIndex
 
-                // Store reference to avoid scope issues
-                property string itemText: modelData
+                property string itemText: suggestionDelegate.modelData
                 // Optional differentiator subtitle for this value (empty when none).
-                property string itemDesc: root.descriptions && root.descriptions[modelData] !== undefined
-                                          ? String(root.descriptions[modelData]) : ""
+                property string itemDesc: root.descriptions && root.descriptions[suggestionDelegate.modelData] !== undefined
+                                          ? String(root.descriptions[suggestionDelegate.modelData]) : ""
 
                 contentItem: Column {
                     spacing: Theme.scaled(1)
@@ -474,16 +486,11 @@ Item {
                                  : suggestionDelegate.itemText
 
                 background: Rectangle {
-                    color: highlighted || hovered ? Theme.primaryColor : "transparent"
-                    opacity: highlighted || hovered ? 0.2 : 1
+                    color: suggestionDelegate.highlighted || suggestionDelegate.hovered ? Theme.primaryColor : "transparent"
+                    opacity: suggestionDelegate.highlighted || suggestionDelegate.hovered ? 0.2 : 1
                 }
 
-                onClicked: {
-                    var listView = suggestionDelegate.ListView.view
-                    if (listView && listView.suggestionRoot) {
-                        listView.suggestionRoot.selectSuggestion(suggestionDelegate.itemText)
-                    }
-                }
+                onClicked: root.selectSuggestion(suggestionDelegate.itemText)
             }
 
             // Show message when no matches

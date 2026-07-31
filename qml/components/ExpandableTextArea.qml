@@ -86,7 +86,7 @@ Rectangle {
         rightPadding: root.isMobile ? Theme.scaled(8) : Theme.scaled(24) // room for expand button on desktop
         topPadding: Theme.scaled(4)
         bottomPadding: Theme.scaled(4)
-        text: Theme.replaceEmojiWithImg(formatTextWithLinks(root.text), root.textFont.pixelSize, true)  // formatTextWithLinks already escapes and emits <a> links
+        text: Theme.replaceEmojiWithImg(root.formatTextWithLinks(root.text), root.textFont.pixelSize, true)  // formatTextWithLinks already escapes and emits <a> links
         textFormat: Text.StyledText
         font: root.textFont
         color: Theme.textColor
@@ -238,7 +238,7 @@ Rectangle {
     }
 
     // Expanded editor dialog
-    Dialog {
+    DecenzaDialog {
         id: expandDialog
         parent: Overlay.overlay
         modal: true
@@ -388,7 +388,7 @@ Rectangle {
                     // Scroll to keep cursor visible when typing or tapping
                     onCursorRectangleChanged: {
                         if (!activeFocus) return
-                        var flickable = dialogScrollView.contentItem
+                        var flickable = dialogScrollView.contentItem as Flickable
                         if (!flickable) return
                         var cursorY = cursorRectangle.y
                         var cursorBottom = cursorY + cursorRectangle.height

@@ -85,6 +85,22 @@ public:
     void setIpResolver(IpResolver resolver) { m_ipResolver = std::move(resolver); }
     void setIpCacheUpdate(IpCacheUpdate cb) { m_ipCacheUpdate = std::move(cb); }
 
+    // Sink for a failure that REPEATS every reconnect cycle while nothing
+    // changes. Routes to BLEManager's per-message warn budget, so the first few
+    // carry the diagnosis at `warn`'s tier and the rest drop to DEBUG.
+    //
+    // Injected rather than logged directly because the budget must be ONE store
+    // shared with the manager. When only the manager's lines were budgeted, its
+    // half of the failing cycle went quiet on the endless tail while this
+    // driver's half kept warning every 60 s forever — leaving a repeating
+    // fragment with no attempt number and no outcome.
+    //
+    // Unset (the default) means log normally: the driver is usable standalone
+    // and in tests without a manager, and an unbudgeted line is the safe
+    // fallback — too loud beats missing.
+    using RepeatFailureSink = std::function<void(const QString& message, bool warn)>;
+    void setRepeatFailureSink(RepeatFailureSink sink) { m_repeatFailureSink = std::move(sink); }
+
 signals:
     // Emitted on the first valid HDS frame (snapshot or status) after a
     // connect attempt — confirms the WS endpoint is actually an HDS scale,
@@ -325,6 +341,41 @@ private:
     // (attemptTarget); set in onError only when m_userInitiatedShutdown is false.
     bool m_socketErrorThisConnect = false;
     QString m_lastSocketErrorString;
+    // Whether the WS handshake ever completed on THIS attempt, i.e. whether
+    // there is a connection for a later `disconnected` to be about.
+    //
+    // Two Qt facts make this necessary, and they live in different modules:
+    //
+    // 1. QWebSocket SYNTHESIZES a `disconnected` for a connect that never
+    //    established. `open()` sets ConnectingState before connectToHost
+    //    (qtwebsockets/src/websockets/qwebsocket_p.cpp:545,550) and the
+    //    disconnected emit is gated only on `webSocketState !=
+    //    UnconnectedState` (:1335-1337) — so a failed connect reaches
+    //    onDisconnected at all. QTcpSocket does NOT do this: its own emit is
+    //    gated on `previousState == ConnectedState || ClosingState`
+    //    (qtbase/src/network/socket/qabstractsocket.cpp:2739-2741).
+    // 2. `disconnected` arrives BEFORE `errorOccurred`, so
+    //    m_socketErrorThisConnect is still false when the classifier runs. The
+    //    order is decided in qabstractsocket.cpp:1039-1040 (`emit
+    //    stateChanged` then `emit errorOccurred`; same shape on the
+    //    DNS-failure path :985-986 and the connect-timeout path :1153-1154);
+    //    qwebsocket_p.cpp only forwards, via direct AutoConnections (:666,
+    //    :680).
+    //
+    // Two caveats, neither of which changes the need for this flag: through a
+    // name-resolving proxy the order REVERSES (qabstractsocket.cpp:926-928), and
+    // with an IP literal both signals can fire synchronously inside `open()`
+    // (:1709-1712) — the trap CLAUDE.md already records.
+    //
+    // Without this flag the classifier fell through to its peer-close branch and
+    // read the socket's stale closeCode, reporting a host that was never
+    // reachable as "disconnected (unexpected) — peer close (code 1000)" — a clean
+    // close from a peer that never answered. Observed live on every WiFi attempt
+    // to an absent scale.
+    //
+    // Set in onConnected, cleared per attempt (attemptTarget) and per connect
+    // cycle (connectToHost).
+    bool m_wsHandshakeDone = false;
     // Set in sleep() when we send the firmware power-off JSON. The scale
     // echoes back a `power_off` frame (reason "disabled", code 0) on receipt;
     // this flag lets handlePowerFrame log the echo at LOG level (app-initiated)
@@ -339,4 +390,21 @@ private:
 
     IpResolver m_ipResolver;     // hostname → cached IP (or empty)
     IpCacheUpdate m_ipCacheUpdate;  // hostname, ip → side-effect
+    RepeatFailureSink m_repeatFailureSink;  // repeating-cycle line → shared warn budget
+
+    // WHERE m_currentTarget came from: caller-supplied, remembered from a
+    // previous connect, or freshly resolved. Rides on the connect-failure line
+    // rather than being announced on a line of its own.
+    //
+    // This exists because a repeating failure against one address is ambiguous
+    // in the one way that decides the diagnosis: a FRESHLY RESOLVED address that
+    // is unreachable means the scale is off or off-network, while a REMEMBERED
+    // address that is unreachable usually means the scale moved and mDNS is
+    // deaf. A real 8-minute ladder showed the second and read as the first,
+    // because the only line naming the source sat at DEBUG.
+    //
+    // A field on an existing line, not a new line: the alternative was one extra
+    // INFO per 60 s cycle forever, which is the log spam this work exists to
+    // reduce.
+    QString m_targetSource;
 };

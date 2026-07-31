@@ -1,10 +1,22 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Templates as T
 import QtQuick.Window
 import Decenza
 
-ApplicationWindow {
+// Rooted at QtQuick.Templates.ApplicationWindow for the same reason the pages and the
+// button family are: a Controls root resolves to the style's composite, whose base chain
+// qmlcachegen cannot walk, so every `root.<prop>` in this file lost AOT compilation --
+// 583 skips, the whole of the remaining id class.
+//
+// Nothing is lost. Material's ApplicationWindow.qml is three lines and its only content is
+// `color: Material.backgroundColor`, which the `color:` below already overrode. The Qt 6.9+
+// safe-area padding the `topPadding` block fights is C++ (QQuickApplicationWindow), not the
+// style, so those four lines are still doing their job.
+//
+// `import QtQuick.Controls` stays -- this file has 16 inline Dialogs and a StackView.
+T.ApplicationWindow {
     id: root
     visible: true
     visibility: Qt.platform.os === "android" ? Window.FullScreen : Window.AutomaticVisibility
@@ -44,9 +56,8 @@ ApplicationWindow {
     // time (else 0) — a fixed snapshot, not a live binding, so it can't jump to 0 if
     // the app navigates away from Idle while the dialog is open.
     function openBrewSettings() {
-        globalBrewDialog.scaleVirtualZero =
-            (pageStack.currentItem && pageStack.currentItem.objectName === "idlePage")
-                ? pageStack.currentItem.scaleVirtualZero : 0
+        var idle = pageStack.currentItem as IdlePage
+        globalBrewDialog.scaleVirtualZero = idle ? idle.scaleVirtualZero : 0
         globalBrewDialog.open()
     }
     BrewDialog {
@@ -154,7 +165,7 @@ ApplicationWindow {
         scaleSleepTimer.start()
     }
 
-    Dialog {
+    DecenzaDialog {
         id: firmwareFlashExitDialog
         modal: true
         dim: true
@@ -260,7 +271,7 @@ ApplicationWindow {
         }
     }
 
-    Dialog {
+    DecenzaDialog {
         id: firmwareRebootRequiredDialog
         modal: true
         dim: true
@@ -568,16 +579,6 @@ ApplicationWindow {
         function onSelectedSteamPitcherChanged() { AppShell.sessionMeasuredMilkG = 0 }
     }
 
-    // Live dose-weighing state, pushed by IdlePage (Bindings next to its
-    // beanCapture engine) while the idle page is showing: the virtual-zero net-bean
-    // weight while an uncaptured dose sits on the scale (-1 otherwise), and the
-    // brief "dose captured" accent flash (IdlePage's beanCaptureShown). Mirrored
-    // read-only by DoseWeightItem so the Beans widget ticks live during weighing
-    // with the same net the capture engine tracks — the widget never re-derives
-    // scale state itself.
-    property real doseLiveNetG: -1
-    property bool doseCaptureFlash: false
-
     // Save the most recent steam session as an atomic (milk weight, duration) pair
     // so steam setup can adopt it as a baseline. Both fields are written together at
     // session end — only when this session actually had a measured milk weight,
@@ -699,9 +700,24 @@ ApplicationWindow {
     // AND when the page's own pageTitle does — which is itself a binding over translate().
     //
     // Any page without a `pageTitle` property yields "" rather than an error.
+    //
+    // The probe is genuinely dynamic and stays dynamic: the 33 pages that declare pageTitle
+    // share no base type, and giving them one would have to be a Page subclass —
+    // CommunityBrowserPage roots at Item, so it would silently drop out and lose its title.
+    // A base type is the right follow-up; it is not a one-line change.
+    // qmllint disable missing-property
     readonly property string currentPageTitle: {
         var it = pageStack.currentItem
         return (it && it.pageTitle !== undefined) ? it.pageTitle : ""
+    }
+    // qmllint enable missing-property
+
+    // Mirrored onto Theme so the PageTitleItem layout widget — a global overlay that is not
+    // a child of any page — can read it without reaching into this window's root.
+    Binding {
+        target: Theme
+        property: "currentPageTitle"
+        value: root.currentPageTitle
     }
 
     // Flag to prevent premature UI display
@@ -843,25 +859,36 @@ ApplicationWindow {
         function onScaleMultiplierChanged() { root.updateScale() }
         function onPageScaleMultiplierChanged() { root.updateScale() }
     }
-    // Raise all application windows together when this window is activated.
+    // GHCSimulator has TWO independent ways of not being usable, and a guard for one does not
+    // cover the other. Both are live configurations, so both tests are required:
     //
-    // Guard the MEMBER, not the name. `typeof GHCSimulator !== "undefined" && GHCSimulator` looks
-    // equivalent and is not: the type is registered wherever DECENZA_SIMULATOR is defined, but the
-    // instance exists only on a debug Windows/macOS build, and a registered-but-uninstanced
-    // singleton resolves to a TRUTHY wrapper whose member reads come back undefined. That guard
-    // therefore passed on Linux, on Windows/macOS Release and on Android/iOS Debug, and the call
-    // below threw a TypeError on every window activation. See decenzaOptionalSingleton() in
-    // src/core/contextsingletons_qml.h for the Qt sources.
+    //   1. The TYPE is absent. Registration is inside `#ifdef DECENZA_SIMULATOR`
+    //      (src/core/contextsingletons_qml.h), which a production Android/iOS build does not
+    //      define — so the name resolves to nothing and reading a member off it throws
+    //      `ReferenceError: GHCSimulator is not defined`. Only `typeof` survives this: an
+    //      unresolvable identifier makes V4 clear the exception and answer "undefined"
+    //      (qtdeclarative/src/qml/jsruntime/qv4runtime.cpp:1746-1754, Runtime::TypeofName::call).
+    //   2. The type is registered but the INSTANCE is null — Linux any config, Windows/macOS
+    //      Release, Android/iOS Debug. Here the name is a TRUTHY wrapper and only member reads
+    //      come back undefined, so `typeof` alone passes and the call throws a TypeError. See
+    //      decenzaOptionalSingleton() in src/core/contextsingletons_qml.h for the Qt sources.
+    //
+    // The member-only guard shipped in 2.0.1 and threw case 1 three times on every tablet
+    // launch (two ReferenceErrors plus a dead Connections whose target never resolved). One
+    // property, so the two call sites below cannot drift apart again.
+    readonly property bool ghcSimulatorLive: typeof GHCSimulator !== "undefined"
+                                             && GHCSimulator.mainWindowActivated !== undefined
+
+    // Raise all application windows together when this window is activated.
     onActiveChanged: {
-        if (active && GHCSimulator.mainWindowActivated !== undefined) {
+        if (active && root.ghcSimulatorLive) {
             GHCSimulator.mainWindowActivated()
         }
     }
 
     // Listen for GHC window activation to raise ourselves (simulator mode only).
-    // Same rule: a truthy-but-empty wrapper is not a valid Connections target.
     Connections {
-        target: GHCSimulator.mainWindowActivated !== undefined ? GHCSimulator : null
+        target: root.ghcSimulatorLive ? GHCSimulator : null
         function onRaiseMainWindow() {
             root.raise()
         }
@@ -1149,12 +1176,24 @@ ApplicationWindow {
     // paintsShotChart is the surface's own drawing state, which it computes anyway, and its
     // `shotChart &&` short-circuits before touching LastShotChartSource when this
     // background is not selected, so the singleton's load guard still holds.
+    //
+    // `as T.Page`, NOT `as Page`. QtQuick.Controls.Page resolves to the active style's
+    // Page.qml — a COMPOSITE type — and a composite can only match an instance whose own
+    // metaobject chain contains it (`qqmltypewrapper.cpp:513-516`: "Rectangle{} is never an
+    // instance of CustomRectangle"). `as` is doInstanceof, and a failed object cast yields
+    // null (`qv4runtime.cpp:394-406`). Pages root at QtQuick.Templates.Page now, so the
+    // style composite is no longer in their chain and `as Page` would return null on every
+    // page — silently pinning shotChartOnCurrentPage to false forever. T.Page is the C++
+    // QQuickPage, which every page satisfies, including the one still rooted at Controls
+    // Page (AddLanguagePage) since the style composite derives from it.
     Binding {
         target: Theme
         property: "shotChartOnCurrentPage"
-        value: !!(pageStack.currentItem
-                  && pageStack.currentItem.background
-                  && pageStack.currentItem.background.paintsShotChart)
+        value: {
+            var page = pageStack.currentItem as T.Page
+            var surface = page ? page.background as BackgroundSurface : null
+            return !!(surface && surface.paintsShotChart)
+        }
     }
 
     // Page stack for navigation
@@ -1366,7 +1405,6 @@ ApplicationWindow {
             "postShotReviewPage": TranslationManager.translate("main.pageShotReview", "Shot review"),
             "beanInfoPage": TranslationManager.translate("main.pageBeanInfo", "Bean info"),
             "equipmentPage": TranslationManager.translate("main.pageEquipment", "Equipment"),
-            "dialingAssistantPage": TranslationManager.translate("main.pageAiAssistant", "AI assistant"),
             "shotDetailPage": TranslationManager.translate("main.pageShotDetail", "Shot detail"),
             "shotComparisonPage": TranslationManager.translate("main.pageShotComparison", "Shot comparison")
         }
@@ -1446,7 +1484,7 @@ ApplicationWindow {
     }
 
     // Global error dialog for BLE issues
-    Dialog {
+    DecenzaDialog {
         id: bleErrorDialog
         modal: true
         dim: true
@@ -1615,7 +1653,7 @@ ApplicationWindow {
     }
 
     // FlowScale fallback dialog (no scale found at startup)
-    Dialog {
+    DecenzaDialog {
         id: flowScaleDialog
         modal: true
         dim: true
@@ -1669,7 +1707,7 @@ ApplicationWindow {
     }
 
     // Scale disconnected dialog
-    Dialog {
+    DecenzaDialog {
         id: scaleDisconnectedDialog
         modal: true
         dim: true
@@ -1730,7 +1768,7 @@ ApplicationWindow {
         }
     }
 
-    Dialog {
+    DecenzaDialog {
         id: noScaleAbortDialog
         modal: true
         dim: true
@@ -1786,7 +1824,7 @@ ApplicationWindow {
     // Charging mismatch warning dialog
     // Shown when smart charging commands the DE1 USB port ON but Android still reports
     // DISCHARGING — the port is not delivering power (DE1 asleep, BLE command failed, cable issue).
-    Dialog {
+    DecenzaDialog {
         id: chargingMismatchDialog
         modal: true
         dim: true
@@ -1859,7 +1897,7 @@ ApplicationWindow {
     }
 
     // Water tank refill dialog
-    Dialog {
+    DecenzaDialog {
         id: refillDialog
         modal: true
         dim: true
@@ -1928,7 +1966,7 @@ ApplicationWindow {
 
 
     // Update notification dialog
-    Dialog {
+    DecenzaDialog {
         id: updateDialog
         modal: true
         dim: true
@@ -2155,10 +2193,9 @@ ApplicationWindow {
         if (pageName === "postShotReviewPage") {
             root.returnToPageName = pageName
             // Get the editShotId from the current page, fallback to lastSavedShotId
-            var currentItem = pageStack.currentItem
-            var hasEditShotId = currentItem && typeof currentItem.editShotId !== "undefined"
-            if (hasEditShotId && currentItem.editShotId > 0) {
-                root.returnToShotId = currentItem.editShotId
+            var currentReview = pageStack.currentItem as PostShotReviewPage
+            if (currentReview && currentReview.editShotId > 0) {
+                root.returnToShotId = currentReview.editShotId
             } else {
                 root.returnToShotId = MainController.lastSavedShotId
             }
@@ -2551,7 +2588,7 @@ ApplicationWindow {
     // is random or public and rejects connections to the DE1 (which uses a
     // random static address) with UnknownRemoteDeviceError. The capability
     // is granted via `sudo setcap` and is frequently cleared by OS updates.
-    Dialog {
+    DecenzaDialog {
         id: linuxBleCapabilityDialog
         modal: true
         dim: true
@@ -2655,7 +2692,7 @@ ApplicationWindow {
         }
     }
 
-    Dialog {
+    DecenzaDialog {
         id: linuxBleBluezCacheDialog
         modal: true
         dim: true
@@ -2748,7 +2785,7 @@ ApplicationWindow {
     }
 
     // First-run welcome dialog
-    Dialog {
+    DecenzaDialog {
         id: firstRunDialog
         modal: true
         dim: true
@@ -2804,7 +2841,7 @@ ApplicationWindow {
     }
 
     // Storage setup dialog (Android 11+ - request MANAGE_EXTERNAL_STORAGE permission)
-    Dialog {
+    DecenzaDialog {
         id: storageSetupDialog
         modal: true
         dim: true
@@ -2906,7 +2943,7 @@ ApplicationWindow {
     // so next week's update reopens automatically. Same pattern as the GPS /
     // storage permission prompts: surfaced at the teachable moment, no
     // permanent in-app UI. Dismissed permanently after either button.
-    Dialog {
+    DecenzaDialog {
         id: autoRelaunchPromptDialog
         modal: true
         dim: true
@@ -2997,7 +3034,7 @@ ApplicationWindow {
     // via MainController; decline/dismiss just records that the offer was
     // answered. Dismiss (escape) counts as decline (recipes-idle-layout-upgrade
     // design.md decision 8) — it must be dismissible, per ACCESSIBILITY.md.
-    Dialog {
+    DecenzaDialog {
         id: recipesUpgradeDialog
         modal: true
         dim: true
@@ -3672,9 +3709,10 @@ ApplicationWindow {
         var wantTab = (tabId !== undefined && tabId !== "" && SettingsTabs.indexOf(tabId) >= 0)
         // Already in Settings: switch tab in place rather than stacking a second copy. Assigning
         // requestedTabId would do nothing — the page consumes it only in StackView.onActivated.
-        if (pageStack.currentItem && pageStack.currentItem.objectName === "settingsPage") {
+        var settings = pageStack.currentItem as SettingsPage
+        if (settings) {
             if (wantTab)
-                pageStack.currentItem.showTab(tabId)
+                settings.showTab(tabId)
             return
         }
         if (wantTab) {
@@ -4999,7 +5037,7 @@ ApplicationWindow {
     }
 
     // Empty database + backups exist: ask user if they want to restore
-    Dialog {
+    DecenzaDialog {
         id: emptyDatabaseDialog
         modal: true
         dim: true

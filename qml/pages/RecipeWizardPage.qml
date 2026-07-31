@@ -1,5 +1,14 @@
+// Seven Repeater delegates and several `Component`/`sourceComponent` blocks here read
+// this file's ids (`wizardPage`, `bagGridFlick`, `profileGrid`, `wizardBeansDialog`,
+// `wizardKnowledgeDialog`); Bound makes them statically resolvable. Every one of those
+// delegates declares its injected role, `modelData`, required in the same edit --
+// without that, Bound stops role injection and every tile in the wizard (drink type,
+// bag, profile, equipment, pitcher, vessel) renders blank at RUNTIME, silently.
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Templates as T
 import QtQuick.Layouts
 import Decenza
 
@@ -21,7 +30,7 @@ import Decenza
 // data → the profile's own recommended numbers. Tea default temps and the
 // profile type-match table live in C++ (src/core/drinktypes.h, exposed via
 // ProfileManager) — the single source shared with the ranking helpers.
-Page {
+T.Page {
     id: wizardPage
     // Declarative so it re-evaluates on a language change. This used to be an
     // imperative assignment in onCompleted/onActivated, which ran once and left
@@ -54,6 +63,23 @@ Page {
     // them in order; edit/clone/promote start at "summary". A step opened
     // FROM the summary returns to it on selection instead of advancing.
     property string currentStep: "drink"
+
+    // Step order, as an explicit switch rather than `[...].indexOf(currentStep)`.
+    // qmlcachegen compiles QJSList::indexOf() and assigns its qsizetype result
+    // straight into the int this feeds (StackLayout.currentIndex), which is a
+    // -Wshorten-64-to-32 error under -Werror. The binding only started compiling
+    // when this page moved to a T.Page root, so the Qt defect was invisible before.
+    // -1 for an unknown step, matching indexOf and leaving the StackLayout blank.
+    function _stepIndex(step: string): int {
+        switch (step) {
+        case "drink":   return 0
+        case "bean":    return 1
+        case "profile": return 2
+        case "details": return 3
+        case "summary": return 4
+        }
+        return -1
+    }
     property bool _fromSummary: false
     // True when the wizard OPENED on the summary (edit / promote / clone):
     // back from the summary then exits; in a creation walk it steps back
@@ -2334,7 +2360,10 @@ Page {
                         { step: "profile", value: wizardPage.fProfileTitle }
                     ]
                     delegate: Rectangle {
-                        visible: modelData.value !== "" && wizardPage.currentStep !== modelData.step
+                        id: stepChip
+                        required property var modelData
+
+                        visible: stepChip.modelData.value !== "" && wizardPage.currentStep !== stepChip.modelData.step
                         radius: height / 2
                         color: Theme.cardBackgroundColor
                         border.color: Theme.borderColor
@@ -2344,7 +2373,7 @@ Page {
                         Label {
                             id: chipLabel
                             anchors.centerIn: parent
-                            text: modelData.value
+                            text: stepChip.modelData.value
                             font: Theme.captionFont
                             color: Theme.textColor
                             Accessible.ignored: true
@@ -2352,9 +2381,9 @@ Page {
                         AccessibleMouseArea {
                             anchors.fill: parent
                             accessibleName: TranslationManager.translate(
-                                "recipes.wizard.accessible.chip", "Change %1").arg(modelData.value)
+                                "recipes.wizard.accessible.chip", "Change %1").arg(stepChip.modelData.value)
                             accessibleItem: parent
-                            onAccessibleClicked: wizardPage.openStep(modelData.step)
+                            onAccessibleClicked: wizardPage.openStep(stepChip.modelData.step)
                         }
                     }
                 }
@@ -2363,8 +2392,7 @@ Page {
             StackLayout {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                currentIndex: ["drink", "bean", "profile", "details", "summary"]
-                    .indexOf(wizardPage.currentStep)
+                currentIndex: wizardPage._stepIndex(wizardPage.currentStep)
 
                 // ===== Step 1: drink type =====
                 ColumnLayout {
@@ -2383,11 +2411,14 @@ Page {
                         Repeater {
                             model: ["espresso", "latte", "latte_hotwater", "filter", "americano", "long_black", "tea"]
                             delegate: Rectangle {
+                                id: drinkTile
+                                required property var modelData
+
                                 radius: Theme.cardRadius
                                 color: Theme.cardBackgroundColor
-                                border.color: wizardPage.fDrinkType === modelData
+                                border.color: wizardPage.fDrinkType === drinkTile.modelData
                                     ? Theme.primaryColor : Theme.borderColor
-                                border.width: wizardPage.fDrinkType === modelData ? 2 : 1
+                                border.width: wizardPage.fDrinkType === drinkTile.modelData ? 2 : 1
                                 implicitWidth: Theme.scaled(170)
                                 implicitHeight: Theme.scaled(120)
                                 ColumnLayout {
@@ -2400,7 +2431,7 @@ Page {
                                         Layout.alignment: Qt.AlignHCenter
                                         spacing: Theme.spacingSmall
                                         Repeater {
-                                            model: wizardPage.drinkTypeIcons(modelData)
+                                            model: wizardPage.drinkTypeIcons(drinkTile.modelData)
                                             delegate: ThemedIcon {
                                                 required property string modelData
                                                 source: modelData
@@ -2412,7 +2443,7 @@ Page {
                                     }
                                     Label {
                                         Layout.alignment: Qt.AlignHCenter
-                                        text: wizardPage.drinkTypeLabel(modelData)
+                                        text: wizardPage.drinkTypeLabel(drinkTile.modelData)
                                         font: Theme.bodyFont
                                         color: Theme.textColor
                                         Accessible.ignored: true
@@ -2420,9 +2451,9 @@ Page {
                                 }
                                 AccessibleMouseArea {
                                     anchors.fill: parent
-                                    accessibleName: wizardPage.drinkTypeLabel(modelData)
+                                    accessibleName: wizardPage.drinkTypeLabel(drinkTile.modelData)
                                     accessibleItem: parent
-                                    onAccessibleClicked: wizardPage.selectDrinkType(modelData)
+                                    onAccessibleClicked: wizardPage.selectDrinkType(drinkTile.modelData)
                                 }
                             }
                         }
@@ -2507,16 +2538,18 @@ Page {
                                 model: bagGridFlick.gridModel
                                 delegate: Rectangle {
                                     id: bagTile
-                                    readonly property bool isGhost: modelData.isAddNew === true || modelData.isNone === true
+                                    required property var modelData
+
+                                    readonly property bool isGhost: bagTile.modelData.isAddNew === true || bagTile.modelData.isNone === true
                                     readonly property bool isSelected: !isGhost && wizardPage.fBagId > 0
-                                        && modelData.id === wizardPage.fBagId
-                                    readonly property string tileTitle: modelData.isAddNew
+                                        && bagTile.modelData.id === wizardPage.fBagId
+                                    readonly property string tileTitle: bagTile.modelData.isAddNew
                                         ? (wizardPage.isTeaDrink
                                             ? TranslationManager.translate("recipes.wizard.addNewTea", "Add a new tea…")
                                             : TranslationManager.translate("recipes.wizard.addNewCoffee", "Add a new coffee…"))
-                                        : modelData.isNone
+                                        : bagTile.modelData.isNone
                                             ? (wizardPage.isTeaDrink ? trNoTea.text : trNoBean.text)
-                                            : (modelData.coffeeName || modelData.roasterName || "")
+                                            : (bagTile.modelData.coffeeName || bagTile.modelData.roasterName || "")
                                     width: Theme.scaled(170)
                                     height: Theme.scaled(190)
                                     radius: Theme.cardRadius
@@ -2564,15 +2597,15 @@ Page {
                                             Layout.preferredHeight: Theme.scaled(90)
                                             imageKey: {
                                                 if (bagTile.isGhost) return ""
-                                                return modelData.beanBaseId && String(modelData.beanBaseId).length > 0
-                                                    ? String(modelData.beanBaseId) : "bag-" + modelData.id
+                                                return bagTile.modelData.beanBaseId && String(bagTile.modelData.beanBaseId).length > 0
+                                                    ? String(bagTile.modelData.beanBaseId) : "bag-" + bagTile.modelData.id
                                             }
-                                            fallbackName: bagTile.isGhost ? "" : (modelData.coffeeName || "")
+                                            fallbackName: bagTile.isGhost ? "" : (bagTile.modelData.coffeeName || "")
                                             link: {
-                                                if (bagTile.isGhost || !modelData.beanBaseData
-                                                    || String(modelData.beanBaseData).length === 0)
+                                                if (bagTile.isGhost || !bagTile.modelData.beanBaseData
+                                                    || String(bagTile.modelData.beanBaseData).length === 0)
                                                     return ""
-                                                try { return JSON.parse(modelData.beanBaseData).link || "" } catch (e) { return "" }
+                                                try { return JSON.parse(bagTile.modelData.beanBaseData).link || "" } catch (e) { return "" }
                                             }
                                             iconSource: wizardPage.isTeaDrink
                                                 ? "qrc:/icons/tea.svg" : "qrc:/icons/coffeebeans.svg"
@@ -2583,17 +2616,17 @@ Page {
                                             visible: bagTile.isGhost
                                             Layout.alignment: Qt.AlignHCenter
                                             Layout.topMargin: Theme.scaled(30)
-                                            source: modelData.isAddNew ? "qrc:/icons/plus.svg"
+                                            source: bagTile.modelData.isAddNew ? "qrc:/icons/plus.svg"
                                                 : (wizardPage.isTeaDrink ? "qrc:/icons/tea.svg" : "qrc:/icons/coffeebeans.svg")
                                             iconWidth: Theme.scaled(32)
                                             iconHeight: Theme.scaled(32)
-                                            iconColor: modelData.isAddNew ? Theme.primaryColor : Theme.textSecondaryColor
+                                            iconColor: bagTile.modelData.isAddNew ? Theme.primaryColor : Theme.textSecondaryColor
                                             Accessible.ignored: true
                                         }
                                         Label {
-                                            visible: !bagTile.isGhost && (modelData.roasterName || "") !== ""
+                                            visible: !bagTile.isGhost && (bagTile.modelData.roasterName || "") !== ""
                                             Layout.fillWidth: true
-                                            text: modelData.roasterName || ""
+                                            text: bagTile.modelData.roasterName || ""
                                             font: Theme.captionFont
                                             color: Theme.textSecondaryColor
                                             elide: Text.ElideRight
@@ -2605,16 +2638,16 @@ Page {
                                             horizontalAlignment: bagTile.isGhost ? Text.AlignHCenter : Text.AlignLeft
                                             text: bagTile.tileTitle
                                             font: Theme.bodyFont
-                                            color: modelData.isAddNew ? Theme.primaryColor : Theme.textColor
+                                            color: bagTile.modelData.isAddNew ? Theme.primaryColor : Theme.textColor
                                             wrapMode: Text.WordWrap
                                             maximumLineCount: 2
                                             elide: Text.ElideRight
                                             Accessible.ignored: true
                                         }
                                         Label {
-                                            visible: !bagTile.isGhost && bagGridFlick.roastAgeLine(modelData) !== ""
+                                            visible: !bagTile.isGhost && bagGridFlick.roastAgeLine(bagTile.modelData) !== ""
                                             Layout.fillWidth: true
-                                            text: bagTile.isGhost ? "" : bagGridFlick.roastAgeLine(modelData)
+                                            text: bagTile.isGhost ? "" : bagGridFlick.roastAgeLine(bagTile.modelData)
                                             font: Theme.captionFont
                                             color: Theme.textSecondaryColor
                                             elide: Text.ElideRight
@@ -2626,12 +2659,12 @@ Page {
                                     AccessibleMouseArea {
                                         anchors.fill: parent
                                         accessibleName: bagTile.isGhost ? bagTile.tileTitle
-                                            : (((modelData.roasterName || "") + " " + (modelData.coffeeName || "")).trim()
-                                               + (bagGridFlick.roastAgeLine(modelData) !== ""
-                                                   ? ", " + bagGridFlick.roastAgeLine(modelData) : ""))
+                                            : (((bagTile.modelData.roasterName || "") + " " + (bagTile.modelData.coffeeName || "")).trim()
+                                               + (bagGridFlick.roastAgeLine(bagTile.modelData) !== ""
+                                                   ? ", " + bagGridFlick.roastAgeLine(bagTile.modelData) : ""))
                                         accessibleItem: bagTile
                                         onAccessibleClicked: {
-                                            if (modelData.isAddNew) {
+                                            if (bagTile.modelData.isAddNew) {
                                                 // Coffee: the search-first flow (the one
                                                 // they want may be in Bean Base /
                                                 // history). Tea: the tea entry (form-
@@ -2644,7 +2677,7 @@ Page {
                                                 }
                                                 return
                                             }
-                                            wizardPage.selectBean(modelData.isNone ? null : modelData)
+                                            wizardPage.selectBean(bagTile.modelData.isNone ? null : bagTile.modelData)
                                         }
                                     }
                                 }
@@ -2702,13 +2735,16 @@ Page {
                             Repeater {
                                 model: wizardPage.profileModel
                                 delegate: Loader {
-                                    sourceComponent: modelData.isHeader ? profileHeader : profileTile
-                                    property var row: modelData
+                                    id: profileLoader
+                                    required property var modelData
+
+                                    sourceComponent: profileLoader.modelData.isHeader ? profileHeader : profileTile
+                                    property var row: profileLoader.modelData
                                     Component {
                                         id: profileHeader
                                         Label {
                                             width: profileGrid.width
-                                            text: row.title
+                                            text: profileLoader.row.title
                                             font: Theme.captionFont
                                             color: Theme.textSecondaryColor
                                             topPadding: Theme.spacingMedium
@@ -2725,15 +2761,15 @@ Page {
                                             height: Theme.scaled(124)
                                             radius: Theme.cardRadius
                                             color: Theme.cardBackgroundColor
-                                            border.color: wizardPage.fProfileTitle === row.title
+                                            border.color: wizardPage.fProfileTitle === profileLoader.row.title
                                                 ? Theme.primaryColor : Theme.borderColor
-                                            border.width: wizardPage.fProfileTitle === row.title ? 2 : 1
+                                            border.width: wizardPage.fProfileTitle === profileLoader.row.title ? 2 : 1
                                             readonly property string metaLine: {
                                                 var parts = []
-                                                if ((row.tempC || 0) > 0)
-                                                    parts.push(Theme.formatTemperature(row.tempC, 0))
-                                                if ((row.yieldG || 0) > 0)
-                                                    parts.push("→ " + Number(row.yieldG).toFixed(0) + "g")
+                                                if ((profileLoader.row.tempC || 0) > 0)
+                                                    parts.push(Theme.formatTemperature(profileLoader.row.tempC, 0))
+                                                if ((profileLoader.row.yieldG || 0) > 0)
+                                                    parts.push("→ " + Number(profileLoader.row.yieldG).toFixed(0) + "g")
                                                 return parts.join(" · ")
                                             }
                                             ColumnLayout {
@@ -2742,7 +2778,7 @@ Page {
                                                 spacing: Theme.scaled(4)
                                                 Label {
                                                     Layout.fillWidth: true
-                                                    text: row.title
+                                                    text: profileLoader.row.title
                                                     font: Theme.bodyFont
                                                     color: Theme.textColor
                                                     wrapMode: Text.WordWrap
@@ -2764,7 +2800,7 @@ Page {
                                                     // The recommendation reason rides its
                                                     // tile as a chip — never detached text.
                                                     Rectangle {
-                                                        visible: row.reason !== ""
+                                                        visible: profileLoader.row.reason !== ""
                                                         radius: height / 2
                                                         color: Qt.alpha(Theme.primaryColor, 0.15)
                                                         implicitHeight: reasonChip.implicitHeight + Theme.scaled(6)
@@ -2776,7 +2812,7 @@ Page {
                                                             anchors.centerIn: parent
                                                             width: Math.min(implicitWidth,
                                                                 parent.width - Theme.scaled(10))
-                                                            text: row.reason
+                                                            text: profileLoader.row.reason
                                                             font: Theme.captionFont
                                                             color: Theme.primaryColor
                                                             elide: Text.ElideRight
@@ -2788,7 +2824,7 @@ Page {
                                                     // profile page offers: the sparkle KB
                                                     // popup and the Profile Info page.
                                                     ColoredIcon {
-                                                        visible: row.hasKb === true
+                                                        visible: profileLoader.row.hasKb === true
                                                         source: "qrc:/icons/sparkle.svg"
                                                         iconWidth: Theme.scaled(16)
                                                         iconHeight: Theme.scaled(16)
@@ -2802,16 +2838,16 @@ Page {
                                                                 "View AI knowledge base")
                                                             accessibleItem: parent
                                                             onAccessibleClicked:
-                                                                wizardKnowledgeDialog.openFor(row.title)
+                                                                wizardKnowledgeDialog.openFor(profileLoader.row.title)
                                                         }
                                                     }
                                                     ProfileInfoButton {
                                                         Layout.preferredWidth: Theme.scaled(26)
                                                         Layout.preferredHeight: Theme.scaled(26)
                                                         buttonSize: Theme.scaled(26)
-                                                        profileFilename: row.name
-                                                        profileName: row.title
-                                                        onClicked: AppShell.profileInfoRequested(row.name, row.title)
+                                                        profileFilename: profileLoader.row.name
+                                                        profileName: profileLoader.row.title
+                                                        onClicked: AppShell.profileInfoRequested(profileLoader.row.name, profileLoader.row.title)
                                                     }
                                                 }
                                             }
@@ -2821,11 +2857,11 @@ Page {
                                             AccessibleMouseArea {
                                                 anchors.fill: parent
                                                 z: -1
-                                                accessibleName: row.title
+                                                accessibleName: profileLoader.row.title
                                                     + (tileRect.metaLine !== "" ? ", " + tileRect.metaLine : "")
-                                                    + (row.reason !== "" ? ", " + row.reason : "")
+                                                    + (profileLoader.row.reason !== "" ? ", " + profileLoader.row.reason : "")
                                                 accessibleItem: tileRect
-                                                onAccessibleClicked: wizardPage.selectProfile(row)
+                                                onAccessibleClicked: wizardPage.selectProfile(profileLoader.row)
                                             }
                                         }
                                     }
@@ -3261,13 +3297,16 @@ Page {
                                 Repeater {
                                     model: wizardPage.equipmentTileModel()
                                     delegate: ChoiceTile {
-                                        readonly property bool isNone: modelData.isNone === true
+                                        id: equipmentTile
+                                        required property var modelData
+
+                                        readonly property bool isNone: equipmentTile.modelData.isNone === true
                                         readonly property string grinder:
-                                            ((modelData.grinderBrand || "") + " " + (modelData.grinderModel || "")).trim()
+                                            ((equipmentTile.modelData.grinderBrand || "") + " " + (equipmentTile.modelData.grinderModel || "")).trim()
                                         readonly property string basket:
-                                            ((modelData.basketBrand || "") + " " + (modelData.basketModel || "")).trim()
+                                            ((equipmentTile.modelData.basketBrand || "") + " " + (equipmentTile.modelData.basketModel || "")).trim()
                                         title: isNone ? trNone.text
-                                            : (modelData.name || grinder || basket)
+                                            : (equipmentTile.modelData.name || grinder || basket)
                                         meta: {
                                             if (isNone) return ""
                                             var parts = []
@@ -3277,9 +3316,9 @@ Page {
                                         }
                                         selected: isNone
                                             ? wizardPage.fEquipmentId <= 0
-                                            : modelData.id === wizardPage.fEquipmentId
+                                            : equipmentTile.modelData.id === wizardPage.fEquipmentId
                                         onChosen: {
-                                            wizardPage.selectEquipment(isNone ? null : modelData)
+                                            wizardPage.selectEquipment(isNone ? null : equipmentTile.modelData)
                                             // Picking a tile is the choice — move
                                             // on without a second Continue tap.
                                             wizardPage.detailsContinue()
@@ -3399,13 +3438,16 @@ Page {
                                 Repeater {
                                     model: wizardPage.pitcherTileModel()
                                     delegate: ChoiceTile {
-                                        title: modelData.name || ""
-                                        meta: wizardPage.pitcherTileMeta(modelData)
+                                        id: pitcherTile
+                                        required property var modelData
+
+                                        title: pitcherTile.modelData.name || ""
+                                        meta: wizardPage.pitcherTileMeta(pitcherTile.modelData)
                                         iconSource: "qrc:/icons/pitcher.svg"
                                         selected: wizardPage.fPitcherName !== ""
-                                            && (modelData.name || "") === wizardPage.fPitcherName
+                                            && (pitcherTile.modelData.name || "") === wizardPage.fPitcherName
                                         onChosen: {
-                                            wizardPage.selectPitcher(modelData)
+                                            wizardPage.selectPitcher(pitcherTile.modelData)
                                             wizardPage.detailsContinue()
                                         }
                                     }
@@ -3477,17 +3519,20 @@ Page {
                                 Repeater {
                                     model: wizardPage.vesselTileModel()
                                     delegate: ChoiceTile {
-                                        title: modelData.name || ""
-                                        meta: wizardPage.vesselTileMeta(modelData)
-                                        iconSource: wizardPage.vesselTileIcon(modelData)
+                                        id: vesselTile
+                                        required property var modelData
+
+                                        title: vesselTile.modelData.name || ""
+                                        meta: wizardPage.vesselTileMeta(vesselTile.modelData)
+                                        iconSource: wizardPage.vesselTileIcon(vesselTile.modelData)
                                         // The empty-name test matters: a preset
                                         // saved with a blank name would otherwise
                                         // match the wizard's own empty default and
                                         // show as chosen before anything is tapped.
                                         selected: wizardPage.fVesselName !== ""
-                                            && (modelData.name || "") === wizardPage.fVesselName
+                                            && (vesselTile.modelData.name || "") === wizardPage.fVesselName
                                         onChosen: {
-                                            wizardPage.selectVessel(modelData)
+                                            wizardPage.selectVessel(vesselTile.modelData)
                                             wizardPage.detailsContinue()
                                         }
                                     }

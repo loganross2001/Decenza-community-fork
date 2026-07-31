@@ -1,4 +1,11 @@
 #include "blemanager.h"
+
+#include "bluetoothlogging.h"
+#include "core/fileshare.h"
+#include "network/webdebuglogger.h"
+#include "refractometers/refractometerlogging.h"
+#include "de1logging.h"
+#include "scales/scalelogging.h"
 #include "blecapability.h"
 #include "scaledevice.h"
 #include "transport/scalebletransport.h"
@@ -15,6 +22,7 @@
 #include "bleepochgate.h"
 #include "version.h"
 #include <QBluetoothLocalDevice>
+#include <QMetaEnum>
 #include <QBluetoothUuid>
 #include <QCoreApplication>
 #include <QDebug>
@@ -96,7 +104,7 @@ BLEManager::BLEManager(QObject* parent)
         m_de1DirectConnectInFlight = false;
         if (m_scaleConnectDeferred) {
             m_scaleConnectDeferred = false;
-            appendScaleLog("DE1 did not connect within 15 s — connecting scale anyway");
+            scaleInfo("DE1 did not connect within 15 s — connecting scale anyway");
             tryDirectConnectToScale();
         }
     });
@@ -127,15 +135,14 @@ BLEManager::BLEManager(QObject* parent)
             // Either powerOff() never reported HostPoweredOff, or the power-on
             // leg never brought it back. Make one more attempt to re-enable, then
             // let finishAdapterRecovery(false) surface it — never leave BT off.
-            qWarning() << "BLEManager: adapter still powered off"
-                       << (kAdapterRecoverySafetyMs / 1000) << "s into recovery — forcing power-on (#1309)";
+            BT_WARN_TAGGED("BLEManager", QStringLiteral("adapter still powered off") + QStringLiteral(" ") + QString("%1").arg((kAdapterRecoverySafetyMs / 1000)) + QStringLiteral(" ") + QStringLiteral("s into recovery — forcing power-on (#1309)"));
             setAdapterPower(true);
             finishAdapterRecovery(false);
         } else {
             // Adapter is on but we missed the HostConnectable event (or powerOff
             // was a no-op and it was never actually off). Treat as recovered.
-            qWarning() << "BLEManager: recovery watchdog — adapter is on without an explicit "
-                          "HostConnectable event; treating as recovered (#1309)";
+            BT_WARN_TAGGED("BLEManager", QStringLiteral("recovery watchdog — adapter is on without an explicit "
+                          "HostConnectable event; treating as recovered (#1309)"));
             finishAdapterRecovery(true);
         }
     });
@@ -187,7 +194,19 @@ bool BLEManager::isBluetoothAvailable() const
 
 void BLEManager::onHostModeStateChanged(QBluetoothLocalDevice::HostMode mode)
 {
-    qDebug() << "BLEManager: Bluetooth host mode changed to" << mode;
+    // Name the mode, don't number it. `QString::arg(mode)` picks arg(int) by
+    // integral promotion and prints a bare "0", which is what this line did after
+    // it was mechanically converted from `qDebug() << mode` — and qDebug's operator
+    // for a Q_ENUM had been spelling it "QBluetoothLocalDevice::HostPoweredOff".
+    // This is the one line that answers "is the radio on?", i.e. the whole reason
+    // the [Bluetooth] marker exists, so a reader must not need the Qt header to
+    // decode it. HostMode is Q_ENUM-registered
+    // (qtconnectivity/src/bluetooth/qbluetoothlocaldevice.h:37).
+    const char* modeName =
+        QMetaEnum::fromType<QBluetoothLocalDevice::HostMode>().valueToKey(mode);
+    BT_LOG_TAGGED("BLEManager", QStringLiteral("Bluetooth host mode changed to %1")
+                                    .arg(modeName ? QLatin1String(modeName)
+                                                  : QLatin1String("unknown")));
 
 #ifndef Q_OS_IOS
     // Drive the wedge-recovery power-cycle off observed adapter transitions
@@ -200,7 +219,7 @@ void BLEManager::onHostModeStateChanged(QBluetoothLocalDevice::HostMode mode)
             // the power-ON leg is itself covered (powerOn never landing must not
             // leave the radio off).
             m_recoverySawPoweredOff = true;
-            qDebug() << "BLEManager: adapter powered off during recovery — powering back on (#1309)";
+            BT_LOG_TAGGED("BLEManager", QStringLiteral("adapter powered off during recovery — powering back on (#1309)"));
             setAdapterPower(true);
             m_adapterRecoverySafetyTimer->start();
         } else {
@@ -225,7 +244,7 @@ void BLEManager::setAdapterPower(bool on)
         "android/bluetooth/BluetoothAdapter", "getDefaultAdapter",
         "()Landroid/bluetooth/BluetoothAdapter;");
     if (!adapter.isValid()) {
-        qWarning() << "BLEManager: no BluetoothAdapter — cannot" << (on ? "enable" : "disable") << "(#1309)";
+        BT_WARN_TAGGED("BLEManager", QStringLiteral("no BluetoothAdapter — cannot") + QStringLiteral(" ") + QString("%1").arg((on ? "enable" : "disable")) + QStringLiteral(" ") + QStringLiteral("(#1309)"));
         return;
     }
     adapter.callMethod<jboolean>(on ? "enable" : "disable");
@@ -248,7 +267,7 @@ void BLEManager::finishAdapterRecovery(bool adapterOn)
     if (adapterOn) {
         m_recoveryLeftAdapterOff = false;
         m_lastDe1FaultTime = QDateTime();  // stale faults shouldn't re-trip immediately
-        qDebug() << "BLEManager: adapter recovered — re-arming DE1 + scale reconnect (#1309)";
+        BT_INFO_TAGGED("BLEManager", QStringLiteral("adapter recovered — re-arming DE1 + scale reconnect (#1309)"));
         emit bleStackRecovered();          // main.cpp resets the DE1 reconnect budget + retries
         if (!m_savedScaleAddress.isEmpty())
             tryDirectConnectToScale();     // scale side re-arm
@@ -257,9 +276,9 @@ void BLEManager::finishAdapterRecovery(bool adapterOn)
         // powers it on instead of treating OFF as user intent) and tell the
         // user — do NOT emit bleStackRecovered(), the stack is not recovered.
         m_recoveryLeftAdapterOff = true;
-        qWarning() << "BLEManager: automatic Bluetooth restart did not bring the adapter "
-                      "back up — asking the user to toggle it manually (#1309)";
-        appendScaleLog(QStringLiteral("Auto Bluetooth restart failed — adapter still off (#1309)"));
+        BT_WARN_TAGGED("BLEManager", QStringLiteral("automatic Bluetooth restart did not bring the adapter "
+                      "back up — asking the user to toggle it manually (#1309)"));
+        scaleWarn(QStringLiteral("Auto Bluetooth restart failed — adapter still off (#1309)"));
         emit errorOccurred(translateUiString(
             QStringLiteral("ble.error.bluetoothRestartFailed"),
             QStringLiteral("Decenza tried to restart Bluetooth but it's still off. "
@@ -279,6 +298,7 @@ void BLEManager::noteDe1Connected(bool connected)
         m_wedgeSince = QDateTime();
         m_lastDe1FaultTime = QDateTime();
         m_lastDe1ErrorShown.clear();  // Healthy again — allow a future DE1 error to surface
+        resetRepeatFailureBudget();   // ...and let the next failure of each kind be loud
     }
 }
 
@@ -355,8 +375,8 @@ void BLEManager::maybeRecoverWedgedStack(const QString& reason)
             if (!m_lastAdapterRecovery.isValid()
                 || m_lastAdapterRecovery.msecsTo(t) >= kAdapterRecoveryBackoffMs) {
                 m_lastAdapterRecovery = t;
-                qWarning() << "BLEManager: adapter still off from a prior failed recovery — "
-                              "retrying power-on (#1309)";
+                BT_WARN_TAGGED("BLEManager", QStringLiteral("adapter still off from a prior failed recovery — "
+                              "retrying power-on (#1309)"));
                 setAdapterPower(true);
             }
         }
@@ -366,8 +386,7 @@ void BLEManager::maybeRecoverWedgedStack(const QString& reason)
     const QDateTime now = QDateTime::currentDateTime();
     if (m_lastAdapterRecovery.isValid()
         && m_lastAdapterRecovery.msecsTo(now) < kAdapterRecoveryBackoffMs) {
-        qDebug() << "BLEManager: BLE stack still appears wedged (" << reason
-                 << ") but within recovery backoff — not cycling adapter yet (#1309)";
+        BT_LOG_TAGGED("BLEManager", QStringLiteral("BLE stack still appears wedged (") + QStringLiteral(" ") + QString("%1").arg(reason) + QStringLiteral(" ") + QStringLiteral(") but within recovery backoff — not cycling adapter yet (#1309)"));
         return;
     }
 
@@ -376,10 +395,8 @@ void BLEManager::maybeRecoverWedgedStack(const QString& reason)
     m_lastAdapterRecovery = now;
     m_adapterRecoveryCount++;
     m_wedgeSince = QDateTime();
-    qWarning() << "BLEManager: BLE stack appears wedged (" << reason
-               << ") — power-cycling Bluetooth adapter, recovery #" << m_adapterRecoveryCount
-               << "this session (#1309)";
-    appendScaleLog(QStringLiteral("BLE stack wedged — auto power-cycling Bluetooth adapter (#1309)"));
+    BT_WARN_TAGGED("BLEManager", QStringLiteral("BLE stack appears wedged (") + QStringLiteral(" ") + QString("%1").arg(reason) + QStringLiteral(" ") + QStringLiteral(") — power-cycling Bluetooth adapter, recovery #") + QStringLiteral(" ") + QString("%1").arg(m_adapterRecoveryCount) + QStringLiteral(" ") + QStringLiteral("this session (#1309)"));
+    scaleWarn(QStringLiteral("BLE stack wedged — auto power-cycling Bluetooth adapter (#1309)"));
     emit bleStackRecoveryStarted();
 
     // powerOff() is async; the host-mode handler powers it back on once it sees
@@ -422,12 +439,41 @@ void BLEManager::setSettings(SettingsHardware* settings)
     // build-change safety valve below. Absent/unrecognized ⇒ Enforce.
     m_backoffMode.store(backoffModeFromString(m_settings->cpMode()),
                         std::memory_order_relaxed);
-    if (observeMode()) {
-        qWarning().noquote()
-            << "[BLE] Backoff policy mode = OBSERVE (persisted) — connection-"
-               "priority detection runs but takes NO action and the scale "
-               "link is forced HIGH (any latch is overridden, not erased). "
-               "Set enforce via MCP to restore the dual-HIGH backoff.";
+    // Announce the mode ONLY when it changes. This function runs on every
+    // settings load, and at WARN it produced 11 identical alarms in a 48 h
+    // capture for a condition that had not changed once. Still prominent —
+    // enforcement being off is worth seeing — but stated once per transition.
+    //
+    // Guards the LOGGING only. Everything below (the latch, the build-change
+    // safety valve) must run on every load regardless, so no early return here.
+    const bool observeNow = observeMode();
+    if (observeNow != m_loggedObserveMode) {
+        m_loggedObserveMode = observeNow;
+        if (observeNow) {
+            // INFO, not WARN. This is a SETTING reporting itself, and the tier is
+            // chosen by audience: WARN means something went wrong, and a mode the
+            // user or a developer deliberately persisted did not.
+            //
+            // Found on a real tablet, where it was the ONLY WARN in an otherwise
+            // clean 26-line startup — so the one line at the tier that means "look
+            // here" was the line that had nothing to report. That is precisely how
+            // a reader learns to skim WARN.
+            //
+            // It was also asymmetric with its own else-branch: ENFORCE has always
+            // been INFO. Reporting one arm of a binary setting as a fault and the
+            // other as narrative is the same defect as a WARN whose retraction is
+            // DEBUG. Visibility is unchanged — the connections view shows INFO and
+            // above — and the dedupe above still limits this to once per transition.
+            SCALE_INFO_STDERR_TAGGED("ConnectionPriority",
+                QStringLiteral("Backoff policy mode = OBSERVE (persisted) — "
+                    "connection-priority detection runs but takes NO action and "
+                    "the scale link is forced HIGH (any latch is overridden, not "
+                    "erased). Set enforce via MCP to restore the dual-HIGH "
+                    "backoff."));
+        } else {
+            SCALE_INFO_STDERR_TAGGED("ConnectionPriority",
+                QStringLiteral("Backoff policy mode = ENFORCE"));
+        }
     }
 
     if (!m_settings->cpLatched()) {
@@ -457,23 +503,28 @@ void BLEManager::setSettings(SettingsHardware* settings)
             "android/os/Build$VERSION", "SDK_INT");
         const bool jniFailed = jniEnv.checkAndClearExceptions();
         if (jniFailed || sdkInt <= 0) {
-            qWarning().noquote()
-                << QStringLiteral("[BLE] First-launch seed: failed to read "
+            SCALE_WARN_STDERR_TAGGED("ConnectionPriority",
+                QStringLiteral("First-launch seed: failed to read "
                       "Android SDK_INT via JNI (sdkInt=%1, jni_exception=%2) "
                       "— seed skipped, runtime detector will arm normally.")
-                       .arg(sdkInt).arg(jniFailed ? "yes" : "no");
+                       .arg(sdkInt).arg(jniFailed ? "yes" : "no"));
         } else if (sdkInt < kSeedSdkBelow) {
             const QString kind = QStringLiteral("seed:sdk<%1").arg(kSeedSdkBelow);
             latchScaleSkipHighPriority(kind);
-            qWarning().noquote()
-                << QStringLiteral("[BLE] First-launch seed: Android SDK %1 < "
+            // INFO, not WARN: the seed firing is this feature working as designed
+            // on the cohort it was written for. It changes BLE behaviour, which is
+            // why it is logged at all, but a WARN here trained readers to skim the
+            // tier — the same cry-wolf pattern the repeat-failure budget exists to
+            // stop. A seed that FAILS (above) is the problem, and stays WARN.
+            SCALE_INFO_STDERR_TAGGED("ConnectionPriority",
+                QStringLiteral("First-launch seed: Android SDK %1 < "
                       "%2 (dual-HIGH-incapable cohort, ex-#1097) — skip-HIGH "
                       "latch SET without running the detection window. "
                       "Persisted under epoch %3; both BLE links start at "
                       "BALANCED. Seed re-applies on every launch where the "
                       "latch is absent (SDK_INT is permanent — no in-app "
                       "escape hatch on this SDK cohort).")
-                       .arg(sdkInt).arg(kSeedSdkBelow).arg(kBleDetectionEpoch);
+                       .arg(sdkInt).arg(kSeedSdkBelow).arg(kBleDetectionEpoch));
         }
 #endif
         return;
@@ -491,21 +542,26 @@ void BLEManager::setSettings(SettingsHardware* settings)
         // ONLY auto-wipe path — it fires only on an intentional epoch change
         // or genuine corruption, NOT on every build. Discard + re-detect.
         m_settings->clearConnectionPriorityLatch();
+        // These two branches were both WARN, which flattened the one distinction
+        // that matters here: whether anything is WRONG. A deliberate epoch bump
+        // discarding the record is a release doing exactly what it was written to
+        // do, on every affected install, once. A corrupt epoch is a damaged store.
+        // The code already told them apart; the tiers now do too.
         if (storedEpoch >= 0) {
-            qWarning().noquote()
-                << QStringLiteral("[BLE] Persisted connection-priority "
+            SCALE_INFO_STDERR_TAGGED("ConnectionPriority",
+                QStringLiteral("Persisted connection-priority "
                       "classification was set under detection epoch %1 but "
                       "this build is epoch %2 — discarding and re-detecting "
                       "from scratch (deliberate epoch reset)")
-                       .arg(storedEpoch).arg(kBleDetectionEpoch);
+                       .arg(storedEpoch).arg(kBleDetectionEpoch));
         } else {
             // Negative but not the -1 "no key" sentinel ⇒ corrupt record.
-            qWarning().noquote()
-                << QStringLiteral("[BLE] Persisted connection-priority "
+            SCALE_WARN_STDERR_TAGGED("ConnectionPriority",
+                QStringLiteral("Persisted connection-priority "
                       "detection epoch is corrupt/unrecognized (stored=%1, "
                       "expected %2 or absent) — discarding and re-detecting "
                       "from scratch rather than honoring a damaged record")
-                       .arg(storedEpoch).arg(kBleDetectionEpoch);
+                       .arg(storedEpoch).arg(kBleDetectionEpoch));
         }
         return;
     }
@@ -531,25 +587,32 @@ void BLEManager::setSettings(SettingsHardware* settings)
         // also corruption (partial write / manual edit). rehydrate() salvaged
         // it to "unknown" — surface that so the MCP "unknown"-kind latch isn't
         // mistaken for a genuine unknown-cause classification with no trail.
-        qWarning().noquote()
-            << QStringLiteral("[BLE] Persisted connection-priority trigger "
+        SCALE_WARN_STDERR_TAGGED("ConnectionPriority",
+            QStringLiteral("Persisted connection-priority trigger "
                   "kind was missing/empty — salvaged to \"%1\"; classification "
                   "kept (it is the load-bearing fact)")
-                   .arg(m_scaleSkipHigh.triggerKind);
+                   .arg(m_scaleSkipHigh.triggerKind));
     }
-    qWarning().noquote()
-        << QStringLiteral("[BLE] Loaded persisted dual-HIGH-incapable "
+    // INFO: a successful rehydrate is the mechanism working. This fired at WARN on
+    // EVERY launch of every device carrying the latch — permanently, since the
+    // latch is meant to persist — so on exactly the hardware whose logs need
+    // reading it was the most frequent warning in the file and said nothing had
+    // gone wrong. The two genuine anomalies around it (a salvaged trigger kind
+    // above, a substituted set-time below) stay WARN and are now the only ones,
+    // which is what makes them findable.
+    SCALE_INFO_STDERR_TAGGED("ConnectionPriority",
+        QStringLiteral("Loaded persisted dual-HIGH-incapable "
               "classification (epoch %1, build %2 [diagnostic], trigger=%3) — "
               "BOTH BLE links will start at BALANCED this run (no detection "
               "window)")
                .arg(legacy ? kBleDetectionEpoch : storedEpoch)
-               .arg(storedBuild).arg(m_scaleSkipHigh.triggerKind);
+               .arg(storedBuild).arg(m_scaleSkipHigh.triggerKind));
     if (!timeOk) {
-        qWarning().noquote()
-            << QStringLiteral("[BLE] Persisted connection-priority set-time "
+        SCALE_WARN_STDERR_TAGGED("ConnectionPriority",
+            QStringLiteral("Persisted connection-priority set-time "
                   "was invalid/missing (stored=\"%1\") — substituted current "
                   "time; classification kept (it is the load-bearing fact)")
-                   .arg(isoIn);
+                   .arg(isoIn));
     }
 
     if (legacy) {
@@ -561,14 +624,18 @@ void BLEManager::setSettings(SettingsHardware* settings)
             m_scaleSkipHigh.triggerKind,
             m_scaleSkipHigh.setTime.toString(Qt::ISODate),
             storedBuild, kBleDetectionEpoch);
-        qWarning().noquote()
-            << QStringLiteral("[BLE] Legacy (pre-epoch) connection-priority "
+        // INFO: a one-time forward migration succeeding. The line it tells you to
+        // look for next — "Failed to PERSIST" — is the WARN, and it is in
+        // settings_hardware.cpp under the same [Scale][ConnectionPriority] tag, so
+        // the two are now one grep apart rather than in unrelated prefixes.
+        SCALE_INFO_STDERR_TAGGED("ConnectionPriority",
+            QStringLiteral("Legacy (pre-epoch) connection-priority "
                   "record honored; stamping detection epoch %1. NO re-detection "
                   "is incurred regardless (the in-memory latch is already live "
                   "— BALANCED this run). If a 'Failed to PERSIST' warning "
                   "follows, the stamp did not stick and this line will repeat "
                   "next launch (still no re-detection — cosmetic only)")
-                   .arg(kBleDetectionEpoch);
+                   .arg(kBleDetectionEpoch));
     }
 }
 
@@ -598,10 +665,12 @@ void BLEManager::clearScaleSkipHighPriority()
     // in-memory latch was already clear).
     if (m_settings) m_settings->clearConnectionPriorityLatch();
     if (wasLatched) {
-        qWarning().noquote()
-            << "[BLE] Scale connection-priority skip-HIGH latch CLEARED via "
+        // INFO: the user asked for this. An operator action succeeding is not a
+        // warning, and its consequences are already stated in the line.
+        SCALE_INFO_STDERR_TAGGED("ConnectionPriority",
+            QStringLiteral("Scale connection-priority skip-HIGH latch CLEARED via "
                "MCP reset — next (re)connect will request HIGH on both links "
-               "and re-enter detection from scratch";
+               "and re-enter detection from scratch"));
     }
 }
 
@@ -615,10 +684,14 @@ void BLEManager::setBackoffMode(BackoffMode mode)
     // value is preserved so switching back to enforce honours it honestly.
     if (m_settings) m_settings->setCpMode(backoffModeToString(mode));
     if (changed) {
-        qWarning().noquote()
-            << "[BLE] Backoff policy mode set to" << backoffModeToString(mode).toUpper()
-            << "— applies on the next scale (re)connect (eventually-consistent; "
-               "the current connection is not torn down)";
+        // INFO: another operator action succeeding. (The persisted OBSERVE state
+        // stays WARN where it is announced at load — being left in a mode that
+        // takes no action is a standing condition worth flagging; choosing it once
+        // is not.)
+        SCALE_INFO_STDERR_TAGGED("ConnectionPriority",
+            QStringLiteral("Backoff policy mode set to %1 — applies on the next "
+               "scale (re)connect (eventually-consistent; the current connection "
+               "is not torn down)").arg(backoffModeToString(mode).toUpper()));
     }
 }
 // recordObserveEvent / recentObserveEvents are header-inline (they delegate to
@@ -644,7 +717,7 @@ void BLEManager::setDisabled(bool disabled) {
             // business tearing down a real scale the user is weighing with —
             // that teardown is now setScaleSimulated's job.
         }
-        qDebug() << "BLEManager: DE1 BLE operations" << (disabled ? "disabled (simulator mode)" : "enabled");
+        de1Debug(QStringLiteral("DE1 BLE operations") + QStringLiteral(" ") + QString("%1").arg((disabled ? "disabled (simulator mode)" : "enabled")));
         emit disabledChanged();
     }
 }
@@ -658,8 +731,7 @@ void BLEManager::setScaleSimulated(bool simulated) {
         m_scaleConnectionTimer->stop();
         emit disconnectScaleRequested();
     }
-    qDebug() << "BLEManager: real-scale connects"
-             << (simulated ? "blocked (simulated scale active)" : "allowed");
+    scaleDebug(QStringLiteral("real-scale connects") + QStringLiteral(" ") + QString("%1").arg((simulated ? "blocked (simulated scale active)" : "allowed")));
     // MUST be emitted on BOTH edges. The rising edge stops the connection timer
     // and drops the physical scale; nothing restarts either of those, so without
     // a falling-edge signal for main.cpp to hang a re-arm on, switching the
@@ -731,7 +803,7 @@ void BLEManager::connectToScale(const QString& address) {
     for (const auto& entry : m_scales) {
         if (entry.address.compare(address, Qt::CaseInsensitive) != 0) continue;
 
-        appendScaleLog(QString("Connecting to %1...").arg(entry.name));
+        scaleInfo(QString("Connecting to %1...").arg(entry.name));
         // If already connected to a different scale, disconnect it first so
         // the scaleDiscovered/wifiScaleSelected handler can connect to the new one.
         if (m_scaleDevice && m_scaleDevice->isConnected()
@@ -768,7 +840,7 @@ void BLEManager::connectToScale(const QString& address) {
         }
         return;
     }
-    qWarning() << "Scale not found in discovered list:" << address;
+    scaleWarn(QStringLiteral("Scale not found in discovered list: %1").arg(address));
 }
 
 void BLEManager::setUsbScaleAvailable(bool available, const QString& name) {
@@ -800,12 +872,12 @@ void BLEManager::setUsbScaleAvailable(bool available, const QString& name) {
         entry.name = name;
         entry.address = kUsbAddress;
         m_scales.append(entry);
-        appendScaleLog(QString("Found %1 (%2)").arg(entry.name, entry.address));
+        scaleInfo(QString("Found %1 (%2)").arg(entry.name, entry.address));
         emit scalesChanged();
     } else {
         if (existing < 0) return;  // Nothing to remove.
         m_scales.removeAt(existing);
-        appendScaleLog(QStringLiteral("USB scale unplugged"));
+        scaleInfo(QStringLiteral("USB scale unplugged"));
         emit scalesChanged();
     }
 }
@@ -821,20 +893,18 @@ void BLEManager::probeMdnsForManualEntry() {
     // they tap Use.
     if (!m_manualEntryDiscovery) {
         m_manualEntryDiscovery = new WifiScaleDiscovery(this);
-        // Forward the dedicated probe's diagnostics into the scale debug log too —
-        // a user reporting "I clicked Add WiFi Scale but nothing showed up" will
-        // have the mDNS-side reason (timeout vs no-responder vs lookup failure)
-        // captured in the log they share.
-        connect(m_manualEntryDiscovery, &WifiScaleDiscovery::logMessage, this,
-                [this](const QString& msg) {
-            appendScaleLog(QString("[WifiScaleDiscovery/manual] %1").arg(msg));
-        });
+        // No logMessage forwarder. WifiScaleDiscovery logs through the shared
+        // helper, so its mDNS-side diagnostics — timeout vs no-responder vs lookup
+        // failure, which is what a "I clicked Add WiFi Scale and nothing showed up"
+        // report needs — already carry [Scale][WifiScaleDiscovery] and already
+        // reached the system log at that class's chosen severity. This connection
+        // only ever fed the private buffer, which is gone.
         connect(m_manualEntryDiscovery, &WifiScaleDiscovery::resultFound, this,
                 [this](const WifiScaleResult& result) {
             // (Result line — the WifiScaleDiscovery logMessage above already
             // logged the "mDNS resolved …" detail; this is the higher-level
             // event for the user reading the log top-to-bottom.)
-            appendScaleLog(QString("Manual-entry mDNS found %1 at %2")
+            scaleInfo(QString("Manual-entry mDNS found %1 at %2")
                                .arg(result.hostname, result.address));
             m_manualEntryFoundThisProbe = true;
             emit manualWifiMdnsDiscovered(result.hostname, result.address);
@@ -842,7 +912,7 @@ void BLEManager::probeMdnsForManualEntry() {
         connect(m_manualEntryDiscovery, &WifiScaleDiscovery::probeFinished, this,
                 [this](bool /*ran*/) {
             if (!m_manualEntryFoundThisProbe) {
-                appendScaleLog(QStringLiteral(
+                scaleWarn(QStringLiteral(
                     "Manual-entry mDNS: no HDS scale responded — user can still type an address"));
             }
             emit manualWifiMdnsProbeFinished();
@@ -853,7 +923,7 @@ void BLEManager::probeMdnsForManualEntry() {
     // uses: this dialog shows ONE one-tap shortcut, so probing several names
     // would just make which one appears depend on resolution order. The dialog
     // is the manual type-an-address path; discovering everything is the scan's job.
-    appendScaleLog(QStringLiteral("Probing mDNS for hds.local (manual entry)..."));
+    scaleInfo(QStringLiteral("Probing mDNS for hds.local (manual entry)..."));
     m_manualEntryDiscovery->probe(QStringLiteral("hds.local"));
 }
 
@@ -867,7 +937,7 @@ void BLEManager::connectToWifiScale(const QString& hostnameOrIp, const QString& 
     if (!host.contains(QLatin1Char('.')))
         host += QStringLiteral(".local");
 
-    appendScaleLog(QString("Adding WiFi scale at %1...").arg(host));
+    scaleInfo(QString("Adding WiFi scale at %1...").arg(host));
 
     // Drop any currently-connected scale first: main.cpp's scaleDiscovered
     // handler early-returns while a scale is connected. Its disconnectScaleRequested
@@ -916,7 +986,7 @@ void BLEManager::connectToSavedScale() {
         const bool usbPresent = std::any_of(m_scales.cbegin(), m_scales.cend(),
             [](const ScaleEntry& e) { return e.transport == QStringLiteral("usb"); });
         if (!usbPresent) {
-            appendScaleLog(QStringLiteral("USB scale switch ignored — scale not plugged in"));
+            scaleWarn(QStringLiteral("USB scale switch ignored — scale not plugged in"));
             return;
         }
         if (m_scaleDevice && m_scaleDevice->isConnected())
@@ -934,7 +1004,7 @@ void BLEManager::connectToSavedScale() {
     // real scale they want to weigh with — and for a WiFi scale there isn't
     // even a radio in common with the DE1.
     if (m_scaleSimulated) {
-        appendScaleLog("Scale switch ignored — simulated scale is active");
+        scaleWarn("Scale switch ignored — simulated scale is active");
         return;
     }
     // The simulator's synthetic entry appears in the Known Devices picker like
@@ -944,7 +1014,7 @@ void BLEManager::connectToSavedScale() {
     // real scale to connect nothing, which is exactly the failure the comment
     // above says these guards exist to prevent.
     if (savedScaleIsSimulated()) {
-        appendScaleLog("Scale switch ignored — that entry is the simulator's "
+        scaleWarn("Scale switch ignored — that entry is the simulator's "
                        "synthetic scale, not a real device");
         return;
     }
@@ -954,7 +1024,7 @@ void BLEManager::connectToSavedScale() {
     // (USB already returned above; anything still here is either wifi: or BLE.)
     if (!m_savedScaleAddress.startsWith(QStringLiteral("wifi:"), Qt::CaseInsensitive)
         && !isBluetoothAvailable()) {
-        appendScaleLog("Cannot switch scale — Bluetooth is powered off");
+        scaleWarn("Cannot switch scale — Bluetooth is powered off");
         emit errorOccurred(translateUiString("ble.error.bluetoothPoweredOff",
                                              "Bluetooth is powered off"));
         return;
@@ -964,6 +1034,7 @@ void BLEManager::connectToSavedScale() {
     // doesn't flash "Not found" during the new connect (mirrors scanForDevices()).
     m_scaleConnectionFailed = false;
     m_flowScaleFallbackEmitted = false;
+    resetRepeatFailureBudget();  // ...and let this attempt's failure be loud
     emit scaleConnectionFailedChanged();
 
     // Drop the currently-connected scale (if any) so the new primary can take over.
@@ -971,7 +1042,7 @@ void BLEManager::connectToSavedScale() {
     // direct connection) and clears m_scaleDevice, so tryDirectConnectToScale()'s
     // "already connected" guard won't block the new dial.
     if (m_scaleDevice && m_scaleDevice->isConnected()) {
-        appendScaleLog(QString("Switching scale to %1")
+        scaleInfo(QString("Switching scale to %1")
                            .arg(m_savedScaleName.isEmpty() ? m_savedScaleAddress : m_savedScaleName));
         emit disconnectScaleRequested();
     }
@@ -984,7 +1055,7 @@ void BLEManager::startScan() {
     if (m_disabled && !m_scanningForScales) {
         // In simulator mode, suppress DE1 scanning but allow scale/refractometer scans
         // (m_scanningForScales is set by scanForDevices() before calling here).
-        qDebug() << "BLEManager: DE1 scan request ignored (simulator mode)";
+        de1Debug(QStringLiteral("DE1 scan request ignored (simulator mode)"));
         return;
     }
 
@@ -993,7 +1064,7 @@ void BLEManager::startScan() {
     }
 
     if (!isBluetoothAvailable()) {
-        qDebug() << "BLEManager: Scan request ignored (Bluetooth is powered off)";
+        BT_INFO_TAGGED("BLEManager", QStringLiteral("Scan request ignored (Bluetooth is powered off)"));
         // Callers (tryDirectConnectToRefractometer, scanForDevices) set the
         // scan flags before calling here on the assumption a scan will run.
         // A scan that never starts must not leave them latched — they are
@@ -1013,7 +1084,10 @@ void BLEManager::clearScanRequestFlags() {
 
 void BLEManager::requestBluetoothPermission() {
 #if defined(Q_OS_ANDROID) || defined(Q_OS_IOS)
-    emit de1LogMessage("Checking permissions...");
+    // No "Checking permissions..." line here, deliberately. These lines have
+    // never appeared in a log before this change, so each one had to justify
+    // itself rather than just being promoted: this one said nothing the next
+    // line does not — a request, a denial, or the scan starting.
 
 #ifdef Q_OS_ANDROID
     // First check/request location permission (required for BLE scanning on Android)
@@ -1021,13 +1095,21 @@ void BLEManager::requestBluetoothPermission() {
     locationPermission.setAccuracy(QLocationPermission::Precise);
 
     if (qApp->checkPermission(locationPermission) == Qt::PermissionStatus::Undetermined) {
-        emit de1LogMessage("Requesting location permission...");
+        // INFO: a system dialog is about to appear and what happens next is the
+        // user's answer, so this is the one line that explains a gap in the log.
+        // Says WHY the permission is wanted — that is the part nobody knows, and
+        // the part that generates the support question.
+        de1Info(QStringLiteral("Requesting location permission — Android requires it to scan "
+                               "for BLE devices"));
         qApp->requestPermission(locationPermission, this, [this](const QPermission& permission) {
             if (permission.status() == Qt::PermissionStatus::Granted) {
-                emit de1LogMessage("Location permission granted");
+                // DEBUG: granted is the non-event. "Scanning for devices..."
+                // follows within milliseconds and says it louder.
+                de1Debug(QStringLiteral("Location permission granted"));
                 requestBluetoothPermission();  // Continue with Bluetooth permission
             } else {
-                emit de1LogMessage("Location permission denied");
+                de1Warn(QStringLiteral("Location permission DENIED — BLE scanning cannot work "
+                                       "until it is granted in Android Settings"));
                 clearScanRequestFlags();  // No scan will start; don't latch the request flags
                 emit errorOccurred(translateUiString("ble.error.locationPermissionDeniedForBluetooth",
                     "Location permission denied - required for Bluetooth scanning"));
@@ -1035,7 +1117,8 @@ void BLEManager::requestBluetoothPermission() {
         });
         return;
     } else if (qApp->checkPermission(locationPermission) == Qt::PermissionStatus::Denied) {
-        emit de1LogMessage("Location permission denied");
+        de1Warn(QStringLiteral("Location permission DENIED — BLE scanning cannot work until it "
+                               "is granted in Android Settings"));
         clearScanRequestFlags();  // No scan will start; don't latch the request flags
         emit errorOccurred(translateUiString("ble.error.locationPermissionRequired",
             "Location permission required. Please enable in Settings."));
@@ -1049,17 +1132,29 @@ void BLEManager::requestBluetoothPermission() {
 
     switch (qApp->checkPermission(bluetoothPermission)) {
     case Qt::PermissionStatus::Undetermined:
-        emit de1LogMessage("Requesting Bluetooth permission...");
+        de1Info(QStringLiteral("Requesting Bluetooth permission — needed to reach the DE1"));
         qApp->requestPermission(bluetoothPermission, this, [this](const QPermission& permission) {
             if (permission.status() == Qt::PermissionStatus::Granted) {
-                emit de1LogMessage("Bluetooth permission granted");
+                // This line is back at INFO, and the reason is a mistake worth
+                // recording. It was deleted as a non-event on the grounds that
+                // "Scanning for devices..." follows within milliseconds and
+                // proves it — and then the very next commit demoted THAT line to
+                // DEBUG for overclaiming the [DE1] marker on a shared scan. The
+                // cited evidence disappeared, which left the INFO+ log stopping
+                // dead right after "Requesting Bluetooth permission", making
+                // three states indistinguishable: granted-and-scanning, dialog
+                // still waiting on the user, and wedged in this callback. The
+                // retained "Requesting" line only works as a signal if a GRANT
+                // does not also end the log.
+                de1Info(QStringLiteral("Bluetooth permission granted"));
                 // isBluetoothAvailable() now switches from the Undetermined bypass
                 // to the real hostMode() check. Notify QML bindings so any "Bluetooth
                 // unavailable" UI re-evaluates immediately.
                 emit bluetoothAvailableChanged();
                 doStartScan();
             } else {
-                emit de1LogMessage("Bluetooth permission denied");
+                de1Warn(QStringLiteral("Bluetooth permission DENIED — no device can be reached "
+                                       "until it is granted in system Settings"));
                 // Transition Undetermined → Denied also flips isBluetoothAvailable()
                 // from true to false (via the hostMode() fall-through).
                 emit bluetoothAvailableChanged();
@@ -1070,13 +1165,16 @@ void BLEManager::requestBluetoothPermission() {
         });
         return;
     case Qt::PermissionStatus::Denied:
-        emit de1LogMessage("Bluetooth permission denied");
+        de1Warn(QStringLiteral("Bluetooth permission DENIED — no device can be reached until it "
+                               "is granted in system Settings"));
         clearScanRequestFlags();  // No scan will start; don't latch the request flags
         emit errorOccurred(translateUiString("ble.error.bluetoothPermissionRequired",
             "Bluetooth permission required. Please enable in Settings."));
         return;
     case Qt::PermissionStatus::Granted:
-        emit de1LogMessage("Permissions OK");
+        // Nothing to say here: this is the already-granted steady state, reached
+        // on every scan after the first, and it has no prompt to explain. The
+        // grant EDGE is what gets an INFO, in the callback above.
         break;
     }
 #endif
@@ -1107,7 +1205,16 @@ void BLEManager::doStartScan() {
     m_scanning = true;
     emit scanningChanged();
     emit scanStarted();  // Notify that scan has actually started
-    emit de1LogMessage("Scanning for devices...");
+    // DEBUG, not INFO, and the live log is why. One BLE scan serves the DE1, the
+    // scales and the refractometers, so bracketing it under [DE1] claims the app
+    // went looking for the machine when usually it did not: a real session showed
+    // "[DE1] Scanning for devices..." followed 207 ms later by "[DE1] Scan
+    // stopped", which reads in a [DE1] filter as "looked for the machine, gave
+    // up" — while the [Scale] lines in between show the scan was a WiFi-to-BLE
+    // scale fallback that found its scale and stopped. The machine's story is
+    // "Found DE1:" below, which is unambiguous; the scan's story belongs to
+    // whoever asked for it.
+    de1Debug(QStringLiteral("Scanning for devices..."));
 
     // Scan for BLE devices only
     ensureDiscoveryAgent();
@@ -1133,7 +1240,7 @@ void BLEManager::stopScan() {
     // WiFi discovery genuinely is still running.
     if (!m_scanning) return;
 
-    emit de1LogMessage("Scan stopped");
+    de1Debug(QStringLiteral("Scan stopped (superseded, or torn down)"));
     if (m_discoveryAgent)
         m_discoveryAgent->stop();
     m_scanning = false;
@@ -1165,8 +1272,8 @@ void BLEManager::onDeviceDiscovered(const QBluetoothDeviceInfo& device) {
         }
         m_de1Devices.append(device);
         emit devicesChanged();
-        qDebug() << "[BLE] Found DE1:" << device.name() << "at" << getDeviceIdentifier(device);
-        emit de1LogMessage(QString("Found DE1: %1 (%2)").arg(device.name()).arg(getDeviceIdentifier(device)));
+        de1Info(QStringLiteral("Found DE1: %1 (%2)")
+                    .arg(device.name(), getDeviceIdentifier(device)));
         emit de1Discovered(device);
         return;
     }
@@ -1192,18 +1299,22 @@ void BLEManager::onDeviceDiscovered(const QBluetoothDeviceInfo& device) {
         }
         m_refractometerDevices.append(device);
         emit refractometersChanged();
-        qDebug() << "[BLE] Found refractometer:" << device.name() << "at" << getDeviceIdentifier(device);
-        appendScaleLog(QString("Found refractometer: %1 (%2)").arg(device.name(), getDeviceIdentifier(device)));
-
         const bool savedMatch = !m_savedRefractometerAddress.isEmpty()
             && deviceIdentifiersMatch(device, m_savedRefractometerAddress);
-        qDebug().noquote() << QString("[R2-diag] R2 advert dev=%1 savedMatch=%2 userInitiatedScan=%3 -> %4")
-            .arg(getDeviceIdentifier(device),
-                 savedMatch ? QStringLiteral("true") : QStringLiteral("false"),
-                 m_userInitiatedScaleScan ? QStringLiteral("true") : QStringLiteral("false"),
-                 savedMatch ? QStringLiteral("emit refractometerDiscovered")
-                            : (m_userInitiatedScaleScan ? QStringLiteral("listed only (no auto-connect)")
-                                                         : QStringLiteral("listed, skip auto-connect (not saved device)")));
+        // One line for one event, carrying the DECISION as well as the find.
+        // There were three here: a bare `qDebug() << "[BLE] Found
+        // refractometer:"`, this INFO saying the same thing in different words,
+        // and a "[R2-diag] R2 advert …" dump that held the only part a reader
+        // actually needs — whether this device is about to be connected or was
+        // merely listed. Discovery without that verdict does not explain why a
+        // saved refractometer showed up in the log and then nothing happened.
+        refractometerInfo(QStringLiteral("Found refractometer: %1 (%2) — %3")
+            .arg(device.name(), getDeviceIdentifier(device),
+                 savedMatch ? QStringLiteral("saved device, connecting")
+                            : (m_userInitiatedScaleScan
+                                   ? QStringLiteral("listed for the user's scan, no auto-connect")
+                                   : QStringLiteral("not the saved device, no auto-connect"))));
+
         // Auto-connect if this is our saved refractometer
         if (savedMatch) {
             emit refractometerDiscovered(device);
@@ -1231,14 +1342,17 @@ void BLEManager::onDeviceDiscovered(const QBluetoothDeviceInfo& device) {
         entry.address = deviceId;
         m_scales.append(entry);
         emit scalesChanged();
-        qDebug() << "[BLE] Found scale:" << device.name() << "type:" << scaleType << "at" << getDeviceIdentifier(device);
-        appendScaleLog(QString("Found %1: %2 (%3)").arg(scaleType).arg(device.name()).arg(getDeviceIdentifier(device)));
+        // The unmarked `qDebug() << "[BLE] Found scale:"` twin of this line is
+        // gone: same event, different words, and only one of the two carried a
+        // marker, so a [Scale] search returned half the pair and a reader had no
+        // way to know the other half existed.
+        scaleInfo(QString("Found %1: %2 (%3)").arg(scaleType).arg(device.name()).arg(getDeviceIdentifier(device)));
 
         // If we're doing a direct wake and this is our saved scale found via scan,
         // log it and clear the direct connect state. The scan-discovered device has
         // proper BLE metadata which may help with connection.
         if (m_directConnectInProgress && deviceIdentifiersMatch(device, m_directConnectAddress)) {
-            appendScaleLog("Direct wake: found saved scale in scan, using scanned device");
+            scaleDebug("Direct wake: found saved scale in scan, using scanned device");
             m_directConnectInProgress = false;
             m_directConnectAddress.clear();
         }
@@ -1292,16 +1406,16 @@ void BLEManager::onDeviceDiscovered(const QBluetoothDeviceInfo& device) {
                 return;
             }
             if (m_savedScaleAddress.isEmpty()) {
-                appendScaleLog(QString("No saved scale — listing %1 for manual selection (no auto-connect)")
+                scaleInfo(QString("No saved scale — listing %1 for manual selection (no auto-connect)")
                                .arg(device.name()));
                 return;
             }
-            appendScaleLog(QString("Ignoring non-primary scale: %1 (%2)").arg(device.name(), getDeviceIdentifier(device)));
+            scaleDebug(QString("Ignoring non-primary scale: %1 (%2)").arg(device.name(), getDeviceIdentifier(device)));
             return;
         }
 
         if (isFallbackCandidate) {
-            appendScaleLog(QString("WiFi fallback: connecting to BLE Decent scale %1 (%2)")
+            scaleInfo(QString("WiFi fallback: connecting to BLE Decent scale %1 (%2)")
                            .arg(device.name(), getDeviceIdentifier(device)));
         }
 
@@ -1313,12 +1427,74 @@ void BLEManager::onDeviceDiscovered(const QBluetoothDeviceInfo& device) {
 }
 
 void BLEManager::onScanFinished() {
-    qDebug().noquote() << "[R2-diag] scan cycle finished — clearing scanning/scanningForScales/userInitiated flags";
+    // No line for the flag reset. It was "[R2-diag] scan cycle finished —
+    // clearing scanning/scanningForScales/userInitiated flags", which announced
+    // the same event as the two marked "Scan complete" lines below it in words
+    // that named three private members — and it claimed the refractometer's
+    // debug prefix for a scan cycle shared by the DE1, the scales and the
+    // refractometer. Same overclaim the [DE1] scan lines had.
+    // Captured before the flags are cleared: the tier of the completion line
+    // depends on who asked for the scan, and by the time it is logged nothing
+    // remembers.
+    const bool wasUserInitiated = m_userInitiatedScaleScan;
     m_scanning = false;
     m_scanningForScales = false;
     m_userInitiatedScaleScan = false;
-    emit de1LogMessage("Scan complete");
-    appendScaleLog("Scan complete");
+
+    // DEBUG on the DE1 side, as with "Scanning for devices..." above — the scan
+    // is rarely the machine's story.
+    de1Debug(QStringLiteral("Scan complete"));
+
+    // On the scale side, INFO only when the USER started this scan. Flat INFO was
+    // wrong in both directions and the view showed it: `Scan complete` arrived
+    // with no matching start, over and over, from nothing the user did.
+    //
+    // The completion has an INFO-worthy partner in exactly one case.
+    // scanForDevices() is the only place "Starting device scan..." is logged, and
+    // it is the only user-initiated entry point. Every OTHER scan — the reconnect
+    // ladder, the refractometer hunt chaining cycles back-to-back for as long as
+    // the review page is open, startup, resume, screensaver exit — reaches the
+    // agent through startScan() directly and announces nothing, so its completion
+    // was an unpaired line appearing from nowhere. Reading it as "the app just
+    // finished looking for my scale" was reasonable and usually wrong.
+    //
+    // Gated on m_userInitiatedScaleScan rather than m_scanningForScales, which
+    // looks like the right flag and is not: the refractometer hunt sets it too, so
+    // it means "this cycle also processes scale/refractometer adverts", not "a
+    // human asked". Gating on it would have kept the worst case — an endless
+    // chain of INFO pairs while the review page sits open.
+    if (wasUserInitiated) {
+        scaleInfo(QStringLiteral("Scan complete"));
+    } else {
+        scaleDebug(QStringLiteral("Scan complete (background)"));
+    }
+
+    // State the DE1's OUTCOME, because nothing else did. With the scan-lifecycle
+    // lines at DEBUG and "Found DE1:" only firing on success, a machine that was
+    // expected and never appeared left ZERO [DE1] lines at INFO or above for the
+    // whole session — so "the app can't find my machine" was indistinguishable in
+    // the log from "the app never looked". The DE1 has no counterpart to the
+    // scale's "connection timeout — not found" anywhere, at any tier.
+    //
+    // Gated on a machine actually being expected: with no saved DE1 and no
+    // discovery, there is nothing to report. One line per cycle.
+    //
+    // NOT in simulator mode, and that gate is not a nicety — without it this line
+    // was a pure false alarm, seen on screen in a running sim session: "Scan
+    // finished with no DE1 found (saved machine E5:5A:… did not appear)" at WARN,
+    // while the status read "Simulated". The machine is absent because the user
+    // replaced it with a simulator. Scale scanning stays enabled in simulator mode
+    // on purpose (scanForDevices' note: real scales tested against a simulated
+    // DE1), so scans DO complete here with no DE1 — which is the configuration
+    // working, not a fault. Warning about it three times per the repeat budget and
+    // then falling to DEBUG is exactly the cry-wolf pattern this change exists to
+    // end, aimed at the one user who cannot act on it.
+    if (!m_disabled && !m_de1Connected && m_de1Devices.isEmpty()
+        && !m_savedDE1Address.isEmpty()) {
+        de1RepeatFailure(QStringLiteral("Scan finished with no DE1 found (saved machine %1 "
+                                        "did not appear)").arg(m_savedDE1Address));
+    }
+
     emit scanningChanged();
 
     // Hunt mode (post-shot review page): restart the scan back-to-back so a
@@ -1328,7 +1504,11 @@ void BLEManager::onScanFinished() {
     // not restarted from onScanError: the background tick recovers from errors.
     if (m_refractometerHunt && !m_savedRefractometerAddress.isEmpty()
         && !isRefractometerConnected() && !m_disabled && isBluetoothAvailable()) {
-        qDebug().noquote() << "[R2-diag] hunt active — restarting scan";
+        // DEBUG, not INFO: this fires once per scan cycle for as long as the
+        // review page is open with the refractometer absent, so at INFO it would
+        // be the dominant line in the view. The hunt turning on and off is the
+        // user-facing fact, and setRefractometerHunt() states that at INFO.
+        refractometerDebug(QStringLiteral("Hunt active — chaining another scan"));
         m_scanningForScales = true;
         startScan();
     }
@@ -1365,11 +1545,22 @@ void BLEManager::onScanError(QBluetoothDeviceDiscoveryAgent::Error error) {
             // working this session, treat the error as a transient hiccup:
             // log it, suppress the popup, let the next scan tick retry.
             if (m_anyBleSuccessThisSession) {
-                qWarning() << "[BLE] Transient MissingPermissionsError "
-                              "(permission previously OK this session — "
-                              "likely CoreBluetooth post-resume hiccup); "
-                              "not surfacing to user";
-                appendScaleLog("Bluetooth scan transient error (ignored — permission OK)");
+                // Through scaleRepeatFailure, not a flat scaleDebug. The comment
+                // above is right that this is USUALLY a transient post-resume
+                // hiccup — but m_anyBleSuccessThisSession latches true for the
+                // rest of the session, so if the user revokes Bluetooth/Location
+                // permission mid-session, or CoreBluetooth wedges non-transiently,
+                // every subsequent scan takes this branch forever at a tier the
+                // view never shows. A "transient hiccup" that repeats indefinitely
+                // is no longer transient, and this is exactly the shape
+                // scaleRepeatFailure exists for: warn on the first few, then drop
+                // to DEBUG once the ladder has proven it isn't going away, so a
+                // permanent denial still surfaces instead of vanishing at DEBUG
+                // for the rest of the session.
+                scaleRepeatFailure(QStringLiteral(
+                    "Bluetooth scan MissingPermissionsError (permission was OK "
+                    "earlier this session — a repeat suggests it no longer is, "
+                    "not just a post-resume hiccup); next scan tick retries"));
                 m_scanning = false;
                 m_scanningForScales = false;
                 m_userInitiatedScaleScan = false;
@@ -1386,9 +1577,13 @@ void BLEManager::onScanError(QBluetoothDeviceDiscoveryAgent::Error error) {
                 "Bluetooth error (code %1)").arg(static_cast<int>(error));
             break;
     }
-    qWarning() << "BLEManager scan error:" << errorMsg << "code:" << static_cast<int>(error);
-    emit de1LogMessage(QString("Error: %1").arg(errorMsg));
-    appendScaleLog(QString("Error: %1").arg(errorMsg));
+    // One wording, both subsystems: a scan error affects the machine and the
+    // scale equally, and this used to say it three times in two phrasings.
+    const QString scanErrorLine = QStringLiteral("Scan error: %1 (code %2)")
+                                      .arg(errorMsg)
+                                      .arg(static_cast<int>(error));
+    de1Warn(scanErrorLine);
+    scaleWarn(scanErrorLine);
     // Debounce the user-visible popup: scan errors from the refractometer/
     // scale auto-reconnect cycle would otherwise re-fire the same error toast
     // every ~30 s (e.g. macOS Tahoe sometimes returns MissingPermissionsError
@@ -1453,9 +1648,11 @@ void BLEManager::setScaleDevice(ScaleDevice* scale) {
     if (m_scaleDevice) {
         connect(m_scaleDevice, &ScaleDevice::connectedChanged,
                 this, &BLEManager::onScaleConnectedChanged);
-        // Connect scale's debug log to our logging system
-        connect(m_scaleDevice, &ScaleDevice::logMessage,
-                this, &BLEManager::appendScaleLog);
+        // No logMessage forwarder, for the same reason: every source behind that
+        // signal has already written the line to the system log at the right
+        // severity — the 13 drivers via SCALE_LOG/SCALE_WARN, and the transports
+        // (whose logMessage each driver re-emits as its own) via their log()/warn()
+        // helpers.
         // Push current DE1-discovery state immediately so a scale that connects
         // mid-discovery (e.g. after the gate timed out) starts in the right
         // pause state instead of waiting for the next edge.
@@ -1480,6 +1677,7 @@ void BLEManager::onScaleConnectedChanged() {
         m_scaleDirectAbortTimer->stop();
         m_directConnectInProgress = false;
         m_directConnectAddress.clear();
+        resetRepeatFailureBudget();          // Next failure of each kind warns again
         m_wifiFallbackToBleActive = false;  // Reset for the next saved-scale cycle
         m_manualWifiConnect = false;        // Manual WiFi add resolved (connected)
         m_lastScanErrorShown.clear();       // Healthy state — allow a future fresh scan error to pop again
@@ -1490,12 +1688,11 @@ void BLEManager::onScaleConnectedChanged() {
             m_scaleConnectionFailed = false;
             emit scaleConnectionFailedChanged();
         }
-        qDebug() << "BLEManager: Scale connected";
+        scaleDebug(QStringLiteral("Scale connected"));
         emit scaleConnected();  // UI auto-dismisses the scale-disconnect / no-scale notice on reconnect
     } else {
         // Scale disconnected - notify UI immediately
-        qDebug() << "BLEManager: Scale disconnected";
-        appendScaleLog("Scale disconnected");
+        scaleInfo(QStringLiteral("Scale disconnected"));
         emit scaleDisconnected();
     }
 }
@@ -1506,7 +1703,7 @@ void BLEManager::abortScaleDirectConnectIfPending(const QString& reason) {
     if (!m_directConnectInProgress) return;
     if (m_scaleDevice && m_scaleDevice->isConnected()) return;  // connect raced in
 
-    appendScaleLog(QString("Direct connect not established (%1) — aborting, scan continues").arg(reason));
+    scaleWarn(QString("Direct connect not established (%1) — aborting, scan continues").arg(reason));
     m_directConnectInProgress = false;
     m_directConnectAddress.clear();
 
@@ -1554,7 +1751,7 @@ void BLEManager::onScaleConnectionTimeout() {
         // retry ladder hits this timeout on every cycle while the scale is
         // simply absent, and must not log/churn a teardown of nothing.
         if (transport && (wasParked || transport->isConnected())) {
-            appendScaleLog(wasParked
+            scaleWarn(wasParked
                 ? QStringLiteral("Scale connection timeout — tearing down parked direct-connect controller")
                 : QStringLiteral("Scale connection timeout — tearing down stuck connection setup"));
             transport->disconnectFromDevice();
@@ -1571,7 +1768,7 @@ void BLEManager::onScaleConnectionTimeout() {
     const QString manualHost = m_pendingWifiHostname;
     m_manualWifiConnect = false;
 
-    qWarning() << "BLEManager: Scale connection timeout - not found";
+    scaleRepeatFailure(QStringLiteral("Scale connection timeout — not found"));
 
     // Heartbeat for the BLE-stack-wedge detector (#1309): a scale that keeps
     // failing to connect is one half of the wedge fingerprint. The detector
@@ -1587,7 +1784,7 @@ void BLEManager::onScaleConnectionTimeout() {
     // the endpoint as HDS — see #1281), so nothing here needs to undo state.
     // The user can try again with a different address.
     if (manualWifiAttempt) {
-        appendScaleLog(QString("Manual WiFi scale validation failed for %1").arg(manualHost));
+        scaleWarn(QString("Manual WiFi scale validation failed for %1").arg(manualHost));
         emit manualWifiValidationFailed(manualHost);
         emit disconnectScaleRequested();   // tear down the half-open WiFi driver
         return;
@@ -1610,7 +1807,7 @@ void BLEManager::onScaleConnectionTimeout() {
 
     if (!m_flowScaleFallbackEmitted) {
         m_flowScaleFallbackEmitted = true;
-        appendScaleLog("Scale not found - using FlowScale");
+        scaleWarn(QStringLiteral("Scale not found — using FlowScale"));
         emit flowScaleFallback();
     }
 
@@ -1635,8 +1832,13 @@ void BLEManager::beginWifiFallbackToBleScan() {
     // user-initiated scan could trip the isFallbackCandidate gate in
     // onDeviceDiscovered, auto-connecting to any Decent BLE scale found.
     if (!isBluetoothAvailable()) {
-        qWarning() << "BLEManager: WiFi fallback to BLE skipped - Bluetooth unavailable";
-        appendScaleLog(QString("WiFi scale %1 unreachable and Bluetooth unavailable").arg(hostname));
+        // One line, marked. The bare qWarning that used to sit here said the same
+        // thing in different words AND carried no [Scale] marker, so it was
+        // invisible to the marker-filtered query that is the whole point of the
+        // marker — while being the only WARN rescuing the line below once its
+        // budget was spent.
+        scaleRepeatFailure(QString("WiFi scale %1 unreachable and Bluetooth unavailable "
+                                   "— fallback to BLE skipped").arg(hostname));
         m_scaleConnectionFailed = true;
         emit scaleConnectionFailedChanged();
         if (!m_flowScaleFallbackEmitted) {
@@ -1654,7 +1856,7 @@ void BLEManager::beginWifiFallbackToBleScan() {
     }
 
     m_wifiFallbackToBleActive = true;
-    appendScaleLog(QString("WiFi scale %1 unreachable — trying Bluetooth").arg(hostname));
+    scaleRepeatFailure(QString("WiFi scale %1 unreachable — trying Bluetooth").arg(hostname));
     emit wifiUnreachableFallingBackToBle(hostname);
 
     // Re-arm the connection timer so the fallback BLE scan has a bounded
@@ -1740,7 +1942,7 @@ void BLEManager::probeWifiPrimaryReachable(const QString& ip) {
     connect(m_wifiProbeTimer, &QTimer::timeout, this, [finish]() { finish(false); });
 
     const QUrl url(QStringLiteral("ws://%1/snapshot").arg(ip));
-    appendScaleLog(QString("Probing WiFi primary at %1 (%2 ms, HDS verify)")
+    scaleDebug(QString("Probing WiFi primary at %1 (%2 ms, HDS verify)")
                        .arg(ip).arg(kProbeTimeoutMs));
     m_wifiProbeTimer->start(kProbeTimeoutMs);
     m_wifiProbeWebSocket->open(url);
@@ -1765,8 +1967,7 @@ void BLEManager::switchToWifiPrimary() {
         return;  // primary isn't a WiFi scale — nothing to switch back to
     }
     const QString hostname = m_savedScaleAddress.mid(QStringLiteral("wifi:").size());
-    qDebug() << "BLEManager: WiFi primary reachable again — switching back from backup to" << hostname;
-    appendScaleLog(QString("WiFi primary %1 reachable — switching back from backup").arg(hostname));
+    scaleInfo(QStringLiteral("WiFi primary %1 reachable again — switching back from backup").arg(hostname));
 
     // Drop the current backup scale, then connect the WiFi primary. main.cpp's
     // disconnectScaleRequested handler tears down the live scale; the
@@ -1850,7 +2051,7 @@ QBluetoothDeviceInfo BLEManager::getRefractometerDeviceInfo(const QString& addre
 void BLEManager::connectToRefractometer(const QString& address) {
     QBluetoothDeviceInfo info = getRefractometerDeviceInfo(address);
     if (info.isValid()) {
-        appendScaleLog(QString("Connecting to refractometer: %1 (%2)").arg(info.name(), address));
+        refractometerInfo(QString("Connecting to refractometer: %1 (%2)").arg(info.name(), address));
         emit refractometerDiscovered(info);
     }
 }
@@ -1880,11 +2081,15 @@ void BLEManager::clearSavedRefractometer() {
 }
 
 void BLEManager::setRefractometerDevice(RefractometerDevice* device) {
-    qDebug().noquote() << QString("[R2-diag] setRefractometerDevice old=%1 new=%2")
+    // The instance addresses are the point, not decoration: the bug this line was
+    // added for was CHURN — a second Refractometer created while the first was
+    // still connected — and "old" and "new" being different non-null values is
+    // the only way that reads in a log. Kept at DEBUG; a user never needs it.
+    refractometerDebug(QStringLiteral("Holder: old=%1 new=%2")
         .arg(m_refractometerDevice ? QString::number(reinterpret_cast<quintptr>(m_refractometerDevice.data()), 16)
                                     : QStringLiteral("none"),
              device ? QString::number(reinterpret_cast<quintptr>(device), 16)
-                     : QStringLiteral("none"));
+                     : QStringLiteral("none")));
     // Sever exactly the two handlers we installed — see the note on the
     // Connection members. Disconnecting an already-severed or default
     // Connection is a no-op, so this needs no null guard.
@@ -1900,7 +2105,10 @@ void BLEManager::setRefractometerDevice(RefractometerDevice* device) {
             // only re-chains when a scan is already in flight, and none is once we
             // were connected. So if the R2 drops mid-page, re-kick the scan chain.
             if (m_refractometerHunt && !isRefractometerConnected() && !m_scanningForScales) {
-                qDebug().noquote() << "[R2-diag] R2 dropped while hunting — re-kicking scan";
+                // INFO: the device the user is trying to take a reading with just
+                // went away. That is their story, not a developer's.
+                refractometerInfo(QStringLiteral("Disconnected while the review page "
+                                                 "is open — restarting the scan"));
                 tryDirectConnectToRefractometer();
             }
         });
@@ -1918,10 +2126,10 @@ void BLEManager::setRefractometerDevice(RefractometerDevice* device) {
         // instead of a silently stale "connected".
         m_refractometerDestroyedConn =
         connect(m_refractometerDevice, &QObject::destroyed, this, [this]() {
-            qDebug().noquote() << "[R2-diag] refractometer destroyed with the holder "
-                                  "still set — reporting disconnected. Expected at app "
-                                  "exit; anywhere else means a path skipped "
-                                  "setRefractometerDevice(nullptr).";
+            refractometerDebug(QStringLiteral(
+                "Destroyed with the holder still set — reporting disconnected. "
+                "Expected at app exit; anywhere else means a path skipped "
+                "setRefractometerDevice(nullptr)."));
             emit refractometerConnectedChanged();
         });
     }
@@ -1938,37 +2146,49 @@ void BLEManager::tryDirectConnectToRefractometer() {
     // scopes them all without touching the scale's separate, always-on
     // reconnect. Manual pairing from Settings goes through connectToRefractometer()
     // → refractometerDiscovered and is intentionally unaffected.
+    // Every reason this can decline, decided before anything is mutated, then
+    // ONE line naming the one that applied.
+    //
+    // There were four "no-op (…)" lines here, one per early return. They said the
+    // same thing four ways, three of them by printing private members
+    // (`savedAddrEmpty=false disabled=false`) and leaving the reader to work out
+    // which boolean was the cause — and the fourth announced "no-op (scan flag
+    // already set)" and then re-tested the same flag below, so the branch existed
+    // twice. Splitting savedAddress from disabled also makes the answer specific:
+    // "no refractometer is paired" and "BLE is off" are different problems that
+    // used to arrive as one line.
+    //
+    // Deciding availability up here rather than mid-function is what keeps the
+    // scan flag honest, the way tryDirectConnectToDE1 does it: with Bluetooth off
+    // startScan() returns without starting anything, so a flag set before that
+    // check would never be cleared — scan finished/error/stop are the only
+    // clearers and none would fire — and every later attempt would decline with
+    // "a scan is already in flight" even after Bluetooth came back. Here nothing
+    // is set until all the checks have passed, so that trap is structural rather
+    // than a rule to remember.
+    QString skipReason;
     if (!m_refractometerHunt) {
-        qDebug().noquote() << "[R2-diag] tryDirectConnectToRefractometer no-op (not hunting — review page closed)";
+        skipReason = QStringLiteral("the post-shot review page is closed");
+    } else if (m_savedRefractometerAddress.isEmpty()) {
+        skipReason = QStringLiteral("no refractometer is paired");
+    } else if (m_disabled) {
+        skipReason = QStringLiteral("BLE is off (simulator mode)");
+    } else if (!isBluetoothAvailable()) {
+        skipReason = QStringLiteral("Bluetooth is unavailable — the reconnect tick will retry");
+    } else if (m_scanningForScales) {
+        skipReason = QStringLiteral("a scan is already in flight");
+    }
+    if (!skipReason.isEmpty()) {
+        refractometerDebug(QStringLiteral("Auto-reconnect skipped: %1").arg(skipReason));
         return;
     }
-    if (m_savedRefractometerAddress.isEmpty() || m_disabled) {
-        qDebug().noquote() << QString("[R2-diag] tryDirectConnectToRefractometer no-op (savedAddrEmpty=%1 disabled=%2)")
-            .arg(m_savedRefractometerAddress.isEmpty() ? QStringLiteral("true") : QStringLiteral("false"),
-                 m_disabled ? QStringLiteral("true") : QStringLiteral("false"));
-        return;
-    }
-    // Check availability BEFORE setting the scan flag (as tryDirectConnectToDE1
-    // does): with Bluetooth off, startScan() returns without starting anything,
-    // and a flag set here would never be cleared — scan finished/error/stop are
-    // the only clearers and none would fire — turning every later reconnect
-    // attempt into a "scan flag already set" no-op even after Bluetooth returns.
-    if (!isBluetoothAvailable()) {
-        qDebug().noquote() << "[R2-diag] tryDirectConnectToRefractometer no-op (Bluetooth unavailable) "
-                              "— background reconnect tick will retry";
-        return;
-    }
+
     // Piggyback on the scale scan infrastructure — set the flag so
     // onDeviceDiscovered processes refractometer advertisements
-    qDebug().noquote() << QString("[R2-diag] tryDirectConnectToRefractometer scanningForScales=%1 scanning=%2 -> %3")
-        .arg(m_scanningForScales ? QStringLiteral("true") : QStringLiteral("false"),
-             m_scanning ? QStringLiteral("true") : QStringLiteral("false"),
-             m_scanningForScales ? QStringLiteral("no-op (scan flag already set)")
-                                  : QStringLiteral("startScan()"));
-    if (!m_scanningForScales) {
-        m_scanningForScales = true;
-        startScan();
-    }
+    refractometerDebug(QStringLiteral("Auto-reconnect scanning for %1")
+                           .arg(m_savedRefractometerAddress));
+    m_scanningForScales = true;
+    startScan();
 }
 
 void BLEManager::setRefractometerHunt(bool active) {
@@ -1976,9 +2196,14 @@ void BLEManager::setRefractometerHunt(bool active) {
         return;
     }
     m_refractometerHunt = active;
-    qDebug().noquote() << QString("[R2-diag] refractometer hunt %1")
+    // INFO, and the only INFO in this mechanism: it is the transition that
+    // explains everything downstream. Hunt ON means the radio scans back-to-back
+    // — visible to a user as battery drain and as scale/DE1 BLE contention — and
+    // hunt OFF means a refractometer will not reconnect no matter how long they
+    // wait. The per-cycle consequences of both stay at DEBUG.
+    refractometerInfo(QStringLiteral("Hunt %1")
         .arg(active ? QStringLiteral("ON — scans will chain back-to-back while a saved refractometer is disconnected")
-                    : QStringLiteral("OFF — refractometer reconnect stops until the review page reopens"));
+                    : QStringLiteral("OFF — refractometer reconnect stops until the review page reopens")));
     if (active && !isRefractometerConnected()) {
         tryDirectConnectToRefractometer();
     }
@@ -1999,17 +2224,17 @@ void BLEManager::clearSavedDE1() {
 
 void BLEManager::tryDirectConnectToDE1() {
     if (m_disabled) {
-        qDebug() << "BLEManager: tryDirectConnectToDE1 - disabled (simulator mode)";
+        de1Debug(QStringLiteral("tryDirectConnectToDE1 - disabled (simulator mode)"));
         return;
     }
 
     if (m_savedDE1Address.isEmpty()) {
-        qDebug() << "BLEManager: tryDirectConnectToDE1 - no saved DE1 address";
+        de1Debug(QStringLiteral("tryDirectConnectToDE1 - no saved DE1 address"));
         return;
     }
 
     if (!isBluetoothAvailable()) {
-        qDebug() << "BLEManager: tryDirectConnectToDE1 - Bluetooth is powered off, skipping";
+        de1Debug(QStringLiteral("tryDirectConnectToDE1 - Bluetooth is powered off, skipping"));
         return;
     }
 
@@ -2024,10 +2249,8 @@ void BLEManager::tryDirectConnectToDE1() {
     QString upperAddress = m_savedDE1Address.toUpper();
     QBluetoothAddress address(upperAddress);
     if (address.isNull()) {
-        qDebug() << "BLEManager: DE1 direct wake - identifier is not a MAC, scanning for"
-                 << deviceName << "id:" << m_savedDE1Address;
-        emit de1LogMessage(QString("Direct wake: scanning for %1 (identifier is not a MAC)")
-                           .arg(deviceName));
+        de1Info(QStringLiteral("Direct wake: scanning for %1 (identifier %2 is not a MAC)")
+                    .arg(deviceName, m_savedDE1Address));
         if (!m_scanning) {
             startScan();
         }
@@ -2035,8 +2258,7 @@ void BLEManager::tryDirectConnectToDE1() {
     }
     QBluetoothDeviceInfo deviceInfo(address, deviceName, QBluetoothDeviceInfo::LowEnergyCoreConfiguration);
 
-    qDebug() << "BLEManager: DE1 direct wake - connecting to" << deviceName << "at" << upperAddress;
-    emit de1LogMessage(QString("Direct wake: connecting to %1 at %2").arg(deviceName, upperAddress));
+    de1Info(QStringLiteral("Direct wake: connecting to %1 at %2").arg(deviceName, upperAddress));
 
     // A DE1 direct-wake connect is now being initiated — gate the scale's BLE
     // direct-connect behind it (two concurrent GATT connects collide on the
@@ -2060,12 +2282,14 @@ void BLEManager::scanForDevices() {
     // Note: m_disabled is intentionally not checked here — scale and refractometer
     // scanning is allowed in simulator mode so real hardware can be tested against
     // a simulated DE1. Only DE1 BLE (startScan without m_scanningForScales) is suppressed.
-    qDebug().noquote() << QString("[R2-diag] scanForDevices (user-initiated) scanning=%1 scanningForScales=%2 (read before stopScan)")
-        .arg(m_scanning ? QStringLiteral("true") : QStringLiteral("false"),
-             m_scanningForScales ? QStringLiteral("true") : QStringLiteral("false"));
-    appendScaleLog("Starting device scan...");
+    // No pre-scan flag dump. It was "[R2-diag] scanForDevices (user-initiated)
+    // scanning=… scanningForScales=…", which named two private members of the
+    // SCALE scan under the refractometer's debug prefix, immediately above the
+    // marked line that already announces the event.
+    scaleInfo("Starting device scan...");
     m_scaleConnectionFailed = false;
     m_flowScaleFallbackEmitted = false;  // User-initiated scan resets the dialog guard
+    resetRepeatFailureBudget();           // ...and the failure-warning budget
     emit scaleConnectionFailedChanged();
 
     // NOTE: Bluetooth availability gates ONLY the BLE leg, below. It used to
@@ -2094,8 +2318,8 @@ void BLEManager::scanForDevices() {
         // No radio: skip the BLE leg but still run WiFi and USB. Clear the
         // request flags startScan() would otherwise have consumed, so they
         // don't leak into the next scan.
-        qDebug() << "BLEManager: Bluetooth unavailable — scanning WiFi and USB only";
-        appendScaleLog(QStringLiteral("Bluetooth unavailable — scanning WiFi and USB only"));
+        BT_INFO_TAGGED("BLEManager", QStringLiteral("Bluetooth unavailable — scanning WiFi and USB only"));
+        scaleInfo(QStringLiteral("Bluetooth unavailable — scanning WiFi and USB only"));
         m_scanningForScales = false;
         m_userInitiatedScaleScan = false;
     }
@@ -2146,7 +2370,7 @@ void BLEManager::browseWifiScales(int timeoutMs) {
     ensureWifiDiscovery();
     m_wifiResults.clear();
     clearWifiScaleRows();
-    appendScaleLog(QString("WiFi-only discovery requested (backend=%1, %2 ms)")
+    scaleDebug(QString("WiFi-only discovery requested (backend=%1, %2 ms)")
                        .arg(MdnsResolver::activeBrowseBackendName())
                        .arg(timeoutMs));
     m_wifiDiscovery->browse(timeoutMs);
@@ -2212,7 +2436,7 @@ void BLEManager::rebuildWifiScaleRows() {
             entry.wsPort = r.port;
             entry.wsPath = r.path;
             m_scales.append(entry);
-            appendScaleLog(QString("Found %1 (%2)").arg(entry.name, entry.address));
+            scaleInfo(QString("Found %1 (%2)").arg(entry.name, entry.address));
             changed = true;
         } else {
             // Refresh in place. resolvedIp deliberately tracks the latest
@@ -2307,14 +2531,9 @@ void BLEManager::ensureWifiDiscovery() {
             [this](bool ran) { m_lastWifiProbeRan = ran; emit scanningChanged(); });
     connect(m_wifiDiscovery, &WifiScaleDiscovery::browseFinished, this,
             [this](bool ran) { m_lastWifiBrowseRan = ran; emit scanningChanged(); });
-    // Forward mDNS-layer diagnostics into the user-shareable scale debug log.
-    // Without this, "mDNS lookup timed out" / "no responder" lines lived only
-    // in qDebug output (Qt Creator console / adb logcat), invisible in the log
-    // a user uploads with a bug report.
-    connect(m_wifiDiscovery, &WifiScaleDiscovery::logMessage, this,
-            [this](const QString& msg) {
-        appendScaleLog(QString("[WifiScaleDiscovery] %1").arg(msg));
-    });
+    // No logMessage forwarder — see the manual-entry probe above. The mDNS-layer
+    // diagnostics reach the system log from WifiScaleDiscovery itself, which is
+    // also the log a user uploads, so there is nothing left to forward them to.
     // Single unified handler that handles both code paths (user-initiated
     // scan AND saved-scale direct-wake). Before this consolidation, each
     // call site lazy-created the discovery object with a DIFFERENT lambda
@@ -2325,13 +2544,21 @@ void BLEManager::ensureWifiDiscovery() {
             const QString hostname = result.hostname;
             const QString resolvedAddress = result.address;
             const QString address = QStringLiteral("wifi:") + hostname;
-            qDebug() << "[BLE] WiFi scale found:" << hostname
-                     << "->" << resolvedAddress
-                     << "address=" << address
-                     << "instance=" << result.instanceName
-                     << "fw=" << result.firmwareVersion
-                     << "userInitiatedScan=" << m_userInitiatedScaleScan
-                     << "saved=" << m_savedScaleAddress;
+            // INFO and marked, matching the BLE path's "Found <type>: …" — a
+            // discovery outcome is what a user reads the log for, and the WiFi leg
+            // previously had no counterpart at any tier, only this unmarked dump.
+            // Fields kept in full rather than trimmed to a headline: on this
+            // transport the mismatch between hostname, resolved IP and saved
+            // address IS the usual bug, and a browse fires per user action or
+            // reconnect tick, not per advertisement, so it is not a firehose.
+            scaleInfo(QStringLiteral("Found WiFi scale: %1 -> %2 (address=%3, "
+                                     "instance=%4, fw=%5, userInitiatedScan=%6, "
+                                     "saved=%7)")
+                          .arg(hostname, resolvedAddress, address,
+                               result.instanceName, result.firmwareVersion,
+                               m_userInitiatedScaleScan ? QStringLiteral("true")
+                                                        : QStringLiteral("false"),
+                               m_savedScaleAddress));
 
             // One authoritative collection. The rows below are DERIVED from it,
             // never maintained alongside it — an earlier version kept both and
@@ -2367,12 +2594,12 @@ void BLEManager::tryDirectConnectToScale(bool allowDirectConnect) {
         // path, so it is the one a user or support engineer reading an exported
         // scale log would be staring at when their scale never connects. qDebug
         // reaches only a console nobody is watching.
-        appendScaleLog("Auto-reconnect skipped — simulated scale is active");
+        scaleInfo("Auto-reconnect skipped — simulated scale is active");
         return;
     }
 
     if (m_savedScaleAddress.isEmpty() || m_savedScaleType.isEmpty()) {
-        qDebug() << "BLEManager: tryDirectConnectToScale - no saved scale address/type";
+        scaleDebug(QStringLiteral("tryDirectConnectToScale - no saved scale address/type"));
         return;
     }
 
@@ -2384,7 +2611,7 @@ void BLEManager::tryDirectConnectToScale(bool allowDirectConnect) {
     // and re-arms the ladder — forever. Reachable as soon as anything starts
     // the ladder while the simulated scale is switched off.
     if (savedScaleIsSimulated()) {
-        appendScaleLog("Auto-reconnect skipped — saved scale is the simulator's "
+        scaleInfo("Auto-reconnect skipped — saved scale is the simulator's "
                        "synthetic entry, nothing to dial");
         return;
     }
@@ -2397,7 +2624,7 @@ void BLEManager::tryDirectConnectToScale(bool allowDirectConnect) {
     // change is about. USB is likewise radio-independent.
 
     if (m_scaleDevice && m_scaleDevice->isConnected()) {
-        qDebug() << "BLEManager: tryDirectConnectToScale - scale already connected";
+        scaleDebug(QStringLiteral("tryDirectConnectToScale - scale already connected"));
         return;
     }
 
@@ -2422,9 +2649,14 @@ void BLEManager::tryDirectConnectToScale(bool allowDirectConnect) {
     // Decent scale (see onScaleConnectionTimeout and beginWifiFallbackToBleScan).
     if (m_savedScaleAddress.startsWith(QStringLiteral("wifi:"), Qt::CaseInsensitive)) {
         const QString hostname = m_savedScaleAddress.mid(QStringLiteral("wifi:").size());
-        qDebug() << "BLEManager: Direct wake (WiFi) - connecting to" << hostname
-                 << "(cached IP first, mDNS fallback)";
-        appendScaleLog(QString("Direct wake (WiFi): connecting to %1").arg(hostname));
+        // One line. This was a drift pair that survived the earlier sweep and was
+        // caught by reading a real log rather than the source: an unmarked
+        // `qDebug() << "BLEManager: Direct wake (WiFi) - connecting to" ...` and a
+        // marked scaleInfo saying the same thing in different words, 1 ms apart. A
+        // [Scale] search returned one of them, so the marker did not in fact return
+        // the whole story, and an unfiltered reader saw the event twice.
+        scaleInfo(QStringLiteral("Direct wake (WiFi): connecting to %1 "
+                                 "(cached IP first, mDNS fallback)").arg(hostname));
 
         // Reconnect through the scale driver's own connect path instead of
         // gating on a fresh mDNS probe. DecentScaleWifi::connectToHost() tries
@@ -2452,8 +2684,8 @@ void BLEManager::tryDirectConnectToScale(bool allowDirectConnect) {
     // (which connects when the saved primary is "usb:decent"). Don't fall
     // through to the BLE connect/scan below — "usb:decent" is not a MAC.
     if (m_savedScaleAddress.startsWith(QStringLiteral("usb:"), Qt::CaseInsensitive)) {
-        qDebug() << "BLEManager: tryDirectConnectToScale - saved scale is USB; "
-                    "reconnect handled by UsbScaleManager";
+        scaleDebug(QStringLiteral("Direct connect skipped — saved scale is USB; "
+                                  "reconnect is handled by UsbScaleManager"));
         return;
     }
 
@@ -2461,7 +2693,7 @@ void BLEManager::tryDirectConnectToScale(bool allowDirectConnect) {
     // everything below (the passive scan and the direct connectToDevice) needs a
     // powered BLE adapter, whereas the WiFi and USB paths above did not.
     if (!isBluetoothAvailable()) {
-        qDebug() << "BLEManager: tryDirectConnectToScale - Bluetooth is powered off, skipping";
+        scaleDebug(QStringLiteral("tryDirectConnectToScale - Bluetooth is powered off, skipping"));
         return;
     }
 
@@ -2480,7 +2712,7 @@ void BLEManager::tryDirectConnectToScale(bool allowDirectConnect) {
         // background reconnect is visible in either capture. The scale log is a
         // 1000-entry ring buffer, so the perpetual 60s ladder can't grow it
         // without bound.
-        appendScaleLog("Auto-reconnect: scanning for saved scale (no direct-connect)");
+        scaleInfo("Auto-reconnect: scanning for saved scale (no direct-connect)");
         m_scaleConnectionTimer->start();   // bounded budget; arms WiFi/FlowScale fallback + retry ladder
         m_scanningForScales = true;
         if (!m_scanning) {
@@ -2499,9 +2731,8 @@ void BLEManager::tryDirectConnectToScale(bool allowDirectConnect) {
     if (QBluetoothAddress(m_savedScaleAddress.toUpper()).isNull()) {
         // Direct connect with just a UUID rarely works — find the device by
         // scanning and match on identity when it advertises.
-        qDebug() << "BLEManager: Direct wake (no MAC) - scanning for" << deviceName
-                 << "id:" << m_savedScaleAddress;
-        appendScaleLog(QString("Direct wake: scanning for %1 (identifier is not a MAC)").arg(deviceName));
+        scaleInfo(QStringLiteral("Direct wake: scanning for %1, id %2 (identifier is not a MAC)")
+                      .arg(deviceName, m_savedScaleAddress));
 
         m_directConnectInProgress = true;
         m_directConnectAddress = m_savedScaleAddress;  // UUID
@@ -2524,8 +2755,8 @@ void BLEManager::tryDirectConnectToScale(bool allowDirectConnect) {
     if (m_de1DirectConnectInFlight) {
         m_scaleConnectDeferred = true;
         if (!m_de1WaitTimer->isActive()) m_de1WaitTimer->start();
-        qDebug() << "BLEManager: deferring scale direct-connect until DE1 settles (15 s cap)";
-        appendScaleLog("Waiting for the DE1 to finish connecting before connecting the scale (15 s cap)");
+        scaleInfo(QStringLiteral("Waiting for the DE1 to finish connecting before connecting "
+                                 "the scale (15 s cap)"));
         return;
     }
 
@@ -2534,8 +2765,7 @@ void BLEManager::tryDirectConnectToScale(bool allowDirectConnect) {
     QBluetoothAddress address(upperAddress);
     QBluetoothDeviceInfo deviceInfo(address, deviceName, QBluetoothDeviceInfo::LowEnergyCoreConfiguration);
 
-    qDebug() << "BLEManager: Direct wake - connecting to" << deviceName << "at" << upperAddress;
-    appendScaleLog(QString("Direct wake: connecting to %1 at %2").arg(deviceName, m_savedScaleAddress));
+    scaleInfo(QStringLiteral("Direct wake: connecting to %1 at %2").arg(deviceName, upperAddress));
 
     // Mark that we're doing a direct connect - but we won't skip scan results
     // Instead, onDeviceDiscovered will check if scale is already connected
@@ -2572,7 +2802,7 @@ void BLEManager::onDe1ConnectionSettled() {
     m_de1WaitTimer->stop();
     if (m_scaleConnectDeferred) {
         m_scaleConnectDeferred = false;
-        appendScaleLog("DE1 connect settled — starting deferred scale connect");
+        scaleInfo("DE1 connect settled — starting deferred scale connect");
         tryDirectConnectToScale();
     }
 }
@@ -2589,6 +2819,8 @@ void BLEManager::openLocationSettings()
         activity.callMethod<void>("startActivity", "(Landroid/content/Intent;)V", intent.object());
     }
 #else
+    // log-marker-exempt: platform-availability note about a UI action, not a
+    // subsystem event — no device or radio state is being reported.
     qDebug() << "openLocationSettings is only available on Android";
 #endif
 }
@@ -2616,184 +2848,186 @@ void BLEManager::openBluetoothSettings()
     // macOS: Open System Settings to Bluetooth privacy pane
     QDesktopServices::openUrl(QUrl("x-apple.systempreferences:com.apple.preference.security?Privacy_Bluetooth"));
 #else
+    // log-marker-exempt: as above — a note that a settings deep-link has no
+    // implementation here, not a report about the radio.
     qDebug() << "openBluetoothSettings is not implemented for this platform";
 #endif
 }
 
-// Scale debug logging methods
-void BLEManager::appendScaleLog(const QString& message) {
-    QString timestampedMsg = QDateTime::currentDateTime().toString("[hh:mm:ss.zzz] ") + message;
-    m_scaleLogMessages.append(timestampedMsg);
-    emit scaleLogMessage(message);
-    // Mirror to the system log so the scale narrative is interleaved with
-    // qDebug output from the rest of the app — without this, the scale
-    // debug log lives only in m_scaleLogMessages (rendered into the user-
-    // shareable scale_debug_log.txt) and is invisible during local
-    // development unless the developer is staring at the in-app log view.
-    // Use a stable [Scale] prefix so the line is grep-friendly in stderr.
-    qDebug().noquote() << "[Scale]" << message;
-
-    // Keep log size reasonable (last 1000 messages)
-    while (m_scaleLogMessages.size() > 1000) {
-        m_scaleLogMessages.removeFirst();
-    }
+// BLEManager's own narrative. One call per event, writing the system log at the
+// right severity with the subsystem marker — and nothing else.
+//
+// Each of these used to ALSO record into m_scaleLogMessages, a private in-memory
+// buffer that fed the connections-page view and a shareable scale_debug_log.txt.
+// That whole channel is gone: the views now read the system log through
+// WebDebugLogger, and Share sends the system log. So the second write disappeared
+// from these five functions rather than from ~60 call sites, which is exactly why
+// the call sites were routed through helpers first.
+void BLEManager::scaleDebug(const QString& message, const QString& source) {
+    SCALE_LOG_STDERR_DYN(source, message);
 }
 
-void BLEManager::clearScaleLog() {
-    m_scaleLogMessages.clear();
-    emit scaleLogMessage("Log cleared");
+void BLEManager::scaleInfo(const QString& message, const QString& source) {
+    SCALE_INFO_STDERR_DYN(source, message);
 }
 
-QString BLEManager::getScaleLogPath() const {
-    return m_scaleLogFilePath;
+void BLEManager::scaleWarn(const QString& message, const QString& source) {
+    SCALE_WARN_STDERR_DYN(source, message);
 }
 
-void BLEManager::writeScaleLogToFile() {
-    // Get app's cache directory for the log file
-    QString cacheDir = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
-    QDir().mkpath(cacheDir);
-    m_scaleLogFilePath = cacheDir + "/scale_debug_log.txt";
+// This class's own convenience form. Private, so "BLEManager wrote it" is a
+// fact here rather than a default that any caller could inherit by omission.
+void BLEManager::scaleRepeatFailure(const QString& message) {
+    scaleRepeatFailure(message, RepeatTier::Warn, QStringLiteral("BLEManager"));
+}
 
-    QFile file(m_scaleLogFilePath);
-    if (file.open(QIODevice::WriteOnly | QIODevice::Text)) {
-        QTextStream out(&file);
-        out << "=== Decenza Scale Debug Log ===" << Qt::endl;
-        out << "Generated: " << QDateTime::currentDateTime().toString(Qt::ISODate) << Qt::endl;
-        out << "================================" << Qt::endl << Qt::endl;
-
-        for (const QString& msg : m_scaleLogMessages) {
-            out << msg << Qt::endl;
-        }
-        file.close();
-        qDebug() << "Scale log written to:" << m_scaleLogFilePath;
+void BLEManager::scaleRepeatFailure(const QString& message, RepeatTier tier,
+                                    const QString& source) {
+    // Counted PER MESSAGE, not per subsystem. A single subsystem counter looked
+    // simpler and was wrong twice over:
+    //
+    //   - It suppressed NOVELTY. A genuinely different failure arriving mid-run
+    //     — "WiFi scale X unreachable and Bluetooth unavailable", i.e. the user
+    //     just turned the radio off, which is actionable — was logged at DEBUG
+    //     because an unrelated timeout had already spent the budget.
+    //   - Its numbers skipped, because one attempt reports several messages, so
+    //     "(repeat 4)" appeared on a line that had been printed twice.
+    //
+    // Per-message fixes both: each distinct failure gets its own first few
+    // warnings, and the count means what it says.
+    //
+    // Cardinality WAS bounded — "literals with at most a host name interpolated"
+    // — and that is no longer true, so do not rely on it. DecentScaleWifi's
+    // failure line now interpolates the error string, an error code, the target,
+    // the phrase describing where the target came from, and the local address.
+    // The target-source phrase varies WITHIN one dead ladder (remembered, then
+    // freshly resolved, then remembered-after-a-failed-resolve), so a single
+    // repeating failure claims a separate budget per phrasing and can emit
+    // roughly three times the intended warnings before going quiet.
+    //
+    // Left as-is deliberately: the provenance on that line is what makes
+    // "the scale moved" separable from "the scale is off", which was the point of
+    // adding it, and three cycles of a real failure is a tolerable price. Keying
+    // the budget on a stable substring while logging the full line is the fix if
+    // it ever becomes a problem. Recorded rather than silently accepted, because
+    // the old sentence would have been read as a guarantee.
+    const int count = ++m_repeatFailureCounts[message];
+    if (count <= kScaleFailuresAtWarn) {
+        // At the caller's own tier, not always WARN. A failing cycle emits
+        // narrative as well as problems, and promoting the narrative to WARN to
+        // budget it would trade one kind of noise for a worse one.
+        if (tier == RepeatTier::Warn)
+            scaleWarn(message, source);
+        else
+            scaleInfo(message, source);
     } else {
-        qWarning() << "Failed to write scale log to:" << m_scaleLogFilePath;
+        // Same event, still true, nothing new — DEBUG, so the log still proves the
+        // ladder is running without another alarm.
+        //
+        // But NOT DEBUG forever, and this is a correction to the first cut of this
+        // budget. Once DecentScaleWifi's warning was routed in here too, a
+        // permanently-absent scale produced nothing whatsoever above DEBUG — so at
+        // the tier debug_get_log's INFO view and the connections page both read,
+        // "retrying every 60 s for the last eight hours" and "gave up hours ago"
+        // became byte-identical: empty. That is the same fault this subsystem was
+        // just fixed for in the other direction. Silence is not honest while the
+        // condition persists; it only looks tidy.
+        //
+        // Milestones, not a period: the gaps widen, so an overnight failure costs a
+        // handful of INFO lines rather than one every 60 s, and the reader still
+        // gets proof of life with a repeat count that says how long it has been.
+        const bool milestone = (count == 10 || count == 30 || count == 100
+                                || (count % 500) == 0);
+        const QString line = QString("%1 (repeat %2)").arg(message).arg(count);
+        if (milestone)
+            scaleInfo(line, source);
+        else
+            scaleDebug(line, source);
     }
 }
 
-void BLEManager::shareScaleLog() {
-    // First write the log to a file
-    writeScaleLogToFile();
-
-    if (m_scaleLogFilePath.isEmpty()) {
-        qWarning() << "No log file path available";
-        return;
-    }
-
-#ifdef Q_OS_ANDROID
-    // Use Android's share intent
-    QJniObject context = QNativeInterface::QAndroidApplication::context();
-
-    // Create a file URI using FileProvider for Android 7+
-    QJniObject fileObj = QJniObject::fromString(m_scaleLogFilePath);
-    QJniObject file("java/io/File", "(Ljava/lang/String;)V", fileObj.object<jstring>());
-
-    // Get the app's package name for FileProvider authority
-    QJniObject packageName = context.callObjectMethod("getPackageName", "()Ljava/lang/String;");
-    QString authority = packageName.toString() + ".fileprovider";
-    QJniObject authorityObj = QJniObject::fromString(authority);
-
-    // Get content URI via FileProvider
-    QJniObject uri = QJniObject::callStaticObjectMethod(
-        "androidx/core/content/FileProvider",
-        "getUriForFile",
-        "(Landroid/content/Context;Ljava/lang/String;Ljava/io/File;)Landroid/net/Uri;",
-        context.object(),
-        authorityObj.object<jstring>(),
-        file.object());
-
-    if (!uri.isValid()) {
-        qWarning() << "Failed to get content URI for file";
-        // Fallback: just notify user of file location
-        emit scaleLogMessage("Log saved to: " + m_scaleLogFilePath);
-        return;
-    }
-
-    // Create share intent
-    QJniObject actionSend = QJniObject::fromString("android.intent.action.SEND");
-    QJniObject intent("android/content/Intent", "(Ljava/lang/String;)V", actionSend.object<jstring>());
-
-    QJniObject mimeType = QJniObject::fromString("text/plain");
-    intent.callObjectMethod("setType", "(Ljava/lang/String;)Landroid/content/Intent;", mimeType.object<jstring>());
-
-    QJniObject extraStream = QJniObject::getStaticObjectField<jstring>("android/content/Intent", "EXTRA_STREAM");
-    intent.callObjectMethod("putExtra", "(Ljava/lang/String;Landroid/os/Parcelable;)Landroid/content/Intent;",
-                           extraStream.object<jstring>(), uri.object());
-
-    // Add grant read permission flag
-    intent.callObjectMethod("addFlags", "(I)Landroid/content/Intent;", 1);  // FLAG_GRANT_READ_URI_PERMISSION
-
-    // Create chooser
-    QJniObject chooserTitle = QJniObject::fromString("Share Scale Debug Log");
-    QJniObject chooser = QJniObject::callStaticObjectMethod(
-        "android/content/Intent",
-        "createChooser",
-        "(Landroid/content/Intent;Ljava/lang/CharSequence;)Landroid/content/Intent;",
-        intent.object(),
-        chooserTitle.object<jstring>());
-
-    chooser.callObjectMethod("addFlags", "(I)Landroid/content/Intent;", 0x10000000);  // FLAG_ACTIVITY_NEW_TASK
-
-    // Start the chooser activity
-    context.callMethod<void>("startActivity", "(Landroid/content/Intent;)V", chooser.object());
-
-    emit scaleLogMessage("Opening share dialog...");
-
-#elif defined(Q_OS_IOS)
-    // iOS: Use UIActivityViewController for sharing
-    NSString* filePath = m_scaleLogFilePath.toNSString();
-    NSURL* fileURL = [NSURL fileURLWithPath:filePath];
-
-    if (![[NSFileManager defaultManager] fileExistsAtPath:filePath]) {
-        qWarning() << "Log file does not exist:" << m_scaleLogFilePath;
-        emit scaleLogMessage("Error: Log file not found");
-        return;
-    }
-
-    // Create activity view controller with the file URL
-    NSArray* activityItems = @[fileURL];
-    UIActivityViewController* activityVC = [[UIActivityViewController alloc]
-        initWithActivityItems:activityItems
-        applicationActivities:nil];
-
-    // Get the root view controller to present from
-    UIWindow* keyWindow = nil;
-    for (UIScene* scene in [UIApplication sharedApplication].connectedScenes) {
-        if ([scene isKindOfClass:[UIWindowScene class]]) {
-            UIWindowScene* windowScene = (UIWindowScene*)scene;
-            for (UIWindow* window in windowScene.windows) {
-                if (window.isKeyWindow) {
-                    keyWindow = window;
-                    break;
-                }
-            }
-        }
-        if (keyWindow) break;
-    }
-
-    UIViewController* rootVC = keyWindow.rootViewController;
-    if (rootVC) {
-        // For iPad, we need to set the popover presentation
-        if (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad) {
-            activityVC.popoverPresentationController.sourceView = rootVC.view;
-            activityVC.popoverPresentationController.sourceRect = CGRectMake(
-                rootVC.view.bounds.size.width / 2,
-                rootVC.view.bounds.size.height / 2,
-                0, 0);
-        }
-
-        [rootVC presentViewController:activityVC animated:YES completion:nil];
-        emit scaleLogMessage("Opening share dialog...");
+// Clears the per-message warn budgets so the next failure of each kind is loud
+// again. Called on a successful connect AND on any fresh user-initiated attempt:
+// a user who plugs the scale in and taps Connect after an hour of a dead ladder
+// is asking a new question, and the answer must not arrive at DEBUG because the
+// ladder had already used up the budget. Missing the user-initiated half was the
+// actual defect — the two sibling latches (m_scaleConnectionFailed,
+// m_flowScaleFallbackEmitted) were reset on those paths and this was not.
+// Same budget, [DE1] marker. Needed because the DE1's "no machine found" outcome
+// is reported once per scan cycle and the reconnect ladder scans forever, so a
+// flat WARN there would be the cry-wolf pattern all over again.
+void BLEManager::de1RepeatFailure(const QString& message) {
+    const int count = ++m_repeatFailureCounts[message];
+    if (count <= kScaleFailuresAtWarn) {
+        de1Warn(message);
     } else {
-        qWarning() << "Could not find root view controller for sharing";
-        emit scaleLogMessage("Error: Could not open share dialog");
+        de1Debug(QString("%1 (repeat %2)").arg(message).arg(count));
     }
+}
 
-#else
-    // Desktop: just show the file path
-    emit scaleLogMessage("Log saved to: " + m_scaleLogFilePath);
-    qDebug() << "Scale log saved to:" << m_scaleLogFilePath;
-#endif
+void BLEManager::resetRepeatFailureBudget() {
+    m_repeatFailureCounts.clear();
+}
+
+// The DE1 tiers. One write, to the system log, carrying the marker.
+//
+// Each of these also emitted de1LogMessage, a signal whose only consumer was the
+// connections-page DE1 window. That is gone: the view reads the system log now, so
+// the second write is not just redundant but was the thing keeping a bare,
+// level-less copy of every line alive.
+void BLEManager::de1Debug(const QString& message, const QString& source) {
+    DE1_LOG_STDERR_DYN(source, message);
+}
+
+void BLEManager::de1Info(const QString& message, const QString& source) {
+    DE1_INFO_STDERR_DYN(source, message);
+}
+
+void BLEManager::de1Warn(const QString& message, const QString& source) {
+    DE1_WARN_STDERR_DYN(source, message);
+}
+
+// The refractometer tiers. Same shape as the scale ones, different marker.
+//
+// Both record into the scale log because that is the view the refractometer is
+// shown in — it is listed on the connections page beside the scales, and its
+// "Share Log" is the same export. The marker is what keeps the two subsystems
+// separable in the system log despite sharing that one sink.
+void BLEManager::refractometerDebug(const QString& message, const QString& source) {
+    REFRACTOMETER_LOG_STDERR_DYN(source, message);
+}
+
+void BLEManager::refractometerInfo(const QString& message, const QString& source) {
+    REFRACTOMETER_INFO_STDERR_DYN(source, message);
+}
+
+// The private scale-log channel that used to live here is GONE:
+// appendScaleLog(), m_scaleLogMessages, clearScaleLog(), getScaleLogPath(),
+// writeScaleLogToFile(), shareScaleLog() and scale_debug_log.txt.
+//
+// It existed because the connections-page view and the "Share Log" button had no
+// other source. Both now read the system log — the view through
+// WebDebugLogger::sessionLinesMatching(), Share through shareSystemLog() below —
+// so the buffer was a second copy of lines already on disk, capped at 1000, and
+// the file was a scale-only subset that omitted the DE1 and everything else that
+// ran alongside a failure. Users have been asked for the system log for a while;
+// this removes the thing that made the other file look like an alternative.
+//
+void BLEManager::shareSystemLog() {
+    // The system log is what users are asked for now, and it is already on disk —
+    // nothing to assemble first, unlike the scale log above.
+    WebDebugLogger* logger = WebDebugLogger::instance();
+    if (!logger) {
+        scaleWarn(QStringLiteral("Cannot share the debug log: the logger is not installed"));
+        return;
+    }
+    const FileShare::Result r =
+        FileShare::shareFile(logger->logFilePath(), QStringLiteral("Share Debug Log"));
+    if (!r.ok) {
+        scaleWarn(QStringLiteral("Share failed: %1").arg(r.message));
+    } else if (!r.message.isEmpty()) {
+        scaleInfo(r.message);
+    }
 }
 
 QString BLEManager::translateUiString(const QString& key, const QString& fallback) const {

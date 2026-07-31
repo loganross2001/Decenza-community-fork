@@ -1,3 +1,9 @@
+// The package-row and puck-prep Repeater delegates read this file's ids (`root`,
+// `pickerInfoDialog`); Bound makes them statically resolvable. Both already declare
+// their one injected role, `modelData`, required -- see the comment on the first one,
+// which hit the blank-row failure this pragma would otherwise reintroduce.
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
@@ -11,7 +17,7 @@ import Decenza
 //             registry-backed suggestions; rpmCapable is derived in storage)
 // Opening with open() shows the picker; openForCreate()/openForEdit() jump
 // straight to the form.
-Dialog {
+DecenzaDialog {
     id: root
     parent: Overlay.overlay
     anchors.centerIn: parent

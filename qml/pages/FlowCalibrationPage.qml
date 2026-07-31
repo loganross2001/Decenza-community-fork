@@ -1,10 +1,11 @@
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Templates as T
 import QtQuick.Layouts
 import QtGraphs
 import Decenza
 
-Page {
+T.Page {
     id: calibrationPage
     // Declarative so it re-evaluates on a language change. This used to be an
     // imperative assignment in onCompleted/onActivated, which ran once and left
@@ -253,7 +254,7 @@ Page {
     Connections {
         target: FlowCalibrationModel
         function onDataChanged() {
-            loadData()
+            calibrationPage.loadData()
         }
     }
 

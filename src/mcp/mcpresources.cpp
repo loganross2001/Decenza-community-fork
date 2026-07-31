@@ -6,11 +6,18 @@
 #include "../controllers/profilemanager.h"
 #include "../history/shothistorystorage.h"
 #include "../history/bagid.h"
+#include "../core/logtags.h"
 #include "../core/memorymonitor.h"
 #include "../core/settings.h"
 #include "../core/settings_dye.h"
 #include "../network/webdebuglogger.h"
 #include "mcplogfilter.h"
+
+#include <QFile>
+#include <QFileInfo>
+#include <QMap>
+#include <QSet>
+#include <algorithm>
 
 #include <QDateTime>
 #include <QJsonObject>
@@ -345,20 +352,65 @@ static void appendLogFields(QJsonObject& result, const QList<McpLogFilter::LineM
 
 void registerDebugTools(McpToolRegistry* registry, MemoryMonitor* memoryMonitor)
 {
+    // The subsystem-marker paragraph, BUILT FROM THE REGISTRY (core/logtags.h) rather
+    // than restated here.
+    //
+    // This matters more than it looks. The whole point of the markers is that an
+    // assistant reading a user's log can retrieve one subsystem's story with one
+    // query — and it can only do that if this description names the markers that
+    // exist. A hand-written list here would be a second copy free to drift, and the
+    // failure mode is invisible: a marker the description omits is a marker the
+    // assistant never tries, so the story simply looks absent.
+    QString markerHelp =
+        QStringLiteral("\n\nSUBSYSTEM MARKERS. Device and radio log lines begin with a "
+                       "bracketed subsystem marker, then optionally their own source "
+                       "(\"[Scale][BLE AcaiaScale] tare sent\"). Pass one as `filter` to "
+                       "retrieve that subsystem's whole narrative. Registered markers:");
+    for (const DecenzaLog::Subsystem& sub : DecenzaLog::subsystems()) {
+        markerHelp += QStringLiteral("\n  %1 — %2")
+                          .arg(DecenzaLog::markerFilter(sub.marker), QLatin1String(sub.description));
+    }
+    markerHelp += QStringLiteral(
+        "\n\nA bracketed marker is a SUBSTRING, not a pattern: pass it with `regex` "
+        "false/absent. Under `regex: true`, \"[Scale]\" is a character class matching "
+        "any line containing S, c, a, l or e — i.e. almost every line — which looks "
+        "like a working query returning everything.\n\n"
+        "Severity carries audience, so `minLevel: \"INFO\"` plus a marker is the "
+        "user-facing story for that subsystem and nothing else: DEBUG is developer "
+        "detail (protocol frames, per-poll state), INFO is the narrative a user may "
+        "need (lifecycle, discovery outcomes, connect/disconnect, fallback), WARN and "
+        "above are problems. That pairing is the same predicate the app's own "
+        "connections page uses, so these lines are the ones a user can read on "
+        "screen — but the page shows only the current session and only its last few "
+        "hundred lines, while you are addressing the whole file. Expect to see more "
+        "than the user does, not less.");
+
     // debug_get_log — chunked access to the persisted debug log with session awareness
     registry->registerTool(
         "debug_get_log",
         "Read the persisted debug log. Supports three addressing modes: "
+        "(0) families=true: census of this log's line prefixes — start here when you do not "
+        "already know which subsystem you need, because the markers named below are a "
+        "MINORITY of the log and a subsystem missing from them is not missing from the log. "
         "(1) sessions=true: list all sessions with index, start line, timestamp, and line count. "
         "(2) session=N: address session N (-1=most recent, -2=previous, 0=first). "
         "(3) Default: address the whole log. "
+        "Sessions are listed in the order they were recorded, so index 0 is the oldest "
+        "surviving session and -1 is the run happening now. A session may be reported with "
+        "`timestamp` null and `startTimeKnown` false; its lines are intact and only its "
+        "start time is unknown, so treat null as \"unknown\", never as \"just now\". There "
+        "is more than one cause — the log is capped and trimmed from the front, which can "
+        "remove the oldest session's marker, and a marker can also be left unparseable by a "
+        "run that ended abruptly — so read `startTimeNote` on that session rather than "
+        "assuming which happened. "
         "Within modes 2/3, `filter` (substring, or regex when `regex` is true; case-insensitive) "
         "and `minLevel` (DEBUG/INFO/WARN/ERROR/FATAL, mode-2/3 app log only) narrow which lines "
         "qualify before pagination. `dedupe` collapses consecutive qualifying lines that are "
         "identical apart from each line's own leading timestamp into one entry carrying `count` "
         "and `lastLine` (non-consecutive repeats are not collapsed). `tail` (last N qualifying/"
         "deduped entries) takes precedence over `offset` when both are given. Every returned line "
-        "carries its absolute line number in the `lines` array.",
+        "carries its absolute line number in the `lines` array."
+        + markerHelp,
         QJsonObject{
             {"type", "object"},
             {"properties", QJsonObject{
@@ -373,6 +425,20 @@ void registerDebugTools(McpToolRegistry* registry, MemoryMonitor* memoryMonitor)
                 {"sessions", QJsonObject{
                     {"type", "boolean"},
                     {"description", "If true, return a list of sessions instead of log lines"}
+                }},
+                {"families", QJsonObject{
+                    {"type", "boolean"},
+                    {"description",
+                     "If true, return a census of this log's line prefixes instead of log lines: "
+                     "how many lines carry each REGISTERED marker, each unregistered bracketed "
+                     "prefix, and each bare \"ClassName:\" prefix, plus how many carry no prefix "
+                     "at all. Start here when you do not already know which subsystem you need. "
+                     "The registered markers are the only ones this tool's description names, and "
+                     "they are a minority of the log — a subsystem missing from that list is not "
+                     "absent from the log, it is just not searchable by marker, and this census "
+                     "is how you find out it exists at all. Combine with `session` to census ONE "
+                     "run — unscoped it sums every app version that ever wrote to the ring "
+                     "buffer, which cannot show whether a subsystem got quieter."}
                 }},
                 {"session", QJsonObject{
                     {"type", "integer"},
@@ -424,10 +490,197 @@ void registerDebugTools(McpToolRegistry* registry, MemoryMonitor* memoryMonitor)
             const qsizetype limit = qBound(qsizetype(1), static_cast<qsizetype>(args["limit"].toInt(500)), qsizetype(2000));
             const bool narrowed = !filter.isEmpty() || !minLevel.isEmpty() || tailActive || dedupe;
 
+            // Mode 0: families=true — a census of this log's prefixes.
+            //
+            // Computed from the log in hand rather than from a list in the source.
+            // A static list would be one more thing to drift, and would describe
+            // the build rather than the file the reader is holding — a family that
+            // never fired this run would still be advertised, and one added since
+            // would be missing. This cannot be wrong about the log it just read.
+            if (args["families"].toBool()) {
+                QSet<QString> registered;
+                for (const auto& s : DecenzaLog::subsystems())
+                    registered.insert(QString::fromUtf8(s.marker));
+
+                // Honours `session`, because a whole-file census answers the wrong
+                // question after a change. The log is a ring buffer spanning app
+                // versions, so "did that subsystem get quieter" is only answerable
+                // by comparing ONE session against another — and the first real use
+                // of this tool wanted exactly that and could not do it. Without
+                // `session` the census reports the sum of every build that ever
+                // wrote to the file, which is honest about the file and useless for
+                // the comparison.
+                QJsonObject scopeFields;
+                qsizetype scanFrom = 0;
+                qsizetype scanCount = 1000000;
+                if (args.contains("session")) {
+                    qsizetype total = 0;
+                    const QList<WebDebugLogger::SessionBoundary> sessions =
+                        logger->sessionIndex(&total);
+                    qsizetype idx = static_cast<qsizetype>(args["session"].toInt(0));
+                    if (idx < 0)
+                        idx = sessions.size() + idx;
+                    if (idx < 0 || idx >= sessions.size()) {
+                        return QJsonObject{{"error", "Session index out of range"},
+                                           {"sessionCount", static_cast<int>(sessions.size())}};
+                    }
+                    scanFrom = sessions[idx].startLine;
+                    scanCount = sessions[idx].lineCount;
+                    scopeFields["session"] = static_cast<int>(idx);
+                    scopeFields["sessionLines"] = static_cast<int>(scanCount);
+                    if (!sessions[idx].timestamp.isEmpty())
+                        scopeFields["sessionTimestamp"] = sessions[idx].timestamp;
+                }
+
+                qsizetype scanned = 0;
+                const QStringList all =
+                    logger->getPersistedLogChunk(scanFrom, scanCount, &scanned);
+                QMap<QString, int> reg, unreg, cls;
+                int none = 0;
+                for (const QString& l : all) {
+                    const auto p = McpLogFilter::linePrefix(l, registered);
+                    switch (p.kind) {
+                    case McpLogFilter::PrefixKind::RegisteredMarker:     reg[p.token]++;   break;
+                    case McpLogFilter::PrefixKind::UnregisteredBracket:  unreg[p.token]++; break;
+                    case McpLogFilter::PrefixKind::ClassPrefix:          cls[p.token]++;   break;
+                    case McpLogFilter::PrefixKind::None:                 ++none;           break;
+                    }
+                }
+                // Carried into every `searchWith` so the string stays pasteable: a
+                // scoped census whose filters silently addressed the whole log
+                // would hand the reader counts from one session and lines from all
+                // of them.
+                const QString scopeSuffix = scopeFields.contains("session")
+                    ? QStringLiteral(", session=%1").arg(scopeFields["session"].toInt())
+                    : QString();
+
+                const auto toArray = [&scopeSuffix](const QMap<QString, int>& m, const QString& how) {
+                    // Descending by line count: the families worth knowing about are
+                    // the ones with volume, and an alphabetical list buries them.
+                    QList<QPair<int, QString>> rows;
+                    for (auto it = m.constBegin(); it != m.constEnd(); ++it)
+                        rows.append({it.value(), it.key()});
+                    std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) {
+                        return a.first != b.first ? a.first > b.first : a.second < b.second;
+                    });
+                    QJsonArray out;
+                    for (const auto& r : rows)
+                        out.append(QJsonObject{{"prefix", r.second}, {"lines", r.first},
+                                               {"searchWith", how.arg(r.second) + scopeSuffix}});
+                    return out;
+                };
+
+                // An empty census has two causes and MUST NOT report them the same
+                // way. "Every list is empty" reads as a quiet log — a reader draws
+                // the conclusion that nothing happened and moves on — when the
+                // actual state may be that the file is missing or unreadable and
+                // NOTHING has been examined. That is the same
+                // absence-looks-like-evidence failure the census exists to fix, so
+                // it would be a poor thing for the census itself to commit.
+                QString emptyReason;
+                if (all.isEmpty() && scopeFields.contains("session")) {
+                    // A scoped census that found nothing says nothing about the
+                    // FILE — the file is plainly readable, since the session index
+                    // came out of it. Running the file probe here would report
+                    // "genuinely holds no lines" about a log with thousands.
+                    emptyReason = QStringLiteral("session %1 contains no lines")
+                                      .arg(scopeFields["session"].toInt());
+                } else if (all.isEmpty()) {
+                    const QString path = logger->logFilePath();
+                    QFile probe(path);
+                    if (!QFileInfo::exists(path))
+                        emptyReason = QStringLiteral("no log file exists at %1 — nothing was "
+                                                     "examined").arg(path);
+                    else if (!probe.open(QIODevice::ReadOnly))
+                        emptyReason = QStringLiteral("log file %1 could not be opened (%2) — "
+                                                     "nothing was examined")
+                                          .arg(path, probe.errorString());
+                    else
+                        emptyReason = QStringLiteral("log file %1 exists and is readable, and "
+                                                     "genuinely holds no lines").arg(path);
+                }
+
+                QJsonObject census{
+                    {"linesScanned", static_cast<double>(all.size())},
+                    {"registeredMarkers", toArray(reg, QStringLiteral("filter=\"[%1]\""))},
+                    {"unregisteredBracketPrefixes",
+                     toArray(unreg, QStringLiteral("filter=\"[%1]\""))},
+                    {"classPrefixes", toArray(cls, QStringLiteral("filter=\"%1:\""))},
+                    {"linesWithNoPrefix", none},
+                    {"note",
+                     "Only `registeredMarkers` are named in this tool's description and guaranteed "
+                     "to return a subsystem's WHOLE story from one search. The other two lists are "
+                     "searchable with the `searchWith` filter shown, but that filter is a plain "
+                     "substring over one hand-written prefix, so it may be incomplete where the "
+                     "same subsystem logs under more than one spelling. `linesWithNoPrefix` are "
+                     "attributable to nothing and can only be found by content. "
+                     "IMPORTANT: a census describes LINES, not the current build. The log is a "
+                     "ring buffer spanning many runs and possibly several app versions, so an "
+                     "unregistered prefix here may be one that has since been converted and no "
+                     "longer occurs — it is evidence about the lines in front of you, not about "
+                     "what the code still does. Pass `session` (e.g. -1) to scope the census to "
+                     "ONE run: an unscoped census sums every build that ever wrote to the file, "
+                     "which cannot answer whether a subsystem got quieter."},
+                };
+                for (auto it = scopeFields.constBegin(); it != scopeFields.constEnd(); ++it)
+                    census[it.key()] = it.value();
+                census["scope"] = scopeFields.contains("session")
+                    ? QStringLiteral("one session")
+                    : QStringLiteral("whole log — pass `session` to scope to a single run");
+                if (!emptyReason.isEmpty())
+                    census["emptyBecause"] = emptyReason;
+                return census;
+            }
+
             // Mode 1/2: sessions=true or session=N — resolve via the cached index.
             if (args.contains("sessions") || args.contains("session")) {
                 qsizetype totalLines = 0;
                 const QList<WebDebugLogger::SessionBoundary> sessions = logger->sessionIndex(&totalLines);
+
+                // One writer for a session's start time, because it is reported
+                // from two places (the list below and the single-session result
+                // further down) and they must not describe an unknown start
+                // differently.
+                //
+                // An unknown start is reported as JSON null plus an explicit
+                // flag and reason, never as "". An empty string reads to a
+                // consumer as a parse failure in the tool, which sends the reader
+                // looking for a bug here instead of understanding that the
+                // information was destroyed by a log trim before they arrived.
+                // The note must not assert a CAUSE it cannot know. An empty
+                // timestamp has two sources, and only the first is a trim:
+                //
+                //   startLine == 0  the leading fragment, whose marker the trim
+                //                   took. Oldest in the file, by construction.
+                //   startLine  > 0  a marker that parsed as a boundary but whose
+                //                   timestamp did not read — a line truncated by
+                //                   a killed process, say. Nothing to do with
+                //                   trimming, and NOT the oldest session.
+                //
+                // The note used to state the trim story unconditionally, so a
+                // torn mid-file marker was reported with a confident wrong
+                // explanation and a false claim about its position. Writing a
+                // cause you have not established is the same defect as the forged
+                // timestamp this whole change exists to remove; it is just harder
+                // to catch, because prose does not fail a test.
+                const auto describeStart = [](const WebDebugLogger::SessionBoundary& b,
+                                              QJsonObject& into) {
+                    if (b.timestamp.isEmpty()) {
+                        into["timestamp"] = QJsonValue();  // null
+                        into["startTimeKnown"] = false;
+                        into["startTimeNote"] = b.startLine == 0
+                            ? "This session's start marker was removed when the log file was "
+                              "trimmed from the front. Its lines are intact; only its start "
+                              "time is unrecoverable. It is the oldest session in the file."
+                            : "This session's start marker is present but its timestamp did "
+                              "not parse — most likely a line truncated when the previous run "
+                              "ended abruptly. Its lines are intact; only its start time is "
+                              "unreadable.";
+                    } else {
+                        into["timestamp"] = b.timestamp;
+                        into["startTimeKnown"] = true;
+                    }
+                };
 
                 if (args["sessions"].toBool()) {
                     QJsonArray sessionList;
@@ -437,7 +690,7 @@ void registerDebugTools(McpToolRegistry* registry, MemoryMonitor* memoryMonitor)
                         s["negativeIndex"] = static_cast<int>(i - sessions.size());
                         s["startLine"] = static_cast<int>(sessions[i].startLine);
                         s["lineCount"] = static_cast<int>(sessions[i].lineCount);
-                        s["timestamp"] = sessions[i].timestamp;
+                        describeStart(sessions[i], s);
                         sessionList.append(s);
                     }
                     return QJsonObject{
@@ -471,7 +724,18 @@ void registerDebugTools(McpToolRegistry* registry, MemoryMonitor* memoryMonitor)
 
                 QJsonObject result;
                 result["session"] = static_cast<int>(sessionIdx);
-                result["sessionTimestamp"] = sessions[sessionIdx].timestamp;
+                {
+                    // Same shape as the list mode, via the same writer: the key
+                    // is named sessionTimestamp here for backward compatibility,
+                    // so rename what describeStart() wrote rather than composing
+                    // a second description of an unknown start.
+                    QJsonObject start;
+                    describeStart(sessions[sessionIdx], start);
+                    result["sessionTimestamp"] = start["timestamp"];
+                    result["sessionStartTimeKnown"] = start["startTimeKnown"];
+                    if (start.contains("startTimeNote"))
+                        result["sessionStartTimeNote"] = start["startTimeNote"];
+                }
                 result["offsetLines"] = static_cast<int>(offset);
                 result["limitLines"] = static_cast<int>(limit);
                 result["sessionLines"] = static_cast<int>(sessLines);

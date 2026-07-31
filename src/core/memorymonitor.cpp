@@ -2,6 +2,7 @@
 #include "sanitizers.h"
 #include <QCoreApplication>
 #include <QDateTime>
+#include <cmath>
 #include <QDebug>
 #include <QJsonDocument>
 #include <QQmlApplicationEngine>
@@ -54,7 +55,8 @@ void MemoryMonitor::onSampleTimerTick()
         m_firstSample = false;
     }
 
-    if (rss > m_peakRss)
+    const bool newPeak = (rss > m_peakRss);
+    if (newPeak)
         m_peakRss = rss;
 
     MemorySample sample;
@@ -69,8 +71,40 @@ void MemoryMonitor::onSampleTimerTick()
     double rssMB = rss / (1024.0 * 1024.0);
     double peakMB = m_peakRss / (1024.0 * 1024.0);
 
+    // Sampling stays at 60 s — the ring buffer behind getMemorySummary() is what makes a leak
+    // visible after the fact, and coarsening it would blunt exactly the thing this class is for.
+    // The LOG line is what gets collapsed: 3,107 lines in a 48-hour capture, 15% of the whole log,
+    // and for 16 of those hours it reported the same plateau over and over (RSS drifting inside a
+    // 5 MB band, QObjects pinned at 9,605).
+    //
+    // The gate text is QUANTIZED rather than the message itself, because the message never repeats
+    // byte-for-byte — RSS moves 0.1 MB between any two samples. "Same plateau" collapses while a
+    // real step change prints at once. A new peak always prints: it is the one sample that cannot
+    // be reconstructed from a later line.
+    //
+    // QUANTIZED AGAINST THE LAST LINE PRINTED, NOT A FIXED BUCKET. This used
+    // static_cast<int>(rssMB / 5.0), and a real Android capture shows why that fails: RSS sat at
+    // 119.1–121.6 MB, straddling the 120.0 bucket edge, so consecutive samples alternated between
+    // buckets 23 and 24 and the "collapsed" line printed 160 times in one session — roughly every
+    // other sample, for memory that never moved 2.5 MB. A fixed grid is only quiet when the value
+    // happens to sit mid-bucket, which is not something a memory figure will do for you.
+    //
+    // Anchoring the band to the last PRINTED value removes the edge entirely: nothing prints until
+    // RSS is genuinely 5 MB away from what was last reported, and a real climb still prints once
+    // per 5 MB. Object count keeps a fixed bucket — it is a count that steps rather than jitters,
+    // so it has no edge to oscillate across.
+    if (m_lastLoggedRssMB < 0.0 || std::abs(rssMB - m_lastLoggedRssMB) >= 5.0)
+        m_lastLoggedRssMB = rssMB;
+    const QString gate = QStringLiteral("rss%1|obj%2")
+                             .arg(m_lastLoggedRssMB, 0, 'f', 1)
+                             .arg(objCount / 25);
+    LogCollapse::Collapsed collapsed;
+    const bool speak = m_logCollapse.shouldLog(QStringLiteral("sample"), gate,
+                                               sample.timestampMs, &collapsed)
+                       || newPeak;
+    if (speak) {
+        const QByteArray tail = m_logCollapse.suffix(collapsed).toUtf8();
 #ifdef Q_OS_ANDROID
-    {
         QJniObject runtime = QJniObject::callStaticObjectMethod(
             "java/lang/Runtime", "getRuntime", "()Ljava/lang/Runtime;");
         if (runtime.isValid()) {
@@ -79,15 +113,17 @@ void MemoryMonitor::onSampleTimerTick()
             jlong max   = runtime.callMethod<jlong>("maxMemory");
             double javaUsedMB = (total - free) / (1024.0 * 1024.0);
             double javaMaxMB  = max / (1024.0 * 1024.0);
-            qDebug("[Memory] RSS: %.1f MB  Java heap: %.1f / %.1f MB  QObjects: %d  peak: %.1f MB",
-                   rssMB, javaUsedMB, javaMaxMB, objCount, peakMB);
+            qDebug("[Memory] RSS: %.1f MB  Java heap: %.1f / %.1f MB  QObjects: %d  peak: %.1f MB%s",
+                   rssMB, javaUsedMB, javaMaxMB, objCount, peakMB, tail.constData());
         } else {
-            qDebug("[Memory] RSS: %.1f MB, QObjects: %d, peak: %.1f MB", rssMB, objCount, peakMB);
+            qDebug("[Memory] RSS: %.1f MB, QObjects: %d, peak: %.1f MB%s", rssMB, objCount, peakMB,
+                   tail.constData());
         }
-    }
 #else
-    qDebug("[Memory] RSS: %.1f MB, QObjects: %d, peak: %.1f MB", rssMB, objCount, peakMB);
+        qDebug("[Memory] RSS: %.1f MB, QObjects: %d, peak: %.1f MB%s", rssMB, objCount, peakMB,
+               tail.constData());
 #endif
+    }
 
     emit sampleTaken();
 

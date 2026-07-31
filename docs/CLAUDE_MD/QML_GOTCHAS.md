@@ -88,6 +88,8 @@ KeyboardAwareContainer {
 
 Never override FINAL properties on Qt types. Qt 6.10+ marks some `Popup`/`Dialog` properties as FINAL (e.g., `message`, `title`). Declaring `property string message` on a Dialog will prevent the component from loading. Use a different name (e.g., `resultMessage`), or use the inherited property directly if it already exists on the base type.
 
+**This is not the same rule as `SETTINGS.md`'s "always add `FINAL`".** Two different things share the keyword: *don't shadow someone else's* `FINAL` property (this section), and *do mark your own* `Q_PROPERTY` final when QML chains a lookup through it, so qmlcachegen will AOT-compile it (`SETTINGS.md`, and `src/core/settings.h`). They never conflict — one is about a base type you don't own, the other about a property you declare.
+
 ## `elide` is silently ignored on `Text.RichText` — use `Text.StyledText`
 
 Qt applies `elide` to `Text.PlainText` and `Text.StyledText`, but **not `Text.RichText`** (a `QTextDocument`-backed format). A label with `textFormat: Text.RichText` and `elide: Text.ElideRight` does not truncate — it overruns its width and hard-clips mid-glyph with no ellipsis, which shows up on wider/fallback system fonts (issue #1469). Default to `Text.StyledText` for any HTML-ish label; it supports the tags we use (`<b> <i> <font color> <a href> <img> <br>`) and is lighter than RichText. Reserve `Text.RichText` for the rare label that genuinely needs `QTextDocument`-only features (tables, CSS blocks) — we currently have none. For inline emoji, `Theme.replaceEmojiWithImg` emits `<img align="middle">`, which StyledText honors (it ignores the CSS `style=` attribute). `TextEdit.RichText` (editable fields) is unaffected — this is about read-only `Text`.
@@ -279,12 +281,22 @@ Two mechanical traps when adding `QML_ELEMENT` to a header:
   guard passes, and the next member access dereferences null. `USBManager` and `UsbScaleManager`
   hit exactly this: three bindings in `SettingsConnectionsTab.qml` would have thrown on iOS, and
   a `visible:` gate does not save you, because an invisible element's bindings still evaluate.
+  - **`USBManager` and `UsbScaleManager` are no longer the live example — they are unregistered on
+    iOS again** (#1696). Registering them there meant naming the types, naming them meant including
+    headers that include `<QSerialPort>`, and iOS builds no part of `src/usb/` and links no
+    SerialPort module — it broke the iOS release build outright. So for those two on iOS the name
+    does not resolve at all: `typeof` is `"undefined"` and a bare reference is a **ReferenceError**,
+    not a truthy wrapper. Both failure modes are real; which one you get depends on whether the
+    TYPE is registered on that platform, and that is the question to answer before writing a guard.
   - Fix: guard on the **condition**, not on the name's existence — the file's own
-    `readonly property bool usbAvailable: Qt.platform.os !== "ios"`, or a plain truthiness test
-    (`X ? X.member : ...`), both of which are correct for a null singleton *and* an absent one.
-  - Use `decenzaOptionalSingleton()` (not `decenzaPublishedSingleton()`) for a name whose instance
-    legitimately does not exist on some builds; the loud helper would `qCritical` on every launch
-    of the platform that is behaving correctly.
+    `readonly property bool usbAvailable: Qt.platform.os !== "ios"`. A plain truthiness test
+    (`X ? X.member : ...`) is correct only for a registered-but-null singleton; on an unregistered
+    name the bare `X` throws before the `?` is reached, so it is not a substitute.
+  - Use `decenzaOptionalSingleton()` (not `decenzaPublishedSingleton()`) only where the type is
+    registered on a build that cannot publish an instance — `GHCSimulator` is the one such case
+    left; the loud helper would `qCritical` on every launch of the platform that is behaving
+    correctly. Where the registration and the publish share one `#ifdef`, use the loud form: a null
+    there is a real defect, not a platform.
   - Grep for `typeof <Name>` before migrating. If there are none, check anyway for
     `Qt.platform.os` tests near the uses — those are the same guard written a different way, and
     they are the ones that stay correct.
@@ -478,7 +490,82 @@ So the name passes both halves of the usual guard and the first method call thro
 
 **Guard the member you are about to use, or use a platform check** (`Qt.platform.os !== "ios"`),
 which short-circuits before the member read — that is why `USBManager`'s call sites were never
-affected while `GHCSimulator`'s were. `GHCSimulator` is registered wherever `DECENZA_SIMULATOR` is
+affected while `GHCSimulator`'s were.
+
+The member guard is right for *this* case and wrong for its mirror image: a type that is **not
+registered on the build at all** (`USBManager` and `UsbScaleManager` on iOS, since #1696). There
+the name resolves to nothing and Qt throws — `qv4qmlcontext.cpp:552-553` ends the lookup with
+`engine->throwReferenceError(name->toQString())` — so the bare name in `X.doThing !== undefined`
+throws before the member is reached. A platform check is the one idiom correct in both cases; use
+it whenever a `#ifdef` decides whether the type exists. `GHCSimulator` is registered wherever `DECENZA_SIMULATOR` is
 defined (every desktop config) but instanced only on a **debug** Windows/macOS build, so the broken
 guard passed — and threw on every window activation — on Linux, on Release desktop and on mobile
 Debug, while working on exactly the two configurations it gets tested on.
+
+## A nested event loop reachable from a QML signal handler is a crash, not a slowdown
+
+`QCoreApplication::processEvents()` (and anything that spins its own `QEventLoop` — a
+`QEventLoop::exec()` wrapped around a network reply, a `QThread::wait()` on the GUI thread) is not
+"the same work with the UI kept responsive". It delivers **queued events** while a QML signal
+handler is still on the stack, and if one of them destroys an object that handler belongs to, Qt
+does not limp on — `QQmlData::destroyed()` calls **`qFatal()`**
+(`qtdeclarative/src/qml/qml/qqmlengine.cpp:1370-1396`):
+
+```
+Object 0x12a0fa680 destroyed while one of its QML signal handlers is in progress.
+Most likely the object was deleted synchronously (use QObject::deleteLater() instead), or the
+application is running a nested event loop.
+This behavior is NOT supported!
+qrc:/qt/qml/Decenza/qml/pages/SettingsPage.qml:106: function() { [native code] }
+```
+
+(abridged — Qt appends up to 96 characters of the handler's own source to the location line.)
+
+That is issue #1692, on shipped iOS 2.0.0, as a **SIGABRT** rather than the SIGSEGV most crash
+reports show. Symbolicated, the chain is five frames long and none of it looks dangerous in
+isolation:
+
+```
+TabBar.onCurrentIndexChanged  ->  markTabLoaded() writes loadedTabs
+  -> Loader.active binding -> QQmlComponent::create  (SYNCHRONOUS: SettingsPage sets
+                                                      asynchronous: false on the tab Loaders)
+    -> SettingsLanguageTab.Component.onCompleted -> TranslationManager::scanAllStrings()
+      -> processEvents()   <-- nested pump
+        -> QCoreApplicationPrivate::sendPostedEvents -> QObject::event
+          -> ~QQmlElement<QQuickPage> deletes its children, incl. the TabBar still in its handler
+```
+
+(`SettingsPage.qml:106` was `onCurrentIndexChanged` in v2.0.0; the handler is further down the
+file on main today. Go by the name, not the number.)
+
+**What is established and what is not.** The stack proves an event delivered inside the pump
+destroyed the page — `QObject::event` deletes on `DeferredDelete` at `qobject.cpp:1463-1464`. It
+does **not** prove *which* posted event, and the obvious story is the one Qt guards against: a bare
+`processEvents()` normally will NOT deliver a queued `DeferredDelete`. `qcoreapplication.cpp:1858-1873`
+allows one through only when it was posted at a deeper loop+scope level than the pump, or before
+the outermost loop, or when `DeferredDelete` is passed explicitly; `qobject.cpp:2534-2557` records
+those levels specifically so that
+
+```cpp
+foo->deleteLater();
+qApp->processEvents();   // without passing QEvent::DeferredDelete
+```
+
+does not delete `foo`. So either one of those clauses held on the device, or the destroyer was a
+different queued event — a queued signal, a timer, a `Loader` status change — that deleted
+synchronously. Qt's own message lists "deleted synchronously" first for that reason. Do not repeat
+the tidier version of this story as fact; it is the version this file shipped with and it does not
+survive the sources.
+
+The rule survives the uncertainty, and it is the part that matters:
+
+- Long work reachable from QML goes on a **worker thread** with results posted back via
+  `QMetaObject::invokeMethod(..., Qt::QueuedConnection)`, or is chunked across event-loop turns.
+  Never pumped inline. `TranslationManager::scanAllStrings()` is the worked example.
+- A progress bar is not a reason to pump. If the UI needs to animate during the work, that is
+  precisely the case that needs the work off the calling stack.
+- This is invisible in the UI and in a normal test run — it needs a pending delete to coincide.
+  Pin the asynchrony with a test (`tests/tst_translationscan.cpp` posts a sentinel queued event and
+  asserts it has NOT run when the call returns, which is an assertion about the event queue rather
+  than about when a signal arrives), because "make it synchronous again, it's simpler" reads as a
+  harmless cleanup.

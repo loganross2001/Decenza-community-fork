@@ -180,6 +180,7 @@ Item {
         target: root._voiceInput
         ignoreUnknownSignals: true
         function onFinalText(text) {   // spoken utterance → the AI; pause the mic until the turn is done
+            if (root._nc) return   // [barista-fork] new path: the controller receives finalText directly (C++)
             // [barista-fork] NOTE: voice-ID must NEVER capture during a live STT turn — Android's mic-contention
             // policy silences the recognizer while a 2nd QAudioSource is open, so the recognizer missed the first
             // 3-6s of speech. The increment-2 concurrent capture was removed; ID now happens only off the STT
@@ -217,6 +218,7 @@ Item {
             else root._stopSpeechScroll()
         }
         function onSpeakingChanged() {
+            if (root._nc) return   // [barista-fork] new path: the controller owns speech-end → mic/close (avatar mouth is audible-driven, separate)
             root._diag("speaking_changed", { speaking: root._voice ? root._voice.speaking : false, endAfter: root._endAfterReply })
             // [barista-fork] Part B: the barista actually started talking → the silence is broken, so kill the
             // 5s cue timer + clear the cue (belt-and-suspenders alongside _markSpokeThisTurn on the speak call).
@@ -279,6 +281,7 @@ Item {
         target: (typeof Barista !== "undefined") ? Barista.coachingVoice : null
         ignoreUnknownSignals: true
         function onSpeakingChanged() {
+            if (root._nc) return   // [barista-fork] new path: SpeakerGate handles coaching→mic (gate closes while coaching speaks)
             if (!root._voiceInput || !root._voiceInput.listening) return
             if (Barista.coachingVoice && Barista.coachingVoice.speaking) {
                 root._voiceInput.pauseMic()
@@ -1301,6 +1304,10 @@ Item {
         root._primed = true
         root._sessionBegun = false
         root._thinking = false   // nothing is thinking — we're waiting on the user, not the model
+        // [barista-fork] new path: the system prompt is primed → tell the controller context is ready. It moves
+        // Priming→Listening, and the arbiter opens the mic (no tap-and-talk queue in the new path — the mic
+        // simply opens on entering Listening).
+        if (root._nc) { root._nc.onContextReady(); return }
         // [barista-fork] If the user already spoke while we were building context (tap-and-talk), replay that
         // first utterance now that we're primed — it begins the session with their real words (never dropped).
         if (root._queuedFirstUtterance.length > 0) {
@@ -1517,16 +1524,44 @@ Item {
     // [barista-fork] engage (→ Conversing) → PRIME the context and open the mic (user-initiated: the user
     // tapped/started talking). dismiss (→ Present) → close the session, back to the quiet tab. The barista
     // never speaks first — priming assembles the system prompt and waits for the first utterance.
+    // [barista-fork] Two-way-comms redesign: when the useNewConversation flag is on, `_nc` is the new C++ state
+    // machine and the overlay DELEGATES the conversation lifecycle to it (mic, turns, close), keeping only the
+    // presentation. Null (→ legacy path) when the flag is off. Re-evaluates when the flag toggles.
+    readonly property var _nc: (typeof Barista !== "undefined" && Barista.conversation
+        && Barista.settings && Barista.settings.useNewConversation) ? Barista.conversation : null
+    // [barista-fork] The controller's OUTPUT seams: it emits these; the overlay drives the (unchanged) AI
+    // dispatch + context build + collapse in response. This keeps AI plumbing in QML for the migration while the
+    // controller owns the state machine (the buggy part). Later phases move dispatch into C++ too.
+    Connections {
+        target: (typeof Barista !== "undefined") ? Barista.conversation : null
+        ignoreUnknownSignals: true
+        function onContextRequested() {   // Priming: assemble context + prime the system prompt
+            if (root._nc) root._startConversation()
+        }
+        function onTurnRequested(utterance) {   // Listening→Thinking produced a user turn → dispatch it
+            if (!root._nc || !root._conv) return
+            if (!root._sessionBegun) { root._conv.beginSession(root._primedSystemPrompt, utterance); root._sessionBegun = true }
+            else root._conv.followUp(utterance)
+        }
+        function onClosingConfirmed() {   // deterministic teardown → hide the dock
+            if (root._orch && typeof root._orch.dismiss === "function") root._orch.dismiss()
+        }
+        function onDisplayTextChanged() { if (root._nc) root._message = root._nc.displayText }
+        function onMessageChanged() { if (root._nc && root._nc.message.length > 0) root._message = root._nc.message }
+    }
+
     Connections {
         target: root._orch
         function onStateChanged() {
             if (!root._orch) return
             if (root._orch.state === "conversing") {
                 root._collapsed = false     // expand the panel
+                if (root._nc) { root._nc.tap(); return }   // [barista-fork] new path: engage the state machine (it drives context+mic)
                 root._startConversation()   // warms context + primes the system prompt; waits for first utterance
                 root._engageOpenMic()       // tap-chat-and-talk: the mic opens with the panel (after the engage test, if on)
             } else {   // "present"
                 root._showSettings = false
+                if (root._nc) root._nc.dismiss()   // [barista-fork] reset the state machine to Idle when the dock hides
                 root._closeSession()
             }
         }
@@ -1583,6 +1618,7 @@ Item {
         function onInterimReceived(text) {
             if (root._state !== "conversing")
                 return
+            if (root._nc) { root._nc.onModelSpeakable(root._stripBlock(text)); return }   // [barista-fork] new path: filler/lead-in → controller
             if (root._awaitingContext)
                 return
             var clean = root._stripBlock(text)
@@ -1610,6 +1646,9 @@ Item {
         function onResponseReceived(response) {
             if (root._state !== "conversing")   // BL-1: reply landed after dismiss (or it's an advisor turn) → ignore
                 return
+            // [barista-fork] new path: the final answer + the close bit → controller (endConversation forced-field
+            // arrives in Phase 2; false for now so the local close-intent accelerator drives closing).
+            if (root._nc) { root._nc.onModelFinal(root._stripBlock(response), false); return }
             if (root._awaitingContext)   // N-R3-2: a preempted turn's reply during our context build → not ours
                 return
             // [barista-fork] Quick-filler abort (owner: "don't say 'one sec' only to answer a second later"):
@@ -1700,6 +1739,7 @@ Item {
         function onErrorOccurred(error) {   // B2: never hang on "…" — surface it and recover the UI
             if (root._state !== "conversing")
                 return
+            if (root._nc) { root._nc.onModelError(error || ""); return }   // [barista-fork] new path: turn error → controller
             if (root._awaitingContext)   // N-R3-2: a preempted turn's error during our context build → not ours
                 return
             root._thinking = false

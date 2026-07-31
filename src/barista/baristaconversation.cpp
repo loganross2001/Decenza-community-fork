@@ -4,6 +4,7 @@
 #include "voiceinput.h"
 #include "speakergate.h"
 #include "baristadiagnostics.h"
+#include "closeintent.h"   // barista::looksLikeClose / barista::looksLikeStall (unit-tested in tst_closeintent)
 
 #include <QDateTime>
 #include <QRegularExpression>
@@ -34,69 +35,9 @@ constexpr int kClosingWatchdogMs = 2500;
 // and return to Listening (today's behaviour).
 constexpr int kMaxAutoContinues  = 1;
 
-// Generous local close-intent (a latency accelerator + fallback — the forced per-turn respond(text,
-// end_conversation) bit is the structural mechanism). Short utterance + a normalised farewell phrase.
-//
-// The old version anchored the farewell at ^…$ with NO prefix handling, so every POLITE goodbye missed:
-// "thanks, that'll be all" didn't start with a listed farewell (the "thanks" prefix broke the anchor) and
-// wasn't in the narrow `thanks,? (that's (it|all)|bye)` branch either — the reported can't-close bug. Fix:
-// strip leading politeness/filler prefixes FIRST, then match the (broadened) farewell set on what remains.
-bool looksLikeClose(const QString& raw)
-{
-    QString t = raw.trimmed().toLower();
-    if (t.isEmpty() || t.length() > 60)
-        return false;
-    // Peel up to two stacked leading prefixes ("ok thanks, …", "alright cool, …") so the farewell that
-    // follows anchors cleanly. Bare politeness ("thanks") strips to empty and does NOT close (too aggressive).
-    static const QRegularExpression prefix(
-        QStringLiteral("^(ok(ay)?|alright|all right|right|so|well|now|um+|uh+|yeah|yep|yes|no|nah|cool|nice|"
-                       "great|perfect|awesome|lovely|thank you so much|thank you|thanks|cheers|"
-                       "appreciate it|i appreciate it)[,.!\\s]+"));
-    for (int i = 0; i < 2; ++i) {
-        const qsizetype before = t.size();
-        t.remove(prefix);
-        t = t.trimmed();
-        if (t.size() == before)
-            break;   // nothing stripped this pass
-    }
-    if (t.isEmpty())
-        return false;
-    static const QRegularExpression re(
-        QStringLiteral("^("
-                       "that'?s (it|all|everything|me|us|enough)( for now| then| done)?|"
-                       "that'?ll (be all|do( it)?)( for now| then)?|"
-                       "that will (be all|do)|"
-                       "we'?re (done|good|all set|all done|finished|set)|"
-                       "i'?m (done|good|all set|all done|finished|fine|set)|"
-                       "(that'?s all|no more|nothing else|nothing more|no more questions)|"
-                       "good ?night|good ?bye|bye( now| bye)?|see ya|see you( later)?|catch you later|"
-                       "all done|all set|we can stop|let'?s stop|stop( there)?|that'?s enough|"
-                       "no (that'?s (it|all)|i'?m (good|done)|thank you|thanks?)"
-                       ")[.!]?$"));
-    return re.match(t).hasMatch();
-}
-
-// [barista-fork] Stall detector: is the model's WHOLE final reply just a promise to continue ("let me check on
-// that", "one moment", "checking…") with no actual answer? Tight on purpose — anchored ^…$ so it matches only a
-// bare stall, never a real answer that happens to open with "let me…". A match means: speak it as a lead-in,
-// keep the turn alive, and fetch the real answer via one continuation (see onModelFinal).
-bool looksLikeStall(const QString& raw)
-{
-    QString t = raw.trimmed().toLower();
-    if (t.isEmpty() || t.length() > 60)
-        return false;
-    t.remove(QRegularExpression(QStringLiteral("[.!,?…]+$")));   // drop trailing punctuation
-    // Peel one leading filler ("ok, …", "sure — …") so the stall stem anchors.
-    t.remove(QRegularExpression(QStringLiteral("^(ok(ay)?|sure|alright|right|well|hmm+|so|yeah|yep)[,.!\\s]+")));
-    t = t.trimmed();
-    static const QRegularExpression re(QStringLiteral(
-        "^(let me |i'?ll |i will |let me just |give me |just |gonna |going to )?"
-        "(check|look|see|find|pull|dig|verify|confirm|find out|look into|check on|look that up|"
-        "hold on|hang on|checking|looking|searching|"
-        "(a|one) (sec|second|moment|minute)|just (a|one) (sec|second|moment|minute)|one moment)"
-        "( that| it| on that| on it| into that| into it| up| that up| it up| for you| for a moment)*$"));
-    return re.match(t).hasMatch();
-}
+// [barista-fork] looksLikeClose() / looksLikeStall() moved to closeintent.{h,cpp} so they can be unit-tested
+// in isolation (pure QtCore, no voice/mic/AI deps) — see tests/tst_closeintent.cpp. Called below as
+// barista::looksLikeClose / barista::looksLikeStall.
 
 // [barista-fork] Self-echo backstop: is `heard` (a first STT result right after the mic opened) mostly a repeat
 // of what the barista just said (`spoken`)? ≥70% of the heard words appearing in the spoken text ⇒ it's the
@@ -315,7 +256,7 @@ void BaristaConversation::onFinalText(const QString& text)
     }
     m_softErrors = 0; m_hardErrors = 0;
     m_autoContinues = 0;   // fresh stall-retry budget for this user turn
-    if (looksLikeClose(text)) {
+    if (barista::looksLikeClose(text)) {
         m_closingArmed = true;
         diag(QStringLiteral("close_intent_local"));
     }
@@ -361,7 +302,7 @@ void BaristaConversation::onModelFinal(const QString& text, bool endConversation
     // continuation to make the model actually produce the answer. Bounded by kMaxAutoContinues so a model that
     // keeps stalling can't loop — after the budget, it falls through to normal delivery below. Never on a
     // close turn (a sign-off is not a stall).
-    if (!endConversation && !m_closingArmed && m_autoContinues < kMaxAutoContinues && looksLikeStall(text)) {
+    if (!endConversation && !m_closingArmed && m_autoContinues < kMaxAutoContinues && barista::looksLikeStall(text)) {
         ++m_autoContinues;
         diag(QStringLiteral("stall_autocontinue"), text.left(40));
         emit continuationRequested();   // module sends a follow-up turn → the real answer arrives via onModelFinal

@@ -396,6 +396,14 @@ add_decenza_test(tst_speechnormalize
     tst_speechnormalize.cpp
 )
 
+# --- tst_closeintent: [barista-fork] the voice-conversation close/stall intent matchers. Pure QString/regex,
+# no voice/mic/AI deps — pins the reported "polite farewell won't close" and "'let me check' stall drops to
+# Listening" regressions (both have re-broken more than once) against re-breaking. ---
+add_decenza_test(tst_closeintent
+    tst_closeintent.cpp
+    ${CMAKE_SOURCE_DIR}/src/barista/closeintent.cpp
+)
+
 # --- tst_speakerembedder: [barista-fork] voice-ID MFCC embedder DSP (FFT/mel/DCT + aggregation). QtCore-only
 # (MfccEmbedder depends on nothing but QVector/QByteArray) — validates determinism + discrimination in software,
 # no device/mic. ---

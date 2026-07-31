@@ -680,7 +680,10 @@ void AssistantSettings::setVoiceIdMaybe(double v) {
 }
 
 bool AssistantSettings::useNewConversation() const {
-    return m_settings.value(QStringLiteral("barista/useNewConversation"), false).toBool();
+    // [barista-fork] Default ON: the new BaristaConversation state machine is now the validated default path
+    // (close/stall hardening landed). The flag is KEPT as the on-device rollback — toggling it off restores the
+    // legacy QML path — so the switch-not-shim design still holds until Phase 4 physically removes the old path.
+    return m_settings.value(QStringLiteral("barista/useNewConversation"), true).toBool();
 }
 
 void AssistantSettings::setUseNewConversation(bool on) {

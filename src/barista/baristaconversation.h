@@ -100,6 +100,8 @@ private:
     QString m_pendingAnswer;                      // answer that arrived while a filler was still playing ("" = none)
     int m_softErrors = 0;                         // NO_MATCH / SPEECH_TIMEOUT run
     int m_hardErrors = 0;                         // ERROR_CLIENT / BUSY run
+    QString m_lastSpokenText;                     // last TTS string — the self-echo text backstop
+    qint64 m_micHotSinceMs = 0;                   // when micLive last went true (self-echo window)
 
     // View mirrors.
     bool m_micLive = false;

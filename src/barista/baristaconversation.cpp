@@ -5,7 +5,9 @@
 #include "speakergate.h"
 #include "baristadiagnostics.h"
 
+#include <QDateTime>
 #include <QRegularExpression>
+#include <QStringList>
 
 namespace {
 // [barista-fork] Timers (design §13). Single, named, in one place — replacing the scattered QML timers.
@@ -33,6 +35,25 @@ bool looksLikeClose(const QString& raw)
                        "i'?m (done|good|all set)|no (that'?s all|thanks?)|goodnight|good night|goodbye|"
                        "bye( now)?|see ya|thanks,? (that'?s (it|all)|bye)|nothing else|all done)\\.?$"));
     return re.match(t).hasMatch();
+}
+
+// [barista-fork] Self-echo backstop: is `heard` (a first STT result right after the mic opened) mostly a repeat
+// of what the barista just said (`spoken`)? ≥70% of the heard words appearing in the spoken text ⇒ it's the
+// speaker's acoustic tail, not the user. Short + generous so "yes, a flat white" (echoing a couple of words) is
+// still safe (few words, low overlap ratio against a long sign-off).
+bool isSelfEcho(const QString& heard, const QString& spoken)
+{
+    if (heard.isEmpty() || spoken.isEmpty())
+        return false;
+    const QStringList words = heard.toLower().split(QRegularExpression(QStringLiteral("\\W+")), Qt::SkipEmptyParts);
+    if (words.isEmpty())
+        return false;
+    const QString sp = QStringLiteral(" ") + spoken.toLower() + QStringLiteral(" ");
+    int hits = 0;
+    for (const QString& w : words)
+        if (sp.contains(QStringLiteral(" ") + w + QStringLiteral(" ")))
+            ++hits;
+    return (static_cast<double>(hits) / words.size()) >= 0.7;
 }
 }  // namespace
 
@@ -163,6 +184,8 @@ void BaristaConversation::updateMicLive()
     if (want == m_micLive)
         return;
     m_micLive = want;
+    if (want)
+        m_micHotSinceMs = QDateTime::currentMSecsSinceEpoch();   // start of the self-echo window
     diag(QStringLiteral("micLive"), want ? QStringLiteral("on") : QStringLiteral("off"));
     if (m_voiceInput)
         m_voiceInput->setActive(want);   // THE only mic control
@@ -207,7 +230,14 @@ void BaristaConversation::onFinalText(const QString& text)
 {
     if (m_state != State::Listening)
         return;   // logged-and-ignored elsewhere; the mic shouldn't be hot outside Listening anyway
-    // (Self-echo text filter is the Phase-3 backstop; the acoustic gate covers the common case.)
+    // Self-echo backstop (belt-and-suspenders to the acoustic gate): a first result within 2s of the mic going
+    // hot that mostly repeats the barista's last line is its own acoustic tail — discard it, keep listening.
+    if (m_micHotSinceMs != 0
+        && (QDateTime::currentMSecsSinceEpoch() - m_micHotSinceMs) < 2000
+        && isSelfEcho(text, m_lastSpokenText)) {
+        diag(QStringLiteral("self_echo_drop"), text.left(40));
+        return;
+    }
     m_softErrors = 0; m_hardErrors = 0;
     if (looksLikeClose(text)) {
         m_closingArmed = true;
@@ -239,6 +269,7 @@ void BaristaConversation::onModelSpeakable(const QString& text)
     if (m_state != State::Thinking && m_state != State::Speaking)
         return;
     setState(State::Speaking);   // turnInFlight stays true
+    m_lastSpokenText = text;     // for the self-echo backstop
     if (m_voice) m_voice->speak(text);
 }
 
@@ -247,6 +278,7 @@ void BaristaConversation::onModelFinal(const QString& text, bool endConversation
     m_closingArmed = m_closingArmed || endConversation;
     m_turnInFlight = false;
     setDisplay(text);
+    m_lastSpokenText = text;   // for the self-echo backstop (covers both the queued + direct speak paths)
     if (m_state == State::Speaking && m_voice && m_voice->speaking()) {
         // A filler/lead-in is still playing — queue the answer; onVoiceSpeakingChanged drains it.
         m_pendingAnswer = text;

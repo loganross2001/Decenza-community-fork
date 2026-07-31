@@ -10,6 +10,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
+#include <QDateTime>
 #include <QRegularExpression>
 #include <QString>
 #include <cmath>
@@ -29,6 +30,10 @@ static QNetworkRequest makeRequest(const QUrl& url)
     QNetworkRequest req(url);
     req.setHeader(QNetworkRequest::UserAgentHeader, kUserAgent);
     req.setTransferTimeout(TRANSFER_TIMEOUT_MS);
+    // [barista-fork] These are real-time feeds (price/weather/news) — always go to the network, never a cached
+    // copy. Belt-and-suspenders: the web-tools QNAM has no cache today, but this guarantees freshness regardless.
+    req.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
+    req.setRawHeader("Cache-Control", "no-cache");
     return req;
 }
 
@@ -202,6 +207,13 @@ void BaristaWebTools::getStockQuote(const QString& symbol, Done done)
         out[QStringLiteral("changePercent")] = QString::number(changePct, 'f', 2).toDouble();
         const QString currency = meta.value(QStringLiteral("currency")).toString();
         if (!currency.isEmpty()) out[QStringLiteral("currency")] = currency;
+        // [barista-fork] Freshness signals so the model can say "as of …" and never present a stale close as a
+        // live price. regularMarketTime is the quote's own timestamp; marketState says whether trading is open.
+        const qint64 mktTime = meta.value(QStringLiteral("regularMarketTime")).toVariant().toLongLong();
+        if (mktTime > 0)
+            out[QStringLiteral("asOf")] = QDateTime::fromSecsSinceEpoch(mktTime).toString(Qt::ISODate);
+        const QString mktState = meta.value(QStringLiteral("marketState")).toString();
+        if (!mktState.isEmpty()) out[QStringLiteral("marketState")] = mktState;   // REGULAR / CLOSED / PRE / POST
         done(out);
     });
 }

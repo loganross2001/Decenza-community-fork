@@ -112,6 +112,7 @@ private:
     // Timers (single-shot unless noted) — the only ones the whole subsystem needs.
     QTimer m_primingTimeout;   // Priming → Listening safety (3s)
     QTimer m_turnTimeout;      // hung-turn guard, reset on model activity (20s)
-    QTimer m_silence;          // Listening (micLive) → NeedsTap (8s)
+    QTimer m_silence;          // Listening (micLive) → NeedsTap (30s)
+    QTimer m_needsTapIdle;     // NeedsTap → silent close if never tapped (walk-away backstop, 45s)
     QTimer m_closingWatchdog;  // Closing → Idle if sign-off TTS never reports done (2.5s)
 };

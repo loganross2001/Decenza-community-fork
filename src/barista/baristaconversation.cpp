@@ -21,19 +21,53 @@ constexpr int kTurnTimeoutMs     = 20000;
 // normal think-pause and force a tap; 30s only fires when the user has genuinely stopped. VoiceInput handles the
 // sub-second no-match churn itself, so this only needs to catch true abandonment.
 constexpr int kSilenceMs         = 30000;
+// [barista-fork] Walk-away backstop: once we've dropped to NeedsTap (30s of Listening silence already elapsed)
+// and the user never taps, silently close the dock rather than leave it open forever — the "it just stays open"
+// complaint's last line of defence, on top of the (now prefix-aware) close-intent matcher and end_conversation
+// tool. Generous so it only fires on genuine abandonment (~75s total idle), and it is a silent teardown (no
+// sign-off) — the user has already gone. This is UI auto-dismiss, the one timer use the design rules allow.
+constexpr int kNeedsTapIdleMs    = 45000;
 constexpr int kClosingWatchdogMs = 2500;
 
-// Generous local close-intent (a latency accelerator only — the forced per-turn close bit is the real
-// mechanism, Phase 2). Short utterance + a normalised farewell phrase.
+// Generous local close-intent (a latency accelerator + fallback — the forced per-turn respond(text,
+// end_conversation) bit is the structural mechanism). Short utterance + a normalised farewell phrase.
+//
+// The old version anchored the farewell at ^…$ with NO prefix handling, so every POLITE goodbye missed:
+// "thanks, that'll be all" didn't start with a listed farewell (the "thanks" prefix broke the anchor) and
+// wasn't in the narrow `thanks,? (that's (it|all)|bye)` branch either — the reported can't-close bug. Fix:
+// strip leading politeness/filler prefixes FIRST, then match the (broadened) farewell set on what remains.
 bool looksLikeClose(const QString& raw)
 {
-    const QString t = raw.trimmed().toLower();
-    if (t.isEmpty() || t.length() > 40)
+    QString t = raw.trimmed().toLower();
+    if (t.isEmpty() || t.length() > 60)
+        return false;
+    // Peel up to two stacked leading prefixes ("ok thanks, …", "alright cool, …") so the farewell that
+    // follows anchors cleanly. Bare politeness ("thanks") strips to empty and does NOT close (too aggressive).
+    static const QRegularExpression prefix(
+        QStringLiteral("^(ok(ay)?|alright|all right|right|so|well|now|um+|uh+|yeah|yep|yes|no|nah|cool|nice|"
+                       "great|perfect|awesome|lovely|thank you so much|thank you|thanks|cheers|"
+                       "appreciate it|i appreciate it)[,.!\\s]+"));
+    for (int i = 0; i < 2; ++i) {
+        const qsizetype before = t.size();
+        t.remove(prefix);
+        t = t.trimmed();
+        if (t.size() == before)
+            break;   // nothing stripped this pass
+    }
+    if (t.isEmpty())
         return false;
     static const QRegularExpression re(
-        QStringLiteral("^(that'?s (it|all|everything)( for now)?|that'?ll be all|we'?re (done|good)|"
-                       "i'?m (done|good|all set)|no (that'?s all|thanks?)|goodnight|good night|goodbye|"
-                       "bye( now)?|see ya|thanks,? (that'?s (it|all)|bye)|nothing else|all done)\\.?$"));
+        QStringLiteral("^("
+                       "that'?s (it|all|everything|me|us|enough)( for now| then| done)?|"
+                       "that'?ll (be all|do( it)?)( for now| then)?|"
+                       "that will (be all|do)|"
+                       "we'?re (done|good|all set|all done|finished|set)|"
+                       "i'?m (done|good|all set|all done|finished|fine|set)|"
+                       "(that'?s all|no more|nothing else|nothing more|no more questions)|"
+                       "good ?night|good ?bye|bye( now| bye)?|see ya|see you( later)?|catch you later|"
+                       "all done|all set|we can stop|let'?s stop|stop( there)?|that'?s enough|"
+                       "no (that'?s (it|all)|i'?m (good|done)|thank you|thanks?)"
+                       ")[.!]?$"));
     return re.match(t).hasMatch();
 }
 
@@ -74,6 +108,7 @@ BaristaConversation::BaristaConversation(AssistantVoice* voice, AssistantVoice* 
     oneShot(m_primingTimeout, kPrimingTimeoutMs);
     oneShot(m_turnTimeout, kTurnTimeoutMs);
     oneShot(m_silence, kSilenceMs);
+    oneShot(m_needsTapIdle, kNeedsTapIdleMs);
     oneShot(m_closingWatchdog, kClosingWatchdogMs);
 
     connect(&m_primingTimeout, &QTimer::timeout, this, [this]() {
@@ -96,6 +131,16 @@ BaristaConversation::BaristaConversation(AssistantVoice* voice, AssistantVoice* 
     // [barista-fork] No canned "One sec" filler: the model emits its own lead-in ("let me check") via
     // onModelSpeakable, and the thinking earcon fills the silent gaps — a canned line would talk over the
     // model's lead-in. (A model-generated quick-filler can return in a later increment.)
+    connect(&m_needsTapIdle, &QTimer::timeout, this, [this]() {
+        if (m_state != State::NeedsTap)
+            return;
+        // Walk-away: silently tear down and tell the view to collapse the dock. closingConfirmed() is the
+        // view's collapse signal (wired to the dock dismiss), same as a completed sign-off — but here there is
+        // nothing to speak, so we emit it directly and go Idle rather than routing through Closing.
+        diag(QStringLiteral("needstap_idle_autoclose"));
+        emit closingConfirmed();
+        setState(State::Idle);
+    });
     connect(&m_closingWatchdog, &QTimer::timeout, this, [this]() {
         if (m_state == State::Closing) { diag(QStringLiteral("closing_watchdog")); setState(State::Idle); }
     });
@@ -126,7 +171,8 @@ void BaristaConversation::setState(State s)
     // Per-state entry actions.
     switch (s) {
     case State::Idle:
-        m_primingTimeout.stop(); m_turnTimeout.stop(); m_silence.stop(); m_closingWatchdog.stop();
+        m_primingTimeout.stop(); m_turnTimeout.stop(); m_silence.stop();
+        m_needsTapIdle.stop(); m_closingWatchdog.stop();
         m_closingArmed = false; m_turnInFlight = false; m_pendingAnswer.clear();
         if (m_voice) m_voice->stop();
         break;
@@ -135,6 +181,7 @@ void BaristaConversation::setState(State s)
         emit contextRequested();
         break;
     case State::Listening:
+        m_needsTapIdle.stop();   // left NeedsTap by tapping — cancel the walk-away timer
         m_silence.start();   // note: the arbiter (updateMicLive) actually opens the mic only when the gate is quiet
         break;
     case State::Thinking:
@@ -149,6 +196,7 @@ void BaristaConversation::setState(State s)
         break;
     case State::NeedsTap:
         m_silence.stop();
+        m_needsTapIdle.start();   // walk-away backstop: silent close if never tapped
         break;
     }
 

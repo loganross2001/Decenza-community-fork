@@ -64,6 +64,9 @@ signals:
     void turnRequested(const QString& utterance);
     void contextRequested();
     void closingConfirmed();   // teardown complete → module clears the session / collapses the dock
+    // [barista-fork] The model ended its turn with only a stall ("let me check on that") and no answer;
+    // ask the module to send one continuation turn so the real answer actually arrives (bounded per user turn).
+    void continuationRequested();
 
 public slots:
     // Actuator inputs (wired by BaristaModule). These are the events of the transition table.
@@ -100,6 +103,7 @@ private:
     QString m_pendingAnswer;                      // answer that arrived while a filler was still playing ("" = none)
     int m_softErrors = 0;                         // NO_MATCH / SPEECH_TIMEOUT run
     int m_hardErrors = 0;                         // ERROR_CLIENT / BUSY run
+    int m_autoContinues = 0;                      // stall→continuation retries used THIS user turn (bounded)
     QString m_lastSpokenText;                     // last TTS string — the self-echo text backstop
     qint64 m_micHotSinceMs = 0;                   // when micLive last went true (self-echo window)
 

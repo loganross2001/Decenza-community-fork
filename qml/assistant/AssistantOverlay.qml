@@ -1551,6 +1551,16 @@ Item {
             if (!root._sessionBegun) { root._conv.beginSession(root._primedSystemPrompt, utterance); root._sessionBegun = true }
             else root._conv.followUp(utterance)
         }
+        function onContinuationRequested() {   // model stalled ("let me check…") with no answer → nudge it to actually answer
+            if (!root._nc || !root._conv || !root._sessionBegun) return
+            // Deferred: this fires synchronously from inside onModelFinal's stack (which QML reached via
+            // onResponseReceived), so re-dispatching the AI turn inline would re-enter the provider mid-unwind.
+            // Qt.callLater lets that stack unwind first, then sends the follow-up.
+            Qt.callLater(function() {
+                if (root._nc && root._conv && root._sessionBegun)
+                    root._conv.followUp("Go ahead and give me the answer now — call your tools if you need to, then answer directly.")
+            })
+        }
         function onClosingConfirmed() {   // deterministic teardown → hide the dock
             if (root._orch && typeof root._orch.dismiss === "function") root._orch.dismiss()
         }

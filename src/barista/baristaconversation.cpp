@@ -28,6 +28,11 @@ constexpr int kSilenceMs         = 30000;
 // sign-off) — the user has already gone. This is UI auto-dismiss, the one timer use the design rules allow.
 constexpr int kNeedsTapIdleMs    = 45000;
 constexpr int kClosingWatchdogMs = 2500;
+// [barista-fork] Max stall→continuation retries per user turn. The model sometimes ends its turn with only a
+// promise ("let me check on that") and no tool call, so no answer follows; we auto-send a continuation to make
+// it actually answer. Bounded so a model that keeps stalling can't loop — after this many, deliver what it said
+// and return to Listening (today's behaviour).
+constexpr int kMaxAutoContinues  = 1;
 
 // Generous local close-intent (a latency accelerator + fallback — the forced per-turn respond(text,
 // end_conversation) bit is the structural mechanism). Short utterance + a normalised farewell phrase.
@@ -68,6 +73,28 @@ bool looksLikeClose(const QString& raw)
                        "all done|all set|we can stop|let'?s stop|stop( there)?|that'?s enough|"
                        "no (that'?s (it|all)|i'?m (good|done)|thank you|thanks?)"
                        ")[.!]?$"));
+    return re.match(t).hasMatch();
+}
+
+// [barista-fork] Stall detector: is the model's WHOLE final reply just a promise to continue ("let me check on
+// that", "one moment", "checking…") with no actual answer? Tight on purpose — anchored ^…$ so it matches only a
+// bare stall, never a real answer that happens to open with "let me…". A match means: speak it as a lead-in,
+// keep the turn alive, and fetch the real answer via one continuation (see onModelFinal).
+bool looksLikeStall(const QString& raw)
+{
+    QString t = raw.trimmed().toLower();
+    if (t.isEmpty() || t.length() > 60)
+        return false;
+    t.remove(QRegularExpression(QStringLiteral("[.!,?…]+$")));   // drop trailing punctuation
+    // Peel one leading filler ("ok, …", "sure — …") so the stall stem anchors.
+    t.remove(QRegularExpression(QStringLiteral("^(ok(ay)?|sure|alright|right|well|hmm+|so|yeah|yep)[,.!\\s]+")));
+    t = t.trimmed();
+    static const QRegularExpression re(QStringLiteral(
+        "^(let me |i'?ll |i will |let me just |give me |just |gonna |going to )?"
+        "(check|look|see|find|pull|dig|verify|confirm|find out|look into|check on|look that up|"
+        "hold on|hang on|checking|looking|searching|"
+        "(a|one) (sec|second|moment|minute)|just (a|one) (sec|second|moment|minute)|one moment)"
+        "( that| it| on that| on it| into that| into it| up| that up| it up| for you| for a moment)*$"));
     return re.match(t).hasMatch();
 }
 
@@ -173,7 +200,7 @@ void BaristaConversation::setState(State s)
     case State::Idle:
         m_primingTimeout.stop(); m_turnTimeout.stop(); m_silence.stop();
         m_needsTapIdle.stop(); m_closingWatchdog.stop();
-        m_closingArmed = false; m_turnInFlight = false; m_pendingAnswer.clear();
+        m_closingArmed = false; m_turnInFlight = false; m_pendingAnswer.clear(); m_autoContinues = 0;
         if (m_voice) m_voice->stop();
         break;
     case State::Priming:
@@ -287,6 +314,7 @@ void BaristaConversation::onFinalText(const QString& text)
         return;
     }
     m_softErrors = 0; m_hardErrors = 0;
+    m_autoContinues = 0;   // fresh stall-retry budget for this user turn
     if (looksLikeClose(text)) {
         m_closingArmed = true;
         diag(QStringLiteral("close_intent_local"));
@@ -324,6 +352,23 @@ void BaristaConversation::onModelSpeakable(const QString& text)
 void BaristaConversation::onModelFinal(const QString& text, bool endConversation)
 {
     m_closingArmed = m_closingArmed || endConversation;
+
+    // [barista-fork] Stall guard: the model sometimes ENDS its turn with only a promise-to-continue
+    // ("let me check on that") and NO tool call, so no answer ever follows and the machine would fall
+    // straight back to Listening having said nothing useful (the reported "it goes to listening instead of
+    // playing the tone until it answers" bug). Treat a bare stall as a lead-in: speak it, keep the turn IN
+    // FLIGHT (so when it finishes the machine goes Thinking → the tone plays, not Listening), and send ONE
+    // continuation to make the model actually produce the answer. Bounded by kMaxAutoContinues so a model that
+    // keeps stalling can't loop — after the budget, it falls through to normal delivery below. Never on a
+    // close turn (a sign-off is not a stall).
+    if (!endConversation && !m_closingArmed && m_autoContinues < kMaxAutoContinues && looksLikeStall(text)) {
+        ++m_autoContinues;
+        diag(QStringLiteral("stall_autocontinue"), text.left(40));
+        emit continuationRequested();   // module sends a follow-up turn → the real answer arrives via onModelFinal
+        onModelSpeakable(text);         // speak the stall as a lead-in (Speaking; m_turnInFlight left TRUE)
+        return;
+    }
+
     m_turnInFlight = false;
     setDisplay(text);
     m_lastSpokenText = text;   // for the self-echo backstop (covers both the queued + direct speak paths)

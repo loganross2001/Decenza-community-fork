@@ -34,6 +34,142 @@
 #include <QUuid>
 #include <QCoreApplication>
 #include <memory>
+#include <initializer_list>
+
+namespace {
+
+// [barista-fork] create_related_profile handler body. Copy/adjust a pressure-flow PROFILE for a coaching move.
+// SAFE BY CONSTRUCTION: the only write is duplicateProfile() → a NEW file (originals are read-only resources and
+// untouchable), UNLESS mode was edit_in_place AND the base is one the user authored — the app refuses in-place on
+// any built-in/read-only profile, so we detect that and fall back to a copy with a note. Adjusts advanced
+// (settings_2c) profiles by editing named frames (Infuse / a decline frame / the pressure peak); declines
+// gracefully when the role frame is absent. All values clamped. Reuses ProfileManager's tested primitives only.
+QJsonObject profErr(const QString& detail) {
+    return QJsonObject{{QStringLiteral("success"), false}, {QStringLiteral("detail"), detail}};
+}
+
+QJsonObject baristaAdjustRelatedProfile(ProfileManager* pm, const QVariantMap& args) {
+    if (!pm) return profErr(QStringLiteral("Profiles are unavailable."));
+    const QString adjustment = args.value(QStringLiteral("adjustment")).toString();
+    const QString direction  = args.value(QStringLiteral("direction")).toString();
+    const QString newName     = args.value(QStringLiteral("name")).toString().trimmed();
+    QString baseTitle         = args.value(QStringLiteral("base")).toString().trimmed();
+    bool wantInPlace          = args.value(QStringLiteral("mode")).toString() == QLatin1String("edit_in_place");
+
+    // Resolve base → canonical title + filename (default: the current active profile).
+    if (baseTitle.isEmpty()) baseTitle = pm->currentProfileName();
+    const QString canonical = pm->resolveProfileTitle(baseTitle);
+    if (!canonical.isEmpty()) baseTitle = canonical;
+    const QString baseFilename = pm->findProfileByTitle(baseTitle);
+    if (baseFilename.isEmpty())
+        return profErr(QStringLiteral("I couldn't find a profile called '%1'. Which one should I base it on?").arg(baseTitle));
+
+    // Safety: in-place ONLY on a user-authored (non-built-in, non-read-only) profile; otherwise copy, with a note.
+    QString note;
+    if (wantInPlace && pm->isBuiltInFilename(baseFilename)) {
+        wantInPlace = false;
+        note = QStringLiteral("'%1' is a built-in profile, so I made a copy instead of changing it.").arg(baseTitle);
+    }
+
+    QString targetTitle, targetFilename;
+    auto makeCopy = [&]() -> QJsonObject {
+        if (newName.isEmpty()) return profErr(QStringLiteral("What would you like to name the new profile?"));
+        if (!pm->duplicateProfile(baseFilename, newName))
+            return profErr(QStringLiteral("I couldn't create '%1' — that name may already be taken. Pick another?").arg(newName));
+        targetTitle = newName;
+        pm->loadProfile(newName);                       // make the copy current so frame edits land on it
+        targetFilename = pm->findProfileByTitle(newName);
+        return QJsonObject{};                            // empty = ok
+    };
+
+    if (!wantInPlace) {
+        const QJsonObject e = makeCopy();
+        if (!e.isEmpty()) return e;
+    } else {
+        pm->loadProfile(baseTitle);
+        if (pm->isCurrentProfileReadOnly()) {           // downloaded read-only → can't edit in place; copy instead
+            note = QStringLiteral("'%1' is read-only, so I made a copy instead of changing it.").arg(baseTitle);
+            const QJsonObject e = makeCopy();
+            if (!e.isEmpty()) return e;
+            wantInPlace = false;
+        } else {
+            targetTitle = baseTitle;
+            targetFilename = baseFilename;
+        }
+    }
+    if (targetFilename.isEmpty())
+        return profErr(QStringLiteral("I created the profile but lost track of the file — please check your profiles."));
+
+    // Gather frames from the now-current target.
+    QList<QVariantMap> frames;
+    for (int i = 0; i <= 40; ++i) { const QVariantMap f = pm->getFrameAt(i); if (f.isEmpty()) break; frames.append(f); }
+    if (frames.isEmpty()) return profErr(QStringLiteral("That profile has no editable frames."));
+
+    auto frameByName = [&](std::initializer_list<const char*> keys) -> int {
+        for (int i = 0; i < frames.size(); ++i) {
+            const QString n = frames[i].value(QStringLiteral("name")).toString().toLower();
+            for (const char* k : keys) if (n.contains(QLatin1String(k))) return i;
+        }
+        return -1;
+    };
+    auto clampd = [](double v, double lo, double hi) { return qBound(lo, v, hi); };
+
+    QString changed;
+    if (adjustment == QLatin1String("preinfusion")) {
+        const int i = frameByName({"infuse", "soak", "bloom", "preinfus"});
+        if (i < 0) return profErr(QStringLiteral("I couldn't find a pre-infusion phase in this profile to adjust."));
+        const double sec = frames[i].value(QStringLiteral("seconds")).toDouble();
+        const double delta = (direction == QLatin1String("less") || direction == QLatin1String("shorter")) ? -3.0 : 5.0;
+        const double newSec = clampd(sec + delta, 1.0, 45.0);
+        pm->setFrameProperty(i, QStringLiteral("seconds"), newSec);
+        changed = QStringLiteral("pre-infusion %1→%2 s").arg(sec, 0, 'f', 0).arg(newSec, 0, 'f', 0);
+        const double pr = frames[i].value(QStringLiteral("pressure")).toDouble();
+        if (direction == QLatin1String("softer") && pr > 1.5) {
+            const double np = clampd(pr - 1.0, 1.0, pr);
+            pm->setFrameProperty(i, QStringLiteral("pressure"), np);
+            changed += QStringLiteral(", pressure %1→%2 bar").arg(pr, 0, 'f', 1).arg(np, 0, 'f', 1);
+        }
+    } else if (adjustment == QLatin1String("declining_tail")) {
+        const int i = frameByName({"decline", "declin", "ramp down", "rampdown", "fall"});
+        if (i < 0) return profErr(QStringLiteral("This profile has no declining phase to deepen (a flat pressure profile has none). Want a different adjustment?"));
+        const double pr = frames[i].value(QStringLiteral("pressure")).toDouble();
+        const double np = clampd(pr - (direction == QLatin1String("less") ? -1.0 : 1.0), 3.0, 10.0);
+        pm->setFrameProperty(i, QStringLiteral("pressure"), np);
+        changed = QStringLiteral("decline end %1→%2 bar").arg(pr, 0, 'f', 1).arg(np, 0, 'f', 1);
+    } else if (adjustment == QLatin1String("cap_spike")) {
+        int i = -1; double mx = -1.0;
+        for (int k = 0; k < frames.size(); ++k) {
+            const double p = frames[k].value(QStringLiteral("pressure")).toDouble();
+            if (p > mx) { mx = p; i = k; }
+        }
+        if (i < 0 || mx <= 0.0) return profErr(QStringLiteral("I couldn't find a pressure peak to cap in this profile."));
+        const double np = clampd(mx - 1.0, 4.0, mx);
+        pm->setFrameProperty(i, QStringLiteral("pressure"), np);
+        changed = QStringLiteral("peak %1→%2 bar (%3)").arg(mx, 0, 'f', 1).arg(np, 0, 'f', 1)
+                      .arg(frames[i].value(QStringLiteral("name")).toString());
+        const double exOver = frames[i].value(QStringLiteral("exitPressureOver")).toDouble();
+        if (exOver > np) pm->setFrameProperty(i, QStringLiteral("exitPressureOver"), np);   // keep the frame able to exit
+    } else {
+        return profErr(QStringLiteral("I don't know the adjustment '%1'.").arg(adjustment));
+    }
+
+    // Persist + activate (uploadCurrentProfile is phase-guarded — it won't touch the machine mid-shot).
+    if (!pm->saveProfile(targetFilename))
+        return profErr(QStringLiteral("I adjusted the curve but couldn't save '%1'.").arg(targetTitle));
+    pm->uploadCurrentProfile();
+
+    QJsonObject out;
+    out[QStringLiteral("success")]   = true;
+    out[QStringLiteral("profile")]   = targetTitle;
+    out[QStringLiteral("base")]      = baseTitle;
+    out[QStringLiteral("mode")]      = wantInPlace ? QStringLiteral("edited_in_place") : QStringLiteral("created_copy");
+    out[QStringLiteral("change")]    = changed;
+    out[QStringLiteral("activated")] = true;
+    if (!note.isEmpty()) out[QStringLiteral("note")] = note;
+    return out;
+}
+
+} // namespace
 
 BaristaModule::BaristaModule(MainController* mainController, MachineState* machineState,
                              Settings* appSettings, QObject* parent)
@@ -448,6 +584,12 @@ BaristaModule::BaristaModule(MainController* mainController, MachineState* machi
             // active recipe's beans, correlate recipeCreated with a 10s timeout). clone/archive/delete land next.
             ai->setRecipeOpHandler([mc](const QString& op, const QVariantMap& args,
                                         std::function<void(QJsonObject)> reply) {
+                // [barista-fork] create_related_profile rides this seam too (it needs ProfileManager, not
+                // RecipeStorage) — handle it before the RecipeStorage guard below.
+                if (op == QLatin1String("create_related_profile")) {
+                    reply(baristaAdjustRelatedProfile(mc ? mc->profileManager() : nullptr, args));
+                    return;
+                }
                 RecipeStorage* rs = mc ? mc->recipeStorage() : nullptr;
                 if (!rs) {
                     reply(QJsonObject{{QStringLiteral("success"), false},

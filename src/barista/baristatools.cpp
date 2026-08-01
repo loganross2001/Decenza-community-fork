@@ -295,6 +295,47 @@ QJsonArray BaristaTools::toolDefinitions()
     ad["input_schema"] = adSchema;
     tools.append(ad);
 
+    // [barista-fork] create_related_profile (WRITE) — make/adjust a pressure/flow PROFILE per a coaching move
+    // (longer pre-infusion / deeper declining tail / cap a pressure spike). SAFETY BY CONSTRUCTION: it only ever
+    // COPIES a base into a NEW profile (originals are read-only resources and untouchable), UNLESS mode is
+    // edit_in_place AND the base is one the user authored — the app refuses in-place on any read-only/stock
+    // profile and the executor falls back to a copy with a note. Reuses ProfileManager via the recipeOp seam.
+    QJsonObject crp;
+    crp["name"] = QString("create_related_profile");
+    crp["description"] = QString(
+        "Create (or adjust) an espresso PROFILE — the pressure/flow curve — to carry out a coaching move the user "
+        "approved. Call this ONLY after you have PROPOSED the profile change AND (a) the user approved, (b) you "
+        "asked what to NAME it, and (c) you asked whether it should be a sub-profile of an existing base (default: "
+        "the current active profile). NEVER edit a profile the user did not create: default mode is 'copy', which "
+        "makes a brand-new profile from the base and leaves the base untouched. Only use mode 'edit_in_place' when "
+        "the base is a profile the USER authored AND they confirmed editing it in place; the app refuses in-place "
+        "on any stock/read-only profile and will copy instead (the result says so). The result tells you exactly "
+        "what changed — confirm to the user from it naturally, and note if it fell back to a copy.");
+    QJsonObject crpSchema; crpSchema["type"] = QString("object");
+    QJsonObject crpProps;
+    QJsonObject adjP; adjP["type"] = QString("string");
+    adjP["enum"] = QJsonArray{ QString("preinfusion"), QString("declining_tail"), QString("cap_spike") };
+    adjP["description"] = QString("Which move: 'preinfusion' (lengthen/soften the soak — builds evenness/body), "
+        "'declining_tail' (deepen the pressure decline — smooths a harsh finish; needs a profile that has a "
+        "decline phase), or 'cap_spike' (lower the pressure peak — kills a spike).");
+    crpProps["adjustment"] = adjP;
+    QJsonObject modeP; modeP["type"] = QString("string");
+    modeP["enum"] = QJsonArray{ QString("copy"), QString("edit_in_place") };
+    modeP["description"] = QString("'copy' (default, always safe — new profile from the base) or 'edit_in_place' "
+        "(only when the base is one the user created AND they confirmed; otherwise it copies).");
+    crpProps["mode"] = modeP;
+    crpProps["name"] = strProp("Name for the new profile (REQUIRED for a copy — ask the user). Ignored for edit_in_place.");
+    crpProps["base"] = strProp("Title of the base profile to derive from. Optional — defaults to the current active profile.");
+    QJsonObject dirP; dirP["type"] = QString("string");
+    dirP["enum"] = QJsonArray{ QString("more"), QString("less"), QString("longer"), QString("softer"), QString("lower") };
+    dirP["description"] = QString("Optional strength/direction hint for the adjustment (e.g. 'longer'/'softer' for pre-infusion, 'more'/'less' for the decline).");
+    crpProps["direction"] = dirP;
+    crpProps["reason"] = strProp("One short plain-language reason for the change (the coaching hypothesis) — optional.");
+    crpSchema["properties"] = crpProps;
+    crpSchema["required"] = QJsonArray{ QString("adjustment") };
+    crp["input_schema"] = crpSchema;
+    tools.append(crp);
+
     // [barista-fork] end_conversation — the barista ends its OWN session when the user signals they're done
     // ("that'll be all", "thanks, I'm good", "bye", "see you later"). It speaks a short warm sign-off FIRST
     // (in the same reply) and calls this; the app collapses the dock only AFTER the sign-off finishes speaking,
@@ -1401,6 +1442,33 @@ void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage*
             return;
         }
         updateRecipe(recipeId, fields, [done](QJsonObject result) { done(result); });
+        return;
+    }
+
+    // [barista-fork] create_related_profile — copy/adjust a pressure/flow PROFILE per a coaching move. Rides the
+    // recipeOp seam (app-side, has ProfileManager). Safety (copy-only / in-place refused on stock) is enforced in
+    // the handler; here we just forward the agreed fields. anchorSnapshot is unused (no shot correlation needed).
+    if (name == QLatin1String("create_related_profile")) {
+        if (!recipeOp) {
+            done(QJsonObject{{QStringLiteral("success"), false},
+                             {QStringLiteral("failure_reason"), QStringLiteral("unavailable")},
+                             {QStringLiteral("detail"), QStringLiteral("Profile editing is unavailable.")}});
+            return;
+        }
+        const QString adjustment = input.value(QStringLiteral("adjustment")).toString().trimmed();
+        if (adjustment.isEmpty()) {
+            done(QJsonObject{{QStringLiteral("error"), QStringLiteral(
+                "create_related_profile needs an 'adjustment' (preinfusion / declining_tail / cap_spike)")}});
+            return;
+        }
+        QVariantMap args;
+        args.insert(QStringLiteral("adjustment"), adjustment);
+        args.insert(QStringLiteral("mode"), input.value(QStringLiteral("mode")).toString().trimmed());
+        args.insert(QStringLiteral("name"), input.value(QStringLiteral("name")).toString().trimmed());
+        args.insert(QStringLiteral("base"), input.value(QStringLiteral("base")).toString().trimmed());
+        args.insert(QStringLiteral("direction"), input.value(QStringLiteral("direction")).toString().trimmed());
+        args.insert(QStringLiteral("reason"), input.value(QStringLiteral("reason")).toString().trimmed());
+        recipeOp(QStringLiteral("create_related_profile"), args, [done](QJsonObject result) { done(result); });
         return;
     }
 

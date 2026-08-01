@@ -33,6 +33,10 @@ public:
         bool webSearch = false;
         bool clientTools = false;   // enable the registered client-side tools (see setClientTools) for this turn
         int timeoutMs = 0;          // [barista-fork] per-turn network transfer timeout; 0 → ANALYSIS_TIMEOUT_MS
+        bool forceRespond = false;  // [barista-fork] Anthropic-only: tool_choice:"any" + a `respond` answer tool,
+                                    // so the model can NEVER end a turn with a bare "let me check…" promise and no
+                                    // tool call (the stall bug). It must call a real tool (→ loop) or `respond`
+                                    // (→ the answer). Gated to the barista conversation; ignored by other providers.
     };
 
     explicit AIProvider(QNetworkAccessManager* networkManager, QObject* parent = nullptr);
@@ -348,6 +352,7 @@ private:
     std::function<void(const QString&, const QJsonObject&, std::function<void(QJsonValue)>)> m_toolExecutor;
     int m_toolRounds = 0;
     static constexpr int MAX_TOOL_ROUNDS = 4;
+    bool m_forceRespond = false;  // [barista-fork] this turn used tool_choice:"any" + the `respond` tool (see RequestOptions)
     int m_currentTimeoutMs = 0;   // [barista-fork] this turn's transfer timeout (RequestOptions.timeoutMs; 0 → default)
     qint64 m_requestSentMs = 0;   // [barista-fork] request-sent stamp for reply-latency instrumentation
 

@@ -864,6 +864,7 @@ void AnthropicProvider::analyzeConversation(const QString& systemPrompt, const Q
     m_continuations = 0;          // [barista-fork]
     m_accumulatedText.clear();    // [barista-fork]
     m_toolRounds = 0;             // [barista-fork] reset the client-tool loop counter per turn
+    m_forceRespond = options.forceRespond;   // [barista-fork] this turn: tool_choice:"any" + `respond` (barista only)
     ++m_reqGen;
     m_truncationPolicy = TruncationPolicy::Fail;
     // A conversation turn is prose the user reads, so a cut-off reply still has
@@ -907,6 +908,37 @@ void AnthropicProvider::analyzeConversation(const QString& systemPrompt, const Q
     if (options.clientTools && m_toolExecutor && !m_clientToolDefs.isEmpty()) {
         for (const QJsonValue& def : m_clientToolDefs)
             tools.append(def);
+    }
+    // [barista-fork] Forced-respond turn protocol (the structural stall fix). With tool_choice:"any" the model
+    // MUST call a tool every turn — it can no longer end a turn with a bare "let me check…" promise and stop
+    // (the reported stall). The only "answer" tool is `respond`, so every reply the user hears comes through it;
+    // to actually check something the model must call a real tool first (get_weather/query_shots/…), whose result
+    // loops back, and then call `respond`. disable_parallel_tool_use keeps it to ONE tool per turn (so it can't
+    // emit get_weather AND respond at once and answer before the result). `respond` is intercepted in
+    // onAnalysisReply — never executed — and its `text` becomes the turn's answer. Anthropic-only; other providers
+    // never see options.forceRespond. Fail-safe: if a turn somehow ends without `respond`, the terminal path below
+    // still delivers whatever text exists, so this can't be worse than the auto/heuristic path.
+    if (m_forceRespond && !tools.isEmpty()) {
+        QJsonObject respondTool;
+        respondTool["name"] = QString("respond");
+        respondTool["description"] = QString(
+            "Say something to the user. This is the ONLY way to speak to them — your spoken reply goes in `text`. "
+            "Call it to answer, greet, acknowledge, or sign off. If you need to look something up first (weather, "
+            "their shots, the web), call that tool FIRST; its result comes back and THEN you call respond with the "
+            "answer. NEVER promise to check something without calling the tool — just call the tool.");
+        QJsonObject rSchema; rSchema["type"] = QString("object");
+        QJsonObject rProps;
+        QJsonObject rText; rText["type"] = QString("string");
+        rText["description"] = QString("Your reply to speak to the user, in natural spoken language.");
+        rProps["text"] = rText;
+        rSchema["properties"] = rProps;
+        rSchema["required"] = QJsonArray{ QString("text") };
+        respondTool["input_schema"] = rSchema;
+        tools.append(respondTool);
+        QJsonObject toolChoice;
+        toolChoice["type"] = QString("any");
+        toolChoice["disable_parallel_tool_use"] = true;
+        requestBody["tool_choice"] = toolChoice;
     }
     if (!tools.isEmpty())
         requestBody["tools"] = tools;
@@ -1059,11 +1091,24 @@ void AnthropicProvider::onAnalysisReply(QNetworkReply* reply)
     if (stopReason == QLatin1String("tool_use") && m_toolExecutor && m_toolRounds < MAX_TOOL_ROUNDS) {
         // Collect every tool_use block up front — the API may batch several parallel calls in one turn.
         QVector<QJsonObject> toolUses;
+        // [barista-fork] Forced-respond: the `respond` tool is the ANSWER channel, not an executable tool. Skip
+        // it here (never dispatch it to the executor) and capture its text; when it's the only tool call this
+        // turn, that text becomes the turn's answer via the normal terminal path below — no re-POST.
+        QString respondText; bool haveRespond = false;
         for (const QJsonValue& v : content) {
             const QJsonObject block = v.toObject();
-            if (block["type"].toString() == QLatin1String("tool_use"))
-                toolUses.append(block);
+            if (block["type"].toString() != QLatin1String("tool_use"))
+                continue;
+            if (m_forceRespond && block["name"].toString() == QLatin1String("respond")) {
+                respondText = block["input"].toObject().value(QStringLiteral("text")).toString();
+                haveRespond = true;
+                continue;
+            }
+            toolUses.append(block);
         }
+        // Model answered via respond (no other tool this turn) → deliver respondText through the terminal emit.
+        if (haveRespond && toolUses.isEmpty())
+            text = respondText;
         if (!toolUses.isEmpty()) {
             ++m_toolRounds;
             // [barista-fork] "Don't leave the user in silence": the model often writes a short natural lead-in

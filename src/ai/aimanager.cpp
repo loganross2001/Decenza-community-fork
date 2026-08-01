@@ -2463,7 +2463,12 @@ void AIManager::analyzeConversation(const QString& systemPrompt, const QJsonArra
     // [barista-fork] Interactive conversation turns get a ~30s per-request timeout (vs the 60s deep-analysis
     // default) so a stalled request fails+recovers fast instead of a long freeze. transferTimeout is per-request
     // inactivity, so each tool-round leg gets its own 30s — a healthy leg completes in seconds.
-    provider->analyzeConversation(systemPrompt, apiMessages, AIProvider::RequestOptions{webSearch, clientTools, 30000});
+    // [barista-fork] forceRespond = clientTools: the barista conversation (the only caller that enables client
+    // tools) forces tool_choice:"any" + a `respond` answer tool on Anthropic, so a turn can never end with a bare
+    // "let me check…" promise and no tool call. Scoped here — analyzeUrl/advisor never set clientTools, so they're
+    // untouched; non-Anthropic providers ignore the flag.
+    provider->analyzeConversation(systemPrompt, apiMessages,
+                                  AIProvider::RequestOptions{webSearch, clientTools, 30000, clientTools});
 }
 
 void AIManager::refreshOllamaModels()

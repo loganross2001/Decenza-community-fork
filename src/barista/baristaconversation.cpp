@@ -16,8 +16,12 @@ constexpr int kPrimingTimeoutMs = 3000;
 // [barista-fork] A HUNG-turn guard, not an SLA. It is RESET on every model activity (each interim/lead-in and on
 // re-entering Thinking), so a slow-but-progressing tool turn (lead-in → tool → 2nd round-trip → answer, easily
 // 15-25s total) never trips it — only genuine dead air does. Was 10s, which wrongly abandoned tool turns to
-// Listening mid-answer.
-constexpr int kTurnTimeoutMs     = 20000;
+// Listening mid-answer. Raised 20s→40s (owner report 2026-07-31: "long wait then straight back to listening,
+// no tone"): a SILENT tool turn (no interim speech to cycle Speaking→Thinking) does NOT reset this timer, and
+// the multi-tool coaching turns — recommend_next_shot → create_related_profile (file I/O + profile upload) —
+// routinely exceed the old 20s, so the guard was firing on a working turn and dropping it (killing the thinking
+// tone with it). 40s keeps a genuinely-working turn alive; true dead air still ends within a reasonable wait.
+constexpr int kTurnTimeoutMs     = 40000;
 // [barista-fork] "Walked away" guard, not a turn-taking limit. 8s (the review's value) would drop the mic on a
 // normal think-pause and force a tap; 30s only fires when the user has genuinely stopped. VoiceInput handles the
 // sub-second no-match churn itself, so this only needs to catch true abandonment.
@@ -25,15 +29,22 @@ constexpr int kSilenceMs         = 30000;
 // [barista-fork] Walk-away backstop: once we've dropped to NeedsTap (30s of Listening silence already elapsed)
 // and the user never taps, silently close the dock rather than leave it open forever — the "it just stays open"
 // complaint's last line of defence, on top of the (now prefix-aware) close-intent matcher and end_conversation
-// tool. Generous so it only fires on genuine abandonment (~75s total idle), and it is a silent teardown (no
-// sign-off) — the user has already gone. This is UI auto-dismiss, the one timer use the design rules allow.
-constexpr int kNeedsTapIdleMs    = 45000;
+// tool. Trimmed 45s→25s (owner report 2026-07-31: the dock "stays listening when it shouldn't" — when STT churn
+// eats a spoken close, this backstop is what actually ends the session, and 75s total felt like it wouldn't
+// close). 25s here only fires AFTER 30s of silence AND an ignored "Tap when you're ready" prompt (55s total
+// idle), so it still can't cut off a live conversation — a returning user taps, which cancels it (setState
+// NeedsTap→Listening). Silent teardown (no sign-off) — the user has already gone. UI auto-dismiss, the one
+// timer use the design rules allow.
+constexpr int kNeedsTapIdleMs    = 25000;
 constexpr int kClosingWatchdogMs = 2500;
 // [barista-fork] Max stall→continuation retries per user turn. The model sometimes ends its turn with only a
 // promise ("let me check on that") and no tool call, so no answer follows; we auto-send a continuation to make
 // it actually answer. Bounded so a model that keeps stalling can't loop — after this many, deliver what it said
-// and return to Listening (today's behaviour).
-constexpr int kMaxAutoContinues  = 1;
+// and return to Listening (today's behaviour). Raised 1→2 (owner report 2026-07-31: "gave me a second, then
+// went right back to listening"): with one retry, a model that stalls TWICE spends its budget and the 2nd stall
+// falls through as if it were the answer → straight to Listening with nothing said. Two retries lets a real
+// answer land in the common case while still bounding the loop.
+constexpr int kMaxAutoContinues  = 2;
 
 // [barista-fork] looksLikeClose() / looksLikeStall() moved to closeintent.{h,cpp} so they can be unit-tested
 // in isolation (pure QtCore, no voice/mic/AI deps) — see tests/tst_closeintent.cpp. Called below as

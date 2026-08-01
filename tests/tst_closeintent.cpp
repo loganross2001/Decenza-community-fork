@@ -78,6 +78,11 @@ void tst_CloseIntent::stall_data()
     QTest::newRow("checking")                       << "checking…"             << true;
     QTest::newRow("sure, let me check on that")      << "Sure, let me check on that" << true;
     QTest::newRow("i'll pull that up")               << "I'll pull that up"     << true;
+    // [barista-fork] time-stall + trailing promise clause (on-device: "One sec, checking the weather." dropped to
+    // Listening because the ^…$ anchor only caught a BARE stall). A leading time-stall with no figure IS a stall.
+    QTest::newRow("one sec + trailing promise")      << "One sec, checking the weather." << true;
+    QTest::newRow("give me a second + let me pull")   << "Give me a second, let me pull that up" << true;
+    QTest::newRow("hold on + trailing promise")       << "Hold on, looking that up for you" << true;
 
     // --- Must NOT be a stall: real answers (a false stall re-queries a delivered answer) ---
     QTest::newRow("real answer: shot metrics")      << "Your last shot was 18 grams in, 36 grams out, in 28 seconds." << false;

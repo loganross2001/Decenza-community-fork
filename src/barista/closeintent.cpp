@@ -64,6 +64,19 @@ bool looksLikeStall(const QString& raw)
     // Peel one leading filler ("ok, …", "sure — …") so the stall stem anchors.
     t.remove(QRegularExpression(QStringLiteral("^(ok(ay)?|sure|alright|right|well|hmm+|so|yeah|yep)[,.!\\s]+")));
     t = t.trimmed();
+    // [barista-fork] Broadened 2026-07-31 (on-device evidence: "One sec, checking the weather." shipped straight
+    // to Listening and the weather was never fetched — the ^…$ matcher below only catches a BARE stall, so the
+    // trailing "checking …" promise broke the anchor). A reply that OPENS with a TIME-STALL ("one sec", "give me
+    // a second", "hold on", "one moment") is a stall even when a promise clause follows — UNLESS it carries an
+    // actual answer, which we proxy by any DIGIT (a real answer states a figure: "…your yield was 36 grams").
+    // This preserves the test contract: "checking the numbers, your yield was 36 grams" has no leading time-stall
+    // AND a digit → not a stall; the em-dash-answer case has no leading time-stall → not a stall.
+    static const QRegularExpression digitRe(QStringLiteral("[0-9]"));
+    static const QRegularExpression timeStall(QStringLiteral(
+        "^((just )?(a|one) (sec|second|moment|minute)|hold on|hang on|one moment"
+        "|give me (a )?(sec|second|moment|minute))\\b"));
+    if (!t.contains(digitRe) && timeStall.match(t).hasMatch())
+        return true;
     static const QRegularExpression re(QStringLiteral(
         "^(let me |i'?ll |i will |let me just |give me |just |gonna |going to )?"
         "(check|look|see|find|pull|dig|verify|confirm|find out|look into|check on|look that up|"

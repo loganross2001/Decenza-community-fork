@@ -6,13 +6,8 @@ import Decenza
 // Reads Settings.dye.dyeBarista — the same name stamped onto each shot — and falls
 // back to "Guest" when none is selected. Label-over-value readout; picks up the
 // zone's contrast color/emphasis when placed in a styled zone (e.g. accentBar).
-Item {
+LayoutWidgetItem {
     id: root
-    property bool isCompact: false
-    property string itemId: ""
-    property var modelData: ({})
-    property color zoneTextColor: Theme.textColor
-    property bool zoneValueBold: false
 
     // Per-instance color override; "default"/unset keeps the zone's color.
     // See WidgetColor for the shared palette used by all readout widgets.

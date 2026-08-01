@@ -18,13 +18,8 @@ import "../.."
 //
 // Pure layout widget: no barista / AI / feedback dependencies, so it can be
 // cherry-picked cleanly onto upstream/main.
-Item {
+LayoutWidgetItem {
     id: root
-    property bool isCompact: false
-    property string itemId: ""
-    property var modelData: ({})
-    property color zoneTextColor: Theme.textColor
-    property bool zoneValueBold: false
 
     readonly property string labelText: TranslationManager.translate("temp.quickSelect.label", "Temp")
 

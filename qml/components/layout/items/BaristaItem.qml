@@ -7,10 +7,8 @@ import "../.."
 // [barista-fork] Home-screen action widget: tap to ENGAGE the barista assistant (opens the conversation
 // panel + mic — user-initiated model). Modelled on DiscussItem. Only shown when the barista is enabled.
 // Placeable anywhere in the layout editor (e.g. the bottom-left where Discuss lives).
-Item {
+LayoutWidgetItem {
     id: root
-    property bool isCompact: false
-    property string itemId: ""
     visible: typeof Barista !== "undefined" && Barista.enabled
 
     implicitWidth: isCompact ? compactContent.implicitWidth : fullContent.implicitWidth

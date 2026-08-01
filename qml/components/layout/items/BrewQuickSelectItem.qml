@@ -15,13 +15,8 @@ import "../.."
 // Values are staged in the dialog and applied together on Confirm.
 //
 // Pure layout widget: no barista / AI / feedback dependencies.
-Item {
+LayoutWidgetItem {
     id: root
-    property bool isCompact: false
-    property string itemId: ""
-    property var modelData: ({})
-    property color zoneTextColor: Theme.textColor
-    property bool zoneValueBold: false
 
     readonly property string labelText: TranslationManager.translate("brewSelect.label", "Brew")
 

@@ -12,14 +12,8 @@ import Decenza
 // isCompact (true in bar zones) drives the chip row's compact layout: the name
 // sits beside the avatar in a short row that fits the bar height, instead of the
 // taller avatar-over-name stack used in center zones.
-Item {
+LayoutWidgetItem {
     id: root
-
-    property bool isCompact: false
-    property string itemId: ""
-    property var modelData: ({})
-    property color zoneTextColor: Theme.textColor
-    property bool zoneValueBold: false
 
     implicitWidth: chipRow.implicitWidth
     implicitHeight: chipRow.implicitHeight

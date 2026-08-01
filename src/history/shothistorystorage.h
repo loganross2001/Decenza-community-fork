@@ -285,15 +285,20 @@ public:
     // Async: fetch most recent shot ID on background thread, emits mostRecentShotIdReady()
     Q_INVOKABLE void requestMostRecentShotId();
 
-    // Async: refresh the distinct-value cache on a background thread, emits distinctCacheReady().
-    // Called at init (pre-warm) and by invalidateDistinctCache() after data changes.
-    Q_INVOKABLE void requestDistinctCache();
-
-    // Get filter options (cache-only, returns {} on miss and triggers async fetch)
+    // Get filter options. Each runs its query against the live database and
+    // returns the answer. There is deliberately no cache; the measurements and
+    // the reasoning are on queryDistinctList() in shothistorystorage_queries.cpp
+    // — one copy, next to the code they justify.
+    //
+    // These are cheap but NOT free, and several are read from QML suggestion
+    // bindings. Do not call one from inside a binding that depends on the text
+    // the user is typing: hoist it to a property refreshed on load and on
+    // historyDataChanged(). PostShotReviewPage and ChangeBeansDialog both had to
+    // be fixed for exactly that.
     Q_INVOKABLE QStringList getDistinctBeanBrands();
     Q_INVOKABLE QStringList getDistinctBaristas();
 
-    // Get filter options with parent-based filtering (cache-only)
+    // Get filter options with parent-based filtering (live reads)
     Q_INVOKABLE QStringList getDistinctBeanTypesForBrand(const QString& beanBrand);
     Q_INVOKABLE QStringList getDistinctGrinderBrands();
     Q_INVOKABLE QStringList getDistinctGrinderModelsForBrand(const QString& grinderBrand);
@@ -302,18 +307,17 @@ public:
 
     // Typical dial increment observed for a grinder, for the Grind quick-select
     // widget. Non-empty model → that grinder's settings; empty model → the full
-    // cross-grinder history (getDistinctGrinderSettingsForGrinder handles both).
+    // cross-grinder history (grinderWideNumericSettings handles both).
     // Parses the numeric subset and runs the same noise-filtered estimator the
     // AI dialing context uses, so the widget and the AI never disagree. Returns
-    // 0 when it cannot derive (cold cache, or <2 distinct numeric settings) —
-    // the caller applies its own default. Cache-backed like the getters above,
-    // so QML re-evaluates on distinctCacheReady() once history loads.
+    // 0 when it cannot derive (<2 distinct numeric settings) — the caller
+    // applies its own default.
     Q_INVOKABLE double grindStepForGrinder(const QString& grinderModel);
 
     // RPM counterpart of grindStepForGrinder, for variable-RPM grinders: the
     // typical increment between the RPMs the user has actually dialed on this
     // grinder (the shots.rpm column), via the same noise-filtered estimator.
-    // Returns 0 when it cannot derive (cold cache, or <2 distinct RPMs) — the
+    // Returns 0 when it cannot derive (<2 distinct RPMs) — the
     // widget falls back to its fixed RPM step. Empty model → 0 (RPM mode always
     // has an identified grinder).
     Q_INVOKABLE double grindRpmStepForGrinder(const QString& grinderModel);
@@ -391,9 +395,6 @@ public:
     // a QSettings value, and the merged-away id now names a deleted row.
     qint64 healedActiveEquipmentId() const { return m_healedActiveEquipmentId; }
 
-    // Invalidate all cached getDistinct*() results (call after save/delete/import/update)
-    void invalidateDistinctCache();
-
     // Close the database (for factory reset before file deletion)
     void close();
 
@@ -412,6 +413,22 @@ public:
     // true when no async work has ever been posted (the worker is lazily created).
     bool isDbWorkIdle() const;
 
+    // Just the serialized WRITE worker, without the detached read/backup threads
+    // isDbWorkIdle() also counts. For a caller that only needs "will a queued
+    // write be lost if I destroy this now?" — which is the shutdown drain, and
+    // only that.
+    //
+    // The distinction is not cosmetic. Detached threads carry reads, plus backup
+    // and import; none of them is in SerialDbWorker's outstanding count, so none
+    // can be discarded by ~SerialDbWorker and there is nothing to protect. Making
+    // the drain wait on them charged its whole timeout to a quit-during-backup —
+    // which cannot finish in that budget anyway — and then printed a warning
+    // about discarded writes that were never at risk.
+    //
+    // The other three storages need no equivalent: they have no detached threads,
+    // so their isDbWorkIdle() is already write-only.
+    bool isDbWriteWorkIdle() const;
+
     // Checkpoint WAL to main database file
     void checkpoint();
 
@@ -421,7 +438,7 @@ public:
 
     // Thread-safe import: opens separate connections for source and destination.
     // Safe to call from any thread (does not use m_db).
-    // Caller must invoke refreshTotalShots() on the main thread afterward (which also invalidates the distinct cache).
+    // Caller must invoke refreshTotalShots() on the main thread afterward.
     static bool importDatabaseStatic(const QString& destDbPath, const QString& srcFilePath, bool merge);
 
     // Thread-safe shot count: opens a temporary connection.
@@ -446,6 +463,22 @@ signals:
     void latestGrindForBeanReady(const QVariantMap& grind);
     void importDatabaseFinished(bool success);
     void shotMetadataUpdated(qint64 shotId, bool success);
+
+    // A write landed that can change what the getDistinct*() getters and the
+    // grind-step derivation return: a shot saved, deleted, metadata-edited, or a
+    // database imported. Emitted from exactly the sites that used to call
+    // invalidateDistinctCache().
+    //
+    // This is NOT the distinct-value cache returning. Nothing is stored; this
+    // only tells a QML binding that already reads live that its answer may have
+    // moved. The cache's problem was that it fired on every async single-key
+    // fill as well, re-running every consumer for an answer that had not
+    // changed — this fires on writes only.
+    //
+    // A binding whose value can change with history needs it: a `readonly
+    // property` over grindStepForGrinder() depends on nothing else, so without
+    // this a resident widget keeps its first answer for its whole life.
+    void historyDataChanged();
     void autoFavoritesReady(const QVariantList& results);
     void autoFavoriteGroupDetailsReady(const QVariantMap& details);
     void backupFinished(bool success, const QString& resultPath);
@@ -458,7 +491,6 @@ signals:
     // (empty if ok and none matched).
     void visualizerLinksReconciled(bool ok, const QVariantList& linked);
     void mostRecentShotIdReady(qint64 shotId);
-    void distinctCacheReady();
     void shotBadgesUpdated(qint64 shotId, bool channelingDetected, bool grindIssueDetected, bool skipFirstFrameDetected, bool pourTruncatedDetected);
 
 private:
@@ -480,6 +512,32 @@ private:
     // had already drifted to calling start() before the deleteLater connect.
     void runDetachedDbThread(std::function<void()> body);
 
+    // One-shot startup census of which grinder each shot is attributed to, and
+    // how much numeric dial history that grinder actually has. Log only — it
+    // reads nothing back and changes no state.
+    //
+    // It exists because "grind step for X = 0, derived from 0" has two causes a
+    // log cannot currently separate, and they are different bugs: the shots are
+    // not LINKED to a package with that model, or they are linked and none of
+    // the settings parse as numeric. Both report the same TooThin outcome, so
+    // the outcome enum cannot help. Diagnosing #1726 needed exactly this fact
+    // and the log did not carry it; the answer had to be inferred from a single
+    // incidental "Loaded shot metadata" line that happened to name a grinder.
+    //
+    // Runs on the shared DB worker rather than a detached thread: it is a full
+    // scan of `shots` with a join, so it must not sit on the main thread at
+    // startup, and the FIFO worker keeps it behind work that matters. The
+    // reason to prefer it is that the worker is JOINED in the destructor, so
+    // the census cannot outlive this object — NOT that only it is covered by
+    // isDbWorkIdle(), which counts detached threads too and has since the
+    // tst_mcptools_write failure that a detached pre-warm from initialize()
+    // caused. An earlier draft of this comment gave that wrong reason.
+    //
+    // Not called at all in test builds — see the call site for why posting it
+    // there would arm a "writes are being discarded" warning about a task that
+    // writes nothing.
+    void logGrinderCensus();
+
     bool createTables();
     bool runMigrations();
     // Version-independent merge-import of legacy bean/presets QSettings into
@@ -493,19 +551,26 @@ private:
     ShotFilter parseFilterMap(const QVariantMap& filterMap);
     QString formatFtsQuery(const QString& userInput);
 
-    // Helper for getDistinct* methods — cache-only, triggers async fetch on miss
+    // SQL fragment matching shots to a grinder MODEL, case- and whitespace-folded.
+    // Public + static because its callers are file-static free functions in
+    // shothistorystorage_queries.cpp, which cannot reach a private member.
+    // `placeholder` is the bind style at the call site (":model" or "?").
+public:
+    static QString grinderModelMatchSql(const QString& placeholder);
+private:
+
+    // Run a SELECT DISTINCT against m_db and return the non-empty values.
+    // THE single place these getters touch the database.
+    QStringList queryDistinctList(const QString& sql, const QVariantList& binds = {});
+    // Column-name form; the column is checked against an allow-list because it is
+    // interpolated into the SQL text and cannot be bound.
     QStringList getDistinctValues(const QString& column);
     // Internal wrappers used as fallbacks by parametric methods when parameter is empty.
-    // Delegate to getDistinctValues() (cache-only).
     QStringList getDistinctBeanTypes();
     QStringList getDistinctGrinders();
     QStringList getDistinctGrinderSettings();
     // Helper to apply smart sorting for grinder settings
     void sortGrinderSettings(QStringList& settings);
-    // Async cache-miss fetcher: runs SQL on background thread, populates cache, emits distinctCacheReady()
-    void requestDistinctValueAsync(const QString& cacheKey, const QString& sql,
-                                    const QVariantList& bindValues = {});
-
     // Connection-parameterised core of importShotRecord, so the import logic can
     // run on either the main-thread m_db (importShotRecord) or a background
     // withTempDb connection (importShotRecordAsync) from one implementation.
@@ -547,17 +612,19 @@ private:
     std::atomic<bool> m_backupInProgress{false};  // Prevent concurrent backup/export operations (thread-safe)
     std::atomic<bool> m_importInProgress{false};   // Prevent concurrent import/restore operations (thread-safe)
 
-    // Cache for getDistinct*() results (invalidated on save/delete/import)
-    QHash<QString, QStringList> m_distinctCache;
     // Deduped narration of what grindStepForGrinder() derived — see its definition.
-    void reportGrindStep(const QString& grinderModel, qsizetype sampleCount, double step);
-    // Last "<grinder>:<count>:<step>" passed to reportGrindStep(), so the
-    // derivation is logged when it CHANGES rather than on every QML binding
-    // re-evaluation. Not a cache — it is only ever compared, never read back.
-    QString m_lastGrindStepReport;
-    bool m_distinctCacheRefreshing = false;  // Debounce guard for requestDistinctCache()
-    bool m_distinctCacheDirty = false;       // Re-queue flag: set when invalidation arrives during refresh
-    QSet<QString> m_pendingDistinctKeys;     // De-duplicate in-flight requestDistinctValueAsync() calls
+    // Why a derivation answered what it did. All three non-derived outcomes
+    // return the SAME 0.0, so a log that does not name them cannot tell a broken
+    // query from a grinder with no numeric history — which is exactly how the
+    // single-digit grind report stayed undiagnosed for so long.
+    enum class GrindStepOutcome { Derived, NotReady, QueryFailed, TooThin, NoGrinder };
+    void reportGrindStep(const QString& grinderModel, qsizetype sampleCount, double step,
+                         GrindStepOutcome outcome);
+    // Last "<count>:<step>" reported per grinder model, so the derivation is
+    // logged when it CHANGES rather than on every re-evaluation. Keyed by model:
+    // a single scalar alternated between two live GrindRowSources (startup has
+    // two, one usually empty) and deduped nothing. Not a cache — only compared.
+    QHash<QString, QString> m_lastGrindStepReport;
 
     // Async filter support
     bool m_loadingFiltered = false;

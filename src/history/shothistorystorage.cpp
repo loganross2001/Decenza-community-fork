@@ -125,16 +125,22 @@ bool ShotHistoryStorage::isDbWorkIdle() const
     // No worker means nothing was ever posted, which is idle by definition — the
     // worker is created lazily on first use (runOnDbThread).
     //
-    // The detached count is the other half, and it used to be missing: the eleven
+    // The detached count is the other half, and it used to be missing: the nine
     // read queries spawn one-shot threads that never go through m_dbWorker, so a
     // caller that waited on this was told "idle" while a thread was mid-SELECT.
-    // initialize() itself starts one (the distinct-cache pre-warm), so EVERY user
-    // of this class had one running. It surfaced as tst_mcptools_write failing
+    // initialize() used to start one itself (the distinct-value cache pre-warm),
+    // so EVERY user of this class had one running; that cache is gone, but the
+    // detached reads it exposed remain. It surfaced as tst_mcptools_write failing
     // with `disk I/O error Unable to execute statement` — a test's QTemporaryDir
     // deleting the .db out from under the previous test's still-running pre-warm,
     // with the warning landing in whichever test happened to be running next.
     return (!m_dbWorker || m_dbWorker->isIdle())
         && m_detachedDbThreads->load(std::memory_order_acquire) == 0;
+}
+
+bool ShotHistoryStorage::isDbWriteWorkIdle() const
+{
+    return !m_dbWorker || m_dbWorker->isIdle();
 }
 
 void ShotHistoryStorage::close()
@@ -244,8 +250,24 @@ bool ShotHistoryStorage::initialize(const QString& dbPath)
     m_ready = true;
     emit readyChanged();
 
-    // Pre-warm the distinct cache on a background thread
-    requestDistinctCache();
+#ifndef DECENZA_TESTING
+    // After m_ready, deliberately: the census reads through its own connection
+    // on the worker, and queueing it earlier would only widen the window in
+    // which a reader could see a half-initialised object.
+    //
+    // Skipped in test builds, like importLegacyBeanPresets() above, and for a
+    // sharper reason than "tests don't need it". Posting here CREATES the FIFO
+    // worker and increments its outstanding count, and ~SerialDbWorker warns
+    // "those writes are being discarded" for anything still queued
+    // (core/dbutils.h). A read-only storage never created that worker before,
+    // so the warning was unreachable; arming it on every initialize() would
+    // make a census that writes NOTHING claim a user lost writes, and would
+    // race QTest::failOnWarning() in every test that constructs a storage and
+    // lets it fall out of scope without draining. The failure would surface
+    // named "ShotHistoryStorageWorker", in whichever test happened to be
+    // running — see the same hazard documented in tst_coffeebags.cpp.
+    logGrinderCensus();
+#endif
 
     qDebug() << "ShotHistoryStorage: Database initialized with" << m_totalShots << "shots";
     return true;
@@ -1960,9 +1982,15 @@ bool ShotHistoryStorage::runMigrations()
     // one — and because grinder calibration matches on model AND burrs while
     // dial-in grouping keys on equipment_id, the grinder read as brand new with
     // no history (#1713). The fork rule is fixed going forward; this repairs the
-    // users it already happened to, which is most of them: the signature is
-    // narrow (a lineage pair differing ONLY by empty-vs-set burrs) and everything
-    // else is left alone. See EquipmentStorage::healEnrichmentForksStatic.
+    // users it already happened to, which is most of them. See
+    // EquipmentStorage::healEnrichmentForksStatic.
+    //
+    // NOTE: this block's TEXT is unchanged since it shipped, but its BEHAVIOUR is
+    // not. It calls the shared heal, and widen-enrichment-heal widened that from
+    // "burrs only" to the whole enrichment rule. So on any database below 35 —
+    // nearly all of them, since stable v2.0.0 predates this migration — 35 now
+    // performs the full widened fold and 36 finds nothing. 36 exists solely for
+    // databases a PRE-widening binary already stamped 35, which cannot re-run it.
     //
     // Data-only and NOT idempotent in effect (a second run simply finds nothing),
     // so the heal commits together with the version bump.
@@ -2021,7 +2049,7 @@ bool ShotHistoryStorage::runMigrations()
                 // same silence otherwise, and this migration is the first thing to
                 // check when a user reports the grinder still looks split.
                 EQUIP_INFO_STDERR("Migration",
-                                  QString("38 complete - merged %1 package(s) that a burr edit had split off")
+                                  QString("38 complete - merged %1 package(s) that an edit recording gear had split off")
                                       .arg(healed));
                 if (healed > 0) {
                     // The active selection lives in QSettings, not this database, so a
@@ -2039,6 +2067,84 @@ bool ShotHistoryStorage::runMigrations()
                 }
             } else {
                 EQUIP_WARN_STDERR("Migration", "38 incomplete - will retry next launch");
+            }
+        }
+    }
+
+    // Migration 39: re-run the heal for databases a PRE-widening binary already
+    // stamped 38 (widen-enrichment-heal). [barista-fork] Upstream #1729 shipped this
+    // as their migration 36 (re-heal for their 35); renumbered here to sit after the
+    // fork chain, since fork migration 38 is the enrichment heal (upstream's 35).
+    //
+    // That older binary's heal restated the enrichment rule instead of sharing it:
+    // it tested the burrs alone and required the other five components to be EQUAL
+    // — the inverse of enrichment for a component that was absent. So a fork caused
+    // by recording a BASKET, which is the common one because baskets arrived after
+    // grinders did, was skipped while 38 logged "merged 0" and read as nothing to
+    // fix. Confirmed on two real databases.
+    //
+    // A database that has NOT yet reached 38 does not need this: 38 above now calls
+    // the shared widened heal and folds everything in one pass, leaving 39 with
+    // nothing to do. Running both in one launch is therefore normal and harmless.
+    //
+    // 38 is left in place and unchanged rather than edited, because its version is
+    // already stamped wherever it ran and a stamped migration never runs again.
+    // Most devices are below it (stable v2.0.0 predates it) and will run both in
+    // one launch: harmless, since the widened predicate is a superset and the
+    // second pass finds the first one's work already done.
+    //
+    // Same shape as 38 deliberately — DbWriteTxn with attempts=1, query.finish()
+    // before taking the write lock, heal and version bump committing together.
+    // The read-then-write hazard documented above applies identically here, and
+    // the SELECT at the top of this function may have been re-executed by any
+    // migration in between.
+    if (currentVersion >= 38 && currentVersion < 39) {
+        EQUIP_LOG_STDERR("Migration", "39: re-healing enrichment forks against the full rule");
+        query.finish();
+        DbWriteTxn txn = DbWriteTxn::begin(m_db, "migration 39 enrichment-fork re-heal", 1);
+        if (!txn.ok()) {
+            EQUIP_WARN_STDERR("Migration",
+                              "39 could not start a transaction - will retry next launch");
+        } else {
+            QHash<qint64, qint64> remap;
+            qsizetype healed = 0;
+            bool ok = EquipmentStorage::healEnrichmentForksStatic(m_db, &remap, &healed);
+            if (ok) {
+                query.exec("DELETE FROM schema_version");
+                ok = query.exec("INSERT INTO schema_version (version) VALUES (39)");
+            }
+            if (ok && txn.commit()) {
+                currentVersion = 39;
+                EQUIP_INFO_STDERR("Migration",
+                                  QString("39 complete - merged %1 package(s) that an edit "
+                                          "recording gear had split off")
+                                      .arg(healed));
+                if (healed > 0) {
+                    // Same reason as 38: the active selection lives in QSettings,
+                    // so a merged-away id would leave the app pointing at a
+                    // deleted package.
+                    //
+                    // Reads QSettings directly, with no "prefer 38's result"
+                    // fallback. An earlier draft had one, reasoning about a chain
+                    // where 38 folds 1->2 and 39 folds 2->3 — but that cannot
+                    // happen now that both call the SAME widened heal: on a
+                    // database below 38, migration 38 folds everything foldable and
+                    // 39 finds nothing, so this block does not run at all. On a
+                    // database already stamped 38 by a pre-widening binary, 38 is
+                    // skipped and there is no earlier result to prefer. The
+                    // fallback was unreachable, and a branch that needs fault
+                    // injection to reach is one to delete, not to test.
+                    AppSettings settings;
+                    const qint64 activeId = settings.value("dye/activeEquipmentId", -1).toLongLong();
+                    if (activeId > 0 && remap.contains(activeId)) {
+                        m_healedActiveEquipmentId = remap.value(activeId);
+                        EQUIP_INFO_STDERR("Migration",
+                                          QString("39 moved the active equipment from package %1 to %2")
+                                              .arg(activeId).arg(m_healedActiveEquipmentId));
+                    }
+                }
+            } else {
+                EQUIP_WARN_STDERR("Migration", "39 incomplete - will retry next launch");
             }
         }
     }
@@ -2329,7 +2435,7 @@ qint64 ShotHistoryStorage::saveShot(ShotDataModel* shotData,
 
             if (shotId > 0) {
                 m_lastSavedShotId = shotId;
-                refreshTotalShots();  // already calls invalidateDistinctCache() internally
+                refreshTotalShots();
 
                 qDebug() << "ShotHistoryStorage: Saved shot" << shotId
                          << "- Profile:" << profileName
@@ -3388,7 +3494,7 @@ bool ShotHistoryStorage::deleteShotStatic(QSqlDatabase& db, qint64 shotId)
         return false;
     }
 
-    // Note: no updateTotalShots()/invalidateDistinctCache()/shotDeleted() here.
+    // Note: no updateTotalShots()/shotDeleted() here.
     // This is only called from the import overwrite path, which handles refresh
     // (refreshTotalShots) after the full batch.
     qDebug() << "ShotHistoryStorage: Deleted shot" << shotId;
@@ -3435,7 +3541,6 @@ void ShotHistoryStorage::deleteShots(const QVariantList& shotIds)
             }
             if (success) {
                 updateTotalShots();
-                invalidateDistinctCache();
                 for (const auto& id : shotIds)
                     emit shotDeleted(id.toLongLong());
                 emit shotsDeleted(shotIds);
@@ -3477,7 +3582,6 @@ void ShotHistoryStorage::requestDeleteShot(qint64 shotId)
             }
             if (success) {
                 refreshTotalShots();
-                invalidateDistinctCache();
                 emit shotDeleted(shotId);
                 qDebug() << "ShotHistoryStorage: Async deleted shot" << shotId;
             } else {
@@ -3626,7 +3730,9 @@ void ShotHistoryStorage::requestUpdateShotMetadata(qint64 shotId, const QVariant
                 return;
             }
             if (success) {
-                invalidateDistinctCache();
+                // A rating, note, bean or grind edit can move what the history
+                // getters and the grind-step derivation return.
+                emit historyDataChanged();
             } else {
                 // User-facing (surfaced as a toast): no internal shot id, no
                 // "metadata" jargon. The id + success are logged at qDebug below.
@@ -3696,9 +3802,10 @@ void ShotHistoryStorage::requestApplyTasteToShot(qint64 shotId, int enjoyment, b
         if (*destroyed) return;
         QMetaObject::invokeMethod(this, [this, shotId, success, destroyed]() {
             if (*destroyed) return;
-            if (success)
-                invalidateDistinctCache();
-            else
+            // [barista-fork] Upstream removed the distinct-value cache (reads now hit the
+            // DB directly), so the post-write invalidateDistinctCache() call is gone — the
+            // success path has nothing left to do but emit.
+            if (!success)
                 qWarning() << "ShotHistoryStorage: barista taste write FAILED for shot" << shotId;
             emit shotMetadataUpdated(shotId, success);
         }, Qt::QueuedConnection);
@@ -3710,6 +3817,9 @@ void ShotHistoryStorage::requestApplyTasteToShot(qint64 shotId, int enjoyment, b
 
 void ShotHistoryStorage::updateTotalShots()
 {
+    // Rows went away, so history-derived values may have moved.
+    emit historyDataChanged();
+
     // Async: run COUNT on background thread using existing static helper
     const QString dbPath = m_dbPath;
     auto destroyed = m_destroyed;
@@ -3912,7 +4022,6 @@ void ShotHistoryStorage::requestImportDatabase(const QString& filePath, bool mer
             m_importInProgress = false;
             if (success) {
                 refreshTotalShots();
-                invalidateDistinctCache();
             } else {
                 emit errorOccurred("Database import failed. The file may be corrupt or the disk may be full.");
             }
@@ -4760,8 +4869,8 @@ void ShotHistoryStorage::backfillBeverageType()
 
 void ShotHistoryStorage::refreshTotalShots()
 {
-    // Refresh distinct cache asynchronously
-    invalidateDistinctCache();
+    // Shot count moved, so anything derived from history may have moved too.
+    emit historyDataChanged();
 
     // Run COUNT query on background thread to avoid blocking the main thread
     QString dbPath = m_dbPath;

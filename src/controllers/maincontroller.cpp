@@ -18,12 +18,14 @@
 #include "../core/settings_visualizer.h"
 #include "../core/profilestorage.h"
 #include "../ble/de1device.h"
+#include "../ble/de1logging.h"
 #include "../machine/machinestate.h"
 #include "../models/shotdatamodel.h"
 #include "../models/shotcomparisonmodel.h"
 #include "../network/visualizeruploader.h"
 #include "../network/visualizerimporter.h"
 #include "../ai/aimanager.h"
+#include "../history/equipmentlogging.h"
 #include "../history/shothistorystorage.h"
 #include "../history/shotimporter.h"
 #include "../history/shotdebuglogger.h"
@@ -62,8 +64,21 @@
 #ifdef Q_OS_ANDROID
 #include <QJniObject>
 #endif
+#include "../core/storagelogging.h"
+#include <QEventLoop>
+#include <QTimer>
 #include <QQmlEngine>
 #include <QJSEngine>
+
+// ShotSettings drift: the DE1 reporting back something other than what we
+// commanded, and the resend ladder that answers it. Aliased rather than typing
+// the tag at each of the seven sites — one misspelling in a file this size is
+// invisible, and the line it produces is silently absent from every
+// [DE1][SettingsDrift] search. See LOGGING.md, "Alias the macro, never copy its
+// body". STDERR because MainController has no logMessage signal.
+#define DRIFT_LOG(msg)  DE1_LOG_STDERR_TAGGED("SettingsDrift", msg)
+#define DRIFT_INFO(msg) DE1_INFO_STDERR_TAGGED("SettingsDrift", msg)
+#define DRIFT_WARN(msg) DE1_WARN_STDERR_TAGGED("SettingsDrift", msg)
 
 MainController *MainController::s_qmlInstance = nullptr;
 
@@ -267,8 +282,19 @@ MainController::MainController(QNetworkAccessManager* networkManager,
     // Adopt the package that migration 35 merged the active selection into, if it
     // healed one — through the setter, so the settings cache and NOTIFY fire.
     // Before setEquipmentStorage(), so the storage resolves the surviving id.
-    if (m_shotHistory->healedActiveEquipmentId() > 0)
-        m_settings->dye()->setActiveEquipmentId(m_shotHistory->healedActiveEquipmentId());
+    //
+    // Logged because the migration announcing the move and this line applying it
+    // are in different files, and only this one changes what the app points at.
+    // Without it a submitted log stops one step short of the answer to "my
+    // equipment changed after updating" — the same gap that made #1713
+    // undiagnosable.
+    if (m_shotHistory->healedActiveEquipmentId() > 0) {
+        const qint64 healed = m_shotHistory->healedActiveEquipmentId();
+        EQUIP_INFO_STDERR("Migration",
+                          QString("adopted the healed active equipment - selection now points at package %1")
+                              .arg(healed));
+        m_settings->dye()->setActiveEquipmentId(healed);
+    }
     m_settings->dye()->setEquipmentStorage(m_equipmentStorage);
 
     // Recipe storage shares the same database (recipes table, migration 25).
@@ -2169,7 +2195,22 @@ QString MainController::pasteFromClipboard() const {
 void MainController::onShotSettingsReported(double deviceSteamTargetC, int deviceSteamDurationSec,
                                              double deviceHotWaterTempC, int deviceHotWaterVolMl,
                                              double deviceGroupTargetC) {
-    if (!m_device || !m_device->isConnected() || !m_settings) return;
+    // A drift episode that ends by the link going away must still produce a
+    // terminal line. Without this the reader gets "DE1-dropped-write" and
+    // "resending attempt 1 of 3" at WARN and then nothing ever again — the
+    // failure half of a narrative, which reads as an unresolved fault. This is
+    // the disconnect path that actually runs; the isConnected() re-check further
+    // down cannot fire, because nothing between it and the WARN above pumps the
+    // event loop.
+    if (!m_device || !m_device->isConnected() || !m_settings) {
+        if (m_shotSettingsResendInFlight || m_shotSettingsDriftResendCount > 0) {
+            DRIFT_INFO(QStringLiteral(
+                "device gone with a resend outstanding — ladder abandoned, drift unresolved"));
+            m_shotSettingsResendInFlight = false;
+            m_shotSettingsDriftResendCount = 0;
+        }
+        return;
+    }
 
     const double commandedSteam = m_device->commandedSteamTargetC();
     const int commandedDuration = m_device->commandedSteamDurationSec();
@@ -2215,29 +2256,36 @@ void MainController::onShotSettingsReported(double deviceSteamTargetC, int devic
     // reflects its power-on state, not ours, and racing against that would
     // log a bogus drift on every connect.
     if (!haveCommanded) {
-        qDebug().noquote() << QString(
-            "[SettingsDrift] pre-commanded report ignored: "
+        DRIFT_LOG(QString(
+            "pre-commanded report ignored: "
             "reported(steam=%1C dur=%2s hw=%3C vol=%4ml group=%5C) — waiting for first write")
             .arg(deviceSteamTargetC, 0, 'f', 1)
             .arg(deviceSteamDurationSec)
             .arg(deviceHotWaterTempC, 0, 'f', 1)
             .arg(deviceHotWaterVolMl)
-            .arg(deviceGroupTargetC, 0, 'f', 2);
+            .arg(deviceGroupTargetC, 0, 'f', 2));
         return;
     }
 
     if (!steamDrift && !durationDrift && !hotWaterTempDrift && !hotWaterVolDrift && !groupDrift) {
         // DE1 stored what we sent. Reset retry bookkeeping.
         if (m_shotSettingsDriftResendCount > 0) {
-            qDebug().noquote() << QString(
-                "[SettingsDrift] resolved after %1 resend(s) — DE1 stored "
+            // INFO, not DEBUG: this is the resolution of a fault already
+            // reported at WARN. Left at DEBUG, a `[DE1]` minLevel=INFO read
+            // shows the dropped write and the resends and never shows that
+            // they worked — the failure half of a narrative, which reads as an
+            // unresolved fault. The terminal outcomes are INFO+ (this) or WARN
+            // ("giving up" below); the two DEBUG lines are intermediate steps
+            // nobody but a developer needs.
+            DRIFT_INFO(QString(
+                "resolved after %1 resend(s) — DE1 stored "
                 "steam=%2C dur=%3s hw=%4C vol=%5ml group=%6C")
                 .arg(m_shotSettingsDriftResendCount)
                 .arg(deviceSteamTargetC, 0, 'f', 1)
                 .arg(deviceSteamDurationSec)
                 .arg(deviceHotWaterTempC, 0, 'f', 1)
                 .arg(deviceHotWaterVolMl)
-                .arg(deviceGroupTargetC, 0, 'f', 2);
+                .arg(deviceGroupTargetC, 0, 'f', 2));
             m_shotSettingsDriftResendCount = 0;
         }
         m_shotSettingsResendInFlight = false;
@@ -2286,8 +2334,8 @@ void MainController::onShotSettingsReported(double deviceSteamTargetC, int devic
         summary = summary.isEmpty() ? note : summary + QStringLiteral("; ") + note;
     }
 
-    qWarning().noquote() << QString(
-        "[SettingsDrift] DE1-dropped-write: %1 | "
+    DRIFT_WARN(QString(
+        "DE1-dropped-write: %1 | "
         "reported(steam=%2C dur=%3s hw=%4C vol=%5ml group=%6C) "
         "commanded(steam=%7C dur=%8s hw=%9C vol=%10ml group=%11C)")
         .arg(summary)
@@ -2300,37 +2348,60 @@ void MainController::onShotSettingsReported(double deviceSteamTargetC, int devic
         .arg(commandedDuration)
         .arg(commandedHotWaterTemp, 0, 'f', 1)
         .arg(commandedHotWaterVol)
-        .arg(commandedGroup, 0, 'f', 2);
+        .arg(commandedGroup, 0, 'f', 2));
 
     // If a resend is already in flight (we sent one and haven't yet received
     // its indication), wait for that to resolve before firing another. This
     // is the event-based replacement for a 2s wall-clock rate limit.
     if (m_shotSettingsResendInFlight) {
-        qDebug() << "[SettingsDrift] resend already in flight — waiting for its indication";
+        // This indication IS that resend's answer — the read is queued after the
+        // write, per the comment above — and it still shows drift. Consume it by
+        // clearing the flag, so the NEXT report can fire attempt N+1.
+        //
+        // Without this clear the flag was set once and never reset on a drifting
+        // path (the only other resets are the no-drift branch and a reconnect),
+        // so the ladder stalled at one attempt: kMaxResendAttempts was never
+        // reached and the "giving up" WARN below could not execute on any
+        // connection. What a user saw instead was DE1-dropped-write re-warned on
+        // every indication, forever, with no terminal line.
+        //
+        // de1app has no ShotSettings drift detection to compare against. Its
+        // nearest equivalent — confirm_de1_send_shot_frames_worked — detects the
+        // same class of fault and then deliberately does NOT auto-resend
+        // (de1plus/de1_comms.tcl:1566, commented out to avoid a 500ms retry
+        // loop). That hazard does not apply here: this ladder is bounded at
+        // kMaxResendAttempts and advances only when the DE1 sends an
+        // indication, so it cannot spin.
+        m_shotSettingsResendInFlight = false;
+        DRIFT_LOG(QStringLiteral("resend already in flight — this report answers it, still drifting"));
         return;
     }
 
     constexpr int kMaxResendAttempts = 3;
     if (m_shotSettingsDriftResendCount >= kMaxResendAttempts) {
-        qWarning().noquote() << QString(
-            "[SettingsDrift] giving up after %1 resend attempts — DE1 not honoring ShotSettings")
-            .arg(m_shotSettingsDriftResendCount);
+        DRIFT_WARN(QString(
+            "giving up after %1 resend attempts — DE1 not honoring ShotSettings")
+            .arg(m_shotSettingsDriftResendCount));
         return;
     }
 
-    // Re-check the connection right before committing to the resend — signals
-    // emitted above could have flipped state, and we don't want to burn a
-    // retry slot on a write that will no-op inside the transport.
+    // Belt-and-braces only. The comment here used to say "signals emitted above
+    // could have flipped state" — that stopped being true once these lines
+    // became stderr-only macros, which emit nothing and pump no event loop, so
+    // isConnected() cannot change between the WARN above and this line. The
+    // disconnect that really happens is caught at the top of this function,
+    // where the ladder is abandoned with a terminal INFO. Kept because a cheap
+    // guard immediately before a device write is worth having anyway.
     if (!m_device->isConnected()) {
-        qDebug() << "[SettingsDrift] device disconnected during drift handling — skipping resend";
+        DRIFT_INFO(QStringLiteral("device disconnected during drift handling — skipping resend"));
         return;
     }
 
     m_shotSettingsDriftResendCount++;
     m_shotSettingsResendInFlight = true;
-    qWarning().noquote() << QString(
-        "[SettingsDrift] resending last ShotSettings payload (attempt %1 of %2)")
-        .arg(m_shotSettingsDriftResendCount).arg(kMaxResendAttempts);
+    DRIFT_WARN(QString(
+        "resending last ShotSettings payload (attempt %1 of %2)")
+        .arg(m_shotSettingsDriftResendCount).arg(kMaxResendAttempts));
     // Re-assert exactly what we last commanded — do NOT re-derive from
     // Settings via sendMachineSettings(). Some code paths (startSteamHeating,
     // softStopSteam, setSteamTimeoutImmediate) deliberately write values that
@@ -2422,9 +2493,108 @@ void MainController::applyFlushSettings() {
     sendMachineSettings(QStringLiteral("applyFlushSettings"));
 }
 
+void MainController::drainDbWork(int timeoutMs, DrainReason reason) {
+    // isDbWriteWorkIdle() on the shot history, not isDbWorkIdle(): the latter also
+    // counts detached read/backup/import threads, which SerialDbWorker never
+    // tracks and ~SerialDbWorker therefore cannot discard. Waiting on those spent
+    // the whole budget on a quit-during-backup for nothing. The other three have
+    // no detached threads, so their isDbWorkIdle() is already write-only.
+    const auto allIdle = [this]() {
+        return (!m_shotHistory      || m_shotHistory->isDbWriteWorkIdle())
+            && (!m_bagStorage       || m_bagStorage->isDbWorkIdle())
+            && (!m_equipmentStorage || m_equipmentStorage->isDbWorkIdle())
+            && (!m_recipeStorage    || m_recipeStorage->isDbWorkIdle());
+    };
+
+    const bool exiting = (reason == DrainReason::Exiting);
+
+    // Log the quiet path too. This is the COMMON outcome — nothing queued, nothing
+    // to wait for — and it used to return in silence, which made "the drain ran and
+    // found nothing" indistinguishable from "the drain never ran". That matters
+    // most where it can least be checked: on Android the suspend call site cannot
+    // be exercised from a desktop build, and this line is the only evidence that
+    // it fires at all. It cost a wrong answer once already, reading a shutdown log
+    // that had run the drain and said nothing about it.
+    if (allIdle()) {
+        STORAGE_LOG_STDERR("Drain", exiting ? QStringLiteral("nothing queued at exit")
+                                           : QStringLiteral("nothing queued at backgrounding"));
+        return;
+    }
+
+    // Polled, not signalled: the workers count outstanding tasks in an atomic and
+    // emit nothing when it reaches zero, so there is no edge to connect to. This
+    // is the periodic-task case the timer rule allows, not a timer standing in
+    // for a condition — the condition is checked directly on every tick.
+    QEventLoop loop;
+    QTimer poll;
+    poll.setInterval(20);
+    QObject::connect(&poll, &QTimer::timeout, &loop, [&]() {
+        if (allIdle())
+            loop.quit();
+    });
+    QTimer::singleShot(timeoutMs, &loop, [&loop]() { loop.quit(); });
+    poll.start();
+    // ExcludeUserInputEvents is load-bearing, not tidiness: a second tap on Quit
+    // delivered inside this loop reaches QCoreApplication::exit(), which exits
+    // EVERY loop in data->eventLoops (qcoreapplication.cpp:1520-1529) — including
+    // this one — abandoning the drain and discarding the write it is saving. The
+    // quit-site comment claimed this protection before the flag was actually here.
+    loop.exec(QEventLoop::ExcludeUserInputEvents);
+
+    if (allIdle()) {
+        STORAGE_LOG_STDERR("Drain", exiting ? QStringLiteral("drained before exit")
+                                           : QStringLiteral("drained before backgrounding"));
+        return;
+    }
+
+    // Name the storage. Four collapse into one message otherwise, and which one
+    // is stuck is the only fact that makes this actionable.
+    QStringList stuck;
+    if (m_shotHistory      && !m_shotHistory->isDbWriteWorkIdle()) stuck << "shots";
+    if (m_bagStorage       && !m_bagStorage->isDbWorkIdle())       stuck << "bags";
+    if (m_equipmentStorage && !m_equipmentStorage->isDbWorkIdle()) stuck << "equipment";
+    if (m_recipeStorage    && !m_recipeStorage->isDbWorkIdle())    stuck << "recipes";
+
+    // Deliberately does NOT tell the reader to look for ~SerialDbWorker's
+    // "destroyed with N DB task(s) still queued" line. That fires during static
+    // teardown, after AsyncLogger::uninstall() has already closed the log — so it
+    // reaches stderr/logcat and never the debug log a user submits. Pointing them
+    // at a line that cannot be there is worse than not mentioning it.
+    //
+    // Nor does it claim the writes ARE lost. The workers keep running through the
+    // rest of shutdown, and ~SerialDbWorker quits and then WAITS, so a task
+    // already in flight still commits; only queued-but-unstarted ones are dropped.
+    // WARN only when exiting. On the backgrounding path the app keeps running and
+    // the worker finishes moments later, so a timeout there is the ordinary
+    // outcome, not a fault — and that path fires on every app switch. Warning on
+    // it is what LOGGING.md means by training readers to skim the tier that says
+    // "look here".
+    if (exiting)
+        STORAGE_WARN_STDERR("Drain", QString(
+            "did not drain within %1 ms. Still busy: %2 - whether a queued write "
+            "survives now depends on whether its worker reaches it before exit, and "
+            "that outcome is not recorded in this log").arg(timeoutMs).arg(stuck.join(", ")));
+    else
+        STORAGE_LOG_STDERR("Drain", QString(
+            "still pending after %1 ms at backgrounding. Still busy: %2 - the worker "
+            "keeps running, so this is only a loss if the OS kills the process before "
+            "it finishes").arg(timeoutMs).arg(stuck.join(", ")));
+}
+
 void MainController::applyAllSettings() {
     // Fresh connection — reset ShotSettings drift bookkeeping so a prior
     // session's exhausted retry budget doesn't permanently disable auto-heal.
+    //
+    // Say so when there was something to discard. Zeroing the counter silently
+    // also suppresses the "resolved after N resend(s)" line on the next clean
+    // report, because that line is gated on the counter being non-zero — so a
+    // drift that ended in a reconnect left the WARN as the last word a reader
+    // ever saw.
+    if (m_shotSettingsDriftResendCount > 0 || m_shotSettingsResendInFlight) {
+        DRIFT_INFO(QString("drift ladder reset by reconnect after %1 resend(s) — "
+                           "the previous session's drift was never resolved")
+                       .arg(m_shotSettingsDriftResendCount));
+    }
     m_shotSettingsDriftResendCount = 0;
     m_shotSettingsResendInFlight = false;
 
@@ -4033,8 +4203,21 @@ void MainController::factoryResetAndQuit()
         "()V");
 #endif
 
-    // 5. Quit the app
-    QCoreApplication::quit();
+    // 5. Quit the app — QUEUED, not a direct call.
+    //
+    // This runs from a QML onClicked handler (SettingsHistoryDataTab.qml), and
+    // QCoreApplication::quit() reaches aboutToQuit synchronously, so a direct
+    // call leaves that handler on the stack for the whole of shutdown. Anything
+    // in aboutToQuit that pumps events — the BLE drain, and now drainDbWork() —
+    // would then be a nested event loop beneath a live QML handler, which is the
+    // qFatal in qqmlengine.cpp:1370-1396 that aborted shipped iOS 2.0.0 (#1692),
+    // not merely a slowdown.
+    //
+    // Posting it lands aboutToQuit on a clean stack, which is exactly what
+    // QQmlApplicationEngine already does for Qt.quit() (it connects the QML
+    // engine's quit signal with Qt::QueuedConnection, qqmlapplicationengine.cpp).
+    // So the ordinary Quit button was always safe and this path was the outlier.
+    QMetaObject::invokeMethod(qApp, &QCoreApplication::quit, Qt::QueuedConnection);
 }
 
 void MainController::bumpTargetWeight(double deltaG)
@@ -4305,7 +4488,10 @@ void MainController::onShotSampleReceived(const ShotSample& sample) {
             double threshGood = qMax(floorGood, goal * 0.25);
             double threshWarn = qMax(floorWarn, goal * 0.50);
             QString color = delta < threshGood ? "GREEN" : (delta < threshWarn ? "YELLOW" : "RED");
-            qDebug() << "[ExtractionTrack]" << (isFlowMode ? "flow" : "pressure")
+            // Prefix deliberately unbracketed: a per-sample trace is not a
+            // subsystem narrative, and "[ExtractionTrack]" advertised a
+            // debug_get_log filter that would return an incomplete answer.
+            qDebug() << "ExtractionTrack:" << (isFlowMode ? "flow" : "pressure")
                      << "actual=" << QString::number(actual, 'f', 2)
                      << "goal=" << QString::number(goal, 'f', 2)
                      << "delta=" << QString::number(delta, 'f', 2)
@@ -4344,7 +4530,8 @@ void MainController::onScaleWeightChanged(double weight) {
             double estimatedWeight = m_flowScale->weight();
             double rawFlow = m_flowScale->rawFlowIntegral();
             double error = estimatedWeight - weight;
-            qDebug().nospace() << "[FlowScale Compare] "
+            // Unbracketed for the same reason as ExtractionTrack above.
+            qDebug().nospace() << "FlowScale Compare: "
                 << "time=" << QString::number(m_lastShotTime, 'f', 1) << "s"
                 << " scale=" << QString::number(weight, 'f', 1) << "g"
                 << " est=" << QString::number(estimatedWeight, 'f', 1) << "g"

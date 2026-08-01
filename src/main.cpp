@@ -97,6 +97,7 @@ extern "C" const char* __ubsan_default_options()
 #include <QSysInfo>
 #include <memory>
 #include <vector>
+#include "core/storagelogging.h"
 #include <QElapsedTimer>
 #include <QNetworkAccessManager>
 #include <QMetaEnum>
@@ -1782,15 +1783,30 @@ int main(int argc, char *argv[])
     // the AIManager was attached. Forwards to every provider + the conversation.
     aiManager.setTranslationManager(&translationManager);
 
-    // Register the per-provider model-hint strings with the translation
-    // registry. SettingsAITab.qml builds these keys dynamically
+    // Register the per-provider model-hint strings and the per-MODEL cost
+    // strings with the translation registry.
+    //
+    // Model hints: SettingsAITab.qml builds these keys dynamically
     // ("settings.ai.modelHint." + provider), which the QML string scanner
     // cannot see; registering here keeps the batch-translation registry
     // complete while the English copy stays in AIProvider::modelHint().
+    //
+    // Cost lines: the keys are static (ai.cost.<provider>.<model>) and live in
+    // C++, but translateString() only registers a key when it is CALLED, and
+    // the app only ever calls costHintFor() for the model currently selected.
+    // Without this loop a user translates the app, switches models, and gets
+    // an English cost line for a model whose string was never offered to the
+    // translator. Priced models are enumerated rather than assumed, so a model
+    // with no costHintFor() case simply contributes no key.
     for (const QString& providerId : aiManager.availableProviders()) {
         const QString hint = aiManager.modelHint(providerId);
         if (!hint.isEmpty())
             translationManager.translateString("settings.ai.modelHint." + providerId, hint);
+        for (const QVariant& model : aiManager.availableModels(providerId)) {
+            const QString modelId = model.toMap().value("id").toString();
+            if (!modelId.isEmpty())
+                (void)aiManager.costHint(providerId, modelId);
+        }
     }
 
     // Connect FlowScale to graph initially (will be disconnected if physical scale found)
@@ -4299,7 +4315,7 @@ int main(int argc, char *argv[])
     // when app is suspended/resumed. Neither DE1 nor scale are put to sleep when
     // backgrounded — users may switch apps while the machine heats up.
     QObject::connect(&app, &QGuiApplication::applicationStateChanged, handlerScope.get(),
-                     [&physicalScale, &bleManager, &settings, &batteryManager, &de1Device, &scaleReconnectTimer, &scaleReconnectAttempt, &reconnectDelays, &de1ReconnectTimer, &de1ReconnectAttempt, &scaleAutoReconnectSuppressed, &refractometerReconnectTimer, &refractometerReconnectAttempt](Qt::ApplicationState state) {
+                     [&physicalScale, &bleManager, &settings, &batteryManager, &de1Device, &scaleReconnectTimer, &scaleReconnectAttempt, &reconnectDelays, &de1ReconnectTimer, &de1ReconnectAttempt, &scaleAutoReconnectSuppressed, &refractometerReconnectTimer, &refractometerReconnectAttempt, &mainController](Qt::ApplicationState state) {
         static bool wasSuspended = false;
 
         // Log every state transition so the debug log captures pre-suspend
@@ -4352,6 +4368,36 @@ int main(int argc, char *argv[])
             // before iOS can tear down CoreBluetooth. The bluetooth-central background mode
             // also helps by keeping CoreBluetooth alive longer during backgrounding.
             batteryManager.ensureChargerOn();
+
+            // Flush queued database writes LAST in this branch, and last for the
+            // same reason the quit-path call is last: it pumps events, so it must
+            // not be queued in front of anything time-critical. Here that is
+            // QAccessible::setActive(false) above — which exists to close an
+            // EGL-surface/accessibility deadlock window — and ensureChargerOn(),
+            // whose comment records a SIGSEGV from racing CoreBluetooth teardown.
+            // The database is local and loses nothing by waiting.
+            //
+            // Why it is needed at all: aboutToQuit is not emitted when the OS kills
+            // a backgrounded process, which on Android is the common way this app
+            // ends, so this is the last hook a queued dose/note/rating gets.
+            //
+            // Usually a no-op via drainDbWork()'s early-out — the worker is a
+            // separate thread that keeps draining after this returns, so there is
+            // normally nothing outstanding by the time it is asked. What it defends
+            // against is the process being frozen (Android's cached-process freezer,
+            // Doze) or killed before the worker reaches a queued task.
+            //
+            // It cannot hang the UI thread here, and that safety is NOT obvious:
+            // drainDbWork relies on timers, and Android's dispatcher suppresses
+            // timer activation while suspended (QEventLoop::X11ExcludeTimers,
+            // qandroideventdispatcher.cpp:54-56) — which would block until resume.
+            // It does not apply to us because that stopper is only registered when
+            // blockEventLoopsWhenSuspended() is true (qandroideventdispatcher.cpp:12-14),
+            // and android/AndroidManifest.xml.in declares
+            // android.app.background_running="true", which sets
+            // QT_BLOCK_EVENT_LOOPS_WHEN_SUSPENDED=0 (QtLoader.java, androidjnimain.cpp).
+            // Flip that manifest line and this becomes a blocking wait.
+            mainController.drainDbWork(250, MainController::DrainReason::Backgrounding);
         }
         else if (state == Qt::ApplicationActive && wasSuspended) {
             qDebug() << "App resumed from suspended state";
@@ -4651,7 +4697,7 @@ int main(int argc, char *argv[])
     });
 
     // Cleanup on exit
-    QObject::connect(&app, &QCoreApplication::aboutToQuit, [&accessibilityManager, &batteryManager, &de1Device, &de1ReconnectTimer, &physicalScale, &engine, &weightThread, &relayClient, &machineStatusSnapshot]() {
+    QObject::connect(&app, &QCoreApplication::aboutToQuit, [&accessibilityManager, &batteryManager, &de1Device, &de1ReconnectTimer, &physicalScale, &engine, &weightThread, &relayClient, &machineStatusSnapshot, &mainController, &scaleReconnectTimer, &shotHistoryExporter]() {
         qDebug() << "Application exiting - shutting down devices";
 
         // Leave an honest "disconnected" snapshot so the Home Screen widget
@@ -4761,6 +4807,53 @@ int main(int argc, char *argv[])
         // wildcard form.
         de1ReconnectTimer.stop();
         QObject::disconnect(&de1Device, &DE1Device::connectedChanged, nullptr, nullptr);
+        scaleReconnectTimer.stop();
+
+        // Let the database write workers finish before the storages are
+        // destroyed. The BLE work above protects the machine; this protects the
+        // user's data. Until now nothing waited: a dose, note, rating or
+        // Visualizer id written seconds before quit could be discarded by
+        // ~SerialDbWorker with only a warning nobody was around to read.
+        //
+        // Placed HERE, not earlier, for two reasons found in review:
+        //
+        //  - It pumps events, and every reconnect ladder must be disarmed first.
+        //    A DE1 or scale reconnect tick landing inside the drain would start a
+        //    BLE scan microseconds before the disconnect below — the stale-GATT
+        //    state the comment above exists to avoid. Before this drain existed,
+        //    a quit with nothing BLE-connected processed no events here at all,
+        //    so that window is new and had to be closed rather than inherited.
+        //  - Both BLE waits above talk to hardware over a link that is about to
+        //    go away, including the charger write labelled important for safety.
+        //    The database is local and loses nothing by waiting, so it must not
+        //    be queued in front of either.
+        //
+        // ExcludeUserInputEvents because a second tap on Quit, delivered inside
+        // this loop, reaches QCoreApplication::exit() — which exits EVERY loop in
+        // data->eventLoops (qcoreapplication.cpp:1520-1529), including this one.
+        // That would abandon the drain and discard exactly the write it is here
+        // to save, at the hand of an impatient user.
+        //
+        // Bounded for the same reason the BLE waits are: Android kills a process
+        // that lingers on quit.
+        mainController.drainDbWork();
+
+        // A drained write may have just spawned an export thread (the exporter
+        // subscribes to shotSaved/shotMetadataUpdated), and this object is
+        // destroyed BEFORE MainController at scope exit — every export thread
+        // body starts with `if (*destroyed) return;`. Waiting on the database
+        // alone therefore made the DB row current while the exported JSON stayed
+        // stale, silently. Same bounded shape as the drain above.
+        {
+            QElapsedTimer waited;
+            waited.start();
+            while (!shotHistoryExporter.isExportWorkIdle() && waited.elapsed() < 750)
+                QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents, 20);
+            if (!shotHistoryExporter.isExportWorkIdle())
+                STORAGE_WARN_STDERR("Export", QStringLiteral(
+                    "shot export threads still running at exit - the exported JSON for a "
+                    "just-edited shot may be stale"));
+        }
 
         // Explicitly disconnect BLE so the GATT connection is released cleanly.
         // Without this, if the app is force-killed (e.g. after a hang), Android's

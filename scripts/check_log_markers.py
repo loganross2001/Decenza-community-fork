@@ -123,6 +123,10 @@ MARKER_ONLY_GLOBS = [
     # Hosts the [Equipment] migration lines (the enrichment-fork heal) beside the
     # whole schema-migration chain and the shot CRUD, none of which is equipment.
     "src/history/shothistorystorage.cpp",
+    # Hosts the [Equipment] grinder census beside every other history query, which
+    # is why it is here and not in COVERED_GLOBS: the file's bare qWarning calls
+    # are query failures belonging to no subsystem at all.
+    "src/history/shothistorystorage_queries.cpp",
     # Drives both reconnect ladders through BLEManager's public tier helpers, so a
     # device subsystem's most-asked-about narrative is written here, in a file that is
     # not about logging at all.
@@ -144,6 +148,13 @@ MARKER_ONLY_GLOBS = [
     # rule 6 existing rather than for adding files by hand.
     "src/core/settings_theme.cpp",
     "src/screensaver/iosbrightness.mm",
+    # Hosts two subsystems' lines: [Equipment][Migration] (the constructor's
+    # adoption of the package migration 35/36 healed) and [DE1][SettingsDrift]
+    # (the ShotSettings resend ladder in onShotSettingsReported). Both sit beside
+    # a constructor wiring shot history, bags, recipes, profiles, the DE1 and the
+    # scales, and ~110 bare qDebug calls belonging to no subsystem at all. Rule 1
+    # has no answer for those, which is exactly the main.cpp case above.
+    "src/controllers/maincontroller.cpp",
 ]
 
 # Helper headers define the macros; they are allowed to name markers and to contain

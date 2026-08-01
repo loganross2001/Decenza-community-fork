@@ -38,7 +38,11 @@ Always run with `-j` — the full suite drops from ~140 s to ~30 s. It is parall
 
 When seeding raw pre-construction settings state in a test, construct an `AppSettings` exactly like production code does — never a bare `QSettings`, which escapes the isolation and writes to the developer's real store. `tst_appsettings` enforces this across `src/`.
 
-`--repeat until-pass:3` covers two clock-cadence tests — `tst_settling` (feeds samples at real `qWait` intervals and asserts plateau detection over time windows) and `tst_decentscalewifi` — that can occasionally miss a timing window under heavy CPU contention when many tests run at once. The retry re-runs only a failed test; a genuine regression fails all three attempts. In Qt Creator's CTest settings you can add the same flag, or just re-run a lone flaky result.
+`--repeat until-pass:3` covers three tests that can miss a timing window under heavy CPU contention when many run at once. The retry re-runs only a failed test; a genuine regression fails all three attempts. In Qt Creator's CTest settings you can add the same flag, or just re-run a lone flaky result.
+
+- `tst_settling` — feeds samples at real `qWait` intervals and asserts plateau detection over time windows.
+- `tst_decentscalewifi`.
+- `tst_coffeebags::settingsDyeKeepFieldsStillResolvesTheDoseRung` — observed failing twice in five full runs (July 2026), always this one function, always passing in isolation and on retry. It fails via `failOnWarning`, not an assertion: the `bagReady` handler in `settings_dye.cpp:56` warns "active bag N not found - clearing selection" when the signal arrives with an empty map, which under load can happen because the async bag read races the test's raw-connection seed. **This is a real race in the test setup, not just slowness** — the mechanism is written down here so whoever fixes it does not have to rediscover it. Until then the retry covers it.
 
 ### Running under UBSan
 
@@ -96,9 +100,11 @@ Two exclusions are forced rather than chosen, and both were found by a Linux/GCC
 
 ### CI
 
-**There is no pull-request CI gate** — the suite is run locally before opening a PR, and that is the gate. `nightly-sanitizers.yml` runs the suite nightly on `main` under UBSan and ASan as two independent Linux builds. On **tag push**, `linux-release.yml` builds and runs all tests (uninstrumented) before packaging the AppImage. Other platform workflows do not run the suite.
+**Nothing on GitHub builds or runs the suite for a pull request** — you run it locally before opening one, and that is the gate. `nightly-sanitizers.yml` runs the suite nightly on `main` under UBSan and ASan as two independent Linux builds. On **tag push**, `linux-release.yml` builds and runs all tests (uninstrumented) before packaging the AppImage. Other platform workflows do not run the suite.
 
-See `docs/CLAUDE_MD/CI_CD.md` for why there is no PR gate: the detectors found no pre-existing defects on their first run across eight months of code, so they were moved off the critical path of every push.
+See `docs/CLAUDE_MD/CI_CD.md` for why: the detectors found no pre-existing defects on their first run across eight months of code, so they were moved off the critical path of every push.
+
+**That is about the suite, not about all PR CI, and the distinction has been misread.** This section used to open "There is no pull-request CI gate" flatly, which is false — `text-invariants.yml` runs on every PR touching the surfaces in its `paths:` list, `src/**` among them. It is build-free (seconds; the workflow header carries the measured figure), which is exactly why it can afford to run per-PR while the suite cannot, and it is where `check_test_source_duplication.py` below is enforced. It is not a *required* status check — a red run does not block the merge button, so **read the run**. A PR whose own `text-invariants` was red has already been merged here on the strength of this sentence, and turned `main` red.
 
 ## Architecture
 
@@ -335,10 +341,172 @@ discriminating.
 
 ## Adding New Tests
 
-1. Create `tests/tst_yourtest.cpp` with `QTEST_GUILESS_MAIN(tst_YourTest)` and `#include "tst_yourtest.moc"`
-2. Add to `tests/CMakeLists.txt` using `add_decenza_test(tst_yourtest tst_yourtest.cpp ...source files...)`
-3. If accessing private members, add `friend class tst_YourTest;` behind `#ifdef DECENZA_TESTING` in the production header
-4. Run `mcp__qtcreator__run_tests` to verify (`scope: "named"`, `names: ["tst_YourTest"]`; if a freshly added target isn't in the Autotest model yet, just retry — it re-parses)
+**A test costs BUILD time, not run time. Budget accordingly.** The whole suite runs
+in ~31 s and an individual test is 50-80 ms — that is noise. What is not noise is that
+`tests/` is **40% of a clean build** (1956 s of 4846 s cpu, measured from `.ninja_log`
+on macOS Debug), and that the suite doubled in July 2026 alone — 60 files to 107.
+
+**Where that 1956 s actually goes.** This matters because the intuitive answer is wrong
+and this section used to give it:
+
+| Slice | Cost | Share | Scales with |
+|---|---|---|---|
+| Production sources recompiled inside test targets | 688 s | 35.2% | the source list you pass `add_decenza_test` |
+| Test source TUs | 625 s | 31.9% | **how much test code exists** |
+| moc / autogen | 519 s | 26.5% | both |
+| qrc (Qt resources) | 66 s | 3.4% | resource-linking targets |
+| Link + timestamps | 58 s | **3.0%** | target count |
+
+Two consequences, both the opposite of what "a compile *and a link*" suggests:
+
+- **Link is 3.0%**, mean 0.53 s per target. Target count is the smallest lever there is.
+- **Relocating test code saves nothing on the test code itself.** Moving 208 test
+  functions from a new file into `tst_profilemanager.cpp` pays the same 17.6 s compile
+  under a different name. Consolidating targets saves link cost and lets targets share a
+  source list — real, but small. The only thing proportional to the problem is writing
+  less test code.
+
+> **Two corrections to the table above, both measured after it was written. Read them
+> before reasoning from those percentages.**
+>
+> **1. "Writing less test code" is a much weaker lever than the 31.9% row implies.**
+> Test-TU compile cost is dominated by the FILE, not by its contents. Isolated
+> single-TU compiles with the real flags: `#include <QtTest>` alone costs 1.42 s, and
+> a whole 60-line test file costs 1.45 s — its body is 3%. Regressing 109 live test
+> TUs against their source lengths gives ~1.4 s fixed per file and ~0.83 ms per line
+> (r=0.35), i.e. **90% of test-TU compile time is per-FILE and 10% scales with lines.**
+>
+> So a new test FILE costs ~1.4 s forever; a new test slot inside an existing file
+> costs single-digit milliseconds. The bar in this document targets the wrong unit: it
+> should be much harder to justify a new `tst_*.cpp` than a new test function. An audit
+> of all 2,515 tests in July 2026 found 93 mergeable into `_data()` tables and 239
+> under three code lines — acting on every one of them would have saved under a second.
+>
+> **2. The absolute seconds are contended wall clock, not CPU cost.** They come from
+> `.ninja_log`, which records each edge's start and end during a PARALLEL build, so
+> every figure is inflated by contention — on this machine roughly 2.5-3x versus the
+> same TU compiled alone. The 1956/4846 s split and the per-row seconds are therefore
+> useful as PROPORTIONS and misleading as durations. A later measurement of the same
+> tree summed 3083 s of edge time into 226.9 s of wall clock (~13.6x parallelism).
+>
+> Both corrections point the same way: **the per-target fixed cost is the largest
+> single slice, and the link row's 3.0% is only true of linking.** That is what made
+> precompiled headers worth doing — see `DECENZA_ENABLE_PCH` in the root
+> `CMakeLists.txt`, measured at 31.6% off a clean rebuild (229.5 s to 157.0 s) without
+> deleting a single test.
+
+So, in order:
+
+1. **Add to an EXISTING target whose fixtures already fit.** This is the default and
+   it is nearly free — one TU recompiles, and only when you touch it. Look for a
+   binary that already links what you need and already has the setup: `tst_dbmigration`
+   (schema/migration chain), `tst_dialing_blocks` (DB-backed reads, and it copies a
+   prebuilt schema template per test instead of re-running migrations), `tst_coffeebags`,
+   `tst_equipment`, `tst_recipestorage`.
+2. **Only create a new target when no existing one fits** — a genuinely new subsystem,
+   or a link footprint the existing binaries do not have. Creating one to get a tidier
+   filename is not a reason; it buys a name and costs a compile+link on every build.
+   If you do: `tests/tst_yourtest.cpp` with `QTEST_GUILESS_MAIN(tst_YourTest)` and
+   `#include "tst_yourtest.moc"`, then `add_decenza_test(...)` in `tests/CMakeLists.txt`.
+   **Watch the source list more than the target.** A new target with three sources is
+   cheap; adding one more production `.cpp` to an existing target's list to reach the
+   code you want is what actually costs — see "Shared sources go in a narrow library".
+3. If accessing private members, add `friend class tst_YourTest;` behind
+   `#ifdef DECENZA_TESTING` in the production header
+4. Run `mcp__qtcreator__run_tests` to verify (`scope: "named"`, `names: ["tst_YourTest"]`;
+   if a freshly added target isn't in the Autotest model yet, just retry — it re-parses)
+
+### A test has to catch something the suite does not
+
+Say what defect shape this test detects that no existing test detects. If you cannot
+name one, add the assertion to the test that already covers that shape instead of
+writing a new one.
+
+"More cases of the same shape" is **insurance, not detection**. It may well be worth
+adding — but argue it on risk and call it insurance, rather than presenting it as
+closing a coverage gap. The byte-parity corpus above is the worked example: the method
+found WIRE-1 with eight profiles, and going to 89 and then 120 more found nothing
+further.
+
+**One invariant, one place.** If an invariant is already asserted somewhere, extend that
+assertion rather than adding a parallel one. Two tests asserting the same invariant over
+different fixtures are one test parameterised over both fixtures — the second copy is
+free to drift, and nothing fails when it does.
+
+This is the same reasoning as the "centralize anything produced at more than one site"
+rule in the root `CLAUDE.md`, applied to assertions.
+
+### A test has to be able to fail
+
+Before you keep a test, **break the code it covers and watch it go red.** This is not
+ceremony; it is the only thing that distinguishes a test from a comment that compiles.
+Three shapes that pass forever and protect nothing, all shipped here:
+
+- **Tautological.** `grindStepAgreesWithDialingContext` asserted that the widget and the
+  AI payload return the same number — after a refactor made both call the same function.
+  `f(x) == f(x)`. Deleted.
+- **Asserting the universal failure value.** A function whose error path, not-ready path
+  and no-data path all return `0` cannot be tested by asserting `0`. Pair it with a case
+  in the same database that returns a real value, so the assertion proves the query ran.
+- **The predicate is the fix.** A poll loop whose condition calls the getter re-issues the
+  work the bug was about not re-issuing, so it passes on both branches. Read once after
+  quiescing instead.
+
+When a test would only pass, say so and don't write it. Deleting a test that cannot fail
+is a strict improvement — it removes build cost and a false sense of coverage at once.
+
+### Shared sources go in a NARROW library, never in `decenza_testlib`
+
+When two or more test targets need the same production source, compile it once into an
+intermediate library linked by **exactly those targets**. Do not reach for
+`decenza_testlib` to deduplicate — it is linked by every test target, and that trade is
+worse than the duplication it fixes.
+
+Measured — `touch src/controllers/profilemanager.cpp`, rebuild, cpu from the `.ninja_log`
+diff, `tests/`-attributable only. Nine consumers; 0.53 s mean link across all 106 targets that link it:
+
+| | Today (9 duplicate compiles) | Into `decenza_testlib` | Into a narrow library |
+|---|---|---|---|
+| Clean build | 72.6 s wasted | 0 s | 0 s |
+| Touch `profilemanager.cpp` | **77.0 s** | ~67 s | **12.2 s** |
+
+Widening the shared library trades a compile fan-out of 9 for a **link fan-out of 106**
+and comes out marginally worse on incremental builds, which is the case a developer
+actually waits on. A narrow library wins on both.
+
+So: an intermediate library's consumer set is never wider than the set of targets that
+need it. Before adding a source to any target's list, check whether another target
+already compiles it — and check whether `decenza_testlib` already carries it, which is
+how `tst_visualizershotparse` ended up compiling `shotanalysis.cpp` a second time for
+no reason.
+
+This rule is **enforced**, not advisory. `scripts/check_test_source_duplication.py` reads
+`tests/CMakeLists.txt` as text and fails on two things: a production source listed by two
+or more test targets, and a source listed by a target that already links a library
+compiling it. It runs per-PR in `text-invariants.yml` (build-free, so it fits that job's
+rule), and it is why the tree can have **zero** duplicates rather than a slowly-refilling
+exception list.
+
+Two consequences for anyone editing `tests/CMakeLists.txt`:
+
+- **Keep every `add_library()` and its source list literal.** The check reads this file as
+  text, so a library name assembled in a `foreach()` is invisible to it. A generated
+  version was written during the cleanup and reverted for exactly this reason.
+- **Do not hoist a moc'd header into a library unless every user of it links that
+  library.** `${MCP_MOC_HEADERS}` was tried in `decenza_mcpserverlib` and produced 24
+  duplicate symbols, because targets that do not link that library moc the same headers
+  themselves. A moc'd header belongs to exactly one compilation unit per link.
+- **A generated `qrc` goes in an OBJECT library, never STATIC.** Nothing references a
+  symbol in a generated resource `.cpp` — it is reached only through its static
+  initialiser — so a linker has no reason to pull it out of an archive and the resource
+  silently fails to register. `decenza_testresources` is `OBJECT` for that reason.
+
+### Prefer fixtures that amortise
+
+`tst_dialing_blocks` builds the schema **once** in `initTestCase()` and copies the file
+per test (a few ms) rather than running `createTables()` + the migration chain each time
+(~300 ms × 37 call sites). If you are adding DB-backed tests, use a binary with that
+shape rather than paying the chain per test.
 
 ## Handling Warnings
 

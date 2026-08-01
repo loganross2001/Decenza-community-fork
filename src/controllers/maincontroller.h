@@ -29,6 +29,18 @@
 #include "../models/shotcomparisonmodel.h"
 #include "../network/shotserver.h"
 #include "../network/shotreporter.h"
+// This include propagates the third-party <MQTTAsync.h> to all 16 includers of
+// this header, most of which use MqttClient only as an opaque pointer. It was
+// tried as a forward declaration and REVERTED — do not retry without reading
+// this. `Q_PROPERTY(MqttClient* mqttClient ...)` below needs the complete type:
+// Qt's metatype system rejects an incomplete pointee outright ("Pointer Meta
+// Types must either point to fully-defined types or be declared with
+// Q_DECLARE_OPAQUE_POINTER"). And the opaque-pointer escape hatch is worse than
+// the include, because SettingsHomeAutomationTab.qml reads through this property
+// at 8 sites (MainController.mqttClient.connected / .status /
+// .connectToBroker()); an opaque pointer carries no introspectable members, so
+// every one of those would degrade at RUNTIME rather than fail to compile.
+// The cost is real but bounded: touching mqttclient.h rebuilds 26 objects.
 #include "../network/mqttclient.h"
 #include "../core/updatechecker.h"
 #include "../core/firmwareassetcache.h"
@@ -359,6 +371,46 @@ public:
     // recipesUpgradeApplied() when finished — see its doc for the three
     // possible outcomes.
     Q_INVOKABLE void acceptRecipesFirstUpgrade(const QString& name, bool hasMilk);
+
+    // Wait until every storage's background DB WRITE worker has finished, or the
+    // budget runs out. Logs both outcomes itself, so there is no result to check.
+    //
+    // Call this before the storages are destroyed. `~SerialDbWorker` warns that
+    // it is discarding queued tasks, and until now nothing in production ever
+    // waited: three storages had an `isDbWorkIdle()` with no caller outside the
+    // tests, `RecipeStorage` had no accessor at all, and `aboutToQuit` drained
+    // the BLE queue but not the database.
+    // So a dose, note, rating or Visualizer id written in the seconds before
+    // quit could vanish, with the warning going to a log nobody reads on the way
+    // out. Found from the other side, when a test destroyed a CoffeeBagStorage
+    // with two writes still queued.
+    //
+    // Bounded on purpose. This runs on the quit path, where Android will kill a
+    // process that takes too long, so a stuck worker must not hold the app open
+    // — the same reason the BLE drain beside it carries a safety-net timeout.
+    //
+    // WHAT THIS DOES NOT COVER, because the comment above otherwise reads as if
+    // the whole class of loss is closed. Two call sites reach this — `aboutToQuit`
+    // and `Qt::ApplicationSuspended` — and NEITHER runs when the OS kills the
+    // process outright: an Android
+    // low-memory kill or force-stop, an iOS SIGKILL (the NORMAL iOS termination —
+    // qioseventdispatcher.mm:434 says so outright), a fatal signal reaching
+    // crashhandler.cpp's re-raise, or an ASan abort. Those lose queued writes with
+    // no warning whatsoever, since ~SerialDbWorker never runs either.
+    //
+    // Android is the primary platform and is usually backgrounded rather than
+    // quit, so the quit path alone would cover very little there. That is why
+    // Qt::ApplicationSuspended also calls this (main.cpp), with a shorter budget:
+    // backgrounding is the last hook before an OS kill, and it is the one that
+    // actually fires on Android.
+    //
+    // That second call was briefly left out and documented as out of scope, on the
+    // grounds that it risked an ANR and needed device measurement. Neither claim
+    // was checked before it was written. It is recorded here because the reasoning
+    // was backwards: the platform where the loss is most likely is the last place
+    // to accept a narrower fix, and "documented" is not a substitute for "fixed".
+    enum class DrainReason { Exiting, Backgrounding };
+    void drainDbWork(int timeoutMs = 750, DrainReason reason = DrainReason::Exiting);
 
 public slots:
     void applySteamSettings();

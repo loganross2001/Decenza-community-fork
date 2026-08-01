@@ -50,6 +50,18 @@ function(add_decenza_test name)
     if(NOT IOS AND mdns_lib_SOURCE_DIR)
         target_include_directories(${name} SYSTEM PRIVATE ${mdns_lib_SOURCE_DIR})
     endif()
+    # Share the one precompiled header decenza_test_pch builds, rather than
+    # building a private ~47 MB one per target. decenza_test_pch is declared
+    # further down this file but that is fine: a function body is evaluated at
+    # CALL time, and the first add_decenza_test() call is well after it.
+    #
+    # Anything added ABOVE this line that changes compile flags — a define, an
+    # include dir, a linked Qt module — must be mirrored onto decenza_test_pch,
+    # or REUSE_FROM fails for all 106 targets at once with an error naming
+    # cmake_pch.hxx and not the flag that actually diverged.
+    if(DECENZA_ENABLE_PCH)
+        target_precompile_headers(${name} REUSE_FROM decenza_test_pch)
+    endif()
     add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
@@ -137,8 +149,12 @@ set(CODEC_SOURCES
 
 # ---------------------------------------------------------------------------
 # decenza_testlib: the base-Qt sources that most test binaries share, compiled
-# ONCE here instead of recompiled into each of ~30 targets (CORE alone was
-# compiled 29×). Test targets link this instead of listing the bundle vars.
+# ONCE here instead of recompiled into each of the 106 targets below (it said
+# "~30" for years after the count had tripled — recount with
+# `grep -c "^add_decenza_test(" tests/CMakeLists.txt` rather than trusting this
+# number — anchored, because this very line contains the search string and an
+# unanchored grep counts itself). Test targets link this instead of listing the
+# bundle vars.
 # Built with DECENZA_TESTING so the friend-class seams match, and AUTOMOC on so
 # Q_OBJECT sources (de1device, machinestate, de1transport.h, …) are moc'd once.
 # ---------------------------------------------------------------------------
@@ -177,6 +193,91 @@ target_include_directories(decenza_testlib PUBLIC
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
+# Its own PCH, not the test one below: this library does not link Qt6::Test, so
+# <QtTest> is not available to it and it cannot share that header set. It is the
+# most expensive single target in tests/ (183.9 s of the 1208 s, ~15%) because it
+# compiles 43 production sources, which is the shape that measured ~28% — the
+# same ~0.5 s per TU the app-side comment describes.
+if(DECENZA_ENABLE_PCH)
+    target_precompile_headers(decenza_testlib PRIVATE
+        <QtCore/qobject.h>
+        <QtCore/qstring.h>
+        <QtCore/qvariant.h>
+        <QtCore/qdatetime.h>
+        <QtCore/qdebug.h>
+        <QtCore/qjsonobject.h>
+        <QtCore/qjsonarray.h>
+        <QtCore/qjsondocument.h>
+    )
+endif()
+
+# ---------------------------------------------------------------------------
+# decenza_test_pch: builds the precompiled header ONCE; every test target reuses
+# it via REUSE_FROM in add_decenza_test().
+#
+# Why a donor target rather than putting the header list on each test: a plain
+# target_precompile_headers() per target builds a SEPARATE ~47 MB PCH per target.
+# At 106 test targets that is ~240 s of PCH builds to save ~285 s of parsing —
+# most of the win handed straight back. REUSE_FROM builds one and shares it.
+#
+# It cannot hang off decenza_testlib, which every test already links: that
+# library does not link Qt6::Test, so it cannot compile <QtTest> and cannot be
+# the donor for a PCH containing it. Hence a target whose flags are constructed
+# to match what add_decenza_test() gives a test, exactly.
+#
+# KEEPING THE FLAGS IN SYNC IS LOAD-BEARING. REUSE_FROM requires the consumer's
+# compile flags to match the donor's; a define added to add_decenza_test() and
+# not here makes every test fail to compile against the shared PCH. If that
+# happens the error names cmake_pch.hxx and looks unrelated to the define — add
+# it in both places.
+#
+# Measured on this machine (isolated single-TU compiles, real flags):
+#   tst_bleserviceerror  1.51s -> 0.44s   -71%
+#   tst_roastdate        1.20s -> 0.44s   -64%
+#   tst_shotanalysis     2.10s -> 1.03s   -51%
+#   tst_settings         2.30s -> 1.18s   -49%
+#   tst_coffeebags       2.56s -> 1.50s   -41%
+#   tst_aimanager        2.60s -> 1.58s   -39%
+#
+# Tests benefit more than the app because a test TU is mostly header: a whole
+# 60-line test file costs 1.45 s and `#include <QtTest>` ALONE costs 1.42 s. The
+# body is 3% of it. That is also why the suite's build cost tracks file count
+# rather than test count — 90% of test-TU compile time is fixed per file, 10%
+# scales with lines (r=0.35, ~0.83 ms/line, ~1.4 s fixed).
+#
+# No language filter here and none needed: tests/ contains no Objective-C++. If
+# a .mm ever lands in a test target, it needs SKIP_PRECOMPILE_HEADERS — see the
+# note in the top-level CMakeLists.txt for why a $<COMPILE_LANGUAGE:CXX> genex
+# is NOT the way to do that (it empties the ObjC++ PCH instead of preventing its
+# use, and clang then rejects the C++ one).
+# The WHOLE target is inside the guard, not just its target_precompile_headers()
+# call. This target exists only to build a PCH: with DECENZA_ENABLE_PCH OFF —
+# which is the default on Windows — declaring it anyway would compile and link a
+# static library against decenza_testlib and six Qt modules to produce an
+# artefact nothing reuses. Every other PCH site in this change guards only the
+# target_precompile_headers() call, correctly, because those targets exist for
+# their own sake and would still be built with the PCH off; this one does not.
+if(DECENZA_ENABLE_PCH)
+    add_library(decenza_test_pch STATIC ${CMAKE_CURRENT_SOURCE_DIR}/pch_donor.cpp)
+    set_target_properties(decenza_test_pch PROPERTIES AUTOMOC OFF AUTOMOC_PATH_PREFIX OFF)
+    target_compile_definitions(decenza_test_pch PRIVATE
+        DECENZA_TESTING
+        DECENZA_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    target_link_libraries(decenza_test_pch PRIVATE
+        decenza_testlib
+        Qt6::Test Qt6::Core Qt6::Bluetooth Qt6::Sql Qt6::Network Qt6::Gui
+    )
+    target_include_directories(decenza_test_pch PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    target_precompile_headers(decenza_test_pch PRIVATE
+        <QtTest>
+        <QtCore/qjsonobject.h>
+        <QtCore/qjsonarray.h>
+        <QtCore/qjsondocument.h>
+    )
+endif()
 
 # ---------------------------------------------------------------------------
 # decenza_shotlib: the shot-history / live-model / upload layer, compiled ONCE
@@ -212,6 +313,22 @@ target_link_libraries(decenza_shotlib PUBLIC
 # includes. PUBLIC so linking targets inherit it and don't each repeat it.
 target_include_directories(decenza_shotlib PUBLIC ${CMAKE_BINARY_DIR})
 
+# The production resources.qrc, compiled ONCE for the three targets that need
+# :/icons/* and :/backgrounds/* to resolve (tst_backgroundpresets,
+# tst_mcpserver_protocol, tst_mcpremoteaccess). Each used to AUTORCC it into
+# itself: 34.9 s across the three, 22.4 s of it duplicate, and two of those
+# were among the slowest edges under tests/.
+#
+# OBJECT rather than STATIC, deliberately. A generated qrc .cpp is reached only
+# through its static initialiser — nothing references a symbol in it — so from a
+# static archive the linker has no reason to pull it in and the resource
+# silently fails to register. An OBJECT library's objects are always linked.
+# (This is the same archive-pull rule that made an over-merged static library
+# fail earlier in this file, seen from the other side.)
+add_library(decenza_testresources OBJECT ${CMAKE_SOURCE_DIR}/resources/resources.qrc)
+set_target_properties(decenza_testresources PROPERTIES AUTORCC ON)
+target_link_libraries(decenza_testresources PUBLIC Qt6::Core)
+
 add_decenza_test(tst_binarycodec
     tst_binarycodec.cpp
 )
@@ -221,8 +338,8 @@ add_decenza_test(tst_binarycodec
 # which needs real packets on a real LAN and so cannot be covered here. ---
 add_decenza_test(tst_wifiscaleresult
     tst_wifiscaleresult.cpp
-    ${CMAKE_SOURCE_DIR}/src/network/wifiscaleresult.cpp
 )
+target_link_libraries(tst_wifiscaleresult PRIVATE decenza_wifiscaleresultlib)
 
 # --- tst_aborted_shot_classifier: header-only "did the shot start?" classifier (issue #899) ---
 add_decenza_test(tst_aborted_shot_classifier
@@ -314,10 +431,14 @@ target_include_directories(tst_builtinprofileformat PRIVATE ${CMAKE_BINARY_DIR})
 
 # --- tst_visualizershotparse: JSON->ShotRecord recovery parser (string-encoded
 # DYE scalars must not zero; hollow-shot guard; phantom-frame guard). ---
+# shotanalysis.cpp is NOT listed here: it is in ANALYSIS_SOURCES, hence in
+# decenza_testlib, which add_decenza_test links. Listing it compiled the same
+# 3.3 s translation unit a second time for no reason, and nothing detected that
+# until the duplication audit — which is why check_test_source_duplication.py
+# now fails on exactly this shape.
 add_decenza_test(tst_visualizershotparse
     tst_visualizershotparse.cpp
     ${CMAKE_SOURCE_DIR}/src/history/shotfileparser.cpp
-    ${CMAKE_SOURCE_DIR}/src/ai/shotanalysis.cpp
 )
 target_compile_definitions(tst_visualizershotparse PRIVATE
     TST_VIS_PARSE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
@@ -415,8 +536,8 @@ add_decenza_test(tst_speakerembedder
 # --- tst_settings: Settings persistence and defaults ---
 add_decenza_test(tst_settings
     tst_settings.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/settingsserializer.cpp
 )
+target_link_libraries(tst_settings PRIVATE decenza_settingsserializerlib)
 
 # --- tst_appsettings: the single canonical settings store ---
 # Asserts the store-identity assumption the whole consolidation rests on (that the
@@ -443,17 +564,15 @@ add_decenza_test(tst_backgroundpresets
     tst_backgroundpresets.cpp
     # For the backup/migration round-trip: the colour and pattern must survive a
     # settings export/import, which backs every persistence surface in the app.
-    ${CMAKE_SOURCE_DIR}/src/core/settingsserializer.cpp
 )
 # Compile the production qrc so :/backgrounds/*.svg resolve — the catalogue test asserts
 # every pattern asset actually ships, which is the check that catches a catalogue entry
 # pointing at a file nobody added to resources.qrc.
-target_sources(tst_backgroundpresets PRIVATE ${CMAKE_SOURCE_DIR}/resources/resources.qrc)
-set_target_properties(tst_backgroundpresets PROPERTIES AUTORCC ON)
+target_link_libraries(tst_backgroundpresets PRIVATE decenza_testresources)
 # Qt6::Svg so the test can RENDER each pattern tile and measure its ink coverage, rather
 # than trusting the hand-entered figure the contrast maths depends on. Two of the six were
 # wrong before this check existed, both understating the shift.
-target_link_libraries(tst_backgroundpresets PRIVATE Qt6::Svg)
+target_link_libraries(tst_backgroundpresets PRIVATE decenza_settingsserializerlib Qt6::Svg)
 
 # --- tst_saw_settings: per-(profile, scale) SAW learning + batch + bootstrap ---
 add_decenza_test(tst_saw_settings
@@ -583,10 +702,10 @@ target_link_libraries(tst_recipesearch PRIVATE Qt6::Qml)
 # --- tst_beanbaseclient: Bean Base API client (debounce, rate limit, cache, parse) ---
 add_decenza_test(tst_beanbaseclient
     tst_beanbaseclient.cpp
-    ${CMAKE_SOURCE_DIR}/src/network/beanbaseclient.cpp
     ${CMAKE_SOURCE_DIR}/src/mcp/mcptools_beansearch.cpp
     ${CMAKE_SOURCE_DIR}/src/mcp/mcptoolregistry.h
 )
+target_link_libraries(tst_beanbaseclient PRIVATE decenza_beanbaselib)
 
 # --- tst_autowakewindow: scheduled stay-awake window predicate (#1203) ---
 add_decenza_test(tst_autowakewindow
@@ -684,18 +803,19 @@ add_decenza_test(tst_aimanager
     ${CMAKE_SOURCE_DIR}/src/mcp/mcptools_ai_conversations.cpp
     ${CMAKE_SOURCE_DIR}/src/mcp/mcptoolregistry.h
     ${CMAKE_SOURCE_DIR}/src/ai/aimanager.cpp
-    ${CMAKE_SOURCE_DIR}/src/ai/aiprovider.cpp
     ${CMAKE_SOURCE_DIR}/src/ai/aiconversation.cpp
     # [barista-fork] fork-only sources not in any shared lib. The analysis sources
     # (shotsummarizer/shotanalysis/conductance/shotprojection) are now provided via
     # decenza_testlib's ANALYSIS_SOURCES, so they are NOT listed here (double-compile).
+    # dialing_blocks.cpp is likewise NOT listed: upstream #1728 moved it into
+    # decenza_dialingblockslib, which tst_aimanager links below (double-compile otherwise).
     ${CMAKE_SOURCE_DIR}/src/barista/baristatools.cpp  # BaristaTools, referenced by aimanager.cpp's client-tool wire-up
     ${CMAKE_SOURCE_DIR}/src/barista/baristadiagnostics.cpp  # [barista-fork] baristatools.cpp calls BaristaDiagnostics::record
-    ${CMAKE_SOURCE_DIR}/src/ai/dialing_blocks.cpp
+    ${CMAKE_SOURCE_DIR}/src/barista/coffeeknowledgebase.cpp  # [barista-fork] baristatools.cpp calls CoffeeKnowledgeBase (coffee brain); not in any shared lib
     ${CMAKE_BINARY_DIR}/version_code.cpp
     ${TST_AIMANAGER_AI_RESOURCES}
 )
-target_link_libraries(tst_aimanager PRIVATE decenza_shotlib)
+target_link_libraries(tst_aimanager PRIVATE decenza_dialingblockslib decenza_aiproviderlib decenza_shotlib)
 target_include_directories(tst_aimanager PRIVATE ${CMAKE_BINARY_DIR})
 
 # --- tst_aiproviders: per-provider model catalog + setModel guard contract ---
@@ -708,8 +828,8 @@ target_include_directories(tst_aimanager PRIVATE ${CMAKE_BINARY_DIR})
 # Qt6::Network comes in via add_decenza_test.
 add_decenza_test(tst_aiproviders
     tst_aiproviders.cpp
-    ${CMAKE_SOURCE_DIR}/src/ai/aiprovider.cpp
 )
+target_link_libraries(tst_aiproviders PRIVATE decenza_aiproviderlib)
 
 # --- tst_shotcorpus: Qt Test wrapper around shot_eval --validate.
 # Runs the curated corpus under tests/data/shots/ as part of the regular
@@ -828,12 +948,143 @@ target_compile_definitions(tst_blefidelity PRIVATE
     PROFILES_DIR="${CMAKE_SOURCE_DIR}/resources/profiles"
 )
 
-# ProfileManager sources (for MCP tool tests)
-set(PROFILEMANAGER_SOURCES
+# ---------------------------------------------------------------------------
+# decenza_profilelib: ProfileManager and the two storage/save sources that
+# travel with it, compiled ONCE for the nine targets that need them (the MCP
+# tests, tst_profilemanager, tst_recipeeditorapppath).
+#
+# This was a `set(PROFILEMANAGER_SOURCES ...)` pasted into nine targets, which
+# meant nine compiles of the same three translation units. Measured on a clean
+# rebuild: 128 s of the 215 s of duplicate compilation in this file, and two of
+# the five slowest edges in the WHOLE build were the same profilemanager.cpp
+# object built for different targets.
+#
+# NARROW on purpose — linked by exactly the nine, not folded into
+# decenza_testlib. Measured, by touching profilemanager.cpp and diffing
+# .ninja_log (tests/-attributable cpu):
+#
+#     today, 9 duplicate compiles ......... 77.0 s   (measured)
+#     folded into decenza_testlib ......... 67.0 s   (1 compile + 106 relinks)
+#     here, in a narrow library ........... 23.0 s   (1 compile + 9 relinks)
+#
+# decenza_testlib is linked by every test target, so putting a source there
+# trades a compile fan-out of 9 for a relink fan-out of 106. That still beats
+# the duplication — link is cheap, 0.53 s mean — but it recovers a seventh of
+# what this does, and its fan-out grows with every test target added while this
+# one's does not. Do not "simplify" this into decenza_testlib.
+#
+# Links decenza_testlib (for DECENZA_TESTING/DECENZA_SIMULATOR and the include
+# dirs) but deliberately NOT decenza_shotlib: two of the nine consumers
+# (tst_recipeeditorapppath, tst_mcptools_profiles) do not link it, and a static
+# library leaves its undefined references to the final executable link, where
+# each target already supplies what it needs.
+# ---------------------------------------------------------------------------
+add_library(decenza_profilelib STATIC
     ${CMAKE_SOURCE_DIR}/src/controllers/profilemanager.cpp
     ${CMAKE_SOURCE_DIR}/src/core/profilestorage.cpp
     ${CMAKE_SOURCE_DIR}/src/profile/profilesavehelper.cpp
 )
+set_target_properties(decenza_profilelib PROPERTIES AUTOMOC ON AUTOMOC_PATH_PREFIX OFF)
+# paho for its INCLUDE dir, not its symbols: profilesavehelper.cpp includes
+# maincontroller.h, which includes network/mqttclient.h, which includes
+# <MQTTAsync.h>. Every one of the nine consumers already linked paho, so this
+# requirement was invisible while the sources were pasted into them; hoisting
+# them into a library is what surfaced it.
+target_link_libraries(decenza_profilelib PUBLIC decenza_testlib paho-mqtt3a-static)
+
+# --- The rest of the narrow libraries, same rule: consumer set no wider than
+# the targets that need the sources. Each replaced a source list pasted into
+# three or four targets. Costs are the duplicate cpu they removed, from the
+# clean-rebuild audit in
+# openspec/changes/archive/2026-07-31-cut-test-build-cost/baseline.md.
+
+# weightprocessor + stepexitarbiter: tst_saw, tst_scalefeedliveness,
+# tst_weightprocessor (11.1 s). Plain Qt Core, no extra link requirements.
+add_library(decenza_weightlib STATIC
+    ${CMAKE_SOURCE_DIR}/src/machine/weightprocessor.cpp
+    ${CMAKE_SOURCE_DIR}/src/machine/stepexitarbiter.cpp
+)
+set_target_properties(decenza_weightlib PROPERTIES AUTOMOC ON AUTOMOC_PATH_PREFIX OFF)
+target_link_libraries(decenza_weightlib PUBLIC decenza_testlib)
+
+# accessibilitymanager (4 consumers, 12.7 s) and screensavervideomanager +
+# batterymanager (3 consumers, a subset of the same targets, 15.2 s).
+#
+# TWO libraries, not one, even though the consumer sets differ by a single
+# target. The first attempt merged them on the reasoning that a static library
+# contributes only the objects an executable actually references, so the odd
+# target out would pay a link edge rather than a compile. That reasoning is
+# WRONG here and the link proved it: AUTOMOC emits ONE mocs_compilation.cpp per
+# target, holding the meta-objects of every Q_OBJECT class in it. Pulling that
+# single object in for AccessibilityManager drags references to
+# ScreensaverVideoManager with it, and tst_accessibility_announcements — which
+# links neither ProfileStorage nor decenza_profilelib — failed with undefined
+# ProfileStorage::staticMetaObject. Merging libraries whose consumer sets differ
+# is therefore not free whenever the sources carry Q_OBJECT.
+find_package(Qt6 REQUIRED COMPONENTS TextToSpeech Multimedia Quick)
+add_library(decenza_a11ylib STATIC
+    ${CMAKE_SOURCE_DIR}/src/core/accessibilitymanager.cpp
+)
+set_target_properties(decenza_a11ylib PROPERTIES AUTOMOC ON AUTOMOC_PATH_PREFIX OFF)
+target_link_libraries(decenza_a11ylib PUBLIC
+    decenza_testlib Qt6::TextToSpeech Qt6::Multimedia Qt6::Quick
+)
+
+add_library(decenza_appserviceslib STATIC
+    ${CMAKE_SOURCE_DIR}/src/screensaver/screensavervideomanager.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/batterymanager.cpp
+)
+set_target_properties(decenza_appserviceslib PROPERTIES AUTOMOC ON AUTOMOC_PATH_PREFIX OFF)
+# decenza_profilelib for ProfileStorage, which ScreensaverVideoManager connects to.
+target_link_libraries(decenza_appserviceslib PUBLIC
+    decenza_profilelib Qt6::TextToSpeech Qt6::Multimedia Qt6::Quick
+)
+
+# beanbaseclient: tst_beanbaseclient, tst_coffeebags, tst_mcptools_write (7.8 s).
+add_library(decenza_beanbaselib STATIC
+    ${CMAKE_SOURCE_DIR}/src/network/beanbaseclient.cpp
+)
+set_target_properties(decenza_beanbaselib PROPERTIES AUTOMOC ON AUTOMOC_PATH_PREFIX OFF)
+target_link_libraries(decenza_beanbaselib PUBLIC decenza_testlib)
+
+# --- The two-consumer cases. Each saves only 2-6 s, which is NOT why they are
+# here: they are here so check_test_source_duplication.py can be an absolute
+# gate with no exception list. An exception list is a place for the next
+# duplicate to be argued into, and then the one after that; a rule with no
+# knobs cannot drift. Judge these on that, not on the seconds.
+#
+# One library each, never merged, because no two share a consumer set — and
+# merging libraries whose consumer sets differ breaks the link whenever the
+# sources carry Q_OBJECT (see the a11y/appservices note above).
+# Spelled out one by one rather than generated in a foreach() — deliberately.
+# check_test_source_duplication.py reads THIS FILE as text (it runs in the
+# build-free PR job, so it cannot query the build graph), and a library whose
+# name is assembled at configure time is invisible to it. Keep every
+# add_library() and its sources literal and greppable.
+add_library(decenza_aiproviderlib STATIC ${CMAKE_SOURCE_DIR}/src/ai/aiprovider.cpp)
+set_target_properties(decenza_aiproviderlib PROPERTIES AUTOMOC ON AUTOMOC_PATH_PREFIX OFF)
+target_link_libraries(decenza_aiproviderlib PUBLIC decenza_testlib)
+
+add_library(decenza_dialingblockslib STATIC ${CMAKE_SOURCE_DIR}/src/ai/dialing_blocks.cpp)
+set_target_properties(decenza_dialingblockslib PROPERTIES AUTOMOC ON AUTOMOC_PATH_PREFIX OFF)
+target_link_libraries(decenza_dialingblockslib PUBLIC decenza_shotlib)
+
+add_library(decenza_settingsserializerlib STATIC ${CMAKE_SOURCE_DIR}/src/core/settingsserializer.cpp)
+set_target_properties(decenza_settingsserializerlib PROPERTIES AUTOMOC ON AUTOMOC_PATH_PREFIX OFF)
+target_link_libraries(decenza_settingsserializerlib PUBLIC decenza_testlib)
+
+add_library(decenza_webdebugloggerlib STATIC ${CMAKE_SOURCE_DIR}/src/network/webdebuglogger.cpp)
+set_target_properties(decenza_webdebugloggerlib PROPERTIES AUTOMOC ON AUTOMOC_PATH_PREFIX OFF)
+target_link_libraries(decenza_webdebugloggerlib PUBLIC decenza_testlib)
+
+add_library(decenza_wifiscaleresultlib STATIC ${CMAKE_SOURCE_DIR}/src/network/wifiscaleresult.cpp)
+set_target_properties(decenza_wifiscaleresultlib PROPERTIES AUTOMOC ON AUTOMOC_PATH_PREFIX OFF)
+target_link_libraries(decenza_wifiscaleresultlib PUBLIC decenza_testlib)
+
+add_library(decenza_refractometerlib STATIC ${CMAKE_SOURCE_DIR}/src/ble/refractometers/refractometerdevice.cpp)
+set_target_properties(decenza_refractometerlib PROPERTIES AUTOMOC ON AUTOMOC_PATH_PREFIX OFF)
+target_link_libraries(decenza_refractometerlib PUBLIC decenza_testlib)
+
 
 # --- tst_coffeebags: coffee bag storage, preset->bag migration, transfer
 # survival, and the unified bean search merge logic (bean-bag-inventory) ---
@@ -841,10 +1092,9 @@ find_package(Qt6 REQUIRED COMPONENTS Quick)
 add_decenza_test(tst_coffeebags
     tst_coffeebags.cpp
     ${CMAKE_SOURCE_DIR}/src/history/unifiedbeansearchmodel.cpp
-    ${CMAKE_SOURCE_DIR}/src/network/beanbaseclient.cpp
     ${CMAKE_BINARY_DIR}/version_code.cpp
 )
-target_link_libraries(tst_coffeebags PRIVATE decenza_shotlib)
+target_link_libraries(tst_coffeebags PRIVATE decenza_beanbaselib decenza_shotlib)
 target_include_directories(tst_coffeebags PRIVATE ${CMAKE_BINARY_DIR})
 
 # --- tst_dbmigration: DB schema creation and migration chain ---
@@ -899,11 +1149,10 @@ qt_add_resources(TST_DIALING_BLOCKS_AI_RESOURCES
     ${CMAKE_SOURCE_DIR}/resources/ai.qrc)
 add_decenza_test(tst_dialing_blocks
     tst_dialing_blocks.cpp
-    ${CMAKE_SOURCE_DIR}/src/ai/dialing_blocks.cpp
     ${CMAKE_BINARY_DIR}/version_code.cpp
     ${TST_DIALING_BLOCKS_AI_RESOURCES}
 )
-target_link_libraries(tst_dialing_blocks PRIVATE decenza_shotlib)
+target_link_libraries(tst_dialing_blocks PRIVATE decenza_dialingblockslib decenza_shotlib)
 target_include_directories(tst_dialing_blocks PRIVATE ${CMAKE_BINARY_DIR})
 # Built-in profile corpus, for the KB-coverage gate (every shipped profile
 # must resolve to a KB entry — restructure-kb-as-validated-json, task 5.2/6.6).
@@ -956,26 +1205,29 @@ target_link_libraries(tst_decentscalewifi PRIVATE
 add_decenza_test(tst_wifiscalediscovery
     tst_wifiscalediscovery.cpp
     ${CMAKE_SOURCE_DIR}/src/network/wifiscalediscovery.cpp
-    ${CMAKE_SOURCE_DIR}/src/network/wifiscaleresult.cpp
     ${CMAKE_SOURCE_DIR}/src/network/mdnsresolver.cpp
 )
+target_link_libraries(tst_wifiscalediscovery PRIVATE decenza_wifiscaleresultlib)
 
 # --- tst_difluidr2: DiFluid R2 refractometer packet parsing and name matching ---
 add_decenza_test(tst_difluidr2
     tst_difluidr2.cpp
     ${CMAKE_SOURCE_DIR}/src/ble/transport/scalebletransport.h
-    ${CMAKE_SOURCE_DIR}/src/ble/refractometers/refractometerdevice.cpp
     ${CMAKE_SOURCE_DIR}/src/ble/refractometers/difluidr2.cpp
 )
+target_link_libraries(tst_difluidr2 PRIVATE decenza_refractometerlib)
 
 # --- tst_difluidr1: DiFluid R1 key derivation, AES decrypt, plaintext parsing (#1307) ---
 add_decenza_test(tst_difluidr1
     tst_difluidr1.cpp
     ${CMAKE_SOURCE_DIR}/src/ble/transport/scalebletransport.h
-    ${CMAKE_SOURCE_DIR}/src/ble/refractometers/refractometerdevice.cpp
     ${CMAKE_SOURCE_DIR}/src/ble/refractometers/difluidr1.cpp
     ${CMAKE_SOURCE_DIR}/src/ble/refractometers/aes128.cpp
 )
+# RefractometerDevice is needed on EVERY platform — keep this outside the IOS
+# branch below. It briefly lived on the OpenSSL line inside else(), which links
+# fine on desktop and would have failed only on an iOS build.
+target_link_libraries(tst_difluidr1 PRIVATE decenza_refractometerlib)
 # Crypto backend: OpenSSL on desktop+Android, CommonCrypto (in libSystem) on iOS.
 # Match the Q_OS_IOS branch in aes128.cpp exactly — macOS desktop still uses OpenSSL.
 if(IOS)
@@ -993,18 +1245,16 @@ add_decenza_test(tst_logcollapse
 # --- tst_weightprocessor: WeightProcessor edge cases (LSLR, oscillation, per-frame) ---
 add_decenza_test(tst_weightprocessor
     tst_weightprocessor.cpp
-    ${CMAKE_SOURCE_DIR}/src/machine/weightprocessor.cpp
-    ${CMAKE_SOURCE_DIR}/src/machine/stepexitarbiter.cpp
 )
+target_link_libraries(tst_weightprocessor PRIVATE decenza_weightlib)
 
 # --- tst_scalefeedliveness: stall detector driven by sample arrival, not value
 # change — a constant weight must not trip a false stall (#1176/#1185) ---
 add_decenza_test(tst_scalefeedliveness
     tst_scalefeedliveness.cpp
     mocks/MockScaleDevice.h
-    ${CMAKE_SOURCE_DIR}/src/machine/weightprocessor.cpp
-    ${CMAKE_SOURCE_DIR}/src/machine/stepexitarbiter.cpp
 )
+target_link_libraries(tst_scalefeedliveness PRIVATE decenza_weightlib)
 
 # --- tst_scaleblepriority: connection-priority backoff decision logic (#1093/#1176) ---
 # BlePriorityDetector is header-only and Qt-free — no extra sources to link.
@@ -1027,9 +1277,8 @@ add_decenza_test(tst_sawprediction
 # --- tst_saw: WeightProcessor SAW tests (minimal deps) ---
 add_decenza_test(tst_saw
     tst_saw.cpp
-    ${CMAKE_SOURCE_DIR}/src/machine/weightprocessor.cpp
-    ${CMAKE_SOURCE_DIR}/src/machine/stepexitarbiter.cpp
 )
+target_link_libraries(tst_saw PRIVATE decenza_weightlib)
 
 # --- tst_visualizermixgoal: temperature.mix_goal / mix present-vs-absent in upload JSON ---
 add_decenza_test(tst_visualizermixgoal
@@ -1081,18 +1330,102 @@ set(MCP_MOC_HEADERS
     ${CMAKE_SOURCE_DIR}/src/mcp/mcpresourceregistry.h
 )
 
+# mcpserver.cpp: tst_mcpremoteaccess, tst_mcpserver_protocol, tst_mcpserver_session
+# (11.6 s). Its own two headers are listed so AUTOMOC emits their meta-objects
+# here rather than in each consumer.
+#
+# ${MCP_MOC_HEADERS} is deliberately NOT listed. Those headers are moc'd by
+# every target that uses them — including several that do not link this library
+# — so adding them here produced 24 duplicate symbols (McpToolRegistry,
+# McpResourceRegistry, MockTransport meta-objects defined in both this archive
+# and the consumer's own mocs_compilation.cpp). A moc'd header belongs to
+# exactly one compilation unit in any given link; hoist a header into a library
+# only when every user of it links that library.
+add_library(decenza_mcpserverlib STATIC
+    ${CMAKE_SOURCE_DIR}/src/mcp/mcpserver.cpp
+    ${CMAKE_SOURCE_DIR}/src/mcp/mcpserver.h
+    ${CMAKE_SOURCE_DIR}/src/mcp/mcpsession.h
+)
+set_target_properties(decenza_mcpserverlib PROPERTIES AUTOMOC ON AUTOMOC_PATH_PREFIX OFF)
+target_link_libraries(decenza_mcpserverlib PUBLIC decenza_profilelib decenza_shotlib)
+
+# ---------------------------------------------------------------------------
+# Every narrow library reuses decenza_testlib's precompiled header.
+#
+# REUSE_FROM rather than a PCH each, because reuse costs NOTHING: the header is
+# already built for decenza_testlib, so even a 2.7 s target comes out ahead. A
+# private PCH per library would not — building one costs ~2 s, so the small
+# libraries would spend more making a PCH than they save using it. That is the
+# whole reason this is a reuse list and not a loop calling
+# target_precompile_headers() on each.
+#
+# On flag compatibility, which REUSE_FROM does require: an earlier version of
+# this comment claimed these libraries "define nothing of their own", which was
+# simply false — decenza_shotlib carries its own
+# target_compile_definitions(decenza_shotlib PUBLIC DECENZA_TESTING) just above,
+# and every Qt module a consumer links contributes its own QT_<MODULE>_LIB
+# through INTERFACE_COMPILE_DEFINITIONS.
+#
+# The real rule is narrower and was MEASURED off the generated build.ninja rather
+# than reasoned about, because reasoning about it produced the wrong answer
+# twice. Of the 107 test targets in the graph: 74 compile with a define set
+# identical to the donor's, and 32 compile with EXTRA defines (QT_QUICK_LIB,
+# QT_OPENGL_LIB, SRCDIR and friends). ALL 106 that go through add_decenza_test()
+# carry -include-pch; the only one that does not is tst_shotcorpus, which is
+# excluded on purpose. So extra defines on a consumer do NOT cost it the PCH.
+#
+# That is clang's actual contract: it rejects a PCH on CONFLICTING macro
+# definitions, not on the consumer having additional macros the precompiled
+# content never read. This PCH is QtTest plus three QJson headers — nothing in it
+# is conditioned on QT_QUICK_LIB — so a Quick-linking test reuses it safely.
+#
+# What WOULD break it is redefining a macro the donor already has to a different
+# value, or a language/standard difference. If you add one of those to a library
+# below, it moves off this list.
+#
+# Re-derive this by diffing DEFINES between a consumer's compile line and the
+# donor's cmake_pch.hxx.pch line in build.ninja; do not restore a claim about
+# what the targets define without doing so.
+#
+# So the rule for adding a library below is not "it must define nothing", it is
+# "it must define nothing the donor does not already define". A NEW macro on any
+# of these moves it off this list or onto decenza_testlib.
+#
+# Listed literally, not derived from a glob or a directory scan: a new library
+# that silently fails to appear here just quietly costs a few seconds forever,
+# which is exactly the kind of regression nothing reports.
+set(DECENZA_TESTLIB_PCH_REUSERS
+    decenza_shotlib
+    decenza_profilelib
+    decenza_weightlib
+    decenza_a11ylib
+    decenza_appserviceslib
+    decenza_beanbaselib
+    decenza_aiproviderlib
+    decenza_dialingblockslib
+    decenza_settingsserializerlib
+    decenza_webdebugloggerlib
+    decenza_wifiscaleresultlib
+    decenza_refractometerlib
+    decenza_mcpserverlib
+)
+if(DECENZA_ENABLE_PCH)
+    foreach(_lib IN LISTS DECENZA_TESTLIB_PCH_REUSERS)
+        target_precompile_headers(${_lib} REUSE_FROM decenza_testlib)
+    endforeach()
+    unset(_lib)
+endif()
+
 # --- tst_profilemanager: ProfileManager lifecycle, signals, BLE, MCP resources, QML bindings ---
 find_package(Qt6 REQUIRED COMPONENTS Graphs Quick Qml)
 add_decenza_test(tst_profilemanager
     tst_profilemanager.cpp
     ${MCP_MOC_HEADERS}
-    ${PROFILEMANAGER_SOURCES}
     ${CMAKE_SOURCE_DIR}/src/mcp/mcpresources.cpp
-    ${CMAKE_SOURCE_DIR}/src/network/webdebuglogger.cpp
     ${CMAKE_SOURCE_DIR}/src/core/memorymonitor.cpp
     ${CMAKE_BINARY_DIR}/version_code.cpp
 )
-target_link_libraries(tst_profilemanager PRIVATE decenza_shotlib Qt6::Qml paho-mqtt3a-static)
+target_link_libraries(tst_profilemanager PRIVATE decenza_webdebugloggerlib decenza_profilelib decenza_shotlib Qt6::Qml paho-mqtt3a-static)
 
 # --- tst_recipeeditorapppath: recipe editing through the path a USER takes ---
 # Companion to tst_recipeeditorparity, which exercises RecipeGenerator and
@@ -1103,10 +1436,9 @@ target_link_libraries(tst_profilemanager PRIVATE decenza_shotlib Qt6::Qml paho-m
 add_decenza_test(tst_recipeeditorapppath
     tst_recipeeditorapppath.cpp
     ${MCP_MOC_HEADERS}
-    ${PROFILEMANAGER_SOURCES}
     ${CMAKE_BINARY_DIR}/version_code.cpp
 )
-target_link_libraries(tst_recipeeditorapppath PRIVATE Qt6::Graphs Qt6::Quick paho-mqtt3a-static)
+target_link_libraries(tst_recipeeditorapppath PRIVATE decenza_profilelib Qt6::Graphs Qt6::Quick paho-mqtt3a-static)
 target_include_directories(tst_recipeeditorapppath PRIVATE ${CMAKE_BINARY_DIR})
 target_compile_definitions(tst_recipeeditorapppath PRIVATE
     DE1APP_PROFILES_PATH="${CMAKE_CURRENT_SOURCE_DIR}/data/de1app_profiles"
@@ -1134,10 +1466,9 @@ add_decenza_test(tst_mcptools_profiles
     tst_mcptools_profiles.cpp
     ${MCP_MOC_HEADERS}
     ${CMAKE_SOURCE_DIR}/src/mcp/mcptools_profiles.cpp
-    ${PROFILEMANAGER_SOURCES}
     ${CMAKE_BINARY_DIR}/version_code.cpp
 )
-target_link_libraries(tst_mcptools_profiles PRIVATE Qt6::Graphs Qt6::Quick paho-mqtt3a-static)
+target_link_libraries(tst_mcptools_profiles PRIVATE decenza_profilelib Qt6::Graphs Qt6::Quick paho-mqtt3a-static)
 target_include_directories(tst_mcptools_profiles PRIVATE ${CMAKE_BINARY_DIR})
 # Built-in profiles QRC, as tst_profilemanager and tst_tclimport already do.
 # Without it ProfileManager cannot open ":/profiles/default.json" and falls
@@ -1154,14 +1485,9 @@ add_decenza_test(tst_mcptools_write
     tst_mcptools_write.cpp
     ${MCP_MOC_HEADERS}
     ${CMAKE_SOURCE_DIR}/src/mcp/mcptools_write.cpp
-    ${CMAKE_SOURCE_DIR}/src/network/beanbaseclient.cpp
-    ${PROFILEMANAGER_SOURCES}
-    ${CMAKE_SOURCE_DIR}/src/core/accessibilitymanager.cpp
-    ${CMAKE_SOURCE_DIR}/src/screensaver/screensavervideomanager.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/batterymanager.cpp
     ${CMAKE_BINARY_DIR}/version_code.cpp
 )
-target_link_libraries(tst_mcptools_write PRIVATE decenza_shotlib Qt6::TextToSpeech Qt6::Multimedia paho-mqtt3a-static)
+target_link_libraries(tst_mcptools_write PRIVATE decenza_beanbaselib decenza_a11ylib decenza_appserviceslib decenza_profilelib decenza_shotlib Qt6::TextToSpeech Qt6::Multimedia paho-mqtt3a-static)
 target_include_directories(tst_mcptools_write PRIVATE ${CMAKE_BINARY_DIR})
 # Same missing built-in profiles QRC as tst_mcptools_profiles above.
 target_sources(tst_mcptools_write PRIVATE ${PROFILES_QRC})
@@ -1174,20 +1500,16 @@ add_decenza_test(tst_mcptools_presets
     tst_mcptools_presets.cpp
     ${MCP_MOC_HEADERS}
     ${CMAKE_SOURCE_DIR}/src/mcp/mcptools_presets.cpp
-    ${PROFILEMANAGER_SOURCES}
-    ${CMAKE_SOURCE_DIR}/src/core/accessibilitymanager.cpp
-    ${CMAKE_SOURCE_DIR}/src/screensaver/screensavervideomanager.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/batterymanager.cpp
     ${CMAKE_BINARY_DIR}/version_code.cpp
 )
-target_link_libraries(tst_mcptools_presets PRIVATE decenza_shotlib Qt6::TextToSpeech Qt6::Multimedia paho-mqtt3a-static)
+target_link_libraries(tst_mcptools_presets PRIVATE decenza_a11ylib decenza_appserviceslib decenza_profilelib decenza_shotlib Qt6::TextToSpeech Qt6::Multimedia paho-mqtt3a-static)
 target_include_directories(tst_mcptools_presets PRIVATE ${CMAKE_BINARY_DIR})
 
 # --- tst_webdebuglogger: WebDebugLogger session-index cache (improve-mcp-debug-log-search) ---
 add_decenza_test(tst_webdebuglogger
     tst_webdebuglogger.cpp
-    ${CMAKE_SOURCE_DIR}/src/network/webdebuglogger.cpp
 )
+target_link_libraries(tst_webdebuglogger PRIVATE decenza_webdebugloggerlib)
 
 # --- tst_mcplogfilter: shared filter/tail helpers for debug_get_log / shots_get_debug_log ---
 # (mcplogfilter.h is header-only — nothing to link beyond decenza_testlib's Qt Core.)
@@ -1200,13 +1522,9 @@ add_decenza_test(tst_mcptools_shots_debuglog
     tst_mcptools_shots_debuglog.cpp
     ${MCP_MOC_HEADERS}
     ${CMAKE_SOURCE_DIR}/src/mcp/mcptools_shots.cpp
-    ${PROFILEMANAGER_SOURCES}
-    ${CMAKE_SOURCE_DIR}/src/core/accessibilitymanager.cpp
-    ${CMAKE_SOURCE_DIR}/src/screensaver/screensavervideomanager.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/batterymanager.cpp
     ${CMAKE_BINARY_DIR}/version_code.cpp
 )
-target_link_libraries(tst_mcptools_shots_debuglog PRIVATE decenza_shotlib Qt6::TextToSpeech Qt6::Multimedia paho-mqtt3a-static)
+target_link_libraries(tst_mcptools_shots_debuglog PRIVATE decenza_a11ylib decenza_appserviceslib decenza_profilelib decenza_shotlib Qt6::TextToSpeech Qt6::Multimedia paho-mqtt3a-static)
 target_include_directories(tst_mcptools_shots_debuglog PRIVATE ${CMAKE_BINARY_DIR})
 # Same missing built-in profiles QRC as tst_mcptools_profiles above — McpTestFixture's
 # ProfileManager falls back to "default" at construction and warns without it.
@@ -1219,13 +1537,9 @@ find_package(Qt6 REQUIRED COMPONENTS Graphs Quick)
 add_decenza_test(tst_mcpserver_session
     tst_mcpserver_session.cpp
     ${MCP_MOC_HEADERS}
-    ${CMAKE_SOURCE_DIR}/src/mcp/mcpserver.cpp
-    ${CMAKE_SOURCE_DIR}/src/mcp/mcpserver.h
-    ${CMAKE_SOURCE_DIR}/src/mcp/mcpsession.h
-    ${PROFILEMANAGER_SOURCES}
     ${CMAKE_BINARY_DIR}/version_code.cpp
 )
-target_link_libraries(tst_mcpserver_session PRIVATE decenza_shotlib paho-mqtt3a-static)
+target_link_libraries(tst_mcpserver_session PRIVATE decenza_mcpserverlib decenza_profilelib decenza_shotlib paho-mqtt3a-static)
 target_include_directories(tst_mcpserver_session PRIVATE ${CMAKE_BINARY_DIR})
 
 # --- tst_mcpserver_protocol: 2025-11-25 spec compliance (version negotiation,
@@ -1236,20 +1550,15 @@ find_package(Qt6 REQUIRED COMPONENTS Graphs Quick)
 add_decenza_test(tst_mcpserver_protocol
     tst_mcpserver_protocol.cpp
     ${MCP_MOC_HEADERS}
-    ${CMAKE_SOURCE_DIR}/src/mcp/mcpserver.cpp
-    ${CMAKE_SOURCE_DIR}/src/mcp/mcpserver.h
-    ${CMAKE_SOURCE_DIR}/src/mcp/mcpsession.h
-    ${PROFILEMANAGER_SOURCES}
     ${CMAKE_BINARY_DIR}/version_code.cpp
 )
-target_link_libraries(tst_mcpserver_protocol PRIVATE decenza_shotlib paho-mqtt3a-static)
+target_link_libraries(tst_mcpserver_protocol PRIVATE decenza_mcpserverlib decenza_profilelib decenza_shotlib paho-mqtt3a-static)
 target_include_directories(tst_mcpserver_protocol PRIVATE ${CMAKE_BINARY_DIR})
 
 # Compile the production qrc so :/icons/* paths resolve at runtime — the
 # `icons[]` round-trip test reads SVGs out of the resource bundle and would
 # fail with an empty array otherwise.
-target_sources(tst_mcpserver_protocol PRIVATE ${CMAKE_SOURCE_DIR}/resources/resources.qrc)
-set_target_properties(tst_mcpserver_protocol PROPERTIES AUTORCC ON)
+target_link_libraries(tst_mcpserver_protocol PRIVATE decenza_testresources)
 
 # --- tst_mcpremoteaccess: remote connector (add-remote-mcp-connector) —
 # capability-token lifecycle, dedicated-listener route gating, failed-token
@@ -1259,20 +1568,15 @@ set_target_properties(tst_mcpserver_protocol PROPERTIES AUTORCC ON)
 add_decenza_test(tst_mcpremoteaccess
     tst_mcpremoteaccess.cpp
     ${MCP_MOC_HEADERS}
-    ${CMAKE_SOURCE_DIR}/src/mcp/mcpserver.cpp
-    ${CMAKE_SOURCE_DIR}/src/mcp/mcpserver.h
-    ${CMAKE_SOURCE_DIR}/src/mcp/mcpsession.h
     ${CMAKE_SOURCE_DIR}/src/mcp/mcpremoteaccess.cpp
     ${CMAKE_SOURCE_DIR}/src/mcp/mcpremoteaccess.h
     ${CMAKE_SOURCE_DIR}/src/mcp/mcptunnel_tsnet.cpp
     ${CMAKE_SOURCE_DIR}/src/mcp/mcptunnel_tsnet.h
-    ${PROFILEMANAGER_SOURCES}
     ${CMAKE_BINARY_DIR}/version_code.cpp
 )
-target_link_libraries(tst_mcpremoteaccess PRIVATE decenza_shotlib paho-mqtt3a-static)
+target_link_libraries(tst_mcpremoteaccess PRIVATE decenza_mcpserverlib decenza_profilelib decenza_shotlib paho-mqtt3a-static)
 target_include_directories(tst_mcpremoteaccess PRIVATE ${CMAKE_BINARY_DIR})
-target_sources(tst_mcpremoteaccess PRIVATE ${CMAKE_SOURCE_DIR}/resources/resources.qrc)
-set_target_properties(tst_mcpremoteaccess PROPERTIES AUTORCC ON)
+target_link_libraries(tst_mcpremoteaccess PRIVATE decenza_testresources)
 
 # --- tst_accessibility_announcements: announce() routing rule (platform vs TTS) ---
 # AccessibilityManager pulls TextToSpeech (m_tts construction in initTts) and
@@ -1282,10 +1586,9 @@ set_target_properties(tst_mcpremoteaccess PROPERTIES AUTORCC ON)
 find_package(Qt6 REQUIRED COMPONENTS TextToSpeech Multimedia Quick Network)
 add_decenza_test(tst_accessibility_announcements
     tst_accessibility_announcements.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/accessibilitymanager.cpp
 )
 target_link_libraries(tst_accessibility_announcements PRIVATE
-    Qt6::TextToSpeech Qt6::Multimedia Qt6::Quick Qt6::Network
+    decenza_a11ylib Qt6::TextToSpeech Qt6::Multimedia Qt6::Quick Qt6::Network
 )
 
 # --- tst_steamhealth: SteamDataModel summaries and SteamHealthTracker trend detection ---

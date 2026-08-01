@@ -13,7 +13,9 @@ namespace {
 // USB-C / wired / built-in are low-latency (Phase-0 measured ~0 tail on built-in), so a short window is safe
 // and keeps the mic snappy. Route is detected live (SpeakerGate::routeDrainMs).
 constexpr int kBluetoothDrainMs = 400;
-constexpr int kWiredDrainMs     = 150;
+// [[maybe_unused]]: only referenced inside routeDrainMs()'s Q_OS_ANDROID branch, so a desktop
+// build (where that block is #ifdef'd out) would otherwise trip -Werror=unused-const-variable.
+[[maybe_unused]] constexpr int kWiredDrainMs = 150;
 }  // namespace
 
 SpeakerGate::SpeakerGate(AssistantVoice* conv, AssistantVoice* coaching, QObject* parent)

@@ -10,11 +10,17 @@ import Decenza
 // of the application. The host supplies the grinder that owns the value (the
 // shot's grinder in post-shot review, the recipe's package in the wizard, the
 // bag's equipment in the beans dialog, the active grinder on the brew bar) and
-// every derived behaviour — step size, notation, observed-history fallback,
-// RPM capability — resolves against it. Nothing here reads the active grinder.
+// every derived behaviour — notation, click-indexing, observed-history
+// fallback, RPM capability — resolves against it.
 // (The pre-split _observedFallback read Settings.dye.dyeGrinderModel — the
 // active grinder — which was harmless while the brew bar was the only host and
 // is exactly the bug this injection exists to prevent.)
+//
+// ONE carve-out, and step size is deliberately absent from the list above
+// because of it: when NOTHING is injected, grindStep() and rpmStep() resolve
+// the history they measure from against the ACTIVE grinder. That is a source
+// of samples, not a semantic. An injected identity is never overridden, and
+// notation, click-indexing and RPM capability never leave it. See grindStep().
 //
 // Per-candidate stepping is catalog-first via SettingsDye.stepGrinderSetting
 // (numeric AND Compound "a+b" notation), then plain-numeric / number-in-text /
@@ -36,32 +42,107 @@ QtObject {
     readonly property bool rpmCapable:
         Settings.dye.grinderRpmCapable(root.grinderBrand, root.grinderModel)
 
-    // Bumped when the async distinct-value cache refreshes, so derived steps and
-    // the history fallback re-evaluate once shot history finishes loading.
-    property int distinctCacheVersion: 0
-    readonly property Connections _historyConn: Connections {
-        target: MainController.shotHistory
-        function onDistinctCacheReady() { root.distinctCacheVersion++ }
-    }
+    // Per-grinder grind step, derived from the user's own shot history by the
+    // same noise-filtered estimator the AI dialing context uses. Prefers the
+    // INJECTED grinder, resolves to the active one when nothing was injected,
+    // and ends at 1.0 when no history anywhere is thick enough — the body
+    // explains why it is that order and not simply the injected one.
+    //
+    // FUNCTIONS, not properties, and deliberately so. Each call runs a live query
+    // measured at 3.3 ms median / 87 ms worst on a real 18.5 MB database. As eager
+    // `readonly property` bindings these evaluated on construction and again on
+    // every write, across EVERY live GrindRowSource — the resident
+    // GrindQuickSelectItem bar widget plus a GrindField in whatever page or dialog
+    // is open — so a taste-slider autosave or a shot save cost several of those
+    // queries inline on the main thread. The shot-save one lands as the machine
+    // leaves Pouring, while BLE telemetry is still on that thread, which is the
+    // tighter-budget case CLAUDE.md names.
+    //
+    // Their only readers are grindRowsFor() / rpmRowsFor(), which are already
+    // explicit snapshots taken at defined moments. Calling the query there means
+    // it runs exactly when rows are built and never otherwise, and the answer is
+    // current by construction — no counter, no staleness, no burst.
+    function grindStep() {
+        if (!MainController.shotHistory)
+            return 1.0
+        // With nothing injected the host has no grinder to name yet — a bag or
+        // recipe with no equipment package, or a shot recorded before it had
+        // one. The active grinder is the honest guess there. The all-grinders
+        // pool that grindStepForGrinder("") returns is NOT: it mixes every
+        // grinder's dial resolution into one estimate, so a Niche stepping 0.25
+        // and an EK43 stepping 1 produce a step belonging to neither, and
+        // nothing on screen says the wheel is not about your grinder. A user
+        // with one grinder cannot tell the two apart — the pool IS their
+        // grinder — which is why nothing has flagged it.
+        //
+        // Found while reading the log attached to #1726, where the post-shot
+        // review reached this branch with an empty model and pooled. It is not
+        // that issue's reported symptom: that one matches the composite-key
+        // cache #1725 fixed, and #1726 was filed minutes after #1725 merged, so
+        // against a build without it. That match is an inference from the log,
+        // not a triaged diagnosis — #1726 is still open.
+        //
+        // Only the source of HISTORY falls back. Notation, click-indexing and
+        // rpmCapable stay on the injected identity: those belong to the grinder
+        // that owns the value, and reading the active grinder for them is the
+        // bug the context injection exists to prevent (see the header).
+        var model = root.grinderModel.length > 0
+            ? root.grinderModel
+            : String(Settings.dye.dyeGrinderModel || "")
+        var s = MainController.shotHistory.grindStepForGrinder(model)
+        if (s > 0)
+            return s
 
-    // Per-grinder grind step, derived from the user's own shot history for the
-    // INJECTED grinder by the same noise-filtered estimator the AI dialing
-    // context uses. Falls back to 1.0 when history is too thin or the cache is
-    // cold. With no grinder, grindStepForGrinder("") derives from full history.
-    readonly property double grindStep: {
-        var __ = root.distinctCacheVersion
-        var s = MainController.shotHistory
-            ? MainController.shotHistory.grindStepForGrinder(root.grinderModel) : 0
-        return s > 0 ? s : 1.0
+        // Scoping can find LESS than pooling, not merely something different:
+        // the pooled query carries no equipment join, so it counts shots
+        // recorded before equipment existed and the scoped one cannot. A user
+        // whose history is mostly pre-equipment can have a grinder that derives
+        // nothing while the pool derives fine — so returning 1.0 straight from
+        // here would REGRESS the single-grinder case this change is otherwise a
+        // no-op for, which is most users. Pool as a second attempt instead: a
+        // step from the user's own dialling habits beats a blind 1.0 even when
+        // it cannot be attributed to one grinder.
+        //
+        // This is also the only path left that pools from the app, and it costs
+        // a second query only when the first derived nothing. The web forms
+        // reach the same pooling branch through
+        // ShotServer::handleGrindCandidatesApi.
+        if (model.length > 0) {
+            s = MainController.shotHistory.grindStepForGrinder("")
+            if (s > 0)
+                return s
+        }
+        return 1.0
     }
 
     // RPM step from the injected grinder's observed RPMs; the 50 default keeps
     // adjacent rows a meaningful ~50 RPM apart across the ~600–1400 working
-    // range.
-    readonly property int rpmStep: {
-        var __ = root.distinctCacheVersion
-        var s = MainController.shotHistory
-            ? MainController.shotHistory.grindRpmStepForGrinder(root.grinderModel) : 0
+    // range. Gated on rpmCapable: only rpmRowsFor() calls this, and the picker
+    // only calls that for an RPM grinder, so querying otherwise is pure waste.
+    //
+    // That gate does NOT screen out the empty-identity case, and an earlier
+    // draft of this comment claimed it did. deriveRpmCapable returns TRUE for a
+    // grinder it cannot find in the registry — "not in the table, so show the
+    // rpm field" (equipmentstorage.cpp:1709) — and an empty brand+model matches
+    // nothing, so rpmCapable is true with nothing injected and the picker does
+    // build RPM rows. What actually keeps this from pooling is one layer down:
+    // grindRpmStepForGrinder early-returns 0.0 on an empty model
+    // (shothistorystorage_queries.cpp). Do not delete that guard on the
+    // strength of this gate.
+    //
+    // So resolve the identity the same way grindStep() does, for the same
+    // reason — with nothing injected the honest source is the active grinder,
+    // and a blind 50 discards RPMs the user has actually dialled. No pooled
+    // second attempt here, unlike grindStep(): the empty model the pool would
+    // need is precisely what the guard above refuses, so there is nothing to
+    // fall through to.
+    function rpmStep() {
+        if (!root.rpmCapable || !MainController.shotHistory)
+            return 50
+        var model = root.grinderModel.length > 0
+            ? root.grinderModel
+            : String(Settings.dye.dyeGrinderModel || "")
+        var s = MainController.shotHistory.grindRpmStepForGrinder(model)
         return s > 0 ? Math.round(s) : 50
     }
 
@@ -258,7 +339,7 @@ QtObject {
     // what the user typed rather than snapping back to the old lattice.
     function grindRowsFor(cur) {
         cur = String(cur == null ? "" : cur).trim()
-        var step = root.grindStep
+        var step = root.grindStep()
         // Canonical current = the value reformatted to the step's decimals
         // (exactly what n === 0 produces); highlight whichever surviving row
         // equals it so clamp-edge dedup can't lose the highlight.
@@ -303,10 +384,12 @@ QtObject {
     function rpmRowsFor(base) {
         var rpmSet = base > 0
         var anchor = rpmSet ? base : root.rpmDefaultAnchor
+        // Once per snapshot, not once per row — this runs a query.
+        var rpmStepValue = root.rpmStep()
         var out = []
         var seen = ({})
         for (var n = -root.rpmWindowSteps; n <= root.rpmWindowSteps; n++) {
-            var rpm = anchor + n * root.rpmStep
+            var rpm = anchor + n * rpmStepValue
             if (rpm <= 0) continue
             var v = String(rpm)
             if (seen[v]) continue
@@ -321,6 +404,7 @@ QtObject {
     // consume rows reactively, because a rebuild under an open Tumbler resets
     // the view mid-interaction (see GrindPickerDialog's snapshot rationale).
     // Callers take an explicit snapshot via grindRowsFor()/rpmRowsFor() and
-    // rebuild at defined moments, listening to distinctCacheVersion for the
-    // async warm-up.
+    // rebuild at defined moments. The steps are derived inside those calls from
+    // the live database, so a snapshot is current when it is taken and there is
+    // nothing to listen for.
 }

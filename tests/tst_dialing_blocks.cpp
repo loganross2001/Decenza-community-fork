@@ -36,145 +36,15 @@
 #include "ai/dialing_blocks.h"
 #include "ai/shotsummarizer.h"  // initTestCase pins the missing-resource qWarning
 #include "shotcurvefixtures.h"
+#include "shotrowfixtures.h"
 
 namespace {
 
-// One shot's input fields. Keep this near-identical to ShotSaveData so
-// the parameter list is grep-able from the production save path.
-// Every member carries an explicit default initializer, including the QStrings.
-// A bare `QString x;` has no default member initializer, so GCC's
-// -Wmissing-field-initializers (part of -Wextra) fires on every designated
-// initialisation below that omits it — and omitting most fields is the entire
-// point of these fixtures. clang does not warn here, so this only showed up on
-// the Linux build.
-struct ShotRow {
-    QString uuid{};
-    qint64 timestamp = 0;
-    QString profileName{};
-    QString profileKbId{};
-    QString beverageType = QStringLiteral("espresso");
-    double duration = 30.0;
-    double finalWeight = 36.0;
-    double doseWeight = 18.0;
-    QString beanBrand{};
-    QString beanType{};
-    QString roastLevel{};
-    QString grinderBrand{};
-    QString grinderModel{};
-    QString grinderBurrs{};
-    QString grinderSetting{};
-    int enjoyment = 0;
-    QString espressoNotes{};
-    // Issue #1158: profile recipe snapshot + SAW target. Empty/0 by
-    // default so existing fixtures are unaffected (pourControl /
-    // targetWeightG simply stay absent, exactly as before this PR).
-    QString profileJson{};
-    double targetWeight = 0.0;  // → shots.yield_override
-    // #1164 finding #3: per-shot temperature override → shots
-    // .temperature_override. 0 by default so existing fixtures are
-    // unaffected (the field stays absent / hoist-neutral, as before).
-    double temperatureOverride = 0.0;
-    // #1161: why the shot ended → shots.stopped_by. "" by default so
-    // existing fixtures are unaffected (sparse-omitted from the blocks).
-    QString stoppedBy{};
-    // Bean storage lifecycle snapshot (bean-freshness-followup) → shots
-    // frozen_date/defrost_date/storage_hint/opened_date. "" by default so
-    // existing fixtures are unaffected (sparse-omitted from the blocks).
-    QString frozenDate{};
-    QString defrostDate{};
-    QString storageHint{};
-    QString openedDate{};
-};
+using ShotRowFixtures::ShotRow;
+using ShotRowFixtures::withRawDb;
+using ShotRowFixtures::insertShot;
+using ShotRowFixtures::projectionForShot;
 
-// Run work with a scoped raw SQLite connection on `path`. Same pattern
-// tst_dbmigration uses; the connection is removed deterministically when
-// `work` returns so Qt does not warn about open connections.
-template<typename Work>
-void withRawDb(const QString& path, const QString& connName, Work&& work)
-{
-    {
-        QSqlDatabase db = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connName);
-        db.setDatabaseName(path);
-        QVERIFY2(db.open(), qPrintable(db.lastError().text()));
-        QSqlQuery (db).exec(QStringLiteral("PRAGMA foreign_keys = ON"));
-        work(db);
-    }
-    QSqlDatabase::removeDatabase(connName);
-}
-
-qint64 insertShot(QSqlDatabase& db, const ShotRow& r)
-{
-    // Grinder identity is no longer a per-shot column (migration 23) — it
-    // resolves through equipment_id to a package's grinder item. Mirror the
-    // production save path: find-or-create a package for this row's grinder
-    // identity and link the shot to it. The per-shot grind setting stays on the
-    // row. An empty identity leaves equipment_id NULL.
-    qint64 equipmentId = 0;
-    if (!(r.grinderBrand.isEmpty() && r.grinderModel.isEmpty() && r.grinderBurrs.isEmpty())) {
-        equipmentId = EquipmentStorage::findPackageByGrinderIdentityStatic(
-            db, r.grinderBrand, r.grinderModel, r.grinderBurrs);
-        if (equipmentId <= 0) {
-            EquipmentPackage pkg;
-            equipmentId = EquipmentStorage::createPackageWithGrinderStatic(
-                db, pkg, r.grinderBrand, r.grinderModel, r.grinderBurrs);
-        }
-    }
-
-    QSqlQuery q(db);
-    q.prepare(QStringLiteral(R"(
-        INSERT INTO shots (
-            uuid, timestamp, profile_name, beverage_type,
-            duration_seconds, final_weight, dose_weight,
-            bean_brand, bean_type, roast_level,
-            grinder_setting, equipment_id,
-            enjoyment, espresso_notes, profile_kb_id,
-            profile_json, yield_override, temperature_override, stopped_by,
-            frozen_date, defrost_date, storage_hint, opened_date
-        ) VALUES (
-            :uuid, :timestamp, :profile_name, :beverage_type,
-            :duration, :final_weight, :dose_weight,
-            :bean_brand, :bean_type, :roast_level,
-            :grinder_setting, :equipment_id,
-            :enjoyment, :espresso_notes, :profile_kb_id,
-            :profile_json, :yield_override, :temperature_override, :stopped_by,
-            :frozen_date, :defrost_date, :storage_hint, :opened_date
-        )
-    )"));
-    q.bindValue(":uuid", r.uuid);
-    q.bindValue(":timestamp", r.timestamp);
-    q.bindValue(":profile_name", r.profileName);
-    q.bindValue(":beverage_type", r.beverageType);
-    q.bindValue(":duration", r.duration);
-    q.bindValue(":final_weight", r.finalWeight);
-    q.bindValue(":dose_weight", r.doseWeight);
-    q.bindValue(":bean_brand", r.beanBrand);
-    q.bindValue(":bean_type", r.beanType);
-    q.bindValue(":roast_level", r.roastLevel);
-    q.bindValue(":grinder_setting", r.grinderSetting);
-    q.bindValue(":equipment_id", equipmentId > 0 ? QVariant(equipmentId) : QVariant());
-    q.bindValue(":enjoyment", r.enjoyment);
-    q.bindValue(":espresso_notes", r.espressoNotes);
-    q.bindValue(":profile_kb_id", r.profileKbId.isEmpty() ? QVariant() : r.profileKbId);
-    q.bindValue(":profile_json", r.profileJson);
-    q.bindValue(":yield_override", r.targetWeight);
-    q.bindValue(":temperature_override", r.temperatureOverride);
-    q.bindValue(":stopped_by", r.stoppedBy);
-    q.bindValue(":frozen_date", r.frozenDate.isEmpty() ? QVariant() : r.frozenDate);
-    q.bindValue(":defrost_date", r.defrostDate.isEmpty() ? QVariant() : r.defrostDate);
-    q.bindValue(":storage_hint", r.storageHint.isEmpty() ? QVariant() : r.storageHint);
-    q.bindValue(":opened_date", r.openedDate.isEmpty() ? QVariant() : r.openedDate);
-    if (!q.exec ()) {
-        qWarning() << "insertShot failed:" << q.lastError().text();
-        return -1;
-    }
-    return q.lastInsertId().toLongLong();
-}
-
-ShotProjection projectionForShot(QSqlDatabase& db, qint64 shotId)
-{
-    return ShotHistoryStorage::convertShotRecord(
-        ShotHistoryStorage::loadShotRecordStatic(db, shotId));
-}
 
 constexpr qint64 kSecPerDay = 24 * 3600;
 
@@ -1386,6 +1256,334 @@ private slots:
             const QJsonObject ur = out.first().toObject().value("userResponse").toObject();
             QCOMPARE(ur.value("adherence").toString(), QStringLiteral("ignored"));
         });
+    }
+
+    // Shared driver for the grinderSetting adherence cases. Seeds a prior shot
+    // and a follow-up, runs one recommendation through buildRecentAdviceBlock,
+    // and returns the adherence verdict.
+    // priorDose/nextDose default to the same value so every existing caller
+    // varies only the grind, as before. The ranges-only cases need a second
+    // axis: with nothing recommended, the dose is one of the things that
+    // decides whether the predicted repeat actually happened.
+    QString adherenceForStructured(const QString& tag, const QJsonObject& sn,
+                                   const QString& priorGrind, const QString& nextGrind,
+                                   double priorDose = 18, double nextDose = 18,
+                                   qint64 priorRpm = 0, qint64 nextRpm = 0)
+    {
+        const QString dbPath = freshDbPath();
+        initAndClose(dbPath);
+        const qint64 nowSec = QDateTime::currentSecsSinceEpoch();
+        QString verdict;
+
+        withRawDb(dbPath, tag, [&](QSqlDatabase& db) {
+            const qint64 priorId = insertShot(db, ShotRow{
+                .uuid = "u-prior", .timestamp = nowSec - 7200,
+                .profileName = "P", .profileKbId = "kb",
+                .duration = 30, .finalWeight = 36, .doseWeight = priorDose,
+                .grinderSetting = priorGrind, .rpm = priorRpm
+            });
+            insertShot(db, ShotRow{
+                .uuid = "u-next", .timestamp = nowSec - 3600,
+                .profileName = "P", .profileKbId = "kb",
+                .duration = 30, .finalWeight = 36, .doseWeight = nextDose,
+                .grinderSetting = nextGrind, .rpm = nextRpm
+            });
+
+            DialingBlocks::RecentAdviceInputs in;
+            in.turns = {AIConversation::HistoricalAssistantTurn{priorId, "advice", sn}};
+            in.currentProfileKbId = "kb";
+            in.currentShotId = 99999;
+
+            const QJsonArray out = DialingBlocks::buildRecentAdviceBlock(db, in);
+            QCOMPARE(out.size(), 1);
+            verdict = out.first().toObject().value("userResponse").toObject()
+                          .value("adherence").toString();
+        });
+        return verdict;
+    }
+
+    // Convenience for the common case: vary only the recommended grind.
+    QString adherenceFor(const QString& tag, const QJsonValue& recommendedGrind,
+                         const QString& priorGrind, const QString& nextGrind)
+    {
+        QJsonObject sn = sampleStructuredNext();
+        sn["grinderSetting"] = recommendedGrind;
+        return adherenceForStructured(tag, sn, priorGrind, nextGrind);
+    }
+
+    // A ranges-only turn recommends no parameter change, so the implicit
+    // instruction is "run this again, here is what I expect". That is an
+    // experiment, and the verdict has to say whether it ran.
+    //
+    // Repeat on the same setup: it ran. This is the case that must keep
+    // working — most ranges-only turns are ordinary "try that again" advice.
+    void recentAdvice_rangesOnlyRepeatOnSameSetupIsFollowed()
+    {
+        QJsonObject sn = sampleStructuredNext();
+        sn.remove("grinderSetting");
+        QCOMPARE(adherenceForStructured("adh_ranges_same", sn, "9.0", "9.0"),
+                 QStringLiteral("followed"));
+    }
+
+    // Changed the grind nobody asked them to change: the predicted repeat did
+    // not happen, so the prediction was never tested. Asserting BOTH verdicts
+    // because "followed" is the specific wrong answer this replaced — it told
+    // the model "the experiment ran and failed", so a bad outcome made it
+    // revise a direction its prediction never covered.
+    void recentAdvice_rangesOnlyWithChangedGrindIsIgnored()
+    {
+        QJsonObject sn = sampleStructuredNext();
+        sn.remove("grinderSetting");
+        const QString verdict =
+            adherenceForStructured("adh_ranges_grind", sn, "9.0", "7.5");
+        QCOMPARE(verdict, QStringLiteral("ignored"));
+        QVERIFY2(verdict != QStringLiteral("followed"),
+                 "a regrind is not the controlled repeat that was predicted");
+    }
+
+    // Same for a dose change, and the tolerance has to hold: 18.0 -> 19.5 is a
+    // decision, 18.0 -> 18.2 is scale noise and must stay "followed".
+    void recentAdvice_rangesOnlyDoseChangeRespectsTolerance()
+    {
+        QJsonObject sn = sampleStructuredNext();
+        sn.remove("grinderSetting");
+        QCOMPARE(adherenceForStructured("adh_ranges_dose_big", sn, "9.0", "9.0", 18.0, 19.5),
+                 QStringLiteral("ignored"));
+        QCOMPARE(adherenceForStructured("adh_ranges_dose_noise", sn, "9.0", "9.0", 18.0, 18.2),
+                 QStringLiteral("followed"));
+    }
+
+    // Notation is not a setup change. "1 + 4" and "1+4" are the same dial
+    // position, and a shot recorded with the RPM annotation is the same
+    // setting as one recorded without it — neither may read as a regrind.
+    void recentAdvice_rangesOnlyNotationIsNotAChange()
+    {
+        QJsonObject sn = sampleStructuredNext();
+        sn.remove("grinderSetting");
+        QCOMPARE(adherenceForStructured("adh_ranges_compound", sn, "1 + 4", "1+4"),
+                 QStringLiteral("followed"));
+        QCOMPARE(adherenceForStructured("adh_ranges_annot", sn, "23.5", "23.5 1400rpm"),
+                 QStringLiteral("followed"));
+    }
+
+    // A blank grinder setting is missing data, not proof of a regrind. Older
+    // shots have no recorded setting, and downgrading those to "ignored" would
+    // rewrite long-settled history on no evidence at all.
+    // Lettered dials ("3F" -> "3C") are an unmistakable regrind, but they
+    // parse as NO number — leadingDialNumber() only knows the numeric and
+    // compound shapes. The first version of sameGrinderSetting() answered
+    // "same" for anything it could not compare numerically, which swallowed
+    // this case whole and scored it "followed": the precise defect this
+    // function exists to catch, surviving inside the fix for it.
+    void recentAdvice_rangesOnlyLetteredRegrindIsIgnored()
+    {
+        QJsonObject sn = sampleStructuredNext();
+        sn.remove("grinderSetting");
+        const QString verdict =
+            adherenceForStructured("adh_ranges_lettered", sn, "3F", "3C");
+        QCOMPARE(verdict, QStringLiteral("ignored"));
+        QVERIFY2(verdict != QStringLiteral("followed"),
+                 "a lettered-dial regrind is still a regrind");
+    }
+
+    // The RPM axis, which nothing reached before: ShotRow had no rpm field, so
+    // every fixture wrote NULL and the comparison skipped. 1400 -> 1200 is a
+    // deliberate move; 1400 -> 1410 is inside the +/-25 band and is not.
+    void recentAdvice_rangesOnlyRpmChangeRespectsTolerance()
+    {
+        QJsonObject sn = sampleStructuredNext();
+        sn.remove("grinderSetting");
+        QCOMPARE(adherenceForStructured("adh_ranges_rpm_big", sn, "9.0", "9.0",
+                                        18, 18, 1400, 1200),
+                 QStringLiteral("ignored"));
+        QCOMPARE(adherenceForStructured("adh_ranges_rpm_noise", sn, "9.0", "9.0",
+                                        18, 18, 1400, 1410),
+                 QStringLiteral("followed"));
+        // Unrecorded on one side is missing data, not a change.
+        QCOMPARE(adherenceForStructured("adh_ranges_rpm_unset", sn, "9.0", "9.0",
+                                        18, 18, 1400, 0),
+                 QStringLiteral("followed"));
+    }
+
+    // A profile RENAME must not read as a setup change. buildRecentAdviceBlock
+    // only ever pairs shots sharing profile_kb_id, so differing stored titles
+    // mean the user renamed the profile between them — nothing about the
+    // coffee moved. The profile comparison was removed for this reason; this
+    // pins that it stays removed.
+    void recentAdvice_rangesOnlyProfileRenameIsNotAChange()
+    {
+        const QString dbPath = freshDbPath();
+        initAndClose(dbPath);
+        const qint64 nowSec = QDateTime::currentSecsSinceEpoch();
+        QJsonObject sn = sampleStructuredNext();
+        sn.remove("grinderSetting");
+
+        withRawDb(dbPath, "adh_ranges_rename", [&](QSqlDatabase& db) {
+            const qint64 priorId = insertShot(db, ShotRow{
+                .uuid = "u-prior", .timestamp = nowSec - 7200,
+                .profileName = "Old Title", .profileKbId = "kb",
+                .duration = 30, .finalWeight = 36, .doseWeight = 18,
+                .grinderSetting = "9.0"
+            });
+            insertShot(db, ShotRow{
+                .uuid = "u-next", .timestamp = nowSec - 3600,
+                .profileName = "New Title", .profileKbId = "kb",
+                .duration = 30, .finalWeight = 36, .doseWeight = 18,
+                .grinderSetting = "9.0"
+            });
+
+            DialingBlocks::RecentAdviceInputs in;
+            in.turns = {AIConversation::HistoricalAssistantTurn{priorId, "advice", sn}};
+            in.currentProfileKbId = "kb";
+            in.currentShotId = 99999;
+
+            const QJsonArray out = DialingBlocks::buildRecentAdviceBlock(db, in);
+            QCOMPARE(out.size(), 1);
+            QCOMPARE(out.first().toObject().value("userResponse").toObject()
+                         .value("adherence").toString(),
+                     QStringLiteral("followed"));
+        });
+    }
+
+    void recentAdvice_rangesOnlyUnknownSettingStaysFollowed()
+    {
+        QJsonObject sn = sampleStructuredNext();
+        sn.remove("grinderSetting");
+        QCOMPARE(adherenceForStructured("adh_ranges_blank_next", sn, "9.0", ""),
+                 QStringLiteral("followed"));
+        QCOMPARE(adherenceForStructured("adh_ranges_blank_prior", sn, "", "9.0"),
+                 QStringLiteral("followed"));
+    }
+
+    // Prose in `grinderSetting` — "a touch coarser than 9" (GPT-5.6 Terra,
+    // observed live 2026-07-30). It matches no setting and parses as no number,
+    // so whether the user followed it is UNKNOWABLE.
+    //
+    // It must not report "ignored" (the user may have complied) and must not
+    // report "followed" (they may have changed nothing) — "followed" is the
+    // worse of the two, because the system prompt reads it as "the experiment
+    // ran" and tells the model to revise direction or commit harder on that
+    // basis. Both wrong answers are asserted against here, because the first
+    // version of this fix produced the second one.
+    void recentAdvice_proseGrinderSettingIsUnclear()
+    {
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression("grinderSetting is prose"));
+        // User DID move — still unknowable, because the advice named no value.
+        QCOMPARE(adherenceFor("adh_prose_moved", "a touch coarser than 9", "9.0", "8.75"),
+                 QStringLiteral("unclear"));
+
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression("grinderSetting is prose"));
+        // User did NOT move. Same verdict — the point is that the recommendation
+        // is unscoreable, so the follow-up shot cannot change the answer. If this
+        // case ever diverges from the one above, scoring is reading the seeded
+        // data it must not be able to reach.
+        QCOMPARE(adherenceFor("adh_prose_still", "slightly coarser than 9", "9.0", "9.0"),
+                 QStringLiteral("unclear"));
+    }
+
+    // Compound notation ("1 + 4") is a REAL setting for every Eureka Mignon
+    // the Eureka Mignon and 1Zpresso families — not prose, despite the spaces.
+    // An earlier version of the guard rejected on any whitespace and silently
+    // stopped scoring every one of them.
+    void recentAdvice_compoundNotationScoresNormally()
+    {
+        QCOMPARE(adherenceFor("adh_compound_followed", "1 + 4", "1 + 2", "1 + 4"),
+                 QStringLiteral("followed"));
+        QCOMPARE(adherenceFor("adh_compound_ignored", "1 + 4", "1 + 2", "1 + 2"),
+                 QStringLiteral("ignored"));
+    }
+
+    // A non-numeric single-token setting ("3F") scores via exact string
+    // equality. Both verdicts are exercised so the test cannot pass by simply
+    // never scoring.
+    void recentAdvice_nonNumericSettingStillScores()
+    {
+        QCOMPARE(adherenceFor("adh_3f_followed", "3F", "3C", "3F"),
+                 QStringLiteral("followed"));
+        QCOMPARE(adherenceFor("adh_3f_ignored", "3F", "3C", "3C"),
+                 QStringLiteral("ignored"));
+    }
+
+    // Incidental padding is not prose. " 8.75 " is the same dial position as
+    // "8.75" and must score, not fall into the unscoreable path.
+    void recentAdvice_paddedSettingIsTrimmedNotRejected()
+    {
+        QCOMPARE(adherenceFor("adh_padded", " 8.75 ", "9.0", "8.75"),
+                 QStringLiteral("followed"));
+    }
+
+    // The schema says grinderSetting is a string, but a model may emit it
+    // unquoted. QJsonValue::toString() returns an EMPTY QString for a non-string
+    // type, which previously read as "no grind change" and scored the turn as
+    // fully followed — a recommendation nobody could check, reported as complied
+    // with. It must be unscoreable instead.
+    void recentAdvice_numericJsonGrinderSettingIsUnclear()
+    {
+        QTest::ignoreMessage(QtWarningMsg,
+            QRegularExpression("grinderSetting is not a JSON string"));
+        QCOMPARE(adherenceFor("adh_numeric_json", QJsonValue(8.75), "9.0", "9.0"),
+                 QStringLiteral("unclear"));
+    }
+
+    // Single-word prose ("coarser") has no whitespace. An earlier version of
+    // looksLikeSetting() returned true for ANY whitespace-free string, so this
+    // was classified scoreable, failed the numeric compare, and reported
+    // "ignored" — the false-non-adherence bug the guard exists to prevent,
+    // surviving in the one shape the prose tests didn't cover.
+    void recentAdvice_singleWordProseIsUnclear()
+    {
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression("grinderSetting is prose"));
+        QCOMPARE(adherenceFor("adh_word_prose", "coarser", "9.0", "8.75"),
+                 QStringLiteral("unclear"));
+    }
+
+    // The comparator must accept every form looksLikeSetting() admits.
+    // Compound spacing is not meaningful: recommending "1 + 4" against a
+    // recorded "1+4" is adherence. Before grinderMatches() went through
+    // GrinderAliases, only byte-identical strings could score.
+    void recentAdvice_compoundSpacingDoesNotDecideAdherence()
+    {
+        QCOMPARE(adherenceFor("adh_compound_spacing", "1 + 4", "1 + 2", "1+4"),
+                 QStringLiteral("followed"));
+    }
+
+    // Variable-RPM grinders commonly annotate the recorded setting with the
+    // RPM. A recommended "23.5" against a recorded "23.5 1400rpm" is the user
+    // doing exactly what was asked; a bare QString::toDouble() rejected the
+    // trailing text and scored it "ignored".
+    void recentAdvice_annotatedSettingStillScores()
+    {
+        QCOMPARE(adherenceFor("adh_annotated", "23.5", "24 1400rpm", "23.5 1400rpm"),
+                 QStringLiteral("followed"));
+    }
+
+    // rpm had the same fail-open hazard grinderSetting was fixed for:
+    // QJsonValue::toInt() yields 0 for a JSON string, and the matcher treated
+    // <= 0 as a free match, so a malformed rpm scored "followed" — "the
+    // experiment ran". It must be unscoreable.
+    void recentAdvice_malformedRpmIsUnclearNotFollowed()
+    {
+        QJsonObject sn = sampleStructuredNext();
+        sn.remove(QStringLiteral("grinderSetting"));   // rpm is the only axis
+        sn["rpm"] = QStringLiteral("1400");            // string, not number
+
+        QTest::ignoreMessage(QtWarningMsg,
+            QRegularExpression("rpm is not a JSON number"));
+        QCOMPARE(adherenceForStructured("adh_rpm_string", sn, "9.0", "9.0"),
+                 QStringLiteral("unclear"));
+    }
+
+    // A model writing rpm: 0 to mean "unchanged" violates the schema (which says
+    // omit), and previously bought a free match. Also unscoreable.
+    void recentAdvice_zeroRpmIsUnclearNotFollowed()
+    {
+        QJsonObject sn = sampleStructuredNext();
+        sn.remove(QStringLiteral("grinderSetting"));
+        sn["rpm"] = 0;
+
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression("rpm is 0"));
+        QCOMPARE(adherenceForStructured("adh_rpm_zero", sn, "9.0", "9.0"),
+                 QStringLiteral("unclear"));
     }
 
     void recentAdvice_emptyTurnsOmitsBlock()
@@ -3550,6 +3748,309 @@ private slots:
             QVERIFY(!projectionForShot(db, id).toVariantMap().contains("beanBaseJson"));
         });
     }
+    // ==========================================
+    // Grind step derivation and the distinct-value getters
+    // ==========================================
+    //
+    // Not migration tests — nothing here touches the schema. They live in this
+    // binary because it already owns a DB fixture that COPIES a prebuilt schema
+    // template per test instead of re-running the migration chain, and because
+    // queryGrinderContext's stepSize coverage is already here. Adding a target
+    // for them would have cost a whole compile+link on every build to buy
+    // nothing but a filename.
+
+    // Seed `count` settings stepping by 0.25 on one grinder, so deriveGrindStep's
+    // smallest-repeated-gap is unambiguously 0.25.
+    void seedQuarterStepHistory(const QString& path, const QString& model, int count) {
+        withRawDb(path, "seed_" + model + QString::number(count), [&](QSqlDatabase& db) {
+            const qint64 now = QDateTime::currentSecsSinceEpoch();
+            for (int i = 0; i < count; ++i) {
+                ShotRow r;
+                r.uuid = QStringLiteral("uuid-%1-%2").arg(model).arg(i);
+                r.timestamp = now - i * 3600;
+                r.profileName = QStringLiteral("p");
+                r.grinderBrand = QStringLiteral("Niche");
+                r.grinderModel = model;
+                r.grinderSetting = QString::number(7.5 + 0.25 * i);
+                QVERIFY(insertShot(db, r) > 0);
+            }
+        });
+    }
+
+    // ==========================================
+    // Grind step derivation and the distinct-value getters.
+    //
+    // NOT migration tests — nothing below touches the schema. They live here
+    // because this file already owns the DB fixtures and links decenza_shotlib,
+    // and a separate target for nine tests would cost a build target to buy
+    // nothing but a better filename.
+    // ==========================================
+
+    // THE regression test for this change. The step derived correctly as 0.25 and
+    // was then lost: it lived behind a distinct-cache key, an invalidation cleared
+    // that key, and the re-fetch racing the next refresh was discarded in silence.
+    // The widget sat on its 1.0 fallback for the rest of the session while the AI
+    // payload still reported 0.25 for the same grinder.
+    //
+    // The trigger was a data change — every shot save wiped the cache. So that is
+    // what this drives: derive, write a shot that MOVES the answer, derive again.
+    //
+    // The write must change the derived step, not just add a row. An earlier
+    // version of this test inserted a setting already on the seeded lattice, so
+    // SELECT DISTINCT returned byte-identical rows and the second assertion could
+    // not fail unless the first did — it was a copy of its own first half. Here
+    // the history starts on a 0.5 lattice and the new shot introduces the first
+    // repeated 0.25 gap, so a reader that did not see the write answers 0.5.
+    void grindStepSurvivesDataChange() {
+        QString path = freshDbPath();
+        initAndClose(path);
+
+        // 6.0, 6.5, 7.0, 7.5 — smallest repeated gap is 0.5.
+        withRawDb(path, "step_seed_half", [](QSqlDatabase& db) {
+            const qint64 now = QDateTime::currentSecsSinceEpoch();
+            for (int i = 0; i < 4; ++i) {
+                ShotRow r;
+                r.uuid = QStringLiteral("uuid-half-%1").arg(i);
+                r.timestamp = now - i * 60;
+                r.profileName = QStringLiteral("p");
+                r.grinderBrand = QStringLiteral("Niche");
+                r.grinderModel = QStringLiteral("Zero");
+                r.grinderSetting = QString::number(6.0 + 0.5 * i);
+                QVERIFY(insertShot(db, r) > 0);
+            }
+        });
+
+        ShotHistoryStorage s;
+        QVERIFY(s.initialize(path));
+        QCOMPARE(s.grindStepForGrinder("Zero"), 0.5);
+
+        // 6.25 and 6.75 introduce two 0.25 gaps — the smallest repeated gap moves.
+        withRawDb(path, "step_after_write", [](QSqlDatabase& db) {
+            const qint64 now = QDateTime::currentSecsSinceEpoch();
+            const char* settings[] = { "6.25", "6.75" };
+            for (int i = 0; i < 2; ++i) {
+                ShotRow r;
+                r.uuid = QStringLiteral("uuid-after-write-%1").arg(i);
+                r.timestamp = now + 1 + i;
+                r.profileName = QStringLiteral("p");
+                r.grinderBrand = QStringLiteral("Niche");
+                r.grinderModel = QStringLiteral("Zero");
+                r.grinderSetting = QString::fromLatin1(settings[i]);
+                QVERIFY(insertShot(db, r) > 0);
+            }
+        });
+        QCOMPARE(s.grindStepForGrinder("Zero"), 0.25);
+        s.close();
+        QTRY_VERIFY(s.isDbWorkIdle());
+    }
+
+    // The getters read the database, so a write is visible to the very next call
+    // with no signal in between. Before this change they returned a cached list
+    // and the new value appeared only once an async refresh had landed — and for
+    // composite keys like this one, often never.
+    void distinctSettingsSeeWritesImmediately() {
+        QString path = freshDbPath();
+        initAndClose(path);
+        seedQuarterStepHistory(path, QStringLiteral("Zero"), 6);
+
+        ShotHistoryStorage s;
+        QVERIFY(s.initialize(path));
+        const qsizetype before = s.getDistinctGrinderSettingsForGrinder("Zero").size();
+        QVERIFY(before > 0);
+
+        withRawDb(path, "distinct_after_write", [](QSqlDatabase& db) {
+            ShotRow r;
+            r.uuid = QStringLiteral("uuid-distinct-new");
+            r.timestamp = QDateTime::currentSecsSinceEpoch() + 1;
+            r.profileName = QStringLiteral("p");
+            r.grinderBrand = QStringLiteral("Niche");
+            r.grinderModel = QStringLiteral("Zero");
+            r.grinderSetting = QStringLiteral("42.5");   // not on the seeded lattice
+            QVERIFY(insertShot(db, r) > 0);
+        });
+
+        const QStringList after = s.getDistinctGrinderSettingsForGrinder("Zero");
+        QCOMPARE(after.size(), before + 1);
+        QVERIFY2(after.contains("42.5"), "a live getter must see a write immediately");
+        s.close();
+        QTRY_VERIFY(s.isDbWorkIdle());
+    }
+
+    // One distinct setting defines no step. 0 means "cannot derive" and the caller
+    // substitutes its own fallback — it is NOT a step of zero.
+    // Seeds a SECOND grinder that does derive, deliberately. 0.0 is this
+    // function's universal failure value — not-ready, query-failed and thin
+    // history all return it — so asserting only `Solo == 0` would pass just as
+    // well against a completely broken query path. Asserting Zero == 0.25 in the
+    // same database proves the query works, which is what makes Solo's 0 mean
+    // "one sample defines no step".
+    void grindStepThinHistoryReturnsZero() {
+        QString path = freshDbPath();
+        initAndClose(path);
+        seedQuarterStepHistory(path, QStringLiteral("Solo"), 1);
+        seedQuarterStepHistory(path, QStringLiteral("Zero"), 6);
+
+        ShotHistoryStorage s;
+        QVERIFY(s.initialize(path));
+        QCOMPARE(s.grindStepForGrinder("Zero"), 0.25);   // the query works
+        QCOMPARE(s.grindStepForGrinder("Solo"), 0.0);    // ...and one sample still yields 0
+        s.close();
+        QTRY_VERIFY(s.isDbWorkIdle());
+    }
+
+    // Same grinder, differently typed. NOT a regression test — main folded here
+    // too (both its cached getter and its derivation used LOWER(TRIM())). This is
+    // a forward guard on the now-shared grinderModelMatchSql(): an exact compare
+    // would read a differently-cased model back as a grinder with no history,
+    // which is invisible because empty is indistinguishable from new.
+    void grindStepFoldsModelCaseAndWhitespace() {
+        QString path = freshDbPath();
+        initAndClose(path);
+        seedQuarterStepHistory(path, QStringLiteral("Zero"), 28);
+
+        ShotHistoryStorage s;
+        QVERIFY(s.initialize(path));
+        QCOMPARE(s.grindStepForGrinder("  zero  "), 0.25);
+        QCOMPARE(s.grindStepForGrinder("ZERO"), 0.25);
+        s.close();
+        QTRY_VERIFY(s.isDbWorkIdle());
+    }
+
+    // An empty model means "no grinder selected" and must derive from the full
+    // cross-grinder history — the ShotServer /beans form depends on it, since a new
+    // bag has no equipment chosen yet.
+    void grindStepEmptyModelUsesFullHistory() {
+        QString path = freshDbPath();
+        initAndClose(path);
+        seedQuarterStepHistory(path, QStringLiteral("Zero"), 28);
+
+        // Shots with NO equipment row at all, stepping by 0.1. Only a query that
+        // drops the equipment join can see these, so without them the test cannot
+        // tell an all-grinders pass from a per-grinder one.
+        withRawDb(path, "no_equipment", [](QSqlDatabase& db) {
+            const qint64 now = QDateTime::currentSecsSinceEpoch();
+            for (int i = 0; i < 6; ++i) {
+                ShotRow r;
+                r.uuid = QStringLiteral("uuid-bare-%1").arg(i);
+                r.timestamp = now - i * 60;
+                r.profileName = QStringLiteral("p");
+                // No grinder brand/model/burrs => insertShot leaves equipment_id NULL.
+                r.grinderSetting = QString::number(2.0 + 0.1 * i);
+                QVERIFY(insertShot(db, r) > 0);
+            }
+        });
+
+        ShotHistoryStorage s;
+        QVERIFY(s.initialize(path));
+        // 0.1 is the smallest repeated gap across the full history, reachable only
+        // if equipment-less shots are included.
+        QCOMPARE(s.grindStepForGrinder(""), 0.1);
+        // The per-grinder answer is unchanged.
+        QCOMPARE(s.grindStepForGrinder("Zero"), 0.25);
+        s.close();
+        QTRY_VERIFY(s.isDbWorkIdle());
+    }
+
+    // grindRpmStepForGrinder had NO coverage at all while this change rewrote both
+    // it and its helper. It returns the same 0.0 sentinel for "no grinder", "not
+    // ready" and "query failed", and the caller silently substitutes a 50 RPM
+    // default — the same shape as the bug this PR fixes, on the RPM wheel.
+    void grindRpmStepDerivesFromHistory() {
+        QString path = freshDbPath();
+        initAndClose(path);
+
+        // 800, 900, 1000, 1100 — smallest repeated gap is 100.
+        withRawDb(path, "rpm_seed", [](QSqlDatabase& db) {
+            const qint64 now = QDateTime::currentSecsSinceEpoch();
+            for (int i = 0; i < 4; ++i) {
+                ShotRow r;
+                r.uuid = QStringLiteral("uuid-rpm-%1").arg(i);
+                r.timestamp = now - i * 60;
+                r.profileName = QStringLiteral("p");
+                r.grinderBrand = QStringLiteral("Mahlkonig");
+                r.grinderModel = QStringLiteral("E80");
+                r.grinderSetting = QString::number(3.0 + i);
+                r.rpm = 800 + 100 * i;
+                QVERIFY(insertShot(db, r) > 0);
+            }
+        });
+
+        ShotHistoryStorage s;
+        QVERIFY(s.initialize(path));
+        QCOMPARE(s.grindRpmStepForGrinder("E80"), 100.0);
+        // Folded like its settings twin — both go through grinderModelMatchSql().
+        QCOMPARE(s.grindRpmStepForGrinder("  e80  "), 100.0);
+        // An empty model has no meaningful RPM history to pool: the documented
+        // precondition of grinderWideRpmStep, guarded at the call site.
+        QCOMPARE(s.grindRpmStepForGrinder(""), 0.0);
+        // A grinder with no recorded RPMs at all.
+        QCOMPARE(s.grindRpmStepForGrinder("Zero"), 0.0);
+        s.close();
+        QTRY_VERIFY(s.isDbWorkIdle());
+    }
+
+    // The SQL orders lexicographically, so "10" sorts before "9". sortGrinderSettings()
+    // re-sorts numerically, and GrindRowSource pushes this list onto the wheel IN
+    // LIST ORDER — so the ordering is directly user-visible. Nothing asserted it:
+    // deleting the sortGrinderSettings() call left the whole suite green.
+    void distinctSettingsAreSortedNumerically() {
+        QString path = freshDbPath();
+        initAndClose(path);
+        withRawDb(path, "sort_seed", [](QSqlDatabase& db) {
+            const qint64 now = QDateTime::currentSecsSinceEpoch();
+            const char* settings[] = { "9", "10", "11", "2" };
+            for (int i = 0; i < 4; ++i) {
+                ShotRow r;
+                r.uuid = QStringLiteral("uuid-sort-%1").arg(i);
+                r.timestamp = now - i * 60;
+                r.profileName = QStringLiteral("p");
+                r.grinderBrand = QStringLiteral("Niche");
+                r.grinderModel = QStringLiteral("Zero");
+                r.grinderSetting = QString::fromLatin1(settings[i]);
+                QVERIFY(insertShot(db, r) > 0);
+            }
+        });
+
+        ShotHistoryStorage s;
+        QVERIFY(s.initialize(path));
+        const QStringList got = s.getDistinctGrinderSettingsForGrinder("Zero");
+        QCOMPARE(got, QStringList({ "2", "9", "10", "11" }));
+        s.close();
+        QTRY_VERIFY(s.isDbWorkIdle());
+    }
+
+    // getDistinctGrinderBurrsForModel binds brand and model POSITIONALLY. A
+    // transposition returns an empty list, which is indistinguishable from "no
+    // burrs recorded" — silent, and the only getter with two positional binds.
+    void distinctBurrsBindBrandAndModelInOrder() {
+        QString path = freshDbPath();
+        initAndClose(path);
+        withRawDb(path, "burrs_seed", [](QSqlDatabase& db) {
+            const qint64 now = QDateTime::currentSecsSinceEpoch();
+            // Two models under ONE brand, so a swapped bind cannot accidentally match.
+            const char* models[] = { "Zero", "Duo" };
+            const char* burrs[]  = { "Steel", "Ceramic" };
+            for (int i = 0; i < 2; ++i) {
+                ShotRow r;
+                r.uuid = QStringLiteral("uuid-burrs-%1").arg(i);
+                r.timestamp = now - i * 60;
+                r.profileName = QStringLiteral("p");
+                r.grinderBrand = QStringLiteral("Niche");
+                r.grinderModel = QString::fromLatin1(models[i]);
+                r.grinderBurrs = QString::fromLatin1(burrs[i]);
+                r.grinderSetting = QStringLiteral("5");
+                QVERIFY(insertShot(db, r) > 0);
+            }
+        });
+
+        ShotHistoryStorage s;
+        QVERIFY(s.initialize(path));
+        QCOMPARE(s.getDistinctGrinderBurrsForModel("Niche", "Zero"), QStringList({ "Steel" }));
+        QCOMPARE(s.getDistinctGrinderBurrsForModel("Niche", "Duo"),  QStringList({ "Ceramic" }));
+        s.close();
+        QTRY_VERIFY(s.isDbWorkIdle());
+    }
+
 };
 
 QTEST_GUILESS_MAIN(TstDialingBlocks)

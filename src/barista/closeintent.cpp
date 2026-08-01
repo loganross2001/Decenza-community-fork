@@ -64,19 +64,26 @@ bool looksLikeStall(const QString& raw)
     // Peel one leading filler ("ok, …", "sure — …") so the stall stem anchors.
     t.remove(QRegularExpression(QStringLiteral("^(ok(ay)?|sure|alright|right|well|hmm+|so|yeah|yep)[,.!\\s]+")));
     t = t.trimmed();
-    // [barista-fork] Broadened 2026-07-31 (on-device evidence: "One sec, checking the weather." shipped straight
-    // to Listening and the weather was never fetched — the ^…$ matcher below only catches a BARE stall, so the
-    // trailing "checking …" promise broke the anchor). A reply that OPENS with a TIME-STALL ("one sec", "give me
-    // a second", "hold on", "one moment") is a stall even when a promise clause follows — UNLESS it carries an
-    // actual answer, which we proxy by any DIGIT (a real answer states a figure: "…your yield was 36 grams").
-    // This preserves the test contract: "checking the numbers, your yield was 36 grams" has no leading time-stall
-    // AND a digit → not a stall; the em-dash-answer case has no leading time-stall → not a stall.
-    static const QRegularExpression digitRe(QStringLiteral("[0-9]"));
-    static const QRegularExpression timeStall(QStringLiteral(
-        "^((just )?(a|one) (sec|second|moment|minute)|hold on|hang on|one moment"
-        "|give me (a )?(sec|second|moment|minute))\\b"));
-    if (!t.contains(digitRe) && timeStall.match(t).hasMatch())
-        return true;
+    // [barista-fork] Broadened 2026-07-31 (on-device evidence, two rounds): the ^…$ matcher below only catches a
+    // BARE stall, so a promise with a trailing object shipped straight to Listening and the fetch never ran —
+    // first "One sec, checking the weather.", then "Let me check the rain chance for tomorrow." A reply is a stall
+    // when it OPENS with a time-stall ("one sec", "hold on", …) OR a first-person promise-to-retrieve ("let me
+    // check …", "I'll pull up …") OR a "-ing" retrieval ("checking the weather"), AND carries no ANSWER SIGNAL.
+    // A real answer states a figure or pivots to a delivered result, which we proxy by a digit, an em-dash, or a
+    // colon/semicolon — so "checking the numbers, your yield was 36 grams" (digit) and "let me check on that …
+    // — actually it was a great shot" (em-dash) keep their answer signal and stay NOT-stalls. Bare imperatives
+    // ("Try grinding …", "Grab the portafilter") don't open with these forms, so they're untouched.
+    static const QRegularExpression answerSignal(QStringLiteral("[0-9]|\\x{2014}|:|;"));
+    if (!t.contains(answerSignal)) {
+        static const QRegularExpression stallOpen(QStringLiteral(
+            "^((just )?(a|one) (sec|second|moment|minute)|hold on|hang on|one moment"
+            "|give me (a )?(sec|second|moment|minute))\\b"
+            "|^(let me|let me just|i'?ll|i will|gonna|going to)\\s+"
+            "(check|look|pull|find|fetch|verify|confirm|dig|search|see)\\b"
+            "|^(check|look|pull|search|fetch)ing\\b"));
+        if (stallOpen.match(t).hasMatch())
+            return true;
+    }
     static const QRegularExpression re(QStringLiteral(
         "^(let me |i'?ll |i will |let me just |give me |just |gonna |going to )?"
         "(check|look|see|find|pull|dig|verify|confirm|find out|look into|check on|look that up|"

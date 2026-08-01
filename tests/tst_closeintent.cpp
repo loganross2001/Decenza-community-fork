@@ -83,6 +83,8 @@ void tst_CloseIntent::stall_data()
     QTest::newRow("one sec + trailing promise")      << "One sec, checking the weather." << true;
     QTest::newRow("give me a second + let me pull")   << "Give me a second, let me pull that up" << true;
     QTest::newRow("hold on + trailing promise")       << "Hold on, looking that up for you" << true;
+    QTest::newRow("let me check + object")            << "Let me check the rain chance for tomorrow." << true;
+    QTest::newRow("i'll pull up + object")            << "I'll pull up your shot history" << true;
 
     // --- Must NOT be a stall: real answers (a false stall re-queries a delivered answer) ---
     QTest::newRow("real answer: shot metrics")      << "Your last shot was 18 grams in, 36 grams out, in 28 seconds." << false;

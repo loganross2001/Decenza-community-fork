@@ -33,48 +33,97 @@ LayoutWidgetItem {
                                           ? Settings.dye.dyeBeanWeight.toFixed(1) + " g"
                                           : "—"
 
-    implicitWidth: col.implicitWidth
-    implicitHeight: col.implicitHeight
+    implicitWidth: root.isCompact ? compactContent.implicitWidth : fullContent.implicitWidth
+    implicitHeight: root.isCompact ? compactContent.implicitHeight : fullContent.implicitHeight
+
+    // Value tint: a named override is static; otherwise secondary while a live
+    // (unsettled) weight shows, accent flash at capture, else the zone color.
+    // Shared by the compact and full renderings.
+    readonly property color valueColor: WidgetColor.resolve(root.colorChoice,
+                                             root.captureFlash ? Theme.primaryColor
+                                           : root.isLive ? Theme.textSecondaryColor
+                                           : root.zoneTextColor)
 
     Accessible.role: Accessible.StaticText
     Accessible.name: root.labelText + ": " + root.valueText
     Accessible.focusable: true
 
-    ColumnLayout {
-        id: col
-        anchors.centerIn: parent
-        width: parent.width
-        spacing: 0
-        Text {
-            visible: root.displayMode !== "icon"
-            Layout.fillWidth: true
-            horizontalAlignment: Text.AlignHCenter
-            elide: Text.ElideRight
-            text: root.labelText
-            color: root.zoneTextColor
-            font: Theme.labelFont
+    // --- COMPACT MODE (bar zones) ---
+    // A single icon+value row so the number fits a one-row bar, the way
+    // ScaleWeightItem renders compact. The stacked label+value column below is
+    // two rows tall; a compact bar squeezes the value row out of it, which is
+    // why the number went missing on the brew bar. The beans icon identifies it
+    // as the dose (there is no room for the text label here).
+    Item {
+        id: compactContent
+        visible: root.isCompact
+        anchors.fill: parent
+        implicitWidth: compactRow.implicitWidth
+        implicitHeight: compactRow.implicitHeight
+
+        Row {
+            id: compactRow
+            anchors.centerIn: parent
+            spacing: Theme.spacingSmall
+
+            ThemedIcon {
+                anchors.verticalCenter: parent.verticalCenter
+                source: "qrc:/icons/coffeebeans.svg"
+                iconSize: Theme.scaled(18)
+                color: WidgetColor.resolve(root.colorChoice, root.zoneTextColor)
+            }
+            Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: root.valueText
+                color: root.valueColor
+                // Bar readouts render bold (the sibling widgets use Theme.valueFont,
+                // which is bold); the zone only sets zoneValueBold on accentBar
+                // zones, so key the compact value bold directly to match the bar
+                // regardless of zone style. Size matches the full rendering.
+                font.pixelSize: Theme.scaled(21)
+                font.bold: true
+            }
         }
-        ThemedIcon {
-            visible: root.displayMode === "icon"
-            Layout.alignment: Qt.AlignHCenter
-            source: "qrc:/icons/coffeebeans.svg"
-            iconSize: Theme.scaled(20)
-            color: WidgetColor.resolve(root.colorChoice, root.zoneTextColor)
-        }
-        Text {
-            Layout.fillWidth: true
-            horizontalAlignment: Text.AlignHCenter
-            elide: Text.ElideRight
-            text: root.valueText
-            // A named color override is static in all states; otherwise secondary
-            // while a live (unsettled) weight is showing, accent flash at capture,
-            // else the zone's configured color.
-            color: WidgetColor.resolve(root.colorChoice,
-                       root.captureFlash ? Theme.primaryColor
-                     : root.isLive ? Theme.textSecondaryColor
-                     : root.zoneTextColor)
-            font.pixelSize: Theme.scaled(21)
-            font.bold: root.zoneValueBold
+    }
+
+    // --- FULL MODE (center zones) ---
+    Item {
+        id: fullContent
+        visible: !root.isCompact
+        anchors.fill: parent
+        implicitWidth: col.implicitWidth
+        implicitHeight: col.implicitHeight
+
+        ColumnLayout {
+            id: col
+            anchors.centerIn: parent
+            width: parent.width
+            spacing: 0
+            Text {
+                visible: root.displayMode !== "icon"
+                Layout.fillWidth: true
+                horizontalAlignment: Text.AlignHCenter
+                elide: Text.ElideRight
+                text: root.labelText
+                color: root.zoneTextColor
+                font: Theme.labelFont
+            }
+            ThemedIcon {
+                visible: root.displayMode === "icon"
+                Layout.alignment: Qt.AlignHCenter
+                source: "qrc:/icons/coffeebeans.svg"
+                iconSize: Theme.scaled(20)
+                color: WidgetColor.resolve(root.colorChoice, root.zoneTextColor)
+            }
+            Text {
+                Layout.fillWidth: true
+                horizontalAlignment: Text.AlignHCenter
+                elide: Text.ElideRight
+                text: root.valueText
+                color: root.valueColor
+                font.pixelSize: Theme.scaled(21)
+                font.bold: root.zoneValueBold
+            }
         }
     }
 }

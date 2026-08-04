@@ -201,6 +201,154 @@ private slots:
             QVERIFY(!l.toObject().contains("lastLine"));
         }
     }
+    // shots_list had NO test at all, which is why a green suite meant nothing
+    // when the recipes join broke it: `profile_json` exists on both `shots` and
+    // `recipes`, the unqualified name made the statement ambiguous, SQLite
+    // rejected it, the bare `if (exec())` swallowed the failure, and the count
+    // query — which does not join — kept returning the true total. The tool
+    // answered `shots: []` beside a non-zero `total` on every call.
+    //
+    // The rows-vs-total assertion below is the one that catches that shape.
+    // Asserting only `total`, or only that the call did not error, would have
+    // passed against the broken build.
+    void shotsListReturnsRowsAndCarriesRecipeIdentity() {
+        McpTestFixture f;
+        ShotHistoryStorage storage;
+        QVERIFY(storage.initialize(f.tempDir.filePath("shots.db")));
+        registerShotTools(&f.registry, &storage);
+
+        withTempDb(storage.databasePath(), "shots_list_seed", [&](QSqlDatabase& db) {
+            QSqlQuery r(db);
+            r.prepare("INSERT INTO recipes (name, profile_title, drink_type, archived) "
+                      "VALUES ('Dad Monday', 'Test', 'latte', 0)");
+            QVERIFY(r.exec());
+            const qint64 recipeId = r.lastInsertId().toLongLong();
+
+            QSqlQuery q(db);
+            q.prepare("INSERT INTO shots (uuid, timestamp, profile_name, duration_seconds, "
+                      "profile_json, recipe_id) VALUES (:uuid, :ts, 'Test', 30, '{}', :rid)");
+            q.bindValue(":uuid", QUuid::createUuid().toString(QUuid::WithoutBraces));
+            q.bindValue(":ts", QDateTime::currentSecsSinceEpoch());
+            q.bindValue(":rid", recipeId);
+            QVERIFY(q.exec());
+
+            // A second shot with no recipe, to prove the fields are sparse rather
+            // than empty-but-present.
+            QSqlQuery q2(db);
+            q2.prepare("INSERT INTO shots (uuid, timestamp, profile_name, duration_seconds, "
+                       "profile_json) VALUES (:uuid, :ts, 'Test', 30, '{}')");
+            q2.bindValue(":uuid", QUuid::createUuid().toString(QUuid::WithoutBraces));
+            q2.bindValue(":ts", QDateTime::currentSecsSinceEpoch() - 60);
+            QVERIFY(q2.exec());
+
+            // A third with a DANGLING recipe_id — the row does not exist. Without
+            // this case the `&& !recipeName.isEmpty()` half of the emit gate is
+            // dead weight: the no-recipe shot above fails on `recipeId > 0`
+            // alone, so deleting the name check leaves the test green.
+            QSqlQuery q3(db);
+            q3.prepare("INSERT INTO shots (uuid, timestamp, profile_name, duration_seconds, "
+                       "profile_json, recipe_id) VALUES (:uuid, :ts, 'Test', 30, '{}', 999999)");
+            q3.bindValue(":uuid", QUuid::createUuid().toString(QUuid::WithoutBraces));
+            q3.bindValue(":ts", QDateTime::currentSecsSinceEpoch() - 120);
+            QVERIFY(q3.exec());
+        });
+
+        const QJsonObject result = f.callAsyncTool("shots_list", QJsonObject{});
+        QVERIFY2(!result.contains("error"), qPrintable(result.value("error").toString()));
+
+        const QJsonArray shots = result["shots"].toArray();
+        QCOMPARE(result["total"].toInt(), 3);
+        QCOMPARE(shots.size(), 3);   // the assertion that goes red on an ambiguous column
+
+        // Newest first: the recipe-driven shot.
+        const QJsonObject withRecipe = shots.at(0).toObject();
+        QVERIFY(withRecipe.contains("recipeId"));
+        QCOMPARE(withRecipe["recipeName"].toString(), QStringLiteral("Dad Monday"));
+
+        // Sparse: presence alone must answer "was this a recipe drink?".
+        const QJsonObject without = shots.at(1).toObject();
+        QVERIFY(!without.contains("recipeId"));
+        QVERIFY(!without.contains("recipeName"));
+
+        // Dangling id: BOTH keys must be absent. Emitting an id beside an empty
+        // name would have an LLM client render "" as the drink's name.
+        const QJsonObject dangling = shots.at(2).toObject();
+        QVERIFY2(!dangling.contains("recipeId"),
+                 "a recipe_id whose row is gone must not be emitted");
+        QVERIFY2(!dangling.contains("recipeName"), "nor an empty recipeName beside it");
+    }
+
+    // ===== shots_compare names the ids it could not resolve =====
+    //
+    // It used to return only the shots it resolved, so a caller could detect the
+    // loss only by comparing counts and could never learn WHICH id was bad.
+
+    void shotsCompareNamesUnresolvedIds() {
+        McpTestFixture f;
+        ShotHistoryStorage storage;
+        QVERIFY(storage.initialize(f.tempDir.filePath("cmp.db")));
+        registerShotTools(&f.registry, &storage);
+
+        qint64 a = -1, b = -1;
+        withTempDb(storage.databasePath(), "cmp_seed", [&](QSqlDatabase& db) {
+            a = insertShotWithDebugLog(db, QStringLiteral("one"));
+            b = insertShotWithDebugLog(db, QStringLiteral("two"));
+        });
+        QVERIFY(a > 0 && b > 0);
+
+        // Storage logs each id it could not load. That warning IS the mechanism
+        // under test, not a fault.
+        ScopedWarningFilter missingShotFilter("loadShotRecordStatic: Shot not found");
+
+        QJsonObject result = f.callAsyncTool("shots_compare",
+            QJsonObject{{"shotIds", QJsonArray{a, b, 99999}}});
+
+        QCOMPARE(result["count"].toInt(), 2);
+        const QJsonArray unresolved = result["unresolvedShotIds"].toArray();
+        QCOMPARE(unresolved.size(), 1);
+        QCOMPARE(unresolved[0].toInteger(), (qint64)99999);
+    }
+
+    void shotsCompareAllUnresolvedIsAnError() {
+        McpTestFixture f;
+        ShotHistoryStorage storage;
+        QVERIFY(storage.initialize(f.tempDir.filePath("cmp2.db")));
+        registerShotTools(&f.registry, &storage);
+
+        // Storage logs each id it could not load. That warning IS the mechanism
+        // under test, not a fault.
+        ScopedWarningFilter missingShotFilter("loadShotRecordStatic: Shot not found");
+
+        QJsonObject result = f.callAsyncTool("shots_compare",
+            QJsonObject{{"shotIds", QJsonArray{99998, 99999}}});
+
+        QVERIFY2(result.contains("error"),
+                 "comparing nothing is not a successful comparison of nothing");
+        QVERIFY(!result.contains("shots"));
+    }
+
+    void shotsCompareWithAllIdsResolvingCarriesNoUnresolvedKey() {
+        McpTestFixture f;
+        ShotHistoryStorage storage;
+        QVERIFY(storage.initialize(f.tempDir.filePath("cmp3.db")));
+        registerShotTools(&f.registry, &storage);
+
+        qint64 a = -1, b = -1;
+        withTempDb(storage.databasePath(), "cmp3_seed", [&](QSqlDatabase& db) {
+            a = insertShotWithDebugLog(db, QStringLiteral("one"));
+            b = insertShotWithDebugLog(db, QStringLiteral("two"));
+        });
+        QVERIFY(a > 0 && b > 0);
+
+        // No warning filter here on purpose: every id resolves, so nothing should
+        // warn, and failOnWarning is the assertion that says so.
+        QJsonObject result = f.callAsyncTool("shots_compare",
+            QJsonObject{{"shotIds", QJsonArray{a, b}}});
+
+        QCOMPARE(result["count"].toInt(), 2);
+        QVERIFY2(!result.contains("unresolvedShotIds"),
+                 "a clean comparison must not carry an empty unresolved array");
+    }
 };
 
 QTEST_GUILESS_MAIN(tst_McpToolsShotsDebugLog)

@@ -200,7 +200,7 @@ LayoutWidgetItem {
                 if (ch === '"') inQuote = false
                 else if (ch === '<') {
                     // Tag inside a quoted attribute — HTML is broken, strip all tags
-                    console.warn("[CustomItem] Malformed HTML detected, stripping tags:", html.substring(0, 80))
+                    root._warn("Malformed HTML detected, stripping tags: " + html.substring(0, 80))
                     return html.replace(/<[^>]*>/g, "")
                 }
             } else if (inTag) {
@@ -291,168 +291,27 @@ LayoutWidgetItem {
         return Theme.replaceEmojiWithImg(result, Theme.bodyFont.pixelSize, true)
     }
 
-    function executeActionString(actionStr) {
-        if (!actionStr) return
-        var parts = actionStr.split(":")
-        if (parts.length < 2) {
-            console.warn("CustomItem: malformed action '" + actionStr + "' (expected 'category:target')")
-            return
-        }
-        var category = parts[0]
-        var target = parts.slice(1).join(":")
 
-        if (category === "togglePreset") {
-            var p = root.idlePage
-            if (p && typeof p.activePresetFunction !== "undefined") {
-                p.activePresetFunction = (p.activePresetFunction === target) ? "" : target
-            } else {
-                console.warn("CustomItem: togglePreset couldn't find IdlePage ancestor; preset '" + target + "' not toggled")
-            }
-        } else if (category === "navigate") {
-            // `target` is USER CONFIGURATION — the widget editor stores whichever destination the
-            // user picked — so a string key is inherent here, unlike the call sites that had one
-            // only because nobody had declared a name. It is dispatched to a named AppShell signal
-            // rather than mapped to a page FILENAME: a bad key now warns below instead of
-            // resolving to a 404 URL, and the shell decides push-vs-replace.
-            //
-            // The operation pages used to `replace(null, ...)` here, copying main.qml's phase
-            // handler. That copied the line and not the reason: the phase handler replaces because
-            // the MACHINE drove the change and there is no meaningful back, whereas this is the
-            // user tapping a widget. It also left pageStack.depth at 1, which makes goBack()'s
-            // `depth > 1` test fail and the back control silently dead. They push now, like the
-            // dedicated Steam/HotWater/Flush widgets always did.
-            switch (target) {
-            case "settings":        AppShell.settingsRequested(""); break
-            case "history":         AppShell.shotHistoryRequested({}); break
-            case "profiles":        AppShell.profileSelectorRequested(); break
-            case "profileEditor":   AppShell.profileEditorRequested(); break
-            case "recipes":         AppShell.recipeEditorRequested(); break
-            case "recipeList":      AppShell.recipesRequested(); break
-            case "descaling":       AppShell.descalingRequested(); break
-            case "ai":              AppShell.aiSettingsRequested(); break
-            case "visualizer":      AppShell.visualizerBrowserRequested(); break
-            case "autofavorites":   AppShell.autoFavoritesRequested(); break
-            case "steam":           AppShell.steamRequested(); break
-            case "hotwater":        AppShell.hotWaterRequested(); break
-            case "flush":           AppShell.flushRequested(); break
-            case "beaninfo":        AppShell.beanInfoRequested(); break
-            case "equipment":       AppShell.equipmentRequested(); break
-            case "espresso":        AppShell.espressoRequested(); break
-            case "community":       AppShell.communityBrowserRequested(); break
-            case "flowCalibration": AppShell.flowCalibrationRequested(); break
-            case "profileImport":   AppShell.profileImportRequested(); break
-            case "shotReview":
-                var shotId = MainController.lastSavedShotId
-                if (shotId > 0)
-                    AppShell.postShotReviewRequested(shotId, false)
-                break
-            default:
-                console.warn("CustomItem: unknown navigate target '" + target + "'")
-            }
-        } else if (category === "command") {
-            // The hardware Group Head Controller (GHC), when present and active, takes
-            // exclusive control of starting shots/steam/etc., so on-screen start calls
-            // are only valid in headless (no/inactive GHC) or simulation mode.
-            var canStart = typeof DE1Device !== "undefined" && DE1Device !== null
-                    && DE1Device.guiEnabled
-                    && (DE1Device.isHeadless || DE1Device.simulationMode)
-            switch (target) {
-                case "sleep":
-                    if (ScaleDevice.connected)
-                        ScaleDevice.disableLcd()
-                    if (typeof DE1Device !== "undefined" && DE1Device !== null)
-                        DE1Device.goToSleep()
-                    AppShell.screensaverRequested()
-                    break
-                case "startEspresso":
-                    if (canStart)
-                        DE1Device.startEspresso()
-                    break
-                case "startSteam":
-                    if (canStart)
-                        DE1Device.startSteam()
-                    break
-                case "startHotWater":
-                    if (canStart)
-                        DE1Device.startHotWater()
-                    break
-                case "startFlush":
-                    if (canStart)
-                        DE1Device.startFlush()
-                    break
-                case "idle":
-                    if (typeof DE1Device !== "undefined" && DE1Device !== null)
-                        DE1Device.requestIdle()
-                    break
-                case "tare":
-                    if (typeof MachineState !== "undefined" && MachineState !== null)
-                        MachineState.tareScale()
-                    break
-                case "scanDE1":
-                    if (typeof BLEManager !== "undefined" && BLEManager !== null)
-                        BLEManager.scanForDevices()
-                    break
-                case "scanScale":
-                    if (typeof BLEManager !== "undefined" && BLEManager !== null)
-                        BLEManager.scanForDevices()
-                    break
-                case "brewSettings":
-                    AppShell.brewSettingsRequested()
-                    break
-                case "toggleCharging":
-                    if (typeof BatteryManager !== "undefined" && BatteryManager !== null)
-                        BatteryManager.chargingMode = (BatteryManager.chargingMode + 1) % 3
-                    break
-                case "tempToggleSteam":
-                    if (typeof Settings !== "undefined" && Settings !== null && typeof MainController !== "undefined" && MainController !== null) {
-                        if (Settings.brew.steamDisabled)
-                            MainController.startSteamHeating("custom-widget-toggle")
-                        else
-                            MainController.turnOffSteamHeater()
-                    }
-                    break
-                case "uploadVisualizer":
-                    var lastId = MainController.lastSavedShotId
-                    if (lastId > 0) {
-                        var handler = function(shotId, data) {
-                            if (shotId !== lastId) return
-                            MainController.shotHistory.shotReady.disconnect(handler)
-                            MainController.visualizer.uploadShotFromHistory(data)
-                        }
-                        MainController.shotHistory.shotReady.connect(handler)
-                        MainController.shotHistory.requestShot(lastId)
-                    } else {
-                        console.warn("CustomItem: uploadVisualizer — no saved shot this session, nothing to upload")
-                    }
-                    break
-                case "disconnectDE1":
-                    if (typeof DE1Device !== "undefined" && DE1Device !== null)
-                        DE1Device.disconnect()
-                    break
-                case "previousProfile":
-                    var prevName = ProfileManager.previousProfileName()
-                    if (prevName)
-                        ProfileManager.loadProfile(prevName)
-                    break
-                case "quit":
-                    Qt.quit()
-                    break
-                default:
-                    // Handle parameterized commands like loadProfile:<name>
-                    if (target.indexOf("loadProfile:") === 0) {
-                        var profileName = target.substring("loadProfile:".length)
-                        if (profileName)
-                            ProfileManager.loadProfile(profileName)
-                        else
-                            console.warn("CustomItem: loadProfile command with empty profile name")
-                    } else {
-                        console.warn("CustomItem: unknown command '" + target + "'")
-                    }
-                    break
-            }
-        } else {
-            console.warn("CustomItem: unknown action category '" + category + "' in '" + actionStr + "'")
-        }
+    // Dispatch lives in the LayoutActions singleton, not here: the built-in action
+    // widgets whose gestures a user can override need the same switch, and they
+    // cannot reach a function that lives on this component.
+    //
+    // The gesture handlers below go through LayoutActions.runGestureOrReserved, the
+    // same entry point the ten built-ins use — one read path for all eleven widget
+    // types. "custom" reserves no destination, so for this widget it is exactly
+    // "run the stored action if there is one", which is what it always did.
+    function executeActionString(actionStr) {
+        LayoutActions.execute(actionStr, { idlePage: root.idlePage })
+    }
+
+    function _runGesture(gestureKey) {
+        LayoutActions.runGestureOrReserved(root.modelData, gestureKey, root.modelData.type || "custom",
+                                           { idlePage: root.idlePage })
+    }
+
+    // The malformed-HTML path below is the one diagnostic this file still owns.
+    function _warn(msg) {
+        console.warn("CustomItem: " + msg)
     }
 
     // --- COMPACT MODE (bar rendering) ---
@@ -528,10 +387,10 @@ LayoutWidgetItem {
             accessibleName: Theme.toAccessibleText(root.resolvedText) + (root.isActive ? ", " + TranslationManager.translate("accessibility.selected", "selected") : "")
             accessibleDescription: root._accessibleHint
             supportLongPress: root.longPressAction !== ""
-            supportDoubleClick: root.doubleclickAction !== ""
-            onAccessibleClicked: root.executeActionString(root.action)
-            onAccessibleLongPressed: root.executeActionString(root.longPressAction)
-            onAccessibleDoubleClicked: root.executeActionString(root.doubleclickAction)
+            supportDoubleClick: true
+            onAccessibleClicked: root._runGesture("action")
+            onAccessibleLongPressed: root._runGesture("longPressAction")
+            onAccessibleDoubleClicked: root._runGesture("doubleclickAction")
         }
     }
 
@@ -616,10 +475,10 @@ LayoutWidgetItem {
             accessibleName: Theme.toAccessibleText(root.resolvedText) + (root.isActive ? ", " + TranslationManager.translate("accessibility.selected", "selected") : "")
             accessibleDescription: root._accessibleHint
             supportLongPress: root.longPressAction !== ""
-            supportDoubleClick: root.doubleclickAction !== ""
-            onAccessibleClicked: root.executeActionString(root.action)
-            onAccessibleLongPressed: root.executeActionString(root.longPressAction)
-            onAccessibleDoubleClicked: root.executeActionString(root.doubleclickAction)
+            supportDoubleClick: true
+            onAccessibleClicked: root._runGesture("action")
+            onAccessibleLongPressed: root._runGesture("longPressAction")
+            onAccessibleDoubleClicked: root._runGesture("doubleclickAction")
         }
 
     }

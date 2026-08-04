@@ -2297,21 +2297,15 @@ QString ShotServer::generateLayoutPage() const
                     <option value="%DOSE%">%DOSE%</option>
                     <option value="%TARGET_WEIGHT%">%TARGET_WEIGHT%</option>
                 </select>
+                <!-- Populated from the injected action catalog by
+                     fillCommActionFilter(). This was the THIRD hand-written copy
+                     of the action list in the app: it carried a third set of
+                     labels ("Settings"/"History"/"Favorites"/"Quit"), the
+                     "Scan for Scale" wording the catalog since unified, and none
+                     of the actions added after it was written — so a user could
+                     not filter community layouts by any of them. -->
                 <select class="lib-filter-select" id="commActionFilter" onchange="browseCommunity()">
                     <option value="">Any action</option>
-                    <option value="navigate:settings">Settings</option>
-                    <option value="navigate:history">History</option>
-                    <option value="navigate:profiles">Profiles</option>
-                    <option value="navigate:autofavorites">Favorites</option>
-                    <option value="command:sleep">Sleep</option>
-                    <option value="command:startEspresso">Start Espresso</option>
-                    <option value="command:startSteam">Start Steam</option>
-                    <option value="command:startHotWater">Start Hot Water</option>
-                    <option value="command:startFlush">Start Flush</option>
-                    <option value="command:tare">Tare Scale</option>
-                    <option value="command:scanDE1">Scan for DE1</option>
-                    <option value="command:scanScale">Scan for Scale</option>
-                    <option value="command:quit">Quit</option>
                 </select>
                 <input class="lib-filter-input" id="commSearchInput" type="text" placeholder="Search..."
                        onkeydown="if(event.key==='Enter')browseCommunity()">
@@ -2644,6 +2638,16 @@ QString ShotServer::generateLayoutPage() const
     html += QStringLiteral("    var WIDGET_DISPLAY_DEFAULTS = %1;\n")
         .arg(QString::fromUtf8(QJsonDocument(SettingsNetwork::displayModeDefaultsJson())
             .toJson(QJsonDocument::Compact)));
+    // Custom-widget action catalog, from the same C++ table as the in-app action
+    // picker. This list used to be written out below by hand and had drifted
+    // sixteen entries behind the in-app one. Two channels: `actions` is what
+    // this editor may OFFER (a parameterized action the web cannot expand is
+    // excluded there), `labels` resolves ANY stored id — including ones no
+    // longer offered — so a legacy layout never renders a raw id. The "None"
+    // entry is prepended in JS because it is the absence of an action.
+    html += QStringLiteral("    var LAYOUT_ACTION_CATALOG = %1;\n")
+        .arg(QString::fromUtf8(QJsonDocument(SettingsNetwork::layoutActionCatalogJson())
+            .toJson(QJsonDocument::Compact)));
     html += R"HTML(
     var WIDGET_TYPES = WIDGET_CATALOG.types;
     var DISPLAY_NAMES = WIDGET_CATALOG.chipNames;
@@ -2657,33 +2661,57 @@ QString ShotServer::generateLayoutPage() const
         return typeOptionKeys(type).indexOf(key) >= 0;
     }
 
-    var ACTIONS = [
-        {id:"",label:"None",contexts:["idle","espresso","steam","hotwater","flush","all"]},
-        {id:"navigate:settings",label:"Go to Settings",contexts:["idle","all"]},
-        {id:"navigate:history",label:"Go to History",contexts:["idle","all"]},
-        {id:"navigate:profiles",label:"Go to Profiles",contexts:["idle","all"]},
-        {id:"navigate:profileEditor",label:"Go to Profile Editor",contexts:["idle","all"]},
-        {id:"navigate:recipes",label:"Go to Recipes",contexts:["idle","all"]},
-        {id:"navigate:descaling",label:"Go to Descaling",contexts:["idle","all"]},
-        {id:"navigate:ai",label:"Go to AI Settings",contexts:["idle","all"]},
-        {id:"navigate:visualizer",label:"Go to Visualizer",contexts:["idle","all"]},
-        {id:"navigate:autofavorites",label:"Go to Favorites",contexts:["idle","all"]},
-        {id:"command:sleep",label:"Sleep",contexts:["idle"]},
-        {id:"command:startEspresso",label:"Start Espresso",contexts:["idle"]},
-        {id:"command:startSteam",label:"Start Steam",contexts:["idle"]},
-        {id:"command:startHotWater",label:"Start Hot Water",contexts:["idle"]},
-        {id:"command:startFlush",label:"Start Flush",contexts:["idle"]},
-        {id:"command:idle",label:"Stop (Idle)",contexts:["idle","espresso","steam","hotwater","flush"]},
-        {id:"command:tare",label:"Tare Scale",contexts:["idle","espresso","all"]},
-        {id:"command:scanDE1",label:"Scan for DE1",contexts:["idle","all"]},
-        {id:"command:scanScale",label:"Scan for Scale",contexts:["idle","all"]},
-        {id:"command:quit",label:"Quit App",contexts:["idle"]}
-    ];
+    // Fail LOUDLY if the catalog did not arrive. Empty would otherwise render a
+    // picker holding only "None", which looks like a context restriction rather
+    // than a broken page; and an outright missing variable throws during this
+    // inline script, killing every button on the editor with nothing but a
+    // devtools entry to show for it.
+    if (typeof LAYOUT_ACTION_CATALOG === "undefined" || !LAYOUT_ACTION_CATALOG
+            || !(LAYOUT_ACTION_CATALOG.actions || []).length) {
+        console.error("LAYOUT_ACTION_CATALOG missing or empty — the action catalog did not load");
+    }
+    // Normalized ONCE. The console.error above is the report; repeating its
+    // guard at every read would be the defensive layer, not the fix.
+    var CATALOG = (typeof LAYOUT_ACTION_CATALOG !== "undefined" && LAYOUT_ACTION_CATALOG)
+        || { actions: [], labels: {} };
+    var ACTION_LABELS = CATALOG.labels || {};
+    var ALL_CONTEXTS = ["idle","espresso","steam","hotwater","flush","all"];
+    var ACTIONS = [{id:"",label:"None",contexts:ALL_CONTEXTS}]
+        .concat(CATALOG.actions || []);
+    // For a widget that RESERVES a destination, unset and "do nothing" are
+    // different choices, so both are offered — and the default row NAMES what it
+    // restores, because "Default" alone does not say what you are going back to.
+    function gestureActionsFor(reservedAction) {
+        var dest = getActionLabel(reservedAction).replace(/^Go to /, "");
+        return [{id:"",label:"Default (opens " + dest + ")",contexts:ALL_CONTEXTS},
+                {id:"none",label:"None",contexts:ALL_CONTEXTS}]
+            .concat(CATALOG.actions || []);
+    }
     var PAGE_CONTEXT = "idle";
     function getFilteredActions() {
         return ACTIONS.filter(function(a) {
             return a.contexts.indexOf(PAGE_CONTEXT) >= 0 || a.contexts.indexOf("all") >= 0;
         });
+    }
+
+    // Community-library action filter, from the same catalog as the picker —
+    // every offerable action, unfiltered by page context (a library layout can
+    // hold an action for any page). Keeps the "Any action" option authored in
+    // the HTML as the leading entry.
+    function fillCommActionFilter() {
+        var sel = document.getElementById("commActionFilter");
+        if (!sel) return;
+        // Reuse ACTIONS rather than re-deriving from the catalog: a second
+        // independent reader is how this dropdown fell sixteen entries behind
+        // the picker in the first place. Skip its leading "None" (empty id) —
+        // the HTML authors that option as "Any action".
+        for (var i = 0; i < ACTIONS.length; i++) {
+            if (!ACTIONS[i].id) continue;
+            var o = document.createElement("option");
+            o.value = ACTIONS[i].id;
+            o.textContent = ACTIONS[i].label;
+            sel.appendChild(o);
+        }
     }
 )HTML";
     html += R"HTML(
@@ -3323,6 +3351,62 @@ QString ShotServer::generateLayoutPage() const
         return html;
     }
 
+    // Gesture-override rows for the built-in action widgets. The reserved-slot
+    // rule is DERIVED from the injected catalog (CATALOG.gestureTypes: type ->
+    // the navigate action its reserved gesture performs, "" when both are free),
+    // so this editor carries no list of which widget reserves which gesture.
+    // Same rule, same presentation as the in-app popup.
+    function roGestureSection(type, props) {
+        var reserved = (CATALOG.gestureTypes || {})[type] || "";
+        var lp = props.longPressAction || "";
+        var dc = props.doubleclickAction || "";
+        // A one-slot widget reserves whichever gesture the user has NOT filled;
+        // clearing the override frees both again.
+        // LOCKED is not the same as WHAT IT DOES. On a one-slot widget an empty
+        // gesture already opens the page — that is its current behaviour and the
+        // row must say so, not "None". It only becomes un-editable once the OTHER
+        // gesture carries an override, because then it is the last way in.
+        var lpLocked = reserved !== "" && lp === "" && dc !== "";
+        var dcLocked = reserved !== "" && dc === "" && lp !== "";
+        var html = '<div class="section-label" style="margin-top:0.9rem">Gestures</div>';
+        if (reserved !== "") {
+            html += '<div style="font-size:0.75rem;color:var(--text-secondary);margin:0 0 0.4rem 0">'
+                 + "One gesture stays reserved so this widget's page is still reachable.</div>";
+        }
+        html += roGestureRow("longPressAction", "Long press", lp, lpLocked, reserved);
+        html += roGestureRow("doubleclickAction", "Double-click", dc, dcLocked, reserved);
+        return html;
+    }
+
+    function roGestureRow(key, label, actionId, isLocked, reservedAction) {
+        // No override: the gesture does whatever the widget reserves — say that.
+        // Only a widget that reserves nothing (tap already opens its page) is
+        // honestly "None" when empty.
+        // Never "None": an empty slot is not "nothing happens", it is "unchanged".
+        // Where the widget reserves a destination, say which one — that is the
+        // gesture's actual behaviour today. Elsewhere "Default" says stock
+        // behaviour without claiming the gesture is dead.
+        // "Opens Recipes", not "Opens Go to Recipes" — the catalog label is
+        // written for a picker row ("Go to X"), which reads as a double verb once
+        // it is embedded in a sentence.
+        var dest = getActionLabel(reservedAction).replace(/^Go to /, "");
+        // Three states, not two: an explicit "none" silences the gesture, unset
+        // means the widget's default (which usually opens its page).
+        // "Default" only where there IS a default to return to. A widget that
+        // reserves nothing does nothing on this gesture when unset, and its
+        // picker offers that state as "None" — calling it "Default" in the row
+        // meant picking None and being told Default.
+        var text = actionId === "none" ? "None"
+                 : actionId ? getActionLabel(actionId)
+                 : (reservedAction ? "Opens " + dest : "None");
+        var cls = "action-selector" + (actionId ? " has-action" : "");
+        var style = isLocked ? ' style="opacity:0.6;cursor:default"' : '';
+        var onclick = isLocked ? '' : ' onclick="roOpenGesturePicker(\'' + key + '\')"';
+        return '<div class="' + cls + '"' + style + onclick + '>'
+             + '<span style="color:var(--text-secondary);font-size:0.8rem">' + label + ':</span> '
+             + '<span style="font-size:0.8rem">' + text + '</span></div>';
+    }
+
     function roSectionsHtml(type, props) {
         if (type === "sleep") {
             var aq = (props.allowQuit === undefined) ? true : props.allowQuit;
@@ -3344,6 +3428,10 @@ QString ShotServer::generateLayoutPage() const
                 html += roCheckboxRow("showRatio", "Show ratio", "Off = weight only, no 1:X.X suffix", sr);
             } else if (key === "color") {
                 html += roRadioSection("Color", "color", RO_COLOR_CHOICES, props.color || "default");
+            } else if (key === "longPressAction") {
+                // Both gestures render in one section; doubleclickAction is
+                // covered here, so its own key is skipped below.
+                html += roGestureSection(type, props);
             }
         }
         return html;
@@ -4299,9 +4387,15 @@ QString ShotServer::generateLayoutPage() const
 
     function getActionLabel(id) {
         if (!id) return "None";
-        for (var i = 0; i < ACTIONS.length; i++) {
-            if (ACTIONS[i].id === id) return ACTIONS[i].label;
-        }
+        // A parameterized action stores its argument in the id
+        // (command:loadProfile:<filename>); label it by its stem.
+        var stem = id.split(":").slice(0, 2).join(":");
+        // ACTION_LABELS, not ACTIONS: a stored action may be one this editor does
+        // not offer — a legacy alias, or one it cannot author — and falling
+        // through to `return id` would print the raw string `command:scanDE1`
+        // where the widget plainly says "Scan for DE1".
+        if (ACTION_LABELS[id]) return ACTION_LABELS[id];
+        if (ACTION_LABELS[stem]) return ACTION_LABELS[stem] + ": " + id.slice(stem.length + 1);
         return id;
     }
 
@@ -4314,12 +4408,36 @@ QString ShotServer::generateLayoutPage() const
         document.getElementById("dblClickActionSel").className = "action-selector" + (currentDoubleclickAction ? " has-action" : "");
     }
 
+    // Which editor the picker is serving. The Custom widget editor and the
+    // built-in widgets' options editor share one picker — a second copy of "list
+    // the actions, let the user choose" is what this change exists to avoid.
+    var actionPickerTarget = "custom";   // "custom" | "readout"
+    var roGestureKey = "";
+
+    function roOpenGesturePicker(key) {
+        actionPickerTarget = "readout";
+        roGestureKey = key;
+        openActionPicker(key === "longPressAction" ? "longpress" : "doubleclick");
+    }
+
     function openActionPicker(gesture) {
         actionPickerGesture = gesture;
         var titles = {click: "Tap Action", longpress: "Long Press Action", doubleclick: "Double-Click Action"};
         document.getElementById("actionPickerTitle").textContent = titles[gesture] || "Action";
-        var currentVal = gesture === "click" ? currentAction : gesture === "longpress" ? currentLongPressAction : currentDoubleclickAction;
-        var filtered = getFilteredActions();
+        var currentVal;
+        if (actionPickerTarget === "readout") {
+            currentVal = (roPendingValues[roGestureKey] !== undefined)
+                ? roPendingValues[roGestureKey] : (roEditingProps[roGestureKey] || "");
+        } else {
+            currentVal = gesture === "click" ? currentAction
+                       : gesture === "longpress" ? currentLongPressAction : currentDoubleclickAction;
+        }
+        var reservedForType = actionPickerTarget === "readout"
+            ? ((CATALOG.gestureTypes || {})[roEditingType] || "") : "";
+        var pool = reservedForType ? gestureActionsFor(reservedForType) : ACTIONS;
+        var filtered = pool.filter(function(a) {
+            return a.contexts.indexOf(PAGE_CONTEXT) >= 0 || a.contexts.indexOf("all") >= 0;
+        });
         var html = "";
         for (var i = 0; i < filtered.length; i++) {
             var a = filtered[i];
@@ -4332,9 +4450,26 @@ QString ShotServer::generateLayoutPage() const
 
     function closeActionPicker() {
         document.getElementById("actionOverlay").classList.remove("open");
+        // Reset the routing HERE, not only on a successful pick. The picker is
+        // shared by the Custom editor and the built-in widgets' options editor;
+        // dismissing it without choosing used to leave it aimed at the readout
+        // editor, so the NEXT Custom-widget action was written onto the widget
+        // edited before it — wrong widget, no error.
+        actionPickerTarget = "custom";
+        roGestureKey = "";
     }
 
     function pickAction(id) {
+        if (actionPickerTarget === "readout") {
+            roFieldChanged(roGestureKey, id);
+            // Re-render so the reserved slot locks/unlocks immediately.
+            var merged = {};
+            for (var k in roEditingProps) merged[k] = roEditingProps[k];
+            for (var pk in roPendingValues) merged[pk] = roPendingValues[pk];
+            document.getElementById("roSections").innerHTML = roSectionsHtml(roEditingType, merged);
+            closeActionPicker();   // also resets the routing
+            return;
+        }
         if (actionPickerGesture === "click") currentAction = id;
         else if (actionPickerGesture === "longpress") currentLongPressAction = id;
         else if (actionPickerGesture === "doubleclick") currentDoubleclickAction = id;
@@ -5053,13 +5188,21 @@ QString ShotServer::generateLayoutPage() const
     }
 
     // Initial load
+    fillCommActionFilter();
     loadLayout();
     loadLibrary();
 
     // Listen for layout changes pushed from the tablet via SSE
     var layoutEvents = new EventSource("/api/layout/events");
     layoutEvents.addEventListener("layout-changed", function() {
-        if (editingItem || ssEditingItem) return;
+        // EVERY open editor suppresses the reload, not just two of them. Both
+        // editors are meant to be open at once — that is what this SSE is for —
+        // and reloading the page underneath an open editor destroys its DOM
+        // while roPendingValues and the auto-save timer still reference the item
+        // being edited. roEditingItem was missing here: harmless while only
+        // readout widgets had options, reachable the moment the ten built-in
+        // action widgets gained gesture overrides.
+        if (editingItem || ssEditingItem || roEditingItem) return;
         loadLayout();
     });
     layoutEvents.onerror = function() {

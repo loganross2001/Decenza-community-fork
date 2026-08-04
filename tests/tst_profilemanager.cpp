@@ -1,4 +1,5 @@
 #include <QtTest>
+#include <QScopeGuard>
 #include <QSignalSpy>
 #include <QJsonDocument>
 #include <QStandardPaths>
@@ -609,6 +610,65 @@ private slots:
 
         QCOMPARE(f.profileManager.currentProfile().targetWeight(), 42.0);
         QFile::remove(advPath);
+    }
+
+    // loadProfile REFUSES a profile it cannot read and keeps the previously
+    // active one. It used to be `void`, so no caller could tell that apart from
+    // a load that worked — and profiles_set_active reported "Profile activated"
+    // while the machine went on brewing the old profile. Its `profileExists`
+    // guard cannot see this: the file is present, it just does not parse.
+    //
+    // Both halves are asserted here. `false` alone would pass if the function
+    // also failed to keep the old profile, and keeping the old profile alone was
+    // already true before the return value existed.
+    void loadProfileReportsRefusalAndKeepsTheActiveProfile() {
+        McpTestFixture f;
+        clearTestProfileStore();
+        loadThreeFrameDFlow(f, "keeper", "D-Flow / Keeper");
+        const QString activeBefore = f.profileManager.baseProfileName();
+        QCOMPARE(activeBefore, QStringLiteral("keeper"));
+
+        // Valid JSON, not a valid profile — no frames, no type, nothing to brew.
+        //
+        // Removed by a scope guard, not by a statement at the end of the test.
+        // The QStandardPaths store PERSISTS ACROSS RUNS, and a failing QVERIFY
+        // below aborts this function — so an end-of-test cleanup runs only when
+        // the test passes, which is exactly when it is not needed. A file left
+        // here makes migrateProfileFormat() warn at every later ProfileManager
+        // construction (and never stamp profile_format_migrated, so it retries
+        // forever); neither warning is in McpTestFixture's filter, so one red
+        // test would turn the whole file red on the NEXT run, pointing nowhere
+        // near here. This file already documents that hazard for the dye
+        // settings at the `cleanup()` slot above.
+        const QString brokenPath = f.profileManager.userProfilesPath() + "/broken.json";
+        const auto removeBroken = qScopeGuard([&brokenPath] { QFile::remove(brokenPath); });
+
+        QFile broken(brokenPath);
+        QVERIFY(broken.open(QIODevice::WriteOnly));
+        broken.write(QJsonDocument(QJsonObject{{"title", "Broken"}}).toJson());
+        broken.close();
+        f.profileManager.refreshProfiles();
+
+        bool loaded = true;
+        {
+            ScopedWarningFilter refusalFilter("loadProfile: refusing");
+            loaded = f.profileManager.loadProfile("broken");
+        }
+
+        QVERIFY2(!loaded, "an unreadable profile must be reported as not loaded");
+        QCOMPARE(f.profileManager.baseProfileName(), activeBefore);
+
+        // The OTHER false-returning path: a name that resolves to nothing at all.
+        // loadProfile loads the default instead, so the requested profile did not
+        // become active either — one line, and it pins the half of the contract
+        // the refusal case cannot reach.
+        {
+            ScopedWarningFilter notFoundFilter("Profile not found");
+            QVERIFY2(!f.profileManager.loadProfile("no_such_profile_anywhere"),
+                     "a name that matches nothing must also report not loaded");
+        }
+
+        clearTestProfileStore();
     }
 
     // === Profile state after load ===
@@ -3065,7 +3125,7 @@ private slots:
     // into the folder at any time.
 
     // Write a profile whose numbers are JSON numbers rather than the canonical
-    // strings, and which omits the two keys reaprime hard-requires. This is the
+    // strings, and which omits the two keys Decaid hard-requires. This is the
     // shape of a file written before Change 1.
     static QString writeLegacyEncodedProfile(McpTestFixture& f, const QString& filename) {
         const QString path = f.profileManager.userProfilesPath() + "/" + filename + ".json";
@@ -3113,7 +3173,7 @@ private slots:
         const QJsonObject obj = QJsonDocument::fromJson(after.readAll()).object();
         after.close();
 
-        // Numbers are string-encoded, and the keys reaprime requires are present —
+        // Numbers are string-encoded, and the keys Decaid requires are present —
         // the whole point of the conversion.
         QVERIFY(obj["target_weight"].isString());
         QVERIFY(obj.contains("tank_temperature"));
@@ -3313,7 +3373,7 @@ private slots:
         QVERIFY(restored.isValid());
         QCOMPARE(restored.title(), QString("Legacy Encoded Test"));
         // And it satisfies the cross-app contract that a legacy-encoded copy would not.
-        QVERIFY(Profile::reaprimeReadabilityErrors(restored.toJsonObject()).isEmpty());
+        QVERIFY(Profile::decaidReadabilityErrors(restored.toJsonObject()).isEmpty());
 
         QFile::remove(path);
     }
@@ -4383,6 +4443,112 @@ private slots:
         f.settings.app()->removeSelectedBuiltInProfile(filename);
 
         QCOMPARE(f.settings.app()->autoLoadProfileFilename(), QString(""));
+    }
+
+    // Deleting a profile is the one lifecycle event that changes what a TITLE
+    // resolves to without changing what is loaded — currentProfileChanged does
+    // not fire, so nothing downstream noticed and a recipe pinned to the
+    // deleted profile stayed active. The signal carries the title, not the
+    // filename, because that is what recipes and shots reference.
+    void profileDeletedCarriesTheTitle() {
+        McpTestFixture f;
+        const QString filename = "zz-deleted-profile-signal";
+        const QString title = "ZZ Deleted Profile Signal";
+        const QString path = f.profileManager.userProfilesPath() + "/" + filename + ".json";
+        QFile out(path);
+        QVERIFY(out.open(QIODevice::WriteOnly));
+        out.write(QJsonDocument(makeDFlowJson(title)).toJson());
+        out.close();
+        f.profileManager.refreshProfiles();
+
+        QSignalSpy deletedSpy(&f.profileManager, &ProfileManager::profileDeleted);
+        QVERIFY(f.profileManager.deleteProfile(filename));
+        QCOMPARE(deletedSpy.count(), 1);
+        // The TITLE, captured before the catalog was rebuilt — after
+        // refreshProfiles() there is nothing left to resolve the filename against.
+        QCOMPARE(deletedSpy.at(0).at(0).toString(), title);
+    }
+
+    // The signal's real contract: it fires only when the TITLE stops resolving.
+    //
+    // This is asserted through the title, NOT through deleteProfile's built-in
+    // early return, because that return is not reachable the way it looks.
+    // refreshProfiles() classifies everything ProfileStorage lists as
+    // UserCreated and replaces the built-in catalog row with it, so a file
+    // shadowing a built-in takes the ORDINARY delete path and would emit —
+    // while the QRC built-in is restored under the same title and still
+    // resolves. Gating the emit on findProfileByTitle covers both shapes; a
+    // test of the early return alone covers neither.
+    void deletingAShadowingProfileDoesNotAnnounceADeletion() {
+        McpTestFixture f;
+        // A title carried by a built-in, so that after the delete the QRC
+        // version resolves it again.
+        const QVariantList all = f.profileManager.allProfilesList();
+        QString builtInTitle;
+        for (const QVariant& v : all) {
+            const QVariantMap m = v.toMap();
+            if (f.profileManager.isBuiltInFilename(m.value("filename").toString())) {
+                builtInTitle = m.value("title").toString();
+                break;
+            }
+        }
+        if (builtInTitle.isEmpty())
+            QSKIP("no built-in profile in the catalog to shadow");
+
+        // A DIFFERENTLY-named file carrying the built-in's title — the shape
+        // the early return cannot catch, since its filename is not a built-in.
+        const QString filename = "zz-shadowing-a-builtin-title";
+        const QString path = f.profileManager.userProfilesPath() + "/" + filename + ".json";
+        QFile out(path);
+        QVERIFY(out.open(QIODevice::WriteOnly));
+        out.write(QJsonDocument(makeDFlowJson(builtInTitle)).toJson());
+        out.close();
+        f.profileManager.refreshProfiles();
+
+        QSignalSpy deletedSpy(&f.profileManager, &ProfileManager::profileDeleted);
+        QVERIFY(f.profileManager.deleteProfile(filename));
+        // Nothing announced: the title still resolves, so no recipe naming it
+        // has broken and none should be deactivated.
+        QVERIFY(!f.profileManager.findProfileByTitle(builtInTitle).isEmpty());
+        QCOMPARE(deletedSpy.count(), 0);
+    }
+
+    // Cleaning up a local override of a BUILT-IN profile is not a deletion in
+    // the sense that matters: the title still resolves afterwards, to the
+    // built-in version, so nothing pointing at it has broken and no recipe
+    // should be deactivated. deleteProfile returns false on that path, before
+    // the emit — this asserts the emit really is behind that return.
+    void builtInOverrideCleanupDoesNotAnnounceADeletion() {
+        McpTestFixture f;
+        // A filename that exists as a built-in QRC resource, so the source is
+        // BuiltIn and the early return applies. Skip rather than assert if the
+        // bundled set ever changes: the point is the branch, not this profile.
+        const QVariantList all = f.profileManager.allProfilesList();
+        QString builtInFilename;
+        for (const QVariant& v : all) {
+            const QVariantMap m = v.toMap();
+            if (f.profileManager.isBuiltInFilename(m.value("filename").toString())) {
+                builtInFilename = m.value("filename").toString();
+                break;
+            }
+        }
+        if (builtInFilename.isEmpty())
+            QSKIP("no built-in profile in the catalog to exercise the override branch");
+
+        // Write a local override so there is something for deleteProfile to
+        // remove — without one it returns false having done nothing, which
+        // would pass this test for the wrong reason.
+        const QString path = f.profileManager.userProfilesPath() + "/" + builtInFilename + ".json";
+        QFile out(path);
+        QVERIFY(out.open(QIODevice::WriteOnly));
+        out.write(QJsonDocument(makeDFlowJson("ZZ Override Of A Built-In")).toJson());
+        out.close();
+        f.profileManager.refreshProfiles();
+
+        QSignalSpy deletedSpy(&f.profileManager, &ProfileManager::profileDeleted);
+        // Returns false: a built-in can never be fully deleted.
+        QVERIFY(!f.profileManager.deleteProfile(builtInFilename));
+        QCOMPARE(deletedSpy.count(), 0);
     }
 };
 

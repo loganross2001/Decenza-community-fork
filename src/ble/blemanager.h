@@ -149,8 +149,12 @@ public:
     // primary-scale change).
     bool isWifiFallbackToBleActive() const { return m_wifiFallbackToBleActive; }
 
-    // Proactive WiFi-primary switch-back (driven by main.cpp's idle poll when
-    // we're on the BLE backup but the saved primary is a WiFi scale):
+    // Proactive WiFi-primary switch-back. TWO drivers, and only one of them
+    // probes: main.cpp's idle poll (which calls probeWifiPrimaryReachable below),
+    // and the reconnect browse, where maybeAutoConnectBrowsedScale() emits
+    // wifiPrimaryReachable(true) directly because the browse resolving the host
+    // IS the evidence. switchToWifiPrimary()'s body says the same thing at its
+    // setPendingWifiConnect() call; this block used to name only the poll.
     //  - probeWifiPrimaryReachable() does a NON-disruptive HDS identity check:
     //    opens ws://<ip>/snapshot and requires a valid HDS frame (snapshot or
     //    status) within ~3.5 s. It never touches the live BLE link, so a failed
@@ -160,8 +164,9 @@ public:
     //    is NOT enough — any LAN device listening on 80 (router, printer, NAS)
     //    would pass that gate; #1281 needed the actual HDS-frame validation.
     //  - switchToWifiPrimary() drops the current backup scale and connects the
-    //    saved WiFi primary via the cached-IP fast path. Call only after a
-    //    reachable probe (and a re-check that we're still idle on the backup).
+    //    saved WiFi primary via the cached-IP fast path. Call only after the
+    //    primary is known reachable — by probe OR by browse — and after a
+    //    re-check that we're still idle on the backup.
     //    Side effects: clears m_wifiFallbackToBleActive and starts
     //    m_scaleConnectionTimer, so a failed reconnect routes back through the
     //    WiFi->BLE fallback path.
@@ -838,6 +843,123 @@ private:
     // first wiped out the other, breaking either the list-populate path or
     // the auto-reconnect path depending on order).
     void ensureWifiDiscovery();
+    // Lazy-create m_reconnectDiscovery — the browse the RECONNECT ladder uses,
+    // deliberately a second instance rather than m_wifiDiscovery. Two reasons,
+    // both load-bearing:
+    //  - browse() calls stopBrowse() first, so sharing would let a reconnect
+    //    tick cancel a scan the user just started — the very action a user
+    //    takes when their scale is missing.
+    //  - isScanning() folds m_wifiDiscovery->isBrowsing() into the composite
+    //    property behind the Scan button. A shared instance would make the
+    //    button read "Scanning..." on every reconnect tick.
+    // Same PATTERN as the m_manualEntryDiscovery split — a separate instance so a
+    // shared one's side effect cannot leak into a context that does not want it.
+    // The side effect differs though: that one avoids auto-connect, this one
+    // avoids cancellation and Scan-button pollution. Don't expect its comment to
+    // give these reasons.
+    void ensureReconnectDiscovery();
+
+public:
+    // The invariants of the reconnect browse, as pure predicates. (Three of
+    // them; connectedScaleIsWifiPrimary() below is NOT one — it is a member,
+    // because its answer is a fact about live objects rather than a rule over
+    // inputs, and so it is not assertable here.)
+    //
+    // They are static and header-inline ON PURPOSE: BLEManager cannot be
+    // constructed in the test suite (it owns the BLE stack), so the only way
+    // these rules become assertable is to state them as functions of their
+    // inputs. The alternative was a fault-injection harness to reach the
+    // branches, which the project treats as a stop sign rather than a testing
+    // problem. Everything else about the browse — timing, socket ownership —
+    // stays untested here and rides on the field log instead.
+
+    /// Whether a reconnect tick should open a browse. Three gates, in the order
+    /// they matter: a saved WiFi primary must exist (otherwise this is the
+    /// absolute no-background-discovery case), a direct attempt must already
+    /// have failed (so the healthy cached-IP path stays silent), and no browse
+    /// may already be running (re-browsing restarts the window a reply needs).
+    static bool shouldBrowseOnReconnect(const QString& savedScaleAddress,
+                                        bool directAttemptFailed,
+                                        bool browseAlreadyRunning) {
+        if (!savedScaleAddress.startsWith(QStringLiteral("wifi:"), Qt::CaseInsensitive))
+            return false;
+        if (!directAttemptFailed) return false;
+        if (browseAlreadyRunning) return false;
+        return true;
+    }
+
+    /// Whether a browsed instance IS the saved primary. This is the
+    /// anti-substitution rule: a browse finds every scale on the LAN, and only
+    /// an exact match on the saved address may be auto-connected. Never relax
+    /// this to a "looks like a Decent scale" test.
+    static bool browsedScaleIsSavedPrimary(const QString& hostname,
+                                           const QString& savedScaleAddress) {
+        if (savedScaleAddress.isEmpty() || hostname.isEmpty()) return false;
+        const QString address = QStringLiteral("wifi:") + hostname;
+        return address.compare(savedScaleAddress, Qt::CaseInsensitive) == 0;
+    }
+
+    /// Whether a connect should clear "the direct attempt to the WiFi primary
+    /// failed" (m_wifiDirectAttemptFailed), which is what gates both the
+    /// reconnect browse and the switch-back.
+    ///
+    /// A WiFi->BLE fallback connect must NOT clear it — that connect is evidence
+    /// the primary is still gone, and clearing would disarm the browse at the one
+    /// moment it is needed. UNLESS the scale that connected is the primary
+    /// itself, which the fallback flag alone cannot tell you: the browse's own
+    /// success path dials the primary while the fallback scan it raced is still
+    /// running, so a successful recovery arrives looking exactly like a fallback.
+    /// Reading it as one left the flag true for the rest of the session.
+    static bool connectClearsDirectAttemptFailed(bool wasWifiFallbackConnect,
+                                                 bool connectedScaleIsWifiPrimary) {
+        if (connectedScaleIsWifiPrimary) return true;
+        return !wasWifiFallbackConnect;
+    }
+
+    /// Whether the scale connected RIGHT NOW is the saved WiFi primary.
+    ///
+    /// Not a pure predicate like the three above, because the answer is a fact
+    /// about live objects. It exists because two places were answering it by
+    /// proxy and getting it wrong: "a scale is connected" and "the WiFi->BLE
+    /// fallback was not active" are both weaker than "the primary is what
+    /// connected", and each let the reconnect machinery act on a scale that was
+    /// already the one it was trying to reach.
+    ///
+    /// The type half is the same test main.cpp's onWifiBackupAndIdle() applies
+    /// before honouring wifiPrimaryReachable, and both now go through
+    /// ScaleTypeIds rather than a hand-written "decent-wifi" — otherwise the two
+    /// layers could disagree about what "on the primary" means without anything
+    /// failing. Only the type half matches: onWifiBackupAndIdle() is a four-part
+    /// composite that also weighs the machine phase, and inverts this test.
+    ///
+    /// LIMIT, and it is reachable rather than theoretical: with a wifi: primary
+    /// saved, ANY connected WiFi scale answers true — this compares the type,
+    /// not the host. Two routes get there, both because the saved address is
+    /// written LATER than the connection is reported. A manual "Add WiFi Scale"
+    /// defers setSavedScaleAddress() to recognizedAsHds while connected is
+    /// signalled at WebSocket open (main.cpp:3030); and tapping a discovered
+    /// WiFi scale while a dead DecentScaleWifi is still the current scale takes
+    /// main.cpp's type-unchanged re-wire branch, which returns without
+    /// persisting.
+    ///
+    /// Both are inert at both call sites, which is why the type test is enough:
+    /// clearing m_wifiDirectAttemptFailed wrongly costs at most one ladder
+    /// cycle, since onScaleConnectionTimeout() re-arms it and is also the only
+    /// place a browse ever starts; and returning early from
+    /// maybeAutoConnectBrowsedScale() produces the same outcome main.cpp's own
+    /// decline already produced. Do NOT read this as "cannot happen".
+    bool connectedScaleIsWifiPrimary() const;
+
+private:
+    // Auto-connect a browsed instance when it IS the saved primary. One
+    // implementation, called from both discovery handlers — the scan's and the
+    // reconnect's. Not duplicated: this file already carries a bug report about
+    // two dedupes that drifted apart and let a browse hit rewrite a row's
+    // address out from under the saved-scale matcher.
+    void maybeAutoConnectBrowsedScale(const WifiScaleResult& result);
+    // Start the reconnect browse for the saved WiFi primary. No-op unless a
+    // direct attempt has already failed (m_wifiDirectAttemptFailed).
+    void startReconnectBrowseIfNeeded();
     // WiFi-saved-scale fallback: when the WiFi connection timer fires without
     // a successful connect, kick off a BLE scan that auto-connects to the
     // first Decent-family scale found. Toast surfaces the fallback to the
@@ -912,6 +1034,34 @@ private:
     // UX-only mDNS probe separate from m_wifiDiscovery (which carries an
     // auto-connect-to-saved-primary handler). Lazy-created on first call.
     WifiScaleDiscovery* m_manualEntryDiscovery = nullptr;
+    // Dedicated browse instance for the reconnect ladder. See
+    // ensureReconnectDiscovery() for why this is not m_wifiDiscovery. It is
+    // deliberately absent from isScanning(), so a reconnect browse never
+    // touches the Scan button.
+    WifiScaleDiscovery* m_reconnectDiscovery = nullptr;
+    // "A direct attempt for the saved WiFi scale has already failed." Set when
+    // the connection timer gives up on a wifi: primary. Gates the reconnect
+    // browse so the healthy path — cached IP answers immediately — never puts
+    // multicast traffic on the network.
+    //
+    // An event flag, not a timer. But NOT "cleared when a scale connects",
+    // which this said for a while and which is two different errors: a WiFi->BLE
+    // fallback connect must not clear it, and a connect to the primary must,
+    // even during a fallback. connectClearsDirectAttemptFailed() is the rule and
+    // carries the reasoning; setSavedScaleAddress() also clears it, because the
+    // failure was recorded against the scale that is no longer saved.
+    bool m_wifiDirectAttemptFailed = false;
+    // Address the reconnect browse resolved for the saved primary, handed across
+    // the wifiPrimaryReachable round-trip into switchToWifiPrimary(). Not a
+    // second IP cache: it exists because the persisted cache is stale in the case
+    // that got us here.
+    //
+    // NOT guaranteed consumed. main.cpp may decline the request (mid-shot), and
+    // a declined request consumes nothing — so it is cleared at two sites, not
+    // one: switchToWifiPrimary() when the request is honoured, and
+    // probeWifiPrimaryReachable() at the start of every probe, so a survivor can
+    // never outrank an address a probe has just verified.
+    QString m_browsedPrimaryIp;
     // Set true when the current manual-entry probe fires resultFound; consumed
     // by probeFinished to decide whether to log "no responder" — the probe
     // doesn't carry a "found anything" return code, so we have to track it

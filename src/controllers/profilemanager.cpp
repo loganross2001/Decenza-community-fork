@@ -1142,11 +1142,17 @@ void ProfileManager::loadAutoLoadProfileIfNeeded() {
 }
 
 bool ProfileManager::deleteProfile(const QString& filename) {
-    // Find the profile info
+    // Find the profile info. The title is captured HERE, while the catalog
+    // still holds the row — everything that references a profile does so by
+    // title, and by the time the delete has run and refreshProfiles() has
+    // rebuilt the catalog there is nothing left to resolve the filename
+    // against.
     ProfileSource source = ProfileSource::BuiltIn;
+    QString deletedTitle;
     for (const ProfileInfo& info : m_allProfiles) {
         if (info.filename == filename) {
             source = info.source;
+            deletedTitle = info.title;
             break;
         }
     }
@@ -1178,6 +1184,14 @@ bool ProfileManager::deleteProfile(const QString& filename) {
     // but we cleaned up any local overrides above
     if (source == ProfileSource::BuiltIn) {
         if (deleted) {
+            // `source` defaults to BuiltIn, so a filename that was NOT in the
+            // catalog lands here too and gets diagnosed as an override cleanup
+            // it never was. Say so, or the log claims a built-in was tidied when
+            // a real profile was removed and nothing announced it.
+            if (deletedTitle.isEmpty())
+                qWarning() << "Deleted" << filename
+                           << "but it was not in the profile catalog — cannot resolve its title,"
+                           << "so nothing holding a title reference to it will be told";
             qDebug() << "Cleaned up local override for built-in profile:" << filename;
             refreshProfiles();
         }
@@ -1204,6 +1218,28 @@ bool ProfileManager::deleteProfile(const QString& filename) {
 
         // Refresh the profile list
         refreshProfiles();
+        // Announce the deletion AFTER the catalog is rebuilt, and only when the
+        // TITLE no longer resolves — which is the only thing any listener
+        // actually cares about, since recipes and shots reference profiles by
+        // title.
+        //
+        // The re-resolve is not belt-and-braces, it is the condition. Relying on
+        // the built-in early return above instead was wrong: refreshProfiles()
+        // classifies everything ProfileStorage lists as UserCreated and replaces
+        // the built-in catalog row with it, so deleting a file that SHADOWS a
+        // built-in never reaches that return — it would emit, MainController
+        // would deactivate the recipe, and the title would still resolve to the
+        // restored built-in. The same holds wherever two catalog rows share a
+        // title. Asking findProfileByTitle makes this signal agree with
+        // installedProfileTitles, which is what the recipe cards bind to.
+        //
+        // An empty title means the filename was not in the catalog at all —
+        // nothing could have referenced it by title, so nothing to announce.
+        if (!deletedTitle.isEmpty() && findProfileByTitle(deletedTitle).isEmpty())
+            emit profileDeleted(deletedTitle);
+        else if (!deletedTitle.isEmpty())
+            qDebug() << "Deleted" << filename << "but title" << deletedTitle
+                     << "still resolves — not announcing a deletion";
         return true;
     }
 
@@ -1408,7 +1444,7 @@ bool ProfileManager::kbProfileSuitsRoast(const QString& profileTitle, const QStr
 //
 // Why it matters at all: DatabaseBackupManager copies the profile directory
 // verbatim, so a legacy-encoded file travels byte-for-byte into a backup and onto
-// another device, where a stricter reader (reaprime) rejects it outright for the
+// another device, where a stricter reader (Decaid) rejects it outright for the
 // missing tank_temperature / target_volume_count_start.
 //
 // `filePath` empty means the profile came from ProfileStorage; the concrete file
@@ -1496,7 +1532,7 @@ void ProfileManager::upgradeStoredEncoding(const QString& resolvedName,
                    << "- the profile loaded fine and is unchanged on disk";
 }
 
-void ProfileManager::loadProfile(const QString& profileName) {
+bool ProfileManager::loadProfile(const QString& profileName) {
     QString path;
     bool found = false;
     // Which tier satisfied the load. Only the writable ones may have their
@@ -1611,7 +1647,7 @@ void ProfileManager::loadProfile(const QString& profileName) {
         emit profileRefusedUnreadable(resolvedName, candidate.title(),
                                       candidate.unsupportedStepKeys(),
                                       candidate.malformedValues());
-        return;
+        return false;
     }
 
     // Upgrade the STORED encoding to canonical, if that is lossless.
@@ -1789,6 +1825,11 @@ void ProfileManager::loadProfile(const QString& profileName) {
     if (wasModified) {
         emit profileModifiedChanged();
     }
+
+    // `found` and not refused — the requested profile is the active one. When it
+    // was not found we loaded the default above and carried on, which is a load
+    // but not the one that was asked for.
+    return found;
 }
 
 bool ProfileManager::loadProfileFromJson(const QString& jsonContent) {
@@ -3649,7 +3690,7 @@ void ProfileManager::stripStoredRecipeBlocks() {
     // TRANSITIONAL — deletable once the population has drained.
     //
     // Decenza was the only producer of the block: de1app has no such key in any of
-    // its 88 profiles, reaprime models ten fields and drops the rest, and Visualizer
+    // its 88 profiles, Decaid models ten fields and drops the rest, and Visualizer
     // normalises it away in both its JSON and TCL renderings. So the set of files
     // carrying one is closed and shrinking, and after a release has shipped with this
     // pass these can all go, in order:

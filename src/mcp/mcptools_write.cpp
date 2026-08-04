@@ -1,6 +1,7 @@
 #include "core/settings_app.h"
 #include "mcpserver.h"
 #include "mcptoolregistry.h"
+#include "mcplogging.h"
 #include "../history/shothistorystorage.h"
 #include "../history/shotprojection.h"
 #include "../history/recipestorage.h"
@@ -214,7 +215,11 @@ void registerWriteTools(McpToolRegistry* registry, ProfileManager* profileManage
                 bool ok = false;
                 QString visualizerId;
                 ShotProjection vizShot;
-                withTempDb(dbPath, "mcp_update", [&](QSqlDatabase& db) {
+                // Checked, so a database that will not open is not reported as a
+                // bad shot id. The old message told the model to "check the id
+                // with shots_list" — against a database shots_list cannot reach
+                // either, so the advice could only send it in a circle.
+                const bool opened = withTempDb(dbPath, "mcp_update", [&](QSqlDatabase& db) {
                     ok = ShotHistoryStorage::updateShotMetadataStatic(db, shotId, metadata);
                     if (ok) {
                         QSqlQuery idQuery(db);
@@ -224,8 +229,10 @@ void registerWriteTools(McpToolRegistry* registry, ProfileManager* profileManage
                             if (idQuery.next())
                                 visualizerId = idQuery.value(0).toString();
                         } else {
-                            qWarning() << "MCP shots_update: failed to query visualizer_id for shot"
-                                       << shotId << ":" << idQuery.lastError().text();
+                            MCP_WARN_TAGGED("shots_update",
+                                            QStringLiteral("failed to query visualizer_id for "
+                                                           "shot %1: %2")
+                                                .arg(shotId).arg(idQuery.lastError().text()));
                         }
                         if (!visualizerId.isEmpty()) {
                             ShotRecord record = ShotHistoryStorage::loadShotRecordStatic(db, shotId, nullptr);
@@ -242,8 +249,16 @@ void registerWriteTools(McpToolRegistry* registry, ProfileManager* profileManage
                         fields << it.key();
                     result["updated"] = QJsonArray::fromStringList(fields);
                     result["message"] = "Shot " + QString::number(shotId) + " updated";
+                } else if (!opened) {
+                    result["error"] = "Shot " + QString::number(shotId) + " was not updated — "
+                                      "the shot database could not be opened.";
                 } else {
-                    result["error"] = "Failed to update shot " + QString::number(shotId);
+                    // The statement ran against an open database and changed
+                    // nothing, or failed outright. Only here is "check the id"
+                    // useful advice.
+                    result["error"] = "Shot " + QString::number(shotId) + " was not updated — "
+                                      "no shot with that id, or the write failed. "
+                                      "Check the id with shots_list.";
                 }
 
                 QMetaObject::invokeMethod(qApp, [respond, result, shotHistory, shotId, ok,
@@ -262,13 +277,15 @@ void registerWriteTools(McpToolRegistry* registry, ProfileManager* profileManage
                             && settings && settings->visualizer()->visualizerAutoUpdate()) {
                         if (vizShot.isValid()) {
                             willAutoUpdate = true;
-                            qInfo() << "MCP shots_update: auto-updating visualizer shot" << visualizerId
-                                    << "for local shot id" << shotId;
+                            MCP_INFO_TAGGED("shots_update",
+                                            QStringLiteral("auto-updating visualizer shot %1 for "
+                                                           "local shot id %2")
+                                                .arg(visualizerId).arg(shotId));
                             visualizerUploader->updateShotOnVisualizerWithOverrides(
                                 visualizerId, QVariant::fromValue(vizShot), vizOverrides);
                         } else {
                             skipReason = QString("failed to reload shot %1 for visualizer PATCH").arg(shotId);
-                            qWarning() << "MCP shots_update:" << skipReason;
+                            MCP_WARN_TAGGED("shots_update", skipReason);
                         }
                     }
 
@@ -439,12 +456,21 @@ void registerWriteTools(McpToolRegistry* registry, ProfileManager* profileManage
                 return;
             }
 
-            // Connect to shotDeleted signal to respond after deletion completes
+            // Respond on the delete's TERMINAL outcome, whichever it is. This used
+            // to wait on `shotDeleted`, which fires only on success — a failed or
+            // no-such-shot delete left the client waiting forever, with no error
+            // and no timeout anywhere in the deferred path.
             auto conn = std::make_shared<QMetaObject::Connection>();
-            *conn = QObject::connect(shotHistory, &ShotHistoryStorage::shotDeleted,
-                shotHistory, [respond, shotId, conn](qint64 deletedId) {
-                    if (deletedId != shotId) return;
+            *conn = QObject::connect(shotHistory, &ShotHistoryStorage::shotDeleteFinished,
+                shotHistory, [respond, shotId, conn](qint64 finishedId, bool success,
+                                                     const QString& reason) {
+                    if (finishedId != shotId) return;
                     QObject::disconnect(*conn);
+                    if (!success) {
+                        respond(QJsonObject{{"error", "Shot " + QString::number(shotId)
+                                                      + " was not deleted — " + reason}});
+                        return;
+                    }
                     respond(QJsonObject{{"success", true}, {"message", "Shot " + QString::number(shotId) + " deleted"}});
                 });
 
@@ -483,7 +509,26 @@ void registerWriteTools(McpToolRegistry* registry, ProfileManager* profileManage
             }
 
             QMetaObject::invokeMethod(profileManager, [profileManager, filename, respond]() {
-                profileManager->loadProfile(filename);
+                // loadProfile refuses a profile it cannot read and KEEPS the
+                // previously active one. Reporting success there told the model
+                // the machine had switched while it went on brewing the old
+                // profile. The `profileExists` check above cannot see this: the
+                // file is present, it just does not parse.
+                if (!profileManager->loadProfile(filename)) {
+                    // Deliberately does NOT say which profile is active now.
+                    // loadProfile returns false for two outcomes with opposite
+                    // side effects — refused-as-unreadable keeps the previous
+                    // profile, not-found loads the DEFAULT — and this tool cannot
+                    // tell them apart from a bool. Claiming "the previous profile
+                    // is still loaded" would be a confident lie half the time,
+                    // which is the failure class this whole change exists to
+                    // remove. profiles_get_active answers what is loaded now.
+                    respond(QJsonObject{{"error", "Profile not activated: " + filename
+                                                  + " — it could not be loaded. Call "
+                                                    "profiles_get_active to see which profile "
+                                                    "is active now."}});
+                    return;
+                }
                 respond(QJsonObject{{"success", true}, {"message", "Profile activated: " + filename}});
             }, Qt::QueuedConnection);
         },

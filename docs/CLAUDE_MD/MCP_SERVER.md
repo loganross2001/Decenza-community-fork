@@ -87,9 +87,9 @@ Each tool has a `category` that determines the minimum access level required:
 
 | Category | Min Access Level | Tools |
 |----------|-----------------|-------|
-| `read` | 0 (Monitor) | machine_get_state, app_get_info, machine_get_telemetry, shots_list, shots_get_detail, shots_get_debug_log, shots_compare, profiles_list, profiles_get_active, profiles_get_detail, profiles_get_params, profiles_get_auto_load, settings_get, dialing_get_context, dialing_get_grinder_calibration, ai_conversations_list, ai_conversation_get, bag_list, equipment_list, recipe_list, recipe_get, steam_pitcher_list, water_vessel_list |
+| `read` | 0 (Monitor) | machine_get_state, app_get_info, machine_get_telemetry, shots_list, shots_get_detail, shots_get_debug_log, shots_compare, profiles_list, profiles_get_active, profiles_get_detail, profiles_get_params, profiles_get_auto_load, settings_get, get_flow_calibration, dialing_get_context, dialing_get_grinder_calibration, ai_conversations_list, ai_conversation_get, bag_list, equipment_list, recipe_list, recipe_get, steam_pitcher_list, water_vessel_list |
 | `control` | 1 (Control) | machine_wake, machine_sleep, machine_start_espresso, machine_start_steam, machine_start_hot_water, machine_start_flush, machine_stop, machine_skip_frame, shots_update, shots_upload_to_visualizer, backup_now, mqtt_connect, mqtt_disconnect, mqtt_publish_discovery, devices_connect_de1, devices_disconnect_scale, devices_reset_scale_priority, bag_select, equipment_select, steam_pitcher_select, water_vessel_select, bag_extract_details  |
-| `settings` | 2 (Full) | profiles_set_active, profiles_edit_params, profiles_save, profiles_delete, profiles_create, profiles_rename, shots_delete, settings_set, reset_saw_learning, clear_flow_calibration, apply_theme, bag_create, bag_update, equipment_update, equipment_merge, recipe_create, recipe_update, recipe_create_from_shot, recipe_clone, recipe_archive, steam_pitcher_add, steam_pitcher_update, steam_pitcher_delete, water_vessel_add, water_vessel_update, water_vessel_delete |
+| `settings` | 2 (Full) | profiles_set_active, profiles_edit_params, profiles_save, profiles_delete, profiles_create, profiles_rename, shots_delete, settings_set, reset_saw_learning, clear_flow_calibration, set_flow_calibration, apply_theme, bag_create, bag_update, equipment_update, equipment_merge, recipe_create, recipe_update, recipe_create_from_shot, recipe_clone, recipe_archive, steam_pitcher_add, steam_pitcher_update, steam_pitcher_delete, water_vessel_add, water_vessel_update, water_vessel_delete |
 
 ### Tool → Confirmation Level Mapping
 
@@ -112,6 +112,13 @@ Two confirmation mechanisms are used depending on where the user is:
 | profiles_rename | **Confirm** | Confirm | Chat |
 | shots_delete | **Confirm** | Confirm | Chat |
 | settings_set | **Confirm** | Confirm | Chat |
+| reset_saw_learning | **Confirm** | Confirm | Chat |
+| reset_saw_learning_for_profile | **Confirm** | Confirm | Chat |
+| clear_flow_calibration | **Confirm** | Confirm | Chat |
+| set_flow_calibration | **Confirm** | Confirm | Chat |
+| devices_set_scale_priority_mode | **Confirm** | Confirm | Chat |
+| devices_reset_scale_priority | **Confirm** | Confirm | Chat |
+| devices_disconnect_scale | **Confirm** | Confirm | Chat |
 | shots_update | No confirm | No confirm | — |
 | shots_upload_to_visualizer | No confirm | No confirm | — |
 
@@ -314,7 +321,9 @@ A recipe is the whole drink: profile + bean link + equipment + dose/yield/temp +
 | `settings_set` | Update any app setting across all QML Settings tabs. Covers 100+ fields: machine, calibration, connections, screensaver, accessibility, AI, espresso, steam, water, flush, DYE, MQTT, themes, visualizer, update, data, history, language, debug, battery, heater, auto-favorites. `aiProvider` selects the provider; `aiModel` selects the model for the active (or same-call) provider, validated against that provider's catalog (invalid ids rejected with `validModels`); OpenRouter/Ollama use `openrouterModel`/`ollamaModel`. Sensitive fields (API keys, passwords) excluded. | settings |
 | `reset_saw_learning` | Reset stop-at-weight learning data globally. Useful when switching beans or grind settings. | settings |
 | `reset_saw_learning_for_profile` | Reset stop-at-weight learning for a single (profile, scale) pair only — other pairs and the global bootstrap are preserved. Defaults to active profile + configured scale. | settings |
-| `clear_flow_calibration` | Clear per-profile flow calibration multiplier. Defaults to current profile if none specified. | settings |
+| `get_flow_calibration` | Describe a profile's flow calibration: stored per-profile multiplier, global fallback, which one is in effect (`effectiveSource`), the auto-calibration switch, batch progress (`pendingAutoCalShots` of `autoCalBatchSize`), and a plain-language `state` sentence. Defaults to current profile. `allProfiles=true` lists every profile with a stored calibration instead, each with `profileExists` — the only way to answer "which profiles are calibrated?", and the only place an orphan entry (a key naming a deleted profile) is visible. | read |
+| `set_flow_calibration` | Set the per-profile flow calibration multiplier by hand, for a user who knows the right value. Range 0.5-2.7, refused (not clamped) outside it. Defaults to current profile. Reaches a connected machine immediately. With auto calibration ON it is the new starting point and future shots keep adjusting it; with auto OFF the value is stored but inert (the machine uses the global multiplier) and the result says so in `warning`. | settings |
+| `clear_flow_calibration` | Clear per-profile flow calibration multiplier. Defaults to current profile if none specified. Unlike get/set it accepts a profile that no longer exists, so orphan entries can be removed; `hadCalibration` reports whether anything was actually stored. | settings |
 | `apply_theme` | Apply a preset theme ('Default Dark', 'Default Light', or user-created). | settings |
 | `backup_now` | Create an immediate backup of database, settings, profiles, and media. | control |
 | `mqtt_connect` | Connect to the configured MQTT broker. | control |
@@ -458,6 +467,137 @@ MCP tool responses are consumed by LLMs (Claude, ChatGPT, etc.) which cannot rel
 - **Shot identity in prose is date/time, never the numeric `id`** (#1162): the per-shot `id` is an internal DB primary key with no user-facing counterpart — Shot History and every user surface key shots by date/time. The AI must cite shots to the user by their local `timestamp` ("your May 10, 9:04 AM shot"), using `id` only as an opaque argument to other tools. This rule is delivered to MCP clients via the server-level `instructions` string in the `initialize` result (retained for the whole session, beverage-agnostic, zero per-call cost) and reinforced in the shared `shotAnalysisSystemPrompt` (`## How to Read Structured Fields`). Two carriers because the full system prompt only reaches MCP clients that call `ai_advisor_invoke` (always carries it) or `dialing_get_context` with `includeFullKnowledge: true` (opt-in since #1164); for a client that does neither, the handshake `instructions` is the only carrier. The `instructions` field is gated on `negotiatedVersion >= "2025-03-26"` (the revision that introduced it) so strict `2024-11-05` clients don't reject the `initialize` response — same discipline as the `structuredContent` / `resource_link` gates in `buildToolCallResponse()`.
 
 When adding new MCP tool responses, never return raw numbers that require domain knowledge to interpret. An AI seeing `"pressure": 9.0` doesn't know if that's bar, PSI, or kPa. Use `"pressureBar": 9.0` instead.
+
+### `error` is a reserved key: it marks the tool call FAILED
+
+**A tool reports failure by returning a top-level `error` key in its result object.** `buildToolCallResponse()` sees the tool's own `error` key on the payload it is wrapping and sets `isError: true` on the envelope. Every tool inherits this; a new tool needs no opt-in, and no call site may hand-roll the marking (the confirmation-denial path used to, and no longer does — one place decides what a failed tool call looks like). ~291 sites across `src/mcp/mcptools_*.cpp` use this shape and none uses a different spelling — measure with `grep -rhoE '\["error"\] *=|\{"error"' src/mcp/mcptools_*.cpp | wc -l` rather than trusting this number, which is a hostage to the next tool file.
+
+**What is NOT marked: a failure signalled any other way.** The rule is "an `error` key is marked", not "every failure is marked". A payload carrying `success: false` with no `error`, a `warning`, an `available: false`, an empty result standing in for "unavailable", or a failure reported through the registry's `errorOut` out-parameter is invisible to this mechanism. If your failure does not put a top-level `error` in the payload, it ships as a successful call. Either give it one, or be sure it is a deliberate non-failure — several payloads here legitimately report a partial outcome on a successful call (`set_flow_calibration`'s `warning`, `profiles_edit_params`' `ignoredFields`, `dialing_get_grinder_calibration`'s `available: false`), and each says so at its site.
+
+The consequence is that **`error` cannot be used as an ordinary data field in a tool payload.** A tool wanting to report an error-shaped value that is not a failure has to name the field something else — `bag_extract_details` is the worked example: a stage-1 failure inside an otherwise-successful call is named `stage1Error`, not `error` (`src/mcp/mcptools_ai.cpp`).
+
+The error TEXT stays in `content[]`, which is what the model reads. `isError` is sparse — absent means success, and a successful call carries no `isError` key at all, never `isError: false`. Both follow MCP's `CallToolResult` (`isError?: boolean`, "If not set, this is assumed to be false"; schema 2025-11-25).
+
+**A tool failure stays a JSON-RPC `result`. Never reach for `sendJsonRpcError()` from a tool.** MCP is explicit: errors originating from the tool "SHOULD be reported inside the result object, with `isError` set to true, _not_ as an MCP protocol-level error response. Otherwise, the LLM would not be able to see that an error occurred and self-correct" (schema 2025-11-25, `CallToolResult.isError`) — a JSON-RPC error delivers no `content[]`, so the error text never reaches the model.
+
+JSON-RPC `error` is for protocol faults, and they reach the wire two different ways:
+
+- **Directly via `sendJsonRpcError()`**, bypassing `sendJsonRpcResponse()` entirely: parse error, "Too many sessions", "Session not initialized".
+- **As a raw `{error: {code, message}}` returned up through `sendJsonRpcResponse()`**: unknown method (`handleJsonRpc`), the `resources/*` handlers, and the `tools/call` faults that happen *before* dispatch — rate limit, async dispatch failure, tool-registry error.
+
+That second group is why `sendJsonRpcResponse()`'s top-level `contains("error")` test exists and is correct. What it cannot see is a **wrapped tool payload**: once a tool has run, `buildToolCallResponse()` has moved its `error` one level down. Note the test is *not* unreachable for `tools/call` — a rate-limited call takes it — only for a payload that has been through the wrap step.
+
+### `success` means the operation happened, not that the tool was called
+
+The companion rule to the one above, and the half `isError` cannot reach. A tool
+that writes no `error` key ships as a successful call — so a tool that *assumes*
+its work succeeded reports success for something that did not happen, and nothing
+on the wire contradicts it. The bullets below name fifteen tools across seven
+distinct mechanisms, and every one was correct C++ that no test and no reviewer
+had reason to question.
+
+- **Consult the operation; do not assume it.** `profiles_set_active` called a
+  `void` `loadProfile()` and reported "Profile activated" for a profile
+  `ProfileManager` had **refused**, while the machine went on brewing the
+  previous one. `apply_theme` did the same for a theme name matching nothing.
+  Both underlying calls now return `bool`. When an app-layer call cannot report
+  its own outcome, **give it a way to** — do not paper over it in the tool.
+- **A database call reports "the statement ran", not "a row changed."**
+  `query.exec()` succeeds on an `UPDATE`/`DELETE` whose `WHERE` matches nothing.
+  Check `numRowsAffected()`. Do **not** add a `SELECT` pre-check instead: it
+  races the write (these run on a background thread) and adds a query to a
+  one-query path.
+- **An async tool must be wired to every terminal signal, not just the happy
+  one.** `shots_delete` waited on `shotDeleted`, which fires only on success, so
+  a failed delete produced **no response at all** — the client hung, with no
+  error and no timeout anywhere in the `_deferred` path. Storage now emits
+  `shotDeleteFinished(id, success, reason)` for both outcomes. Prefer a
+  request-specific completion signal over a general error signal: a storage-wide
+  `errorOccurred` carries no id, so an unrelated failure would resolve your call.
+- **An unavailable dependency is an error, not emptiness.** Returning a bare
+  `{}`, a default-constructed payload, or `status: ""` gives the model nothing to
+  act on and violates the human-readable-enum convention besides. Keep it
+  distinct from a meaningful "no data yet" (`steam_get_health` has both:
+  `hasData: false` means no steam sessions, an `error` means no tracker).
+- **Name the inputs you dropped.** `shots_compare` silently returned a shorter
+  list; it now carries `unresolvedShotIds`, and errors when nothing resolves.
+- **A no-op is a success, flagged as a no-op.** `devices_connect_de1` and
+  `mqtt_disconnect` returned a bare `message` with neither `success` nor
+  `error` — a third state nothing can classify. Both now report `success: true`
+  plus `alreadyConnected` / `alreadyDisconnected`, and echo the parameters the
+  caller supplied. (`mqtt_publish_discovery` still treats a missing connection as
+  an `error`, which is not an inconsistency: it cannot do its job without one.)
+- **An empty virtual is not a capability.** `ScaleDevice`'s `startTimer` /
+  `stopTimer` / `resetTimer` are virtual with empty default bodies, so every
+  scale accepted a timer command and the three `scale_timer_*` tools reported
+  success on all of them — including Acaia, whose header says in a comment that
+  it has no remote timer control. `supportsTimer()` defaults to **false** so a
+  driver whose override is forgotten fails in the safe direction.
+
+Not everything that looks like this is a defect. `settings_set`'s ~117 `void`
+setters build their response *before* the setters run, so a clamp or rejection
+cannot reach it — real, but with no identified failing key, and the fix is a
+90-setter refactor. Left alone deliberately.
+
+### Wire conformance: what the MCP spec requires that is easy to miss
+
+Departures from the spec produce no symptom until a stricter client arrives, so
+they accumulate silently. Six were found in one audit and fixed together;
+`tests/tst_mcpserver_protocol.cpp` pins each.
+
+- **A POST body may be a JSON array.** Batch support is required by the
+  **2025-03-26** base protocol — exactly one of the four revisions negotiated.
+  Batching does not exist in 2024-11-05 and was *removed* in 2025-06-18, so it is
+  accepted unconditionally rather than version-gated: one branch, and a
+  2025-03-26 client may still send one.
+  Elements with an `id` get one response each in a returned array; an
+  all-notification batch gets 202. An element whose response would be *deferred*
+  (in-app confirmation, async tool) is refused in its slot — a deferred response
+  is written as a complete HTTP body and cannot be folded into an array.
+- **A session the server ended answers 404**, on every verb — POST, GET and
+  DELETE. That is what tells a client to re-initialize, and the `GET` case is the
+  one that matters most: an SSE stream opened on a dead session never carries an
+  event for it, so serving it hangs the client instead.
+  **Only an explicit `DELETE` is tombstoned.** The server ends sessions three
+  other ways — idle expiry, the orphan reaper inside `findOrCreateSession`, and
+  `MaxTotalSessions` eviction — and none of them records. Each targets a client
+  that is expected to come back, which is exactly what the auto-recovery path
+  exists for, and 404ing those is the "permanently broken until restart" outcome
+  that path's own comment warns about. A knowing shortfall against the MUST,
+  taken because none of it has been verified against a live `mcp-remote`, Claude
+  Desktop or cloud connector.
+  **The auto-recovery path for IDs we never issued must stay reachable** — cloud
+  connectors re-initialize per request without echoing the session header, and
+  the server cannot tell an ID from before a restart from one it never issued.
+  `initialize` carrying a terminated ID is still accepted; 404ing the recovery
+  move would strand the client.
+- **`structuredContent` is not a `ResourceContents` field.** It exists on
+  `CallToolResult` only. It was being emitted inside `resources/read` contents and
+  version-gated as though it were a 2025-06-18 resources feature, with a test
+  pinning that mistaken premise. Removed; the same JSON is already in `text`.
+  The `tools/call` `structuredContent` **is** in the schema and is unchanged.
+- **Error codes are per the spec's own examples**: `-32002` (+ `data.uri`) for a
+  resource that is not found, `-32602` for an unregistered tool — a bad request,
+  not a server fault. Registry failures that *are* server-side (wrong sync/async
+  dispatch, access level) stay `-32603`. The caller picks the code from
+  `McpRegistryFailure`, an out-param, **never by matching the error text** — a
+  string comparison against a message is the thing that rots.
+- **SSE streams prime the client for reconnection**: a `retry` interval and an
+  opening event carrying an ID and **no `data` field** — both 2025-11-25
+  `SHOULD`s. An ID on every subsequent event is a `MAY`, not a SHOULD; don't cite
+  all three as one requirement. The opening event omits `data` deliberately: per
+  the HTML SSE model a `data` field appends value+LF, so `data: ` followed by a
+  blank line dispatches a real `message` event carrying the empty string — and
+  every MCP client `JSON.parse`s `event.data`. `Last-Event-ID` replay is a `MAY`
+  and is deliberately not implemented, which is also why the related SHOULD that
+  event IDs encode their originating stream is knowingly unmet.
+
+**One deliberate non-conformance, recorded so the next audit does not
+re-litigate it:** the server binds all interfaces rather than localhost. The
+spec's localhost `SHOULD` targets servers with no LAN requirement; Decenza's MCP
+endpoint is served by ShotServer, whose entire purpose is LAN reachability. The
+`Origin` allowlist and the capability-URL gate on the remote surface are the
+mitigations, and both already exist.
 
 ### Shot Detector Outputs (`shots_get_detail`, `shots_compare`)
 

@@ -750,15 +750,20 @@ private slots:
 
     // --- The shot-chart background's cache key -----------------------------
     //
-    // The key itself lives in QML (LastShotChartSource) and this suite is C++ with no Qt
-    // Quick Test harness, so the key's ARITHMETIC is verified live rather than here. What
-    // is testable, and what actually breaks, is its COMPLETENESS: the key lists the graph
-    // visibility settings by name, and a curve added to the chart later without a matching
-    // entry produces a background that silently stops updating when you toggle it. Nothing
-    // about that looks broken — the old chart is still a real chart.
+    // This used to compare two hand-maintained key lists: the settings HistoryShotGraph
+    // read, against the list LastShotChartSource invalidated its cached render on. A curve
+    // added to the graph without a matching entry produced a background that silently
+    // stopped updating — nothing about it looked broken, the old chart was still a chart.
     //
-    // So compare the two lists in the two files directly. A source-consistency check rather
-    // than a behaviour one, in the same spirit as declaredCoverageMatchesTheArtwork above.
+    // LastShotChartSource no longer keeps a list; its cache key is derived from GraphSeries,
+    // so that particular omission is now unrepresentable. The same risk moved one step back:
+    // GraphSeries is the single definition of the series, and a curve drawn by the graph but
+    // missing from it would be absent from the legend AND from the cache key — the identical
+    // silent-stale-render failure, one file earlier.
+    //
+    // So the comparison still exists, against the new source of truth. A source-consistency
+    // check rather than a behaviour one, in the same spirit as declaredCoverageMatchesTheArtwork
+    // above.
 
     static QStringList graphKeysIn(const QString& relativePath, const QRegularExpression& pattern) {
         QFile file(QStringLiteral(DECENZA_SOURCE_DIR "/") + relativePath);
@@ -781,19 +786,19 @@ private slots:
     }
 
     void theShotBackgroundKeyCoversEveryCurveTheChartDraws() {
-        // Every graph/show* the chart reads...
+        // Every series-visibility property the chart reads...
         const QStringList drawn = graphKeysIn(
             "qml/components/HistoryShotGraph.qml",
-            QRegularExpression(R"RX(Settings\.boolValue\("(graph/[^"]+)")RX"));
+            QRegularExpression(R"RX(Settings\.graph\.(show[A-Za-z]+))RX"));
         QVERIFY2(drawn.size() >= 10,
                  qPrintable(QString("only found %1 curve settings in HistoryShotGraph — the "
                                     "pattern that finds them has probably gone stale")
                                 .arg(drawn.size())));
 
-        // ...must appear in the key the cached render is invalidated on.
+        // ...must appear in the one definition the legend and the cache key derive from.
         const QStringList keyed = graphKeysIn(
-            "qml/components/LastShotChartSource.qml",
-            QRegularExpression(R"RX("(graph/[^"]+)")RX"));
+            "qml/components/GraphSeries.qml",
+            QRegularExpression(R"RX(key: "(show[A-Za-z]+)")RX"));
 
         QStringList missing;
         for (const QString& k : drawn) {
@@ -801,9 +806,10 @@ private slots:
                 missing << k;
         }
         QVERIFY2(missing.isEmpty(),
-                 qPrintable(QString("LastShotChartSource's cache key does not mention %1 — "
-                                    "toggling %2 would leave the background showing the "
-                                    "previous render, with nothing to indicate it is stale")
+                 qPrintable(QString("GraphSeries does not list %1 — %2 would be missing from "
+                                    "the legend, and toggling it would leave the background "
+                                    "showing the previous render with nothing to indicate it "
+                                    "is stale")
                                 .arg(missing.join(", "),
                                      missing.size() == 1 ? missing.first()
                                                          : QStringLiteral("one of them"))));
@@ -816,7 +822,7 @@ private slots:
                 extra << k;
         }
         QVERIFY2(extra.isEmpty(),
-                 qPrintable("cache key mentions settings the chart does not read: "
+                 qPrintable("GraphSeries lists series the chart does not read: "
                             + extra.join(", ")));
     }
 
@@ -1000,6 +1006,32 @@ private slots:
         // polarity slot, so it could only ever be half-applied.
         SettingsTheme theme;
         QVERIFY(!theme.themeNames().contains("Glass"));
+    }
+
+    // applyPresetTheme returns whether a theme of that name existed and was
+    // applied. Three callers take an arbitrary name and two of them — the MCP
+    // `apply_theme` tool and ShotServer's POST /api/theme/preset — used to
+    // discard it and report success for a theme that does not exist.
+    //
+    // Tested here rather than at those two callers because both live in source
+    // files no test binary links, while settings_theme.cpp is already linked
+    // everywhere — so this slot costs milliseconds and a new tst_*.cpp would
+    // cost ~1.4 s of build time forever. It also sits next to clearBackground-
+    // Preset, which applyPresetTheme calls, and which is this file's subject.
+    void applyPresetThemeReportsWhetherTheNameMatched() {
+        SettingsTheme theme;
+
+        QVERIFY2(theme.applyPresetTheme("Default Dark"),
+                 "a built-in name must report applied");
+        QVERIFY2(theme.applyPresetTheme("Default Light"),
+                 "the other built-in polarity too");
+
+        // Falls off the end of the user-theme loop. Before the return value
+        // existed this was indistinguishable from success at every call site.
+        QVERIFY2(!theme.applyPresetTheme("NoSuchThemeXYZ"),
+                 "an unknown name must report NOT applied");
+        QVERIFY2(!theme.applyPresetTheme(QString()),
+                 "an empty name is not a theme either");
     }
 };
 

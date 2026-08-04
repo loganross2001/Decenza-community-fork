@@ -1173,7 +1173,7 @@ private slots:
     // handshake.
     //
     // Byte layouts are asserted against pyacaia (decode/Settings), Beanconqueror
-    // (decoder.ts) and reaprime (acaia_scale.dart), which agree; de1app parses
+    // (decoder.ts) and Decaid (acaia_scale.dart), which agree; de1app parses
     // weight only and never reads a 0x08 settings frame.
 
     // 0x08 settings frame. Battery is payload[1] = buf[4]; buf[5] is the units
@@ -1239,7 +1239,7 @@ private slots:
     }
 
     void acaiaBatteryHighBitIsMasked() {
-        // pyacaia and Beanconqueror mask 0x80 off; reaprime does not. Masking
+        // pyacaia and Beanconqueror mask 0x80 off; Decaid does not. Masking
         // keeps a set high bit from reading as an out-of-range battery.
         auto* transport = new MockScaleBleTransport;
         AcaiaScale scale(transport);
@@ -1396,6 +1396,31 @@ private slots:
         scale.connectToDevice(QBluetoothDeviceInfo());
 
         QCOMPARE(transport->m_connectCount, 0);
+    }
+
+    // ==========================================
+    // supportsTimer(): a driver must not claim a timer it does not send
+    // ==========================================
+    //
+    // startTimer/stopTimer/resetTimer are virtual with EMPTY default bodies, so
+    // a scale that does not implement them accepts every timer command and does
+    // nothing. supportsTimer() is what lets a caller tell those apart, and its
+    // failure mode is silent by construction — nothing on the wire, nothing in a
+    // log. Acaia is the case that matters: it OVERRIDES all three, as empty
+    // bodies, with a comment saying it has no remote timer control, so reading
+    // the override list is exactly what gets this wrong.
+    void supportsTimerMatchesWhetherTheDriverSendsAnything() {
+        DecentScale decent(nullptr);
+        BookooScale bookoo(nullptr);
+        DifluidScale difluid(nullptr);
+        AcaiaScale acaia(nullptr);
+
+        QVERIFY2(decent.supportsTimer(), "DecentScale::startTimer sends 0B0300");
+        QVERIFY2(bookoo.supportsTimer(), "BookooScale::startTimer sends 030A0400000A");
+        QVERIFY2(difluid.supportsTimer(), "DifluidScale::startTimer sends DFDF03020100C4");
+        QVERIFY2(!acaia.supportsTimer(),
+                 "AcaiaScale overrides the three timer slots with EMPTY bodies — it must "
+                 "report no timer support, not inherit true from the override list");
     }
 };
 

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(Decenza VERSION 2.0.1 LANGUAGES CXX)
+project(Decenza VERSION 2.0.2 LANGUAGES CXX)
 
 message(STATUS "Developer note: executable target is now 'Decenza'. If Qt Creator shows 'No executable specified', re-run CMake and select the 'Decenza' Run configuration.")
 
@@ -97,9 +97,16 @@ endif()
 # ever exercised the combination. Turning it on is a separate change that must
 # be measured on a Windows runner with a warm sccache.
 #
+# OFF in CI on the four legs that carry a warm ccache (android, macos, linux,
+# linux-arm64), passed as -DDECENZA_ENABLE_PCH=OFF by those workflows rather
+# than decided here. A PCH and a compiler cache are SUBSTITUTES: ccache will not
+# cache a compile that consumes a PCH, since the preprocessed output no longer
+# contains the PCH'd headers' text. Enabling the PCH cost those legs ~90% of
+# their cache hits and roughly doubled the macOS build; numbers in PR #1738.
+#
 # ON everywhere else, which includes every local build: Qt Creator and a plain
-# CLI configure set no compiler launcher, and local development is the case this
-# exists for. CI throughput is explicitly the lower priority.
+# CLI configure set no compiler launcher, so there is no cache to lose, and
+# local development is the case this exists for.
 #
 # To force either way: -DDECENZA_ENABLE_PCH=ON/OFF.
 if(NOT DEFINED DECENZA_ENABLE_PCH)
@@ -692,6 +699,7 @@ set(SOURCES
     src/core/settings_network.cpp
     src/core/settings_app.cpp
     src/core/settings_calibration.cpp
+    src/core/settings_graph.cpp
     src/core/widgetlibrary.cpp
     src/widget/machinestatussnapshot.cpp
     src/core/batterymanager.cpp
@@ -920,6 +928,7 @@ set(HEADERS
     src/core/settings_network.h
     src/core/settings_app.h
     src/core/settings_calibration.h
+    src/core/settings_graph.h
     src/core/grinderaliases.h
     src/core/basketaliases.h
     src/core/widgetlibrary.h
@@ -1278,8 +1287,10 @@ set_source_files_properties(qml/AppShell.qml PROPERTIES QT_QML_SINGLETON_TYPE TR
 set_source_files_properties(qml/Theme.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
 set_source_files_properties(qml/components/SettingsTabs.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
 set_source_files_properties(qml/components/layout/WidgetColor.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
+set_source_files_properties(qml/components/layout/LayoutActions.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
 set_source_files_properties(qml/components/DrinkType.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
 set_source_files_properties(qml/components/LastShotChartSource.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
+set_source_files_properties(qml/components/GraphSeries.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
 
 # Define QML files list for dependency tracking
 set(QML_FILES
@@ -1370,6 +1381,7 @@ set(QML_FILES
     qml/components/ProfilePreviewPopup.qml
     qml/components/ProfileInfoButton.qml
     qml/components/BottomBar.qml
+    qml/components/BottomBarSubtitle.qml
     qml/components/ThemedIcon.qml
     qml/components/TranslationErrorToast.qml
     qml/components/AccessibleMouseArea.qml
@@ -1422,6 +1434,12 @@ set(QML_FILES
     qml/components/ComparisonDataTable.qml
     qml/components/ComparisonShotTable.qml
     qml/components/GraphLegend.qml
+    qml/components/GraphFlowScaleCard.qml
+    qml/components/GraphOptionsButton.qml
+    qml/components/GraphOptionsDialog.qml
+    qml/components/GraphOptionToggleCard.qml
+    qml/components/GraphRightAxisLabels.qml
+    qml/components/GraphSeries.qml
     qml/components/QualityBadges.qml
     qml/components/PhaseSummaryPanel.qml
     qml/components/ShotAnalysisDialog.qml
@@ -1445,10 +1463,12 @@ set(QML_FILES
     qml/components/De1CommunicationErrorDialog.qml
     qml/components/ProfileRefusedDialog.qml
     qml/components/ColoredIcon.qml
+    qml/components/SearchKeywordChip.qml
     qml/components/CrtOverlay.qml
     qml/components/CrtShaderEffect.qml
     qml/components/QrCode.qml
     qml/components/DateUtils.js
+    qml/components/GraphUtils.js
     qml/components/qrcode.js
     qml/components/RecipeSearch.js
     qml/components/SettingsSearchIndex.js
@@ -1485,6 +1505,8 @@ set(QML_FILES
     qml/components/layout/items/BrewQuickSelectItem.qml
     qml/components/layout/items/ShotPlanItem.qml
     qml/components/layout/items/SpacerItem.qml
+    qml/components/layout/LayoutActions.qml
+    qml/components/layout/GestureActionRow.qml
     qml/components/layout/items/CustomItem.qml
     qml/components/layout/items/WeatherItem.qml
     qml/components/layout/items/PageTitleItem.qml
@@ -2403,6 +2425,7 @@ if(NOT ANDROID AND NOT IOS)
         src/core/settings_network.cpp
         src/core/settings_app.cpp
         src/core/settings_calibration.cpp
+        src/core/settings_graph.cpp
         src/ble/scales/scaletypeids.cpp
     )
     target_link_libraries(saw_parity PRIVATE Qt6::Core Qt6::Sql Qt6::Network Qt6::Gui Qt6::Bluetooth)

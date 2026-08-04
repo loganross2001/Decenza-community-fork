@@ -126,6 +126,98 @@ private:
         ShotRowFixtures::initAndCloseStorage(path, storage);
     }
 
+    // Recipe-identity fixture (history-recipe-identity). Lives under `private:`
+    // with the other helpers. Qt Test collects a private slot as a test only when
+    // it takes ZERO parameters, returns void, is not suffixed `_data`, and is
+    // not named exactly `init`, `cleanup`, `initTestCase` or `cleanupTestCase`
+    // (`isValidSlot`, qtbase/src/testlib/qtestcase.cpp:151 — only `_data` is a
+    // wildcard there; `initFixture()` WOULD run as a test) — so this
+    // two-argument helper would not have run as a test even under `private
+    // slots:`. Stated because an earlier version of this comment claimed
+    // otherwise without checking the Qt source.
+    //
+    // Deliberately: no shot's bean, profile or notes contains "monday",
+    // "tuesday" or "vacation", so a search hit on any of those can only have
+    // arrived through the `recipes` table.
+    struct RecipeSeed { qint64 mondayId = 0; qint64 tuesdayId = 0; qint64 archivedId = 0; };
+    void seedRecipeShots(const QString& path, RecipeSeed& seed) {
+        withRawDb(path, "recipe_seed", [&](QSqlDatabase& db) {
+            auto addRecipe = [&](const QString& name, const QString& drinkType, int archived) -> qint64 {
+                QSqlQuery r(db);
+                r.prepare("INSERT INTO recipes (name, profile_title, drink_type, archived) VALUES (?, 'P', ?, ?)");
+                r.addBindValue(name); r.addBindValue(drinkType); r.addBindValue(archived);
+                if (!r.exec()) return 0;
+                return r.lastInsertId().toLongLong();
+            };
+            seed.mondayId   = addRecipe("Dad Monday", "latte", 0);
+            seed.tuesdayId  = addRecipe("Dad Tuesday", "espresso", 0);
+            seed.archivedId = addRecipe("Vacation Blend", "filter", 1);
+            QVERIFY(seed.mondayId > 0 && seed.tuesdayId > 0 && seed.archivedId > 0);
+
+            auto addShot = [&](const QString& uuid, qint64 ts, qint64 recipeId) {
+                QSqlQuery sh(db);
+                sh.prepare("INSERT INTO shots (uuid, timestamp, profile_name, duration_seconds, "
+                           "bean_brand, bean_type, recipe_id) "
+                           "VALUES (?, ?, 'P', 30, 'Roaster', 'Beans', ?)");
+                sh.addBindValue(uuid); sh.addBindValue(ts);
+                if (recipeId > 0) sh.addBindValue(recipeId); else sh.addBindValue(QVariant());
+                QVERIFY(sh.exec());
+            };
+            addShot("s-monday",   1000, seed.mondayId);
+            addShot("s-tuesday",  2000, seed.tuesdayId);
+            addShot("s-archived", 3000, seed.archivedId);
+            addShot("s-none",     4000, 0);
+        });
+    }
+
+    // Two bags of the SAME coffee, plus a pre-bag shot. Every shot here carries
+    // identical bean_brand/bean_type, so a bean filter cannot separate them —
+    // which is the whole reason the bag filter exists (history-bag-filter).
+    struct BagSeed { qint64 julyId = 0; qint64 augustId = 0; };
+    void seedBagShots(const QString& path, BagSeed& seed) {
+        withRawDb(path, "bag_seed", [&](QSqlDatabase& db) {
+            auto addBag = [&](const QString& roaster, const QString& coffee,
+                              const QString& roastDate) -> qint64 {
+                QSqlQuery b(db);
+                b.prepare("INSERT INTO coffee_bags (roaster_name, coffee_name, roast_date) "
+                          "VALUES (?, ?, ?)");
+                b.addBindValue(roaster); b.addBindValue(coffee); b.addBindValue(roastDate);
+                if (!b.exec()) return 0;
+                return b.lastInsertId().toLongLong();
+            };
+            seed.julyId   = addBag("Roaster", "Ethiopia Guji", "2026-07-04");
+            seed.augustId = addBag("Roaster", "Ethiopia Guji", "2026-08-11");
+            QVERIFY(seed.julyId > 0 && seed.augustId > 0);
+
+            auto addShot = [&](const QString& uuid, qint64 ts, qint64 bagId) {
+                QSqlQuery sh(db);
+                // A distinctive profile name, not the 'P' the recipe seed uses:
+                // the scoping assertion needs a token that appears in a SHOT
+                // column and in no bag column, and single letters do not
+                // qualify — "P" is inside "EthioPia", which is how the first
+                // version of that assertion failed.
+                // shots.roast_date is set DELIBERATELY, and to a value no bag
+                // has. `roast_date` exists on both tables, so if the bag
+                // subquery's columns are ever left unqualified and resolve to
+                // the outer scope, this seed turns it into a correlated query
+                // that returns the wrong rows — with no SQL error to report.
+                // With every shot carrying the same date as its bag, that
+                // regression would pass green.
+                sh.prepare("INSERT INTO shots (uuid, timestamp, profile_name, duration_seconds, "
+                           "bean_brand, bean_type, roast_date, bag_id) "
+                           "VALUES (?, ?, 'Londinium Ristretto', 30, 'Roaster', 'Ethiopia Guji', "
+                           "'1999-01-01', ?)");
+                sh.addBindValue(uuid); sh.addBindValue(ts);
+                if (bagId > 0) sh.addBindValue(bagId); else sh.addBindValue(QVariant());
+                QVERIFY(sh.exec());
+            };
+            addShot("b-july-1",   1000, seed.julyId);
+            addShot("b-july-2",   2000, seed.julyId);
+            addShot("b-august-1", 3000, seed.augustId);
+            addShot("b-prebag",   4000, 0);   // NULL bag_id
+        });
+    }
+
     // Like initAndClose(), but for an initialize() that is expected to emit a
     // single migration-failure qWarning (a gated migration that did NOT bump).
     void initExpectingMigrationWarning(const QString& path, const QString& warnRegex) {
@@ -2213,6 +2305,484 @@ private slots:
         s.requestShotsFiltered({{"searchText", "zzz-no-match"}}, 0, 50);
         QVERIFY(spy.wait(3000));
         QCOMPARE(spy.last().at(2).toInt(), 0);
+
+        s.close();
+    }
+
+    // ---- Recipe identity on the shot list (history-recipe-identity) ----------
+    //
+    // Recipe name/type/archived are resolved LIVE by shots.recipe_id, never
+    // snapshotted onto the shot, and a recipe's name is not in shots_fts (which
+    // is external-content on `shots`, so it can only index shots columns). These
+    // guard the resulting query: the display join, the free-text clause that
+    // reaches the other table, the `recipe:` keyword's narrower scope, the exact
+    // id filter, and the LIKE escaping.
+
+    // The list row carries the recipe's identity, and a recipe-less shot carries
+    // none of it — the two cases the row layout branches on.
+    void recipeIdentityOnShotListRow() {
+        const QString path = freshDbPath();
+        ShotHistoryStorage s;
+        QVERIFY(s.initialize(path));
+        RecipeSeed seed;
+        seedRecipeShots(path, seed);
+
+        QSignalSpy spy(&s, &ShotHistoryStorage::shotsFilteredReady);
+        s.requestShotsFiltered({}, 0, 50);
+        QVERIFY(spy.wait(3000));
+
+        QVariantMap byUuid;
+        const QVariantList rows = spy.last().at(0).toList();
+        for (const QVariant& v : rows) {
+            const QVariantMap m = v.toMap();
+            byUuid.insert(m.value("uuid").toString(), m);
+        }
+        QCOMPARE(rows.size(), 4);
+
+        const QVariantMap monday = byUuid.value("s-monday").toMap();
+        QCOMPARE(monday.value("recipeId").toLongLong(), seed.mondayId);
+        QCOMPARE(monday.value("recipeName").toString(), QString("Dad Monday"));
+        QCOMPARE(monday.value("recipeDrinkType").toString(), QString("latte"));
+        QCOMPARE(monday.value("recipeArchived").toBool(), false);
+
+        const QVariantMap archived = byUuid.value("s-archived").toMap();
+        QCOMPARE(archived.value("recipeArchived").toBool(), true);
+
+        // No recipe: the LEFT JOIN yields nulls, which must read as empty rather
+        // than as some other shot's recipe.
+        const QVariantMap none = byUuid.value("s-none").toMap();
+        QCOMPARE(none.value("recipeId").toLongLong(), 0LL);
+        QVERIFY(none.value("recipeName").toString().isEmpty());
+        QVERIFY(none.value("recipeDrinkType").toString().isEmpty());
+        QCOMPARE(none.value("recipeArchived").toBool(), false);
+
+        s.close();
+    }
+
+    // A bare free-text term must reach the recipe name, which lives in another
+    // table and cannot be in shots_fts. Without the OR'd subquery this returns 0
+    // — the "typing my recipe's name finds nothing" gap.
+    void recipeNameMatchesBareFreeText() {
+        const QString path = freshDbPath();
+        ShotHistoryStorage s;
+        QVERIFY(s.initialize(path));
+        RecipeSeed seed;
+        seedRecipeShots(path, seed);
+        Q_UNUSED(seed)
+
+        QSignalSpy spy(&s, &ShotHistoryStorage::shotsFilteredReady);
+
+        // "monday" appears in no bean, profile or note — only in a recipe name.
+        s.requestShotsFiltered({{"searchText", "monday"}}, 0, 50);
+        QVERIFY(spy.wait(3000));
+        QCOMPARE(spy.last().at(0).toList().size(), 1);
+        // The count query runs against a DIFFERENT `FROM` (no `recipes` join) with
+        // the same disjunction string, so this checks the qualified names stay
+        // valid without the join. (It is no longer the "two independently built
+        // strings" risk an earlier version of this comment described — this change
+        // hoisted both to one shared `freeTextMatch`.)
+        QCOMPARE(spy.last().at(2).toInt(), 1);
+
+        // Word order must not matter — FTS treats space-separated terms as AND in
+        // any order, and this clause has to agree or the same query returns
+        // different answers depending on how the user typed it.
+        s.requestShotsFiltered({{"searchText", "monday dad"}}, 0, 50);
+        QVERIFY(spy.wait(3000));
+        QCOMPARE(spy.last().at(2).toInt(), 1);
+        QCOMPARE(spy.last().at(0).toList().size(), 1);
+
+        // Both terms must be present: "dad" matches two recipes, "dad vacation"
+        // must match neither.
+        s.requestShotsFiltered({{"searchText", "dad vacation"}}, 0, 50);
+        QVERIFY(spy.wait(3000));
+        QCOMPARE(spy.last().at(2).toInt(), 0);
+
+        // Archived recipes still match: the shot happened.
+        s.requestShotsFiltered({{"searchText", "vacation"}}, 0, 50);
+        QVERIFY(spy.wait(3000));
+        QCOMPARE(spy.last().at(2).toInt(), 1);
+
+        s.close();
+    }
+
+    // The `recipe:` keyword is narrower than bare text: recipe names only.
+    void recipeKeywordScopesToRecipeName() {
+        const QString path = freshDbPath();
+        ShotHistoryStorage s;
+        QVERIFY(s.initialize(path));
+        RecipeSeed seed;
+        seedRecipeShots(path, seed);
+        Q_UNUSED(seed)
+
+        QSignalSpy spy(&s, &ShotHistoryStorage::shotsFilteredReady);
+
+        // Single token: both "Dad Monday" and "Dad Tuesday".
+        // Assert ROWS as well as the count on every case: the count query does not
+        // join `recipes`, so a defect confined to the data query leaves the count
+        // correct and the rows empty — the "shots: [] beside a non-zero total"
+        // shape that made the MCP tool's failure invisible.
+        s.requestShotsFiltered({{"recipeName", "dad"}}, 0, 50);
+        QVERIFY(spy.wait(3000));
+        QCOMPARE(spy.last().at(2).toInt(), 2);
+        QCOMPARE(spy.last().at(0).toList().size(), 2);
+
+        // Quoted form (the QML hands the inner text through): disambiguates.
+        s.requestShotsFiltered({{"recipeName", "dad tuesday"}}, 0, 50);
+        QVERIFY(spy.wait(3000));
+        QCOMPARE(spy.last().at(2).toInt(), 1);
+        QCOMPARE(spy.last().at(0).toList().size(), 1);
+
+        // Keyword form is word-order independent too.
+        s.requestShotsFiltered({{"recipeName", "tuesday dad"}}, 0, 50);
+        QVERIFY(spy.wait(3000));
+        QCOMPARE(spy.last().at(2).toInt(), 1);
+
+        // Case-insensitive.
+        s.requestShotsFiltered({{"recipeName", "DAD TUESDAY"}}, 0, 50);
+        QVERIFY(spy.wait(3000));
+        QCOMPARE(spy.last().at(2).toInt(), 1);
+
+        // An explicitly empty QUOTED term must filter to NOTHING, never to
+        // everything — the search box sends a whitespace sentinel for it. (A bare
+        // `recipe:` with a space after it is deliberately NOT this case: the
+        // keyword does not match at all and the following word searches normally,
+        // because "recipe: dad" returning zero shots was worse than the widening
+        // it was meant to prevent.)
+        s.requestShotsFiltered({{"recipeName", QStringLiteral(" ")}}, 0, 50);
+        QVERIFY(spy.wait(3000));
+        QCOMPARE(spy.last().at(2).toInt(), 0);
+
+        // Scoped: every seeded shot has bean_brand 'Roaster', but no recipe is
+        // named that, so the keyword must return nothing where bare text would
+        // have returned everything.
+        s.requestShotsFiltered({{"recipeName", "Roaster"}}, 0, 50);
+        QVERIFY(spy.wait(3000));
+        QCOMPARE(spy.last().at(2).toInt(), 0);
+
+        s.close();
+    }
+
+    // The tap-through filters by ID, so it is unmoved by a rename and is not
+    // confused by a second recipe with the same name.
+    void recipeIdFilterIsExact() {
+        const QString path = freshDbPath();
+        ShotHistoryStorage s;
+        QVERIFY(s.initialize(path));
+        RecipeSeed seed;
+        seedRecipeShots(path, seed);
+
+        // A SECOND recipe named exactly "Dad Monday", with its own shot. A
+        // name-based filter would conflate the two; an id-based one must not.
+        withRawDb(path, "recipe_twin", [&](QSqlDatabase& db) {
+            QSqlQuery r(db);
+            QVERIFY(r.exec("INSERT INTO recipes (name, profile_title, drink_type, archived) "
+                           "VALUES ('Dad Monday', 'P', 'espresso', 0)"));
+            const qint64 twin = r.lastInsertId().toLongLong();
+            QSqlQuery sh(db);
+            sh.prepare("INSERT INTO shots (uuid, timestamp, profile_name, duration_seconds, recipe_id) "
+                       "VALUES ('s-twin', 5000, 'P', 30, ?)");
+            sh.addBindValue(twin); QVERIFY(sh.exec());
+        });
+
+        QSignalSpy spy(&s, &ShotHistoryStorage::shotsFilteredReady);
+
+        s.requestShotsFiltered({{"recipeId", seed.mondayId}}, 0, 50);
+        QVERIFY(spy.wait(3000));
+        QCOMPARE(spy.last().at(2).toInt(), 1);
+        QCOMPARE(spy.last().at(0).toList().size(), 1);
+        QCOMPARE(spy.last().at(0).toList().first().toMap().value("uuid").toString(),
+                 QString("s-monday"));
+
+        // The name both share matches two shots, proving the id filter above was
+        // doing something a name filter could not.
+        s.requestShotsFiltered({{"recipeName", "dad monday"}}, 0, 50);
+        QVERIFY(spy.wait(3000));
+        QCOMPARE(spy.last().at(2).toInt(), 2);
+
+        s.close();
+    }
+
+    // ---- Bag identity on the shot list (history-bag-filter) -----------------
+    //
+    // Same two scopes as recipe above: an exact id (the Custom widget's "this
+    // bag" action) and a `bag:` keyword substring. What is worth guarding here
+    // and is NOT a repeat of the recipe cases: a bag filter must be strictly
+    // narrower than the bean filter beside it (two bags of one coffee), the
+    // keyword spans three columns rather than one, and an unset filter must not
+    // be confusable with "match the NULL bag_id rows".
+
+    // The exact filter isolates ONE bag, where the bean filter over the same
+    // rows returns all of them. If these two ever return the same set, the bag
+    // filter has silently become a bean filter.
+    void bagIdFilterIsNarrowerThanBean() {
+        const QString path = freshDbPath();
+        ShotHistoryStorage s;
+        QVERIFY(s.initialize(path));
+        BagSeed seed;
+        seedBagShots(path, seed);
+
+        QSignalSpy spy(&s, &ShotHistoryStorage::shotsFilteredReady);
+
+        // Assert rows as well as the count throughout: the count query does not
+        // carry the display join, so a defect confined to the data query leaves
+        // a correct total beside empty rows.
+        s.requestShotsFiltered({{"bagId", seed.julyId}}, 0, 50);
+        QVERIFY(spy.wait(3000));
+        QCOMPARE(spy.last().at(2).toInt(), 2);
+        QCOMPARE(spy.last().at(0).toList().size(), 2);
+
+        s.requestShotsFiltered({{"bagId", seed.augustId}}, 0, 50);
+        QVERIFY(spy.wait(3000));
+        QCOMPARE(spy.last().at(2).toInt(), 1);
+        QCOMPARE(spy.last().at(0).toList().first().toMap().value("uuid").toString(),
+                 QString("b-august-1"));
+
+        // Same coffee, no bag scope: all four, spanning both bags AND the
+        // pre-bag shot. This is the widening the bean action deliberately keeps.
+        s.requestShotsFiltered({{"beanBrand", "Roaster"}, {"beanType", "Ethiopia Guji"}}, 0, 50);
+        QVERIFY(spy.wait(3000));
+        QCOMPARE(spy.last().at(2).toInt(), 4);
+
+        s.close();
+    }
+
+    // An unset bagId must be a no-op, and must never be spelled the same way as
+    // "the rows with no bag". The guard is bagIdIsSet(); with a hand-rolled `>= 0` a 0
+    // would emit `bag_id = 0`, matching nothing while looking like a filter.
+    void bagIdUnsetIsNotAFilter() {
+        const QString path = freshDbPath();
+        ShotHistoryStorage s;
+        QVERIFY(s.initialize(path));
+        BagSeed seed;
+        seedBagShots(path, seed);
+        Q_UNUSED(seed)
+
+        QSignalSpy spy(&s, &ShotHistoryStorage::shotsFilteredReady);
+
+        // -1 is parseFilterMap's default for an absent key; 0 is what a
+        // present-but-malformed value parses to. Both mean unset — every shot,
+        // including the NULL-bag one. (QML sends neither: the widget helper
+        // returns no filter at all when there is no active bag.)
+        s.requestShotsFiltered({{"bagId", -1}}, 0, 50);
+        QVERIFY(spy.wait(3000));
+        QCOMPARE(spy.last().at(2).toInt(), 4);
+
+        s.requestShotsFiltered({{"bagId", 0}}, 0, 50);
+        QVERIFY(spy.wait(3000));
+        QCOMPARE(spy.last().at(2).toInt(), 4);
+
+        s.close();
+    }
+
+    // A pre-bag shot (NULL bag_id) belongs to no bag, so no bag filter may
+    // return it.
+    //
+    // The EXACT form gets this free from SQL's three-valued logic — `bag_id = ?`
+    // never matches NULL whatever the id — so there is nothing here for a bag
+    // test to earn. (An earlier version of this test claimed a rewrite to
+    // `IFNULL(bag_id,0)` would break it silently; checked against sqlite3, that
+    // rewrite returns identical rows. The claim was wrong and the assertion it
+    // justified could not fail.) What IS worth pinning is the KEYWORD form: it
+    // resolves through a subquery over coffee_bags, where a NULL bag_id landing
+    // in an `IN (...)` is a real shape to get wrong.
+    void bagKeywordExcludesPreBagShots() {
+        const QString path = freshDbPath();
+        ShotHistoryStorage s;
+        QVERIFY(s.initialize(path));
+        BagSeed seed;
+        seedBagShots(path, seed);
+        Q_UNUSED(seed)
+
+        QSignalSpy spy(&s, &ShotHistoryStorage::shotsFilteredReady);
+
+        // "roaster" is in BOTH bags' roaster_name and in the pre-bag shot's
+        // bean_brand, so a clause that leaked to the shot row would return 4.
+        s.requestShotsFiltered({{"bagTerm", "roaster"}}, 0, 50);
+        QVERIFY(spy.wait(3000));
+        QCOMPARE(spy.last().at(2).toInt(), 3);
+        const QVariantList rows = spy.last().at(0).toList();
+        QCOMPARE(rows.size(), 3);
+        for (const QVariant& v : rows)
+            QVERIFY(v.toMap().value("uuid").toString() != QLatin1String("b-prebag"));
+
+        s.close();
+    }
+
+    // The `bag:` keyword spans coffee name, roaster AND roast date as ONE
+    // identity string, so terms from different fields combine. Per-column ORs
+    // would pass every single-term case here and fail the mixed one.
+    void bagKeywordSpansIdentityFields() {
+        const QString path = freshDbPath();
+        ShotHistoryStorage s;
+        QVERIFY(s.initialize(path));
+        BagSeed seed;
+        seedBagShots(path, seed);
+        Q_UNUSED(seed)
+
+        QSignalSpy spy(&s, &ShotHistoryStorage::shotsFilteredReady);
+
+        // Coffee name alone: both bags.
+        s.requestShotsFiltered({{"bagTerm", "guji"}}, 0, 50);
+        QVERIFY(spy.wait(3000));
+        QCOMPARE(spy.last().at(2).toInt(), 3);
+        QCOMPARE(spy.last().at(0).toList().size(), 3);
+
+        // Roast date alone narrows to one bag.
+        s.requestShotsFiltered({{"bagTerm", "2026-08"}}, 0, 50);
+        QVERIFY(spy.wait(3000));
+        QCOMPARE(spy.last().at(2).toInt(), 1);
+
+        // Terms drawn from DIFFERENT columns, ANDed: neither column contains
+        // both words, so this is the case a per-column OR gets wrong.
+        s.requestShotsFiltered({{"bagTerm", "guji 2026-07"}}, 0, 50);
+        QVERIFY(spy.wait(3000));
+        QCOMPARE(spy.last().at(2).toInt(), 2);
+        QCOMPARE(spy.last().at(0).toList().size(), 2);
+
+        // Word order must not matter, matching `recipe:` and FTS.
+        s.requestShotsFiltered({{"bagTerm", "2026-07 guji"}}, 0, 50);
+        QVERIFY(spy.wait(3000));
+        QCOMPARE(spy.last().at(2).toInt(), 2);
+
+        // Case-insensitive.
+        s.requestShotsFiltered({{"bagTerm", "GUJI"}}, 0, 50);
+        QVERIFY(spy.wait(3000));
+        QCOMPARE(spy.last().at(2).toInt(), 3);
+
+        // The subquery reads the BAG's roast_date, not the shot's. Both tables
+        // have that column, so an unqualified reference would resolve outward
+        // and match every shot on its own '1999-01-01' — silently, with no SQL
+        // error, since the query stays valid either way.
+        s.requestShotsFiltered({{"bagTerm", "1999"}}, 0, 50);
+        QVERIFY(spy.wait(3000));
+        QCOMPARE(spy.last().at(2).toInt(), 0);
+
+        // An explicitly empty quoted term (`bag:""`) is the whitespace sentinel
+        // the search box sends: filter to NOTHING, never to everything.
+        s.requestShotsFiltered({{"bagTerm", QStringLiteral(" ")}}, 0, 50);
+        QVERIFY(spy.wait(3000));
+        QCOMPARE(spy.last().at(2).toInt(), 0);
+
+        // Scoped to bags: "ristretto" is in every seeded shot's profile_name and
+        // in no bag field, so the keyword must return nothing where the same
+        // word as free text returns everything. Both halves asserted — the
+        // zero alone would also be produced by a keyword that matches nothing
+        // at all, which is the shape a broken clause takes.
+        s.requestShotsFiltered({{"bagTerm", "ristretto"}}, 0, 50);
+        QVERIFY(spy.wait(3000));
+        QCOMPARE(spy.last().at(2).toInt(), 0);
+
+        s.requestShotsFiltered({{"searchText", "ristretto"}}, 0, 50);
+        QVERIFY(spy.wait(3000));
+        QCOMPARE(spy.last().at(2).toInt(), 4);
+
+        s.close();
+    }
+
+    // LIKE metacharacters in a BAG's identity are matched literally.
+    //
+    // The decoy has to SHARE the literal prefix, or the test cannot fail: with
+    // "Plain Kenya" as the second bag — the first version of this — the term
+    // "100%" unescaped becomes '%100%%', which still needs the substring "100"
+    // and so still matches only the first bag. Deleting escapeLikeWildcards left
+    // it green. "100 Kenya" is the decoy that distinguishes them, the same shape
+    // recipeNameLikeMetacharactersAreLiteral uses ("50% off" vs "50 off").
+    //
+    // The escaping itself is shared with the recipe keyword (both go through
+    // likeContainsLiteral), so this is insurance rather than new coverage. It
+    // earns a slot in an existing file — milliseconds of build — because the bag
+    // clause matches a CONCATENATED expression over a different table, and the
+    // one thing this pins is that the term, not the expression, is what gets
+    // escaped.
+    void bagTermLikeMetacharactersAreLiteral() {
+        const QString path = freshDbPath();
+        ShotHistoryStorage s;
+        QVERIFY(s.initialize(path));
+        withRawDb(path, "bag_meta_seed", [&](QSqlDatabase& db) {
+            QSqlQuery b(db);
+            QVERIFY(b.exec("INSERT INTO coffee_bags (roaster_name, coffee_name, roast_date) "
+                           "VALUES ('R', '100% Kenya', '2026-07-04')"));
+            const qint64 pct = b.lastInsertId().toLongLong();
+            QVERIFY(b.exec("INSERT INTO coffee_bags (roaster_name, coffee_name, roast_date) "
+                           "VALUES ('R', '100 Kenya', '2026-07-05')"));
+            const qint64 plain = b.lastInsertId().toLongLong();
+            QSqlQuery sh(db);
+            sh.prepare("INSERT INTO shots (uuid, timestamp, profile_name, duration_seconds, bag_id) "
+                       "VALUES ('b-pct', 1000, 'P', 30, ?)");
+            sh.addBindValue(pct); QVERIFY(sh.exec());
+            sh.prepare("INSERT INTO shots (uuid, timestamp, profile_name, duration_seconds, bag_id) "
+                       "VALUES ('b-plain', 2000, 'P', 30, ?)");
+            sh.addBindValue(plain); QVERIFY(sh.exec());
+        });
+
+        QSignalSpy spy(&s, &ShotHistoryStorage::shotsFilteredReady);
+
+        // '%' is a literal here. Unescaped it is a wildcard, so "100%" would
+        // match "100 Kenya" too and the count would read 2.
+        s.requestShotsFiltered({{"bagTerm", "100%"}}, 0, 50);
+        QVERIFY(spy.wait(3000));
+        QCOMPARE(spy.last().at(2).toInt(), 1);
+        QCOMPARE(spy.last().at(0).toList().first().toMap().value("uuid").toString(),
+                 QString("b-pct"));
+
+        // Positive control: without the metacharacter both bags match, so the 1
+        // above is the escaping working and not the term simply missing.
+        s.requestShotsFiltered({{"bagTerm", "100"}}, 0, 50);
+        QVERIFY(spy.wait(3000));
+        QCOMPARE(spy.last().at(2).toInt(), 2);
+
+        s.close();
+    }
+
+    // LIKE metacharacters in a recipe name are matched literally. A missed escape
+    // does not crash — it silently turns a user's '%' into a wildcard, so this is
+    // the only thing that would catch it.
+    void recipeNameLikeMetacharactersAreLiteral() {
+        const QString path = freshDbPath();
+        ShotHistoryStorage s;
+        QVERIFY(s.initialize(path));
+
+        withRawDb(path, "recipe_meta", [&](QSqlDatabase& db) {
+            auto add = [&](const QString& name, const QString& uuid, qint64 ts) {
+                QSqlQuery ri(db);
+                ri.prepare("INSERT INTO recipes (name, profile_title, drink_type, archived) VALUES (?, 'P', 'espresso', 0)");
+                ri.addBindValue(name);
+                QVERIFY(ri.exec());
+                const qint64 id = ri.lastInsertId().toLongLong();
+                QSqlQuery sh(db);
+                sh.prepare("INSERT INTO shots (uuid, timestamp, profile_name, duration_seconds, recipe_id) "
+                           "VALUES (?, ?, 'P', 30, ?)");
+                sh.addBindValue(uuid); sh.addBindValue(ts); sh.addBindValue(id);
+                QVERIFY(sh.exec());
+            };
+            add("50% off",    "s-pct",   1000);
+            add("50 off",     "s-plain", 2000);   // '%' as a wildcard would also match this
+            add("a_b",        "s-under", 3000);
+            add("axb",        "s-any",   4000);   // '_' as a wildcard would also match this
+            add("Bob's Brew", "s-quote", 5000);   // an unescaped quote would break the SQL
+        });
+
+        QSignalSpy spy(&s, &ShotHistoryStorage::shotsFilteredReady);
+
+        s.requestShotsFiltered({{"recipeName", "50% off"}}, 0, 50);
+        QVERIFY(spy.wait(3000));
+        QCOMPARE(spy.last().at(2).toInt(), 1);
+        QCOMPARE(spy.last().at(0).toList().size(), 1);
+
+        s.requestShotsFiltered({{"recipeName", "a_b"}}, 0, 50);
+        QVERIFY(spy.wait(3000));
+        QCOMPARE(spy.last().at(2).toInt(), 1);
+
+        s.requestShotsFiltered({{"recipeName", "Bob's"}}, 0, 50);
+        QVERIFY(spy.wait(3000));
+        QCOMPARE(spy.last().at(2).toInt(), 1);
+
+        // Same escaping, but through the free-text path, which builds an inline
+        // SQL literal instead of a bind — a different function with the same
+        // failure mode.
+        s.requestShotsFiltered({{"searchText", "Bob's"}}, 0, 50);
+        QVERIFY(spy.wait(3000));
+        QCOMPARE(spy.last().at(2).toInt(), 1);
 
         s.close();
     }

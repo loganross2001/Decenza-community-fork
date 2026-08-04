@@ -1,5 +1,6 @@
 #include "mcpserver.h"
 #include "mcptoolregistry.h"
+#include "mcplogging.h"
 #include "mcptools_shots_helpers.h"
 #include "mcplogfilter.h"
 #include "../history/shothistorystorage.h"
@@ -87,7 +88,8 @@ static void reshapeBeanBase(QJsonObject& obj)
     else if (!raw.isEmpty())
         // Corruption tripwire — sparse-emit makes a bad blob look "unlinked"
         // at every consumer; leave one trace.
-        qWarning() << "MCP: corrupt beanBaseJson on shot" << obj.value("id");
+        MCP_WARN_TAGGED("shots", QStringLiteral("corrupt beanBaseJson on shot %1")
+                                    .arg(obj.value("id").toVariant().toString()));
 }
 
 void registerShotTools(McpToolRegistry* registry, ShotHistoryStorage* shotHistory)
@@ -153,52 +155,77 @@ void registerShotTools(McpToolRegistry* registry, ShotHistoryStorage* shotHistor
                     // Grinder model resolves through the equipment_id pointer
                     // (the per-shot grinder_model column is dropped in migration
                     // 23, add-equipment-packages task 4.1).
-                    QString sql = "SELECT s.id, timestamp, profile_name, dose_weight, final_weight, "
-                                  "duration_seconds, enjoyment, "
-                                  "grinder_setting, rpm, eg.model AS grinder_model, "
-                                  "espresso_notes, bean_brand, bean_type, yield_override, profile_json, "
-                                  "stopped_by "
+                    // Recipe identity resolves through s.recipe_id the same way
+                    // (history-recipe-identity): live from `recipes`, so a rename
+                    // is reflected here too. A shot-linked recipe can only be
+                    // archived, never deleted, so the row always resolves.
+                    // EVERY shots column is qualified `s.`: joining `recipes` makes
+                    // ten names ambiguous (bag_id, beanbase_id, created_at,
+                    // equipment_id, hot_water_json, id, profile_json, steam_json,
+                    // updated_at, yield_mode), and SQLite rejects the whole
+                    // statement on any one of them. Do not hand-maintain that list
+                    // — recompute it from the two CREATE TABLEs plus their
+                    // ALTER TABLE ADD COLUMN migrations if you need it. Qualifying
+                    // unconditionally is what makes the list not matter.
+                    QString sql = "SELECT s.id, s.timestamp, s.profile_name, s.dose_weight, s.final_weight, "
+                                  "s.duration_seconds, s.enjoyment, "
+                                  "s.grinder_setting, s.rpm, eg.model AS grinder_model, "
+                                  "s.espresso_notes, s.bean_brand, s.bean_type, s.yield_override, s.profile_json, "
+                                  "s.stopped_by, s.recipe_id, r.name AS recipe_name "
                                   "FROM shots s "
                                   "LEFT JOIN equipment_items eg ON eg.package_id = s.equipment_id AND eg.kind = 'grinder' "
+                                  "LEFT JOIN recipes r ON r.id = s.recipe_id "
                                   "WHERE 1=1 ";
-                    QString countSql = "SELECT COUNT(*) FROM shots WHERE 1=1 ";
+                    // Aliased `s` as well, though it does NOT join: it lets the shared
+                    // WHERE fragments below carry one qualified spelling instead of
+                    // two that can drift apart.
+                    QString countSql = "SELECT COUNT(*) FROM shots s WHERE 1=1 ";
 
                     if (!profileFilter.isEmpty()) {
-                        sql += " AND profile_name LIKE :profileFilter";
-                        countSql += " AND profile_name LIKE :profileFilter";
+                        sql += " AND s.profile_name LIKE :profileFilter";
+                        countSql += " AND s.profile_name LIKE :profileFilter";
                     }
                     if (!beanFilter.isEmpty()) {
-                        sql += " AND bean_brand LIKE :beanFilter";
-                        countSql += " AND bean_brand LIKE :beanFilter";
+                        sql += " AND s.bean_brand LIKE :beanFilter";
+                        countSql += " AND s.bean_brand LIKE :beanFilter";
                     }
                     if (minEnjoyment > 0) {
-                        sql += " AND enjoyment >= :minEnjoyment";
-                        countSql += " AND enjoyment >= :minEnjoyment";
+                        sql += " AND s.enjoyment >= :minEnjoyment";
+                        countSql += " AND s.enjoyment >= :minEnjoyment";
                     }
                     if (hasRating) {
-                        sql += " AND enjoyment > 0";
-                        countSql += " AND enjoyment > 0";
+                        sql += " AND s.enjoyment > 0";
+                        countSql += " AND s.enjoyment > 0";
                     }
                     if (hasNotes) {
-                        sql += " AND TRIM(COALESCE(espresso_notes, '')) <> ''";
-                        countSql += " AND TRIM(COALESCE(espresso_notes, '')) <> ''";
+                        sql += " AND TRIM(COALESCE(s.espresso_notes, '')) <> ''";
+                        countSql += " AND TRIM(COALESCE(s.espresso_notes, '')) <> ''";
                     }
                     if (hasTds) {
-                        sql += " AND drink_tds > 0";
-                        countSql += " AND drink_tds > 0";
+                        sql += " AND s.drink_tds > 0";
+                        countSql += " AND s.drink_tds > 0";
                     }
                     if (afterEpoch > 0) {
-                        sql += " AND timestamp >= :after";
-                        countSql += " AND timestamp >= :after";
+                        sql += " AND s.timestamp >= :after";
+                        countSql += " AND s.timestamp >= :after";
                     }
                     if (beforeEpoch > 0) {
-                        sql += " AND timestamp <= :before";
-                        countSql += " AND timestamp <= :before";
+                        sql += " AND s.timestamp <= :before";
+                        countSql += " AND s.timestamp <= :before";
                     }
-                    sql += " ORDER BY timestamp DESC LIMIT " + QString::number(limit) + " OFFSET " + QString::number(offset);
+                    sql += " ORDER BY s.timestamp DESC LIMIT " + QString::number(limit) + " OFFSET " + QString::number(offset);
 
                     QSqlQuery query(db);
-                    query.prepare(sql);
+                    // prepare() checked with || so it SHORT-CIRCUITS. Calling
+                    // exec() after a failed prepare clears lastError and then
+                    // reports whatever the finalized statement produces —
+                    // "Parameter count mismatch" with any filter bound — which
+                    // sends the reader hunting a bind bug instead of the real
+                    // "ambiguous column name". (qsqlquery.cpp clears the error
+                    // before delegating; qsql_sqlite.cpp clears it again.)
+                    const bool prepared = query.prepare(sql);
+                    if (!prepared)
+                        MCP_WARN_TAGGED("shots_list", QStringLiteral("prepare failed - %1").arg(query.lastError().text()));
                     if (!profileFilter.isEmpty())
                         query.bindValue(":profileFilter", "%" + profileFilter + "%");
                     if (!beanFilter.isEmpty())
@@ -210,7 +237,7 @@ void registerShotTools(McpToolRegistry* registry, ShotHistoryStorage* shotHistor
                     if (beforeEpoch > 0)
                         query.bindValue(":before", beforeEpoch);
 
-                    if (query.exec()) {
+                    if (prepared && query.exec()) {
                         while (query.next()) {
                             QJsonObject shot;
                             shot["id"] = query.value("id").toLongLong();
@@ -227,6 +254,19 @@ void registerShotTools(McpToolRegistry* registry, ShotHistoryStorage* shotHistor
                             if (rpm > 0)
                                 shot["rpm"] = rpm;  // RPM half of the dial-in (sparse)
                             shot["grinderModel"] = query.value("grinder_model").toString();
+                            // Sparse: both omitted when the shot used no recipe,
+                            // so their presence alone answers "was this a recipe
+                            // drink?" without a sentinel value to interpret.
+                            // Both or neither. Emitting an id beside an empty name
+                            // would defeat the sparse convention's whole point —
+                            // presence answers "was this a recipe drink?" — and an
+                            // LLM client renders the empty string literally.
+                            const qint64 recipeId = query.value("recipe_id").toLongLong();
+                            const QString recipeName = query.value("recipe_name").toString();
+                            if (recipeId > 0 && !recipeName.isEmpty()) {
+                                shot["recipeId"] = recipeId;
+                                shot["recipeName"] = recipeName;
+                            }
                             shot["notes"] = query.value("espresso_notes").toString();
                             shot["beanBrand"] = query.value("bean_brand").toString();
                             shot["beanType"] = query.value("bean_type").toString();
@@ -257,10 +297,25 @@ void registerShotTools(McpToolRegistry* registry, ShotHistoryStorage* shotHistor
                             }
                             shots.append(shot);
                         }
+                    } else {
+                        // A bare `if (exec())` with no else is how a broken query
+                        // here reaches a user: the loop is skipped, the count query
+                        // still succeeds because it does not join, and the tool
+                        // answers `shots: []` beside a non-zero `total` — forever,
+                        // with no log line and no error field. That is exactly what
+                        // an unqualified `profile_json` did once the recipes join
+                        // landed. Report it instead.
+                        const QString why = prepared ? query.lastError().text()
+                                                     : QStringLiteral("statement did not prepare");
+                        MCP_WARN_TAGGED("shots_list", QStringLiteral("query failed - %1").arg(why));
+                        result["error"] = QStringLiteral("Shot list query failed: ") + why;
                     }
 
                     QSqlQuery countQuery(db);
-                    countQuery.prepare(countSql);
+                    if (!countQuery.prepare(countSql))
+                        MCP_WARN_TAGGED("shots_list",
+                                        QStringLiteral("count prepare failed - %1")
+                                            .arg(countQuery.lastError().text()));
                     if (!profileFilter.isEmpty())
                         countQuery.bindValue(":profileFilter", "%" + profileFilter + "%");
                     if (!beanFilter.isEmpty())
@@ -271,8 +326,20 @@ void registerShotTools(McpToolRegistry* registry, ShotHistoryStorage* shotHistor
                         countQuery.bindValue(":after", afterEpoch);
                     if (beforeEpoch > 0)
                         countQuery.bindValue(":before", beforeEpoch);
-                    if (countQuery.exec() && countQuery.next())
+                    // The count query needs the same treatment as the data query
+                    // above: swallowed here, totalCount stays 0, which makes
+                    // hasMore false and nextOffset null — a client paginating gets
+                    // a truncated result set and no error.
+                    if (!countQuery.exec()) {
+                        MCP_WARN_TAGGED("shots_list",
+                                        QStringLiteral("count query failed - %1")
+                                            .arg(countQuery.lastError().text()));
+                        if (!result.contains("error"))
+                            result["error"] = QStringLiteral("Shot count query failed: ")
+                                              + countQuery.lastError().text();
+                    } else if (countQuery.next()) {
                         totalCount = countQuery.value(0).toLongLong();
+                    }
                 })) {
                     result["error"] = "Failed to open shot database";
                 }
@@ -436,6 +503,7 @@ void registerShotTools(McpToolRegistry* registry, ShotHistoryStorage* shotHistor
             QThread* thread = QThread::create([dbPath, idArray, fullDetail, respond]() {
                 QJsonObject result;
                 QJsonArray shots;
+                QJsonArray unresolved;
                 QList<ShotProjection> projections;
 
                 if (!withTempDb(dbPath, "mcp_compare", [&](QSqlDatabase& db) {
@@ -443,7 +511,14 @@ void registerShotTools(McpToolRegistry* registry, ShotHistoryStorage* shotHistor
                         qint64 shotId = idVal.toInteger();
                         ShotRecord record = ShotHistoryStorage::loadShotRecordStatic(db, shotId);
                         ShotProjection shot = ShotHistoryStorage::convertShotRecord(record);
-                        if (shot.isValid()) {
+                        if (!shot.isValid()) {
+                            // Dropped IDs used to vanish: the caller got a shorter
+                            // array and could only detect the loss by comparing
+                            // counts, with no way to learn WHICH id was bad.
+                            unresolved.append(shotId);
+                            continue;
+                        }
+                        {
                             QJsonObject shotJson = shot.toJsonObject();
                             if (!fullDetail)
                                 stripTimeSeriesFields(shotJson);
@@ -457,9 +532,20 @@ void registerShotTools(McpToolRegistry* registry, ShotHistoryStorage* shotHistor
                     }
                 })) {
                     result["error"] = "Failed to open shot database";
+                } else if (shots.isEmpty()) {
+                    // Nothing resolved, so there is nothing to compare — a result
+                    // with an empty `shots` array and a `count` of 0 would read as
+                    // a successful comparison of nothing.
+                    QStringList ids;
+                    for (const QJsonValue& v : std::as_const(unresolved))
+                        ids << QString::number(v.toInteger());
+                    result["error"] = "No shots found for any of the requested ids: "
+                                      + ids.join(QStringLiteral(", "));
                 }
 
                 if (!result.contains("error")) {
+                    if (!unresolved.isEmpty())
+                        result["unresolvedShotIds"] = unresolved;
                     // Dedupe shared profile metadata. Comparing dial-in
                     // iterations on a single recipe is the common case, and
                     // profileNotes is ~700 chars per shot — hoisting it to

@@ -179,22 +179,40 @@ DecenzaDialog {
         return Theme.replaceEmojiWithImg(result, Theme.bodyFont.pixelSize, true)  // user-authored template may contain markup
     }
 
+    // Built once per popup rather than per lookup: getActionLabel() is read from
+    // six bindings, and rebuilding a 41-entry map across the C++/QML boundary for
+    // each single-key read would be work nobody asked for. Not a cache — there is
+    // nothing to invalidate; the table is a compile-time constant.
+    readonly property var _actionLabels: Settings.network.layoutActionLabels()
+
     // Helper to get action label
     function getActionLabel(actionId) {
         if (!actionId) return TranslationManager.translate("customeditor.action.none", "None")
-        // Handle parameterized actions like command:loadProfile:<name>
-        if (actionId.indexOf("command:loadProfile:") === 0) {
-            var profileName = actionId.substring("command:loadProfile:".length)
-            var profiles = ProfileManager.availableProfiles
-            for (var j = 0; j < profiles.length; j++) {
-                if (profiles[j].name === profileName)
-                    return TranslationManager.translate("customaction.command.loadProfile", "Load Profile") + ": " + profiles[j].title
+        // The LABEL table, not getFilteredActions(): a stored action can be one
+        // the picker no longer offers — a legacy alias, or one filtered out by
+        // this page's context — and falling through to `return actionId` would
+        // show the user the raw string `command:scanDE1` where their widget
+        // plainly says "Scan for DE1".
+        var entry = popup._actionLabels[actionId]
+        if (entry !== undefined)
+            return TranslationManager.translate(entry.key, entry.fallback)
+        // A parameterized action stores its argument in the id
+        // (command:loadProfile:<filename>), so it misses above. Resolve the stem
+        // through the same table — writing "Load Profile" out here again would
+        // put a third copy of a label the catalog owns.
+        var stem = actionId.split(":").slice(0, 2).join(":")
+        var stemEntry = popup._actionLabels[stem]
+        if (stemEntry !== undefined) {
+            var arg = actionId.substring(stem.length + 1)
+            var label = TranslationManager.translate(stemEntry.key, stemEntry.fallback)
+            if (stem === "command:loadProfile") {
+                var profiles = ProfileManager.availableProfiles
+                for (var j = 0; j < profiles.length; j++) {
+                    if (profiles[j].name === arg)
+                        return label + ": " + profiles[j].title
+                }
             }
-            return TranslationManager.translate("customaction.command.loadProfile", "Load Profile") + ": " + profileName
-        }
-        var actions = getFilteredActions()
-        for (var i = 0; i < actions.length; i++) {
-            if (actions[i].id === actionId) return actions[i].label
+            return label + ": " + arg
         }
         return actionId
     }
@@ -871,133 +889,31 @@ DecenzaDialog {
                         font: Theme.captionFont
                     }
 
-                    // Click action selector
-                    Rectangle {
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: Theme.scaled(28)
-                        radius: Theme.scaled(4)
-                        color: Theme.backgroundColor
-                        border.color: popup.textAction ? Theme.primaryColor : Theme.borderColor
-                        border.width: 1
-                        Accessible.role: Accessible.Button
-                        Accessible.name: TranslationManager.translate("customeditor.accessible.clickAction", "Click action") + ", " + popup.getActionLabel(popup.textAction)
-                        Accessible.focusable: true
-                        Accessible.onPressAction: clickActionMa.clicked(null)
-
-                        RowLayout {
-                            anchors.fill: parent
-                            anchors.leftMargin: Theme.scaled(4)
-                            anchors.rightMargin: Theme.scaled(4)
-
-                            Text {
-                                text: TranslationManager.translate("customeditor.gesture.click", "Click:")
-                                color: Theme.textSecondaryColor
-                                font: Theme.captionFont
-                                Accessible.ignored: true
-                            }
-                            Text {
-                                Layout.fillWidth: true
-                                text: popup.getActionLabel(popup.textAction)
-                                color: popup.textAction ? Theme.primaryColor : Theme.textColor
-                                font: Theme.captionFont
-                                elide: Text.ElideRight
-                                Accessible.ignored: true
-                            }
-                        }
-                        MouseArea {
-                            id: clickActionMa
-                            anchors.fill: parent
-                            onClicked: {
-                                actionPickerPopup.gesture = "click"
-                                actionPickerPopup.open()
-                            }
-                        }
+                    // Three rows, one component (GestureActionRow) — they were three
+                    // ~40-line copies differing in a label and a property name, and the
+                    // built-in action widgets need the same row.
+                    GestureActionRow {
+                        gestureLabel: TranslationManager.translate("customeditor.gesture.click", "Click:")
+                        accessibleLabel: TranslationManager.translate("customeditor.accessible.clickAction", "Click action")
+                        actionId: popup.textAction
+                        actionLabel: popup.getActionLabel(popup.textAction)
+                        onPicked: { actionPickerPopup.gesture = "click"; actionPickerPopup.open() }
                     }
 
-                    // Long Press action selector
-                    Rectangle {
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: Theme.scaled(28)
-                        radius: Theme.scaled(4)
-                        color: Theme.backgroundColor
-                        border.color: popup.textLongPressAction ? Theme.primaryColor : Theme.borderColor
-                        border.width: 1
-                        Accessible.role: Accessible.Button
-                        Accessible.name: TranslationManager.translate("customeditor.accessible.longPressAction", "Long press action") + ", " + popup.getActionLabel(popup.textLongPressAction)
-                        Accessible.focusable: true
-                        Accessible.onPressAction: longPressActionMa.clicked(null)
-
-                        RowLayout {
-                            anchors.fill: parent
-                            anchors.leftMargin: Theme.scaled(4)
-                            anchors.rightMargin: Theme.scaled(4)
-
-                            Text {
-                                text: TranslationManager.translate("customeditor.gesture.long", "Long:")
-                                color: Theme.textSecondaryColor
-                                font: Theme.captionFont
-                                Accessible.ignored: true
-                            }
-                            Text {
-                                Layout.fillWidth: true
-                                text: popup.getActionLabel(popup.textLongPressAction)
-                                color: popup.textLongPressAction ? Theme.primaryColor : Theme.textColor
-                                font: Theme.captionFont
-                                elide: Text.ElideRight
-                                Accessible.ignored: true
-                            }
-                        }
-                        MouseArea {
-                            id: longPressActionMa
-                            anchors.fill: parent
-                            onClicked: {
-                                actionPickerPopup.gesture = "longpress"
-                                actionPickerPopup.open()
-                            }
-                        }
+                    GestureActionRow {
+                        gestureLabel: TranslationManager.translate("customeditor.gesture.long", "Long:")
+                        accessibleLabel: TranslationManager.translate("customeditor.accessible.longPressAction", "Long press action")
+                        actionId: popup.textLongPressAction
+                        actionLabel: popup.getActionLabel(popup.textLongPressAction)
+                        onPicked: { actionPickerPopup.gesture = "longpress"; actionPickerPopup.open() }
                     }
 
-                    // Double Click action selector
-                    Rectangle {
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: Theme.scaled(28)
-                        radius: Theme.scaled(4)
-                        color: Theme.backgroundColor
-                        border.color: popup.textDoubleclickAction ? Theme.primaryColor : Theme.borderColor
-                        border.width: 1
-                        Accessible.role: Accessible.Button
-                        Accessible.name: TranslationManager.translate("customeditor.accessible.doubleClickAction", "Double click action") + ", " + popup.getActionLabel(popup.textDoubleclickAction)
-                        Accessible.focusable: true
-                        Accessible.onPressAction: dblClickActionMa.clicked(null)
-
-                        RowLayout {
-                            anchors.fill: parent
-                            anchors.leftMargin: Theme.scaled(4)
-                            anchors.rightMargin: Theme.scaled(4)
-
-                            Text {
-                                text: TranslationManager.translate("customeditor.gesture.doubleClick", "DblClk:")
-                                color: Theme.textSecondaryColor
-                                font: Theme.captionFont
-                                Accessible.ignored: true
-                            }
-                            Text {
-                                Layout.fillWidth: true
-                                text: popup.getActionLabel(popup.textDoubleclickAction)
-                                color: popup.textDoubleclickAction ? Theme.primaryColor : Theme.textColor
-                                font: Theme.captionFont
-                                elide: Text.ElideRight
-                                Accessible.ignored: true
-                            }
-                        }
-                        MouseArea {
-                            id: dblClickActionMa
-                            anchors.fill: parent
-                            onClicked: {
-                                actionPickerPopup.gesture = "doubleclick"
-                                actionPickerPopup.open()
-                            }
-                        }
+                    GestureActionRow {
+                        gestureLabel: TranslationManager.translate("customeditor.gesture.dblclick", "DblClk:")
+                        accessibleLabel: TranslationManager.translate("customeditor.accessible.dblClickAction", "Double click action")
+                        actionId: popup.textDoubleclickAction
+                        actionLabel: popup.getActionLabel(popup.textDoubleclickAction)
+                        onPicked: { actionPickerPopup.gesture = "doubleclick"; actionPickerPopup.open() }
                     }
                 }
             }
@@ -1320,14 +1236,6 @@ DecenzaDialog {
         return false
     }
 
-    // Build action items list with "None" prepended
-    function buildActionItems() {
-        var items = [{ id: "", label: TranslationManager.translate("customeditor.action.none", "None") }]
-        var filtered = popup.getFilteredActions()
-        for (var i = 0; i < filtered.length; i++)
-            items.push(filtered[i])
-        return items
-    }
 
     // Find the currently selected action index for a given gesture
     function findCurrentActionIndex(gesture, items) {
@@ -1361,7 +1269,7 @@ DecenzaDialog {
         options: _actionItems.map(function(item) { return item.label })
         currentIndex: popup.findCurrentActionIndex(gesture, _actionItems)
 
-        onAboutToShow: _actionItems = popup.buildActionItems()
+        onAboutToShow: _actionItems = LayoutActions.pickerItems(popup.pageContext)
 
         onSelected: function(index, value) {
             var actionId = _actionItems[index].id
@@ -1418,47 +1326,4 @@ DecenzaDialog {
         }
     }
 
-    // Action registry with page context filtering
-    function getFilteredActions() {
-        var allActions = [
-            { id: "navigate:settings",      label: TranslationManager.translate("customaction.navigate.settings", "Go to Settings"),             contexts: ["idle", "all"] },
-            { id: "navigate:history",        label: TranslationManager.translate("customaction.navigate.history", "Go to History"),               contexts: ["idle", "all"] },
-            { id: "navigate:profiles",       label: TranslationManager.translate("customaction.navigate.profiles", "Go to Profiles"),             contexts: ["idle", "all"] },
-            { id: "navigate:profileEditor",  label: TranslationManager.translate("customaction.navigate.profileEditor", "Go to Profile Editor"),  contexts: ["idle", "all"] },
-            { id: "navigate:recipes",        label: TranslationManager.translate("customaction.navigate.recipes", "Go to Recipes"),               contexts: ["idle", "all"] },
-            { id: "navigate:descaling",      label: TranslationManager.translate("customaction.navigate.descaling", "Go to Descaling"),           contexts: ["idle", "all"] },
-            { id: "navigate:ai",             label: TranslationManager.translate("customaction.navigate.ai", "Go to AI Settings"),                contexts: ["idle", "all"] },
-            { id: "navigate:visualizer",     label: TranslationManager.translate("customaction.navigate.visualizer", "Go to Visualizer"),         contexts: ["idle", "all"] },
-            { id: "navigate:autofavorites",  label: TranslationManager.translate("customaction.navigate.autofavorites", "Go to Favorites"),       contexts: ["idle", "all"] },
-            { id: "navigate:steam",          label: TranslationManager.translate("customaction.navigate.steam", "Go to Steam"),                   contexts: ["idle"] },
-            { id: "navigate:hotwater",       label: TranslationManager.translate("customaction.navigate.hotwater", "Go to Hot Water"),             contexts: ["idle"] },
-            { id: "navigate:flush",          label: TranslationManager.translate("customaction.navigate.flush", "Go to Flush"),                   contexts: ["idle"] },
-            { id: "navigate:beaninfo",       label: TranslationManager.translate("customaction.navigate.beaninfo", "Go to Bean Info"),             contexts: ["idle", "all"] },
-            { id: "navigate:espresso",       label: TranslationManager.translate("customaction.navigate.espresso", "Go to Espresso"),             contexts: ["idle"] },
-            { id: "navigate:community",      label: TranslationManager.translate("customaction.navigate.community", "Go to Community"),           contexts: ["idle", "all"] },
-            { id: "navigate:flowCalibration", label: TranslationManager.translate("customaction.navigate.flowCalibration", "Go to Flow Calibration"), contexts: ["idle", "all"] },
-            { id: "navigate:profileImport",  label: TranslationManager.translate("customaction.navigate.profileImport", "Go to Profile Import"),  contexts: ["idle", "all"] },
-            { id: "navigate:shotReview",     label: TranslationManager.translate("customaction.navigate.shotReview", "Go to Shot Review"),        contexts: ["idle"] },
-            { id: "command:sleep",           label: TranslationManager.translate("customaction.command.sleep", "Sleep"),                           contexts: ["idle"] },
-            { id: "command:startEspresso",   label: TranslationManager.translate("customaction.command.startEspresso", "Start Espresso"),         contexts: ["idle"] },
-            { id: "command:startSteam",      label: TranslationManager.translate("customaction.command.startSteam", "Start Steam"),               contexts: ["idle"] },
-            { id: "command:startHotWater",   label: TranslationManager.translate("customaction.command.startHotWater", "Start Hot Water"),        contexts: ["idle"] },
-            { id: "command:startFlush",      label: TranslationManager.translate("customaction.command.startFlush", "Start Flush"),               contexts: ["idle"] },
-            { id: "command:idle",            label: TranslationManager.translate("customaction.command.idle", "Stop (Idle)"),                     contexts: ["idle", "espresso", "steam", "hotwater", "flush"] },
-            { id: "command:tare",            label: TranslationManager.translate("customaction.command.tare", "Tare Scale"),                      contexts: ["idle", "espresso", "all"] },
-            { id: "command:scanScale",       label: TranslationManager.translate("customaction.command.scanScale", "Scan for Devices"),           contexts: ["idle", "all"] },
-            { id: "command:brewSettings",    label: TranslationManager.translate("customaction.command.brewSettings", "Open Brew Settings"),      contexts: ["idle"] },
-            { id: "command:tempToggleSteam", label: TranslationManager.translate("customaction.command.tempToggleSteam", "Toggle Steam (temporary)"), contexts: ["idle"] },
-            { id: "command:toggleCharging",  label: TranslationManager.translate("customaction.command.toggleCharging", "Toggle Charging Mode"),  contexts: ["idle", "all"] },
-            { id: "command:uploadVisualizer", label: TranslationManager.translate("customaction.command.uploadVisualizer", "Upload to Visualizer"), contexts: ["idle"] },
-            { id: "command:disconnectDE1",   label: TranslationManager.translate("customaction.command.disconnectDE1", "Disconnect DE1"),         contexts: ["idle"] },
-            { id: "command:loadProfile",     label: TranslationManager.translate("customaction.command.loadProfile", "Load Profile") + "...",     contexts: ["idle"] },
-            { id: "command:previousProfile", label: TranslationManager.translate("customaction.command.previousProfile", "Previous Profile"),   contexts: ["idle"] },
-            { id: "command:quit",            label: TranslationManager.translate("customaction.command.quit", "Quit App"),                        contexts: ["idle"] }
-        ]
-        var ctx = popup.pageContext
-        return allActions.filter(function(a) {
-            return a.contexts.indexOf(ctx) >= 0 || a.contexts.indexOf("all") >= 0
-        })
-    }
 }

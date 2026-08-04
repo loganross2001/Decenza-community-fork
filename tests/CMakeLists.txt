@@ -112,6 +112,7 @@ set(CORE_SOURCES
     ${CMAKE_SOURCE_DIR}/src/core/settings_network.cpp
     ${CMAKE_SOURCE_DIR}/src/core/settings_app.cpp
     ${CMAKE_SOURCE_DIR}/src/core/settings_calibration.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/settings_graph.cpp
     ${CMAKE_SOURCE_DIR}/src/ble/scales/scaletypeids.cpp
 )
 
@@ -416,7 +417,7 @@ add_decenza_test(tst_profile
     tst_profile.cpp
 )
 
-# --- tst_builtinprofileformat: every shipped built-in must satisfy reaprime's
+# --- tst_builtinprofileformat: every shipped built-in must satisfy Decaid's
 # Profile.fromJson contract (required keys, non-empty steps, enum vocabulary), so
 # a profile makes the same coffee in every DE1 app. See OpenSpec
 # align-profile-json-with-reaprime.
@@ -1199,6 +1200,9 @@ target_link_libraries(tst_decentscalewifi PRIVATE
     Qt6::WebSockets
     Qt6::WebSocketsPrivate
     Qt6::CorePrivate
+    # name() formats its label through WifiScaleResultUtil so the WiFi scale is
+    # spelled identically everywhere it is shown.
+    decenza_wifiscaleresultlib
 )
 
 # --- tst_wifiscalediscovery: mDNS probe service ---
@@ -1505,9 +1509,15 @@ add_decenza_test(tst_mcptools_presets
 target_link_libraries(tst_mcptools_presets PRIVATE decenza_a11ylib decenza_appserviceslib decenza_profilelib decenza_shotlib Qt6::TextToSpeech Qt6::Multimedia paho-mqtt3a-static)
 target_include_directories(tst_mcptools_presets PRIVATE ${CMAKE_BINARY_DIR})
 
-# --- tst_webdebuglogger: WebDebugLogger session-index cache (improve-mcp-debug-log-search) ---
+# --- tst_webdebuglogger: WebDebugLogger session-index cache (improve-mcp-debug-log-search),
+# plus CrashHandler::getDebugLogTail(), which reads the debug.log WebDebugLogger
+# writes and whose result is the crash report's debugLogTail field. (Both resolve
+# DecenzaPaths::logsDirectory() as of #1746; before that CrashHandler used
+# AppDataLocation, a different file on Android.) crashhandler.cpp is compiled into
+# this target alone — no other test needs it, so no intermediate library. ---
 add_decenza_test(tst_webdebuglogger
     tst_webdebuglogger.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/crashhandler.cpp
 )
 target_link_libraries(tst_webdebuglogger PRIVATE decenza_webdebugloggerlib)
 

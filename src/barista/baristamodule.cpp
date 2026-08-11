@@ -20,7 +20,10 @@
 #include "../controllers/profilemanager.h"   // [barista-fork] activate_recipe pre-flight (findProfileByTitle)
 #include "../history/shothistorystorage.h"
 #include "../history/recipestorage.h"         // [barista-fork] Recipes 2.0 activate pre-flight + load
+#include "../history/coffeebagstorage.h"      // [barista-fork] bagOp seam: coffee-bag CRUD
+#include "../network/beanbase_blob.h"         // [barista-fork] bagOp: merge bean-detail edits into the blob
 #include "../core/dbutils.h"                  // [barista-fork] withTempDb for the off-main recipe pre-flight
+#include <QDate>                              // [barista-fork] bagOp list: days-off-roast freshness
 #include "../ai/aimanager.h"
 
 #include <QQmlApplicationEngine>
@@ -808,6 +811,238 @@ BaristaModule::BaristaModule(MainController* mainController, MachineState* machi
                 reply(QJsonObject{{QStringLiteral("success"), false},
                     {QStringLiteral("failure_reason"), QStringLiteral("unsupported_op")},
                     {QStringLiteral("detail"), QStringLiteral("That recipe operation isn't supported yet.")}});
+            });
+            // [barista-fork] bagOp seam: coffee-bag management (list/create/update/mark_empty/delete) against
+            // CoffeeBagStorage. Same shape as recipeOp — a shared one-shot correlation scaffold (10s timeout +
+            // double-reply guard) bridges each async storage signal to the reply. Bean-detail edits (origin,
+            // process, tastingNotes, ...) live in the beanBaseData blob, folded via BeanBaseBlob::mergeBeanDetails
+            // exactly as the in-app bag editor and the MCP `bag` tool do.
+            ai->setBagOpHandler([mc](const QString& op, const QVariantMap& args,
+                                     std::function<void(QJsonObject)> reply) {
+                CoffeeBagStorage* bags = mc ? mc->bagStorage() : nullptr;
+                if (!bags) {
+                    reply(QJsonObject{{QStringLiteral("success"), false},
+                                      {QStringLiteral("failure_reason"), QStringLiteral("unavailable")},
+                                      {QStringLiteral("detail"), QStringLiteral("Bag management is unavailable.")}});
+                    return;
+                }
+                auto makeFinish = [reply](std::shared_ptr<QMetaObject::Connection> conn, QTimer* timer,
+                                          std::shared_ptr<bool> done) {
+                    return [reply, conn, timer, done](QJsonObject r) {
+                        if (*done) return;
+                        *done = true;
+                        if (*conn) QObject::disconnect(*conn);
+                        timer->stop(); timer->deleteLater();
+                        reply(r);
+                    };
+                };
+
+                // The bean-detail blob vocabulary (mirrors the MCP `bag` tool's kBlobKeys). These do NOT map to
+                // columns; they're merged into beanBaseData. Kept here (app side) so baristatools.cpp needs no
+                // BeanBaseBlob dependency.
+                static const QStringList kBlobKeys = {
+                    QStringLiteral("origin"), QStringLiteral("region"), QStringLiteral("producer"),
+                    QStringLiteral("variety"), QStringLiteral("process"), QStringLiteral("tastingNotes"),
+                    QStringLiteral("link")};
+
+                if (op == QLatin1String("list")) {
+                    // requestInventory returns only in-inventory bags, MRU order (finished bags are out of scope
+                    // for a "which bag do you mean" lookup); includeFinished is accepted but can't surface them.
+                    auto done = std::make_shared<bool>(false);
+                    auto conn = std::make_shared<QMetaObject::Connection>();
+                    QTimer* timer = new QTimer(bags); timer->setSingleShot(true);
+                    auto finish = makeFinish(conn, timer, done);
+                    *conn = QObject::connect(bags, &CoffeeBagStorage::inventoryReady, bags,
+                        [finish](const QVariantList& list) {
+                            QJsonArray arr;
+                            for (const QVariant& v : list) {
+                                const CoffeeBag b = CoffeeBag::fromVariantMap(v.toMap());
+                                QJsonObject o;
+                                o[QStringLiteral("bagId")]   = static_cast<double>(b.id);
+                                o[QStringLiteral("roaster")] = b.roasterName;
+                                o[QStringLiteral("coffee")]  = b.coffeeName;
+                                if (!b.roastDate.isEmpty()) o[QStringLiteral("roastDate")] = b.roastDate;
+                                // Freshness = days since the beans last met air: the defrost date if the bag was
+                                // frozen and thawed, otherwise the roast date.
+                                const QString ref = !b.defrostDate.isEmpty() ? b.defrostDate : b.roastDate;
+                                const QDate rd = QDate::fromString(ref, Qt::ISODate);
+                                if (rd.isValid())
+                                    o[QStringLiteral("freshnessDays")] = static_cast<double>(rd.daysTo(QDate::currentDate()));
+                                o[QStringLiteral("inInventory")] = b.inInventory;
+                                arr.append(o);
+                            }
+                            finish(QJsonObject{{QStringLiteral("bags"), arr}});
+                        });
+                    QObject::connect(timer, &QTimer::timeout, bags, [finish]() {
+                        finish(QJsonObject{{QStringLiteral("error"), QStringLiteral("No inventory returned within 10s.")}});
+                    });
+                    timer->start(10000);
+                    bags->requestInventory();
+                    return;
+                }
+
+                if (op == QLatin1String("create")) {
+                    const QString roaster = args.value(QStringLiteral("roasterName")).toString().trimmed();
+                    const QString coffee  = args.value(QStringLiteral("coffeeName")).toString().trimmed();
+                    if (roaster.isEmpty() || coffee.isEmpty()) {
+                        reply(QJsonObject{{QStringLiteral("success"), false},
+                            {QStringLiteral("failure_reason"), QStringLiteral("bad_args")},
+                            {QStringLiteral("detail"), QStringLiteral("A new bag needs a roaster and a coffee name.")}});
+                        return;
+                    }
+                    const QString kind = (args.value(QStringLiteral("kind")).toString() == QLatin1String("tea"))
+                                         ? QStringLiteral("tea") : QStringLiteral("coffee");
+                    QVariantMap bag;
+                    bag.insert(QStringLiteral("roasterName"), roaster);
+                    bag.insert(QStringLiteral("coffeeName"), coffee);
+                    bag.insert(QStringLiteral("kind"), kind);
+                    bag.insert(QStringLiteral("inInventory"), true);
+                    for (const char* k : {"roastDate", "roastLevel", "grinderSetting", "yieldMode"}) {
+                        const QString key = QLatin1String(k);
+                        if (args.contains(key)) bag.insert(key, args.value(key).toString());
+                    }
+                    if (args.contains(QStringLiteral("doseWeightG")))
+                        bag.insert(QStringLiteral("doseWeightG"), args.value(QStringLiteral("doseWeightG")).toDouble());
+                    if (args.contains(QStringLiteral("rpm")))
+                        bag.insert(QStringLiteral("rpm"), args.value(QStringLiteral("rpm")).toInt());
+                    if (args.contains(QStringLiteral("yieldValue")))
+                        bag.insert(QStringLiteral("yieldValue"), args.value(QStringLiteral("yieldValue")).toDouble());
+                    QVariantMap blobEdits;
+                    for (const QString& key : kBlobKeys)
+                        if (args.contains(key)) blobEdits.insert(key, args.value(key));
+                    if (!blobEdits.isEmpty())
+                        bag.insert(QStringLiteral("beanBaseData"),
+                                   BeanBaseBlob::mergeBeanDetails(QString(), blobEdits));
+
+                    auto done = std::make_shared<bool>(false);
+                    auto conn = std::make_shared<QMetaObject::Connection>();
+                    QTimer* timer = new QTimer(bags); timer->setSingleShot(true);
+                    auto finish = makeFinish(conn, timer, done);
+                    // bagCreated is a broadcast with no token — correlate on the submitted identity (roaster +
+                    // coffee + kind), exactly like the MCP bag create. bagId<=0 is a failure and is still ours.
+                    *conn = QObject::connect(bags, &CoffeeBagStorage::bagCreated, bags,
+                        [finish, roaster, coffee, kind](qint64 bagId, const QVariantMap& created) {
+                            if (bagId > 0
+                                && (created.value(QStringLiteral("roasterName")).toString() != roaster
+                                    || created.value(QStringLiteral("coffeeName")).toString() != coffee
+                                    || created.value(QStringLiteral("kind")).toString() != kind))
+                                return;  // someone else's concurrent create
+                            if (bagId <= 0) {
+                                finish(QJsonObject{{QStringLiteral("success"), false},
+                                    {QStringLiteral("failure_reason"), QStringLiteral("create_failed")},
+                                    {QStringLiteral("detail"), QStringLiteral("The bag could not be created.")}});
+                                return;
+                            }
+                            finish(QJsonObject{{QStringLiteral("success"), true},
+                                {QStringLiteral("bagId"), static_cast<double>(bagId)},
+                                {QStringLiteral("roaster"), roaster},
+                                {QStringLiteral("coffee"), coffee}});
+                        });
+                    QObject::connect(timer, &QTimer::timeout, bags, [finish]() {
+                        finish(QJsonObject{{QStringLiteral("success"), false},
+                            {QStringLiteral("failure_reason"), QStringLiteral("timeout")},
+                            {QStringLiteral("detail"), QStringLiteral("No confirmation the bag was created within 10s.")}});
+                    });
+                    timer->start(10000);
+                    bags->requestCreateBag(bag);
+                    return;
+                }
+
+                // update / mark_empty / delete all key on a bagId.
+                const qint64 bagId = args.value(QStringLiteral("bagId")).toLongLong();
+                if (bagId <= 0) {
+                    reply(QJsonObject{{QStringLiteral("success"), false},
+                        {QStringLiteral("failure_reason"), QStringLiteral("bad_args")},
+                        {QStringLiteral("detail"), QStringLiteral("That needs a valid bagId — use list_bags first.")}});
+                    return;
+                }
+
+                if (op == QLatin1String("delete")) {
+                    auto done = std::make_shared<bool>(false);
+                    auto conn = std::make_shared<QMetaObject::Connection>();
+                    QTimer* timer = new QTimer(bags); timer->setSingleShot(true);
+                    auto finish = makeFinish(conn, timer, done);
+                    *conn = QObject::connect(bags, &CoffeeBagStorage::bagDeleted, bags,
+                        [finish, bagId](qint64 id, bool success) {
+                            if (id != bagId) return;
+                            if (success)
+                                finish(QJsonObject{{QStringLiteral("success"), true},
+                                    {QStringLiteral("bagId"), static_cast<double>(bagId)}});
+                            else
+                                finish(QJsonObject{{QStringLiteral("success"), false},
+                                    {QStringLiteral("failure_reason"), QStringLiteral("has_history")},
+                                    {QStringLiteral("detail"), QStringLiteral(
+                                        "This bag has shot history, so it can't be deleted — offer to finish it "
+                                        "(mark it empty) instead.")}});
+                        });
+                    QObject::connect(timer, &QTimer::timeout, bags, [finish]() {
+                        finish(QJsonObject{{QStringLiteral("success"), false},
+                            {QStringLiteral("failure_reason"), QStringLiteral("timeout")}});
+                    });
+                    timer->start(10000);
+                    bags->requestDeleteBag(bagId);
+                    return;
+                }
+
+                // update / mark_empty both resolve on bagUpdated(id, success).
+                QVariantMap fields;
+                if (op == QLatin1String("update")) {
+                    for (const char* k : {"roastDate", "roastLevel", "grinderSetting", "yieldMode"}) {
+                        const QString key = QLatin1String(k);
+                        if (args.contains(key)) fields.insert(key, args.value(key).toString());
+                    }
+                    if (args.contains(QStringLiteral("doseWeightG")))
+                        fields.insert(QStringLiteral("doseWeightG"), args.value(QStringLiteral("doseWeightG")).toDouble());
+                    if (args.contains(QStringLiteral("rpm")))
+                        fields.insert(QStringLiteral("rpm"), args.value(QStringLiteral("rpm")).toInt());
+                    if (args.contains(QStringLiteral("yieldValue")))
+                        fields.insert(QStringLiteral("yieldValue"), args.value(QStringLiteral("yieldValue")).toDouble());
+                    QVariantMap blobEdits;
+                    for (const QString& key : kBlobKeys)
+                        if (args.contains(key)) blobEdits.insert(key, args.value(key));
+                    if (!blobEdits.isEmpty()) {
+                        // Merge into the CURRENT blob (a bounded single-row read on a discrete voice action),
+                        // so an edit to one detail doesn't wipe the rest of the canonical snapshot.
+                        QString existing;
+                        withTempDb(bags->databasePath(), QStringLiteral("barista_bagupd_read"),
+                                   [&](QSqlDatabase& db) {
+                                       existing = CoffeeBagStorage::loadBagStatic(db, bagId).beanBaseData;
+                                   });
+                        fields.insert(QStringLiteral("beanBaseData"),
+                                      BeanBaseBlob::mergeBeanDetails(existing, blobEdits));
+                    }
+                    if (fields.isEmpty()) {
+                        reply(QJsonObject{{QStringLiteral("success"), false},
+                            {QStringLiteral("failure_reason"), QStringLiteral("bad_args")},
+                            {QStringLiteral("detail"), QStringLiteral("Nothing to change on that bag.")}});
+                        return;
+                    }
+                }
+
+                auto done = std::make_shared<bool>(false);
+                auto conn = std::make_shared<QMetaObject::Connection>();
+                QTimer* timer = new QTimer(bags); timer->setSingleShot(true);
+                auto finish = makeFinish(conn, timer, done);
+                const bool isFinish = (op == QLatin1String("mark_empty"));
+                *conn = QObject::connect(bags, &CoffeeBagStorage::bagUpdated, bags,
+                    [finish, bagId, isFinish](qint64 id, bool success) {
+                        if (id != bagId) return;
+                        if (success)
+                            finish(QJsonObject{{QStringLiteral("success"), true},
+                                {QStringLiteral("bagId"), static_cast<double>(bagId)},
+                                {QStringLiteral("finished"), isFinish}});
+                        else
+                            finish(QJsonObject{{QStringLiteral("success"), false},
+                                {QStringLiteral("failure_reason"), QStringLiteral("not_found_or_failed")},
+                                {QStringLiteral("detail"), QStringLiteral("That bag couldn't be found or updated.")}});
+                    });
+                QObject::connect(timer, &QTimer::timeout, bags, [finish]() {
+                    finish(QJsonObject{{QStringLiteral("success"), false},
+                        {QStringLiteral("failure_reason"), QStringLiteral("timeout")}});
+                });
+                timer->start(10000);
+                if (isFinish) bags->requestMarkEmpty(bagId);
+                else          bags->requestUpdateBag(bagId, fields);
             });
             // [barista-fork] list_profiles seam: hand back the app's usable profiles (main-thread ProfileManager
             // read). The barista uses this to show what's available AND to resolve a spoken profile name to its

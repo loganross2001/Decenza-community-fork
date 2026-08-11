@@ -89,6 +89,12 @@ public:
                             // types, so DB-only tests still compile it. Empty = those tools unavailable.
                             const std::function<void(const QString&, const QVariantMap&,
                                                      std::function<void(QJsonObject)>)>& recipeOp,
+                            // [barista-fork] bagOp seam: the app-side coffee-bag operations that need
+                            // CoffeeBagStorage (list/create/update/mark_empty/delete). One generic (op, args,
+                            // done) seam — baristatools.cpp names no app types, so DB-only tests still compile it.
+                            // Empty = the bag tools are unavailable.
+                            const std::function<void(const QString&, const QVariantMap&,
+                                                     std::function<void(QJsonObject)>)>& bagOp,
                             // [barista-fork] list_profiles seam: return the app's usable profiles ([{title,editor,
                             // drink}], optional title substring filter). Sync, main-thread ProfileManager read.
                             const std::function<QJsonArray(const QString&)>& listProfiles,

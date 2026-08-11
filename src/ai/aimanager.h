@@ -220,6 +220,12 @@ public:
                                                std::function<void(QJsonObject)>)> handler) {
         m_recipeOpHandler = std::move(handler);
     }
+    // [barista-fork] bagOp seam: coffee-bag management (list/create/update/mark_empty/delete). App-side (needs
+    // CoffeeBagStorage); one generic (op, args, reply) seam wired in baristamodule.cpp.
+    void setBagOpHandler(std::function<void(const QString&, const QVariantMap&,
+                                            std::function<void(QJsonObject)>)> handler) {
+        m_bagOpHandler = std::move(handler);
+    }
     // [barista-fork] list_profiles seam: return the app's usable profiles (query = optional title filter).
     void setListProfilesHandler(std::function<QJsonArray(const QString&)> handler) {
         m_listProfilesHandler = std::move(handler);
@@ -487,6 +493,7 @@ private:
     std::function<void(qint64, std::function<void(QJsonObject)>)> m_activateRecipeHandler;
     std::function<void(qint64, const QVariantMap&, std::function<void(QJsonObject)>)> m_updateRecipeHandler;
     std::function<void(const QString&, const QVariantMap&, std::function<void(QJsonObject)>)> m_recipeOpHandler;
+    std::function<void(const QString&, const QVariantMap&, std::function<void(QJsonObject)>)> m_bagOpHandler;
     std::function<QJsonArray(const QString&)> m_listProfilesHandler;
     std::function<void(const QString&)> m_setActiveUserHandler;   // [barista-fork] Phase 1 set_active_user seam
     ProfileManager* m_profileManager = nullptr;

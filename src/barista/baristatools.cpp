@@ -262,6 +262,119 @@ QJsonArray BaristaTools::toolDefinitions()
     sf["input_schema"] = sfSchema;
     tools.append(sf);
 
+    // [barista-fork] Coffee-bag management tools (list_bags / add_bag / update_bag / finish_bag / delete_bag).
+    // These let the user manage their bean inventory BY VOICE. All ride the app-side bagOp seam (CoffeeBagStorage);
+    // the executor only translates the model's inputs → the seam's args. numProp mints a number-typed schema field
+    // (dose/yield/ratio/temp), matching the inline pattern apply_dial_change uses.
+    const auto numProp = [](const QString& d){ QJsonObject o; o["type"] = QString("number"); o["description"] = d; return o; };
+
+    // list_bags (READ) — the inventory, so the model can resolve "the Ethiopia" to a bagId before editing it.
+    QJsonObject lb;
+    lb["name"] = QString("list_bags");
+    lb["description"] = QString(
+        "List the user's coffee/tea bags so you can find the one they mean (e.g. resolve \"the Ethiopia\" or "
+        "\"my Onyx bag\" to its bagId) before editing, finishing, or deleting it. Returns each bag's bagId, "
+        "roaster, coffee, roast date, freshness in days, and whether it's still in the inventory. Call this "
+        "first whenever a bag operation needs a bagId you don't already have.");
+    QJsonObject lbSchema; lbSchema["type"] = QString("object");
+    QJsonObject lbProps;
+    QJsonObject lbInc; lbInc["type"] = QString("boolean");
+    lbInc["description"] = QString("Include finished/empty bags too (default false = only bags still in the inventory).");
+    lbProps["includeFinished"] = lbInc;
+    lbSchema["properties"] = lbProps;
+    lb["input_schema"] = lbSchema;
+    tools.append(lb);
+
+    // Shared bean-detail properties reused by add_bag + update_bag (the beanBaseData blob vocabulary).
+    const auto addBeanDetailProps = [&strProp, &numProp](QJsonObject& p) {
+        p["roastDate"]    = strProp("Roast date, YYYY-MM-DD (optional).");
+        p["roastLevel"]   = strProp("Roast level, e.g. light / medium / dark (optional).");
+        p["doseWeightG"]  = numProp("Preferred dose for this bag, grams (optional).");
+        p["grinderSetting"] = strProp("Grind setting to remember for this bag (optional; grinder-specific free text).");
+        p["rpm"]          = numProp("Grinder RPM to remember for this bag (optional).");
+        p["yieldG"]       = numProp("Preferred yield OUT, grams — an absolute anchor (optional; mutually exclusive with yieldRatio).");
+        p["yieldRatio"]   = numProp("Preferred brew ratio, e.g. 2.0 for 1:2.0 (optional; mutually exclusive with yieldG).");
+        p["origin"]       = strProp("Country/origin (optional).");
+        p["region"]       = strProp("Growing region (optional).");
+        p["producer"]     = strProp("Producer/farm (optional).");
+        p["variety"]      = strProp("Bean variety/cultivar (optional).");
+        p["process"]      = strProp("Process, e.g. washed / natural / honey (optional).");
+        p["tastingNotes"] = strProp("Roaster's tasting notes (optional).");
+        p["link"]         = strProp("Product URL for the bag (optional).");
+    };
+
+    // add_bag (WRITE) — create a new bag in the inventory.
+    QJsonObject ab;
+    ab["name"] = QString("add_bag");
+    ab["description"] = QString(
+        "Add a new coffee (or tea) bag to the user's inventory when they mention getting one — e.g. \"I just "
+        "picked up some Onyx Southern Weather\". Provide the roaster and the coffee name (both required) plus "
+        "whatever else they told you (roast date, roast level, origin, process, a dose/grind to remember, etc.). "
+        "Do NOT invent details. This does NOT change which bag is currently loaded for the next shot — it only "
+        "adds it to the list.");
+    QJsonObject abSchema; abSchema["type"] = QString("object");
+    QJsonObject abProps;
+    abProps["roasterName"] = strProp("Roaster / brand (required).");
+    abProps["coffeeName"]  = strProp("Coffee / bean name (required).");
+    QJsonObject abKind; abKind["type"] = QString("string");
+    abKind["enum"] = QJsonArray{ QString("coffee"), QString("tea") };
+    abKind["description"] = QString("Whether this is a coffee or tea bag (default coffee). Set only at creation.");
+    abProps["kind"] = abKind;
+    addBeanDetailProps(abProps);
+    abSchema["properties"] = abProps;
+    abSchema["required"] = QJsonArray{ QString("roasterName"), QString("coffeeName") };
+    ab["input_schema"] = abSchema;
+    tools.append(ab);
+
+    // update_bag (WRITE) — edit fields on an existing bag.
+    QJsonObject ub;
+    ub["name"] = QString("update_bag");
+    ub["description"] = QString(
+        "Edit fields on an existing bag — e.g. \"set the roast date to Aug 3\", \"this one's a natural process\", "
+        "\"remember 18 grams for the Ethiopia\". Pass the bagId (use list_bags first if you don't have it) plus "
+        "ONLY the field(s) that change. Leave everything else out; do NOT restate unchanged values or invent data.");
+    QJsonObject ubSchema; ubSchema["type"] = QString("object");
+    QJsonObject ubProps;
+    ubProps["bagId"] = intProp("The bagId of the bag to edit (from list_bags) (required).");
+    addBeanDetailProps(ubProps);
+    ubSchema["properties"] = ubProps;
+    ubSchema["required"] = QJsonArray{ QString("bagId") };
+    ub["input_schema"] = ubSchema;
+    tools.append(ub);
+
+    // finish_bag (WRITE, needs confirmation) — mark a bag as finished/empty (removes it from the active inventory).
+    QJsonObject fb;
+    fb["name"] = QString("finish_bag");
+    fb["description"] = QString(
+        "Mark a bag as finished/empty so it leaves the active inventory (its history is kept). Call this ONLY "
+        "after the user has clearly confirmed they're done with THAT specific bag — name the bag in your "
+        "confirmation first (\"Mark the Onyx Southern Weather as finished?\") and wait for a yes. NEVER call it "
+        "unprompted or on a vague remark. Use list_bags to get the bagId if you don't have it.");
+    QJsonObject fbSchema; fbSchema["type"] = QString("object");
+    QJsonObject fbProps;
+    fbProps["bagId"] = intProp("The bagId of the bag to mark finished (from list_bags) (required).");
+    fbSchema["properties"] = fbProps;
+    fbSchema["required"] = QJsonArray{ QString("bagId") };
+    fb["input_schema"] = fbSchema;
+    tools.append(fb);
+
+    // delete_bag (WRITE, DESTRUCTIVE, needs confirmation) — permanently remove a bag (refused if shots reference it).
+    QJsonObject db;
+    db["name"] = QString("delete_bag");
+    db["description"] = QString(
+        "Permanently delete a bag from the inventory. This is DESTRUCTIVE — call it ONLY after the user has "
+        "explicitly confirmed deleting THAT specific bag, which you named in your confirmation (\"Delete the "
+        "Onyx Southern Weather for good?\") and got a clear yes. If the bag has shot history it can't be deleted; "
+        "the result says so — offer to finish it (finish_bag) instead. Prefer finish_bag unless the user really "
+        "wants it gone. Use list_bags to get the bagId.");
+    QJsonObject dbSchema; dbSchema["type"] = QString("object");
+    QJsonObject dbProps;
+    dbProps["bagId"] = intProp("The bagId of the bag to delete (from list_bags) (required).");
+    dbSchema["properties"] = dbProps;
+    dbSchema["required"] = QJsonArray{ QString("bagId") };
+    db["input_schema"] = dbSchema;
+    tools.append(db);
+
     // [barista-fork] apply_dial_change (WRITE) — apply an agreed next-shot dial change. This is the
     // approve-then-apply seam: the barista PROPOSES a change and asks; only once the user clearly approves
     // ("yes" / "do it" / "go ahead") does it call this. ALL fields — dose, yield, temperature, AND grinder —
@@ -608,7 +721,7 @@ QJsonArray BaristaTools::toolDefinitions()
 
     // [barista-fork] update_recipe — edit a SAVED recipe's fields (does not touch the machine; no activation).
     // Approve-then-apply lives in the model (like activate_recipe): confirm the exact change with the user first.
-    const auto numProp = [](const QString& d){ QJsonObject o; o["type"] = QString("number"); o["description"] = d; return o; };
+    // (numProp is defined once, earlier with the bag tools, and reused here.)
     QJsonObject rupd;
     rupd["name"] = QString("update_recipe");
     rupd["description"] = QString(
@@ -1151,6 +1264,8 @@ void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage*
                                                         std::function<void(QJsonObject)>)>& updateRecipe,
                                const std::function<void(const QString&, const QVariantMap&,
                                                         std::function<void(QJsonObject)>)>& recipeOp,
+                               const std::function<void(const QString&, const QVariantMap&,
+                                                        std::function<void(QJsonObject)>)>& bagOp,
                                const std::function<QJsonArray(const QString&)>& listProfiles,
                                const std::function<void(const QString&)>& setActiveUser,
                                const QVariantMap& anchorSnapshot,
@@ -1565,6 +1680,101 @@ void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage*
         recipeOp(QStringLiteral("delete"),
                  QVariantMap{{QStringLiteral("recipeId"), recipeId}},
                  [done](QJsonObject result) { done(result); });
+        return;
+    }
+
+    // [barista-fork] Coffee-bag management (list_bags / add_bag / update_bag / finish_bag / delete_bag). All ride
+    // the app-side bagOp seam (CoffeeBagStorage). This TU only maps the model's inputs → the seam's args; the
+    // async storage correlation + the destructive guards live in baristamodule.cpp. yieldG/yieldRatio are
+    // translated to the storage's (yieldValue, yieldMode) pair, exactly as create_recipe/update_recipe do.
+    if (name == QLatin1String("list_bags") || name == QLatin1String("add_bag")
+        || name == QLatin1String("update_bag") || name == QLatin1String("finish_bag")
+        || name == QLatin1String("delete_bag")) {
+        if (!bagOp) { done(QJsonObject{{QStringLiteral("error"), QStringLiteral("Bag management is unavailable.")}}); return; }
+
+        if (name == QLatin1String("list_bags")) {
+            bagOp(QStringLiteral("list"),
+                  QVariantMap{{QStringLiteral("includeFinished"),
+                               input.value(QStringLiteral("includeFinished")).toBool()}},
+                  [done](QJsonObject result) { done(result); });
+            return;
+        }
+
+        // finish_bag / delete_bag / update_bag all need a bagId.
+        if (name != QLatin1String("add_bag")) {
+            const qint64 bagId = input.value(QStringLiteral("bagId")).toVariant().toLongLong();
+            if (bagId <= 0) {
+                done(QJsonObject{{QStringLiteral("error"), QStringLiteral(
+                    "That needs a bagId — call list_bags to find the bag first.")}});
+                return;
+            }
+            if (name == QLatin1String("finish_bag")) {
+                bagOp(QStringLiteral("mark_empty"), QVariantMap{{QStringLiteral("bagId"), bagId}},
+                      [done](QJsonObject result) { done(result); });
+                return;
+            }
+            if (name == QLatin1String("delete_bag")) {
+                bagOp(QStringLiteral("delete"), QVariantMap{{QStringLiteral("bagId"), bagId}},
+                      [done](QJsonObject result) { done(result); });
+                return;
+            }
+            // update_bag: fall through with bagId already validated.
+        }
+
+        // add_bag / update_bag: build the field map from the model's inputs.
+        QVariantMap fields;
+        const bool isAdd = (name == QLatin1String("add_bag"));
+        if (isAdd) {
+            const QString roaster = input.value(QStringLiteral("roasterName")).toString().trimmed();
+            const QString coffee  = input.value(QStringLiteral("coffeeName")).toString().trimmed();
+            if (roaster.isEmpty() || coffee.isEmpty()) {
+                done(QJsonObject{{QStringLiteral("error"), QStringLiteral(
+                    "add_bag needs both a roasterName and a coffeeName.")}});
+                return;
+            }
+            fields.insert(QStringLiteral("roasterName"), roaster);
+            fields.insert(QStringLiteral("coffeeName"), coffee);
+            const QString kind = input.value(QStringLiteral("kind")).toString().trimmed();
+            if (kind == QLatin1String("tea") || kind == QLatin1String("coffee"))
+                fields.insert(QStringLiteral("kind"), kind);
+        } else {
+            fields.insert(QStringLiteral("bagId"),
+                          input.value(QStringLiteral("bagId")).toVariant().toLongLong());
+        }
+        // Direct string/number fields (same names the storage/blob use).
+        for (const char* k : {"roastDate", "roastLevel", "grinderSetting",
+                              "origin", "region", "producer", "variety", "process", "tastingNotes", "link"}) {
+            const QString key = QLatin1String(k);
+            if (input.contains(key)) fields.insert(key, input.value(key).toString());
+        }
+        if (input.contains(QStringLiteral("doseWeightG")))
+            fields.insert(QStringLiteral("doseWeightG"), input.value(QStringLiteral("doseWeightG")).toDouble());
+        if (input.contains(QStringLiteral("rpm")))
+            fields.insert(QStringLiteral("rpm"), input.value(QStringLiteral("rpm")).toVariant().toInt());
+        // Yield anchor: grams (absolute) or a dose multiplier (ratio) — mutually exclusive, like the recipe tools.
+        const bool hasYieldG = input.contains(QStringLiteral("yieldG"));
+        const bool hasRatio  = input.contains(QStringLiteral("yieldRatio"));
+        if (hasYieldG && hasRatio) {
+            done(QJsonObject{{QStringLiteral("error"), QStringLiteral(
+                "yieldG and yieldRatio are mutually exclusive — send exactly one.")}});
+            return;
+        }
+        if (hasYieldG) {
+            const double g = input.value(QStringLiteral("yieldG")).toDouble();
+            fields.insert(QStringLiteral("yieldValue"), g > 0 ? g : 0.0);
+            fields.insert(QStringLiteral("yieldMode"), g > 0 ? QStringLiteral("absolute") : QStringLiteral("none"));
+        } else if (hasRatio) {
+            const double r = input.value(QStringLiteral("yieldRatio")).toDouble();
+            fields.insert(QStringLiteral("yieldValue"), r > 0 ? YieldSpec::clampRatio(r) : 0.0);
+            fields.insert(QStringLiteral("yieldMode"), r > 0 ? QStringLiteral("ratio") : QStringLiteral("none"));
+        }
+        if (!isAdd && fields.size() <= 1) {  // only bagId → nothing to change
+            done(QJsonObject{{QStringLiteral("error"), QStringLiteral(
+                "update_bag needs the bagId plus at least one field to change.")}});
+            return;
+        }
+        bagOp(isAdd ? QStringLiteral("create") : QStringLiteral("update"), fields,
+              [done](QJsonObject result) { done(result); });
         return;
     }
 

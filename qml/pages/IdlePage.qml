@@ -172,16 +172,26 @@ T.Page {
         idlePage.topPanelClearance = 0
     }
 
-    // Center-zone inline carousel: when the expanded center column would reach
-    // the bottom-anchored lower-mid band, the band is HIDDEN (faded out) rather
-    // than shoved down — the band sits on bottomBar.top (modulo the user's zone
-    // Y-offset), so "down" runs it into the bottom action bar. One-way: reads the column's
-    // un-offset bottom against the band's static top.
-    readonly property bool carouselOverlapsBand: {
+    // Center-zone inline carousel: when the expanded center column reaches the
+    // bottom-anchored lower-mid band, slide the COLUMN up so the band stays
+    // visible, rather than hiding the band. The band sits on bottomBar.top
+    // (modulo the user's zone Y-offset) and can't be shoved down without running
+    // into the bottom action bar — so the movable side is the column, exactly
+    // the "slide content aside instead of overlapping" the picker popups already
+    // do (bottomPanelClearance). Read the column's UN-OFFSET bottom against the
+    // band's static top so the slide can't feed back into its own input.
+    readonly property real _bandOverlap: {
         if (idlePage.activePresetFunction === "" || !idlePage.lowerMidBarVisible)
-            return false
-        return (centerContent.y + centerContent.height + Theme.spacingMedium) > lowerMidBar.y
+            return 0
+        return Math.max(0, (centerContent.y + centerContent.height + Theme.spacingMedium) - lowerMidBar.y)
     }
+    // How far the column slides up to clear the band, bounded so it never slides
+    // off the top under the status bar. Combined with the popup clearance (max)
+    // where the transform is applied, so a picker over an active preset still works.
+    readonly property real presetBandClearance: Math.min(idlePage._bandOverlap, idlePage._maxPanelClearance)
+    // Fall back to fading the band ONLY when the bounded slide can't fully clear
+    // the overlap (very short viewports) — otherwise the slide keeps it visible.
+    readonly property bool carouselOverlapsBand: idlePage._bandOverlap > idlePage.presetBandClearance + 0.5
 
     Component.onCompleted: {
         MainController.bagStorage.requestInventory()
@@ -901,7 +911,7 @@ T.Page {
         // Transient slide to clear a picker popup: up for a lower-half popup,
         // down for an upper-half one (restores to 0 on close).
         transform: Translate {
-            y: -idlePage.bottomPanelClearance + idlePage.topPanelClearance
+            y: -Math.max(idlePage.bottomPanelClearance, idlePage.presetBandClearance) + idlePage.topPanelClearance
             // qmllint disable Quick.layout-positioning
             // False positive, verified: this `y` belongs to the Translate transform, not to the
             // layout-managed item. A transform is precisely how you offset an item inside a layout

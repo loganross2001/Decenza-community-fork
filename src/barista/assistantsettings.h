@@ -2,6 +2,7 @@
 
 #include <QObject>
 #include <QSettings>
+#include "../core/appsettings.h"
 #include <QString>
 #include <QVariantList>
 #include <QVariantMap>
@@ -273,5 +274,5 @@ private:
     double readVoiceLevel(bool coaching, const QString& field, const QString& legacyKey) const;
     void writeVoiceLevel(bool coaching, const QString& field, double value);
 
-    mutable QSettings m_settings;  // org/app default = DecentEspresso/DE1Qt (set in main)
+    mutable AppSettings m_settings;  // the one canonical store (DecentEspresso/Decenza)
 };

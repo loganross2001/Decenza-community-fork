@@ -61,6 +61,7 @@ QByteArray voiceLike(double f0, double formantHz, double seconds, double amp,
 class TstSpeakerEmbedder : public QObject {
     Q_OBJECT
 private slots:
+    void init() { QTest::failOnWarning(); }
     void deterministic();
     void selfMatchIsHigh();
     void differentTonesLessSimilarThanNoisyCopy();

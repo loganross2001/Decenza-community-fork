@@ -2249,9 +2249,9 @@ T.ApplicationWindow {
     // owner wants the dock visible for). phase has NOTIFY, so this binding re-evaluates on transitions, and the
     // Loader's onVisibleChanged→dismiss() tears down any live session when the shot starts.
     function isActiveOperation(phase) {   // [barista-fork]
-        // [barista-fork] MachineState is now a QML_SINGLETON (upstream #1674) — enums read straight off it as
-        // MachineState.Phase.X; the old "MachineStateType" name is gone, and referencing it threw here and
-        // broke the barista dock's `visible` binding (barista failed to load after the v2.0.1 sync).
+        // [barista-fork] MachineState is now a QML_SINGLETON (upstream #1674) — the Phase enumerators read
+        // straight off it (see the uses below); the old "MachineStateType" name is gone, and referencing it
+        // threw here and broke the barista dock's `visible` binding (barista failed to load after the v2.0.1 sync).
         return phase === MachineState.Phase.Preinfusion ||
                phase === MachineState.Phase.Pouring ||
                phase === MachineState.Phase.Ending ||

@@ -2,6 +2,7 @@
 
 #include "assistantsettings.h"
 #include "../ai/aimanager.h"
+#include "../core/appsettings.h"
 
 #include <QSettings>
 #include <QDir>
@@ -26,21 +27,21 @@ QString BaristaKnowledge::defaultLocation() const {
 }
 
 QString BaristaKnowledge::location() const {
-    const QString custom = QSettings().value(QStringLiteral("barista/knowledgePath")).toString();
+    const QString custom = AppSettings().value(QStringLiteral("barista/knowledgePath")).toString();
     return custom.isEmpty() ? defaultLocation() : custom;
 }
 
 void BaristaKnowledge::setLocation(const QString& dir) {
     if (location() == dir)
         return;
-    QSettings().setValue(QStringLiteral("barista/knowledgePath"), dir.trimmed());
+    AppSettings().setValue(QStringLiteral("barista/knowledgePath"), dir.trimmed());
     emit locationChanged();
     emit backupsChanged();
     emit lastBackupChanged();
 }
 
 QString BaristaKnowledge::lastBackup() const {
-    return QSettings().value(QStringLiteral("barista/lastBackup")).toString();
+    return AppSettings().value(QStringLiteral("barista/lastBackup")).toString();
 }
 
 QStringList BaristaKnowledge::backups() const {
@@ -110,14 +111,14 @@ bool BaristaKnowledge::backupNow() {
     const QString ts = QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss"));
     const QString path = dir + QStringLiteral("/decenza-barista-") + ts + QStringLiteral(".conf");
 
-    QSettings src;   // app default (DecentEspresso/DE1Qt)
+    AppSettings src;   // the one canonical store (DecentEspresso/Decenza)
     QSettings dest(path, QSettings::IniFormat);
     copyGroups(src, dest);
     if (dest.status() != QSettings::NoError || !QFileInfo::exists(path)) {
         setStatus(QStringLiteral("Backup failed"));
         return false;
     }
-    QSettings().setValue(QStringLiteral("barista/lastBackup"),
+    AppSettings().setValue(QStringLiteral("barista/lastBackup"),
                          QDateTime::currentDateTime().toString(Qt::ISODate));
     emit lastBackupChanged();
     emit backupsChanged();
@@ -131,7 +132,7 @@ bool BaristaKnowledge::restore(const QString& fileName) {
         setStatus(QStringLiteral("Backup not found"));
         return false;
     }
-    QSettings dest;   // app default
+    AppSettings dest;   // the one canonical store (DecentEspresso/Decenza)
     // S6: capture the device's conversation index BEFORE the copy so restore MERGES rather than replaces
     // it — otherwise local conversations absent from the backup get orphaned (and later overwritten).
     const QByteArray localIndex = dest.value(QStringLiteral("ai/conversations/index")).toByteArray();

@@ -6,6 +6,7 @@
 #include <QVariantList>
 #include <QVariantMap>
 #include <QVector>
+#include <QtQml/qqmlregistration.h>
 #include <atomic>
 #include <functional>
 #include <memory>
@@ -44,6 +45,8 @@ struct Barista {
 // migration and tests.
 class BaristaStorage : public QObject {
     Q_OBJECT
+    QML_ELEMENT
+    QML_UNCREATABLE("BaristaStorage is created in C++ and reached via MainController")
 
 public:
     explicit BaristaStorage(QObject* parent = nullptr);

@@ -1,6 +1,7 @@
 #include "baristaactions.h"
 
 #include "../core/settings.h"
+#include "../core/appsettings.h"
 #include "../core/settings_dye.h"
 #include "../core/settings_brew.h"
 #include "../machine/machinestate.h"
@@ -221,14 +222,14 @@ int BaristaActions::parseConfirmation(const QString& reply) const {
 
 // ── pending grinder queue ────────────────────────────────────────────────────────
 QVariantList BaristaActions::loadPending() const {
-    const QByteArray json = QSettings().value(QStringLiteral("barista/pendingActions")).toByteArray();
+    const QByteArray json = AppSettings().value(QStringLiteral("barista/pendingActions")).toByteArray();
     if (json.isEmpty()) return {};
     return QJsonDocument::fromJson(json).array().toVariantList();
 }
 
 void BaristaActions::savePending(const QVariantList& list) {
     const QJsonArray arr = QJsonArray::fromVariantList(list);
-    QSettings().setValue(QStringLiteral("barista/pendingActions"),
+    AppSettings().setValue(QStringLiteral("barista/pendingActions"),
                          QJsonDocument(arr).toJson(QJsonDocument::Compact));
 }
 

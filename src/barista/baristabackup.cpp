@@ -1,6 +1,7 @@
 #include "baristabackup.h"
 #include "baristadiagnostics.h"
 #include "../core/dbutils.h"
+#include "../core/appsettings.h"
 
 #include <QDir>
 #include <QFile>
@@ -38,10 +39,10 @@ bool isSecretKey(const QString& key) {
 }  // namespace
 
 BaristaBackup::BaristaBackup(QObject* parent) : QObject(parent) {
-    m_enabled = QSettings().value(QLatin1String(kEnabledKey), true).toBool();
+    m_enabled = AppSettings().value(QLatin1String(kEnabledKey), true).toBool();
     // A user-chosen folder (e.g. a Google-Drive-synced local folder) wins; else the built-in default
     // beside the app's debug.log (AppDataLocation) — the one location retrievable off the tablet.
-    const QString custom = QSettings().value(QLatin1String(kDirKey)).toString().trimmed();
+    const QString custom = AppSettings().value(QLatin1String(kDirKey)).toString().trimmed();
     m_dir = custom.isEmpty() ? defaultDir() : custom;
     QDir().mkpath(m_dir);
 }
@@ -63,7 +64,7 @@ QString BaristaBackup::defaultDir() const {
 }
 
 bool BaristaBackup::isDefaultDir() const {
-    return QSettings().value(QLatin1String(kDirKey)).toString().trimmed().isEmpty();
+    return AppSettings().value(QLatin1String(kDirKey)).toString().trimmed().isEmpty();
 }
 
 void BaristaBackup::setBackupDir(const QString& folderUrlOrPath) {
@@ -78,12 +79,12 @@ void BaristaBackup::setBackupDir(const QString& folderUrlOrPath) {
         emit statusChanged();
         return;
     }
-    QSettings().setValue(QLatin1String(kDirKey), path);
+    AppSettings().setValue(QLatin1String(kDirKey), path);
     applyDir(path);
 }
 
 void BaristaBackup::resetBackupDir() {
-    QSettings().remove(QLatin1String(kDirKey));
+    AppSettings().remove(QLatin1String(kDirKey));
     applyDir(defaultDir());
 }
 
@@ -117,7 +118,7 @@ bool BaristaBackup::enabled() const { return m_enabled; }
 void BaristaBackup::setEnabled(bool on) {
     if (m_enabled == on) return;
     m_enabled = on;
-    QSettings().setValue(QLatin1String(kEnabledKey), on);
+    AppSettings().setValue(QLatin1String(kEnabledKey), on);
     emit enabledChanged();
     if (on) runBackup(false);   // catch up immediately when turned on
 }
@@ -155,7 +156,7 @@ void BaristaBackup::runBackup(bool force) {
     // Snapshot the (non-secret) settings on the main thread (QSettings), pass the JSON to the worker to write.
     QByteArray settingsJson;
     {
-        QSettings s;
+        AppSettings s;
         QJsonObject obj;
         const QStringList keys = s.allKeys();
         for (const QString& key : keys) {

@@ -53,6 +53,7 @@ class TstMaintenanceDocSync : public QObject
     Q_OBJECT
 
 private slots:
+    void init() { QTest::failOnWarning(); }
     void initTestCase() { QVERIFY(m_dir.isValid()); }
 
     // --- update_maintenance_default: is_default guard ------------------------------------------

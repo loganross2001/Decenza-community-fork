@@ -15,6 +15,18 @@ namespace {
 
 QString norm(const QString &s) { return s.trimmed().toLower(); }
 
+// A positively-clean trace: the caller reported an even/smooth pour, which is the
+// NEGATION of a channeling/gush shape (though still compatible with fast or slow).
+// Distinct from a trace we simply can't discriminate — "smooth" is information, not
+// absence of it, so it must conflict a channel-family condition rather than sit
+// neutral. ("uneven" is NOT clean and never reaches here — traceShapes() already
+// maps it to {channel}.)
+bool isCleanTrace(const QString &raw)
+{
+    const QString s = norm(raw);
+    return s.contains("smooth") || s.contains("clean") || s.contains("normal");
+}
+
 // --- Condition matching ----------------------------------------------------
 // A diagnostic's `conditions` describe when it applies. We compare each against
 // the caller-supplied context and classify the outcome. A single Conflict means
@@ -49,8 +61,16 @@ Match matchTrace(const QString &cond, const QString &user)
     if (user.trimmed().isEmpty())
         return Match::Unknown;
     const QSet<QString> u = traceShapes(user);
-    if (u.isEmpty())
+    if (u.isEmpty()) {
+        // A positively-clean trace negates a channel-family condition (e.g. a
+        // post-PI gush rule): a smooth pour is evidence AGAINST channeling, so
+        // drop the record rather than let it survive on a priority tiebreak.
+        // Clean is still compatible with fast/slow, so only the "channel" shape
+        // conflicts. Anything genuinely undiscriminated stays neutral.
+        if (isCleanTrace(user) && c.contains(QStringLiteral("channel")))
+            return Match::Conflict;
         return Match::Unknown;                // caller described a shape we can't discriminate
+    }
     return c.intersects(u) ? Match::Matched : Match::Conflict;
 }
 

@@ -114,16 +114,16 @@ LocationProvider::~LocationProvider()
 
 bool LocationProvider::proactiveLocationAllowed() const
 {
-    // Read the same key ShotReporter / MainController use for the Shot Map. That value
-    // is written through the Settings façade, whose backing store is the PRIMARY store
-    // ("DecentEspresso"/"DE1Qt", settings.cpp:47) — NOT the app-default store
-    // ("DecentEspresso"/"Decenza", main.cpp:394-396) that a bare QSettings() resolves to
-    // and that this class uses for its own manual-city persistence. Must read the primary
-    // store explicitly, or the gate never sees the user enabling Shot Map.
+    // Read the same key ShotReporter / MainController use for the Shot Map. That
+    // value is written through the Settings façade, whose backing store is the one
+    // canonical store — AppSettings ("DecentEspresso"/"Decenza"). The legacy
+    // ("DecentEspresso"/"DE1Qt") store this used to read no longer exists after the
+    // app-name migration drained it, so AppSettings is the only handle that sees the
+    // user enabling Shot Map (and, under DECENZA_TESTING, stays inside test isolation).
     // Weather (a passive layout widget) has no queryable "active" flag, so it is
     // intentionally NOT a trigger here: it consumes whatever fix another feature
     // already obtained but never causes a proactive fetch on its own.
-    QSettings settings("DecentEspresso", "DE1Qt");
+    AppSettings settings;
     return settings.value("shotmap/enabled", false).toBool();
 }
 

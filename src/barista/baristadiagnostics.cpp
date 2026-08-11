@@ -1,5 +1,7 @@
 #include "baristadiagnostics.h"
 
+#include "../core/appsettings.h"
+
 #include <QFile>
 #include <QFileInfo>
 #include <QDir>
@@ -59,7 +61,7 @@ QString renderDetail(const QVariantMap& detail)
 BaristaDiagnostics::BaristaDiagnostics(QObject* parent)
     : QObject(parent)
 {
-    QSettings settings;
+    AppSettings settings;
     m_enabled = settings.value(QStringLiteral("barista/diagnosticsEnabled"), true).toBool();
 
     // Write to the PUBLIC Documents/Decenza/logs folder (via the app's StorageHelper) — the ONE spot the
@@ -241,7 +243,7 @@ void BaristaDiagnostics::setEnabled(bool on)
             return;
         m_enabled = on;
     }
-    QSettings().setValue(QStringLiteral("barista/diagnosticsEnabled"), on);
+    AppSettings().setValue(QStringLiteral("barista/diagnosticsEnabled"), on);
     record(QStringLiteral("system"), on ? QStringLiteral("logging_enabled")
                                         : QStringLiteral("logging_disabled"));
     emit enabledChanged();

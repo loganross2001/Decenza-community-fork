@@ -16,6 +16,7 @@ class TstSpeechNormalize : public QObject
     Q_OBJECT
 
 private slots:
+    void init() { QTest::failOnWarning(); }
     void grams();
     void gramsDecimal();
     void gramsNotKg();

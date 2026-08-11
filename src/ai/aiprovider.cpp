@@ -1257,13 +1257,18 @@ void AnthropicProvider::onAnalysisReply(QNetworkReply* reply)
     text = m_accumulatedText + text;
     m_accumulatedText.clear();
 
-    // [barista-fork] tool_use / pause_turn reaching the terminal means a fork loop
-    // exhausted its bound (MAX_TOOL_ROUNDS / MAX_CONTINUATIONS). Those are NOT
-    // truncation, so they are excluded from `unfinished` — otherwise upstream's
-    // truncation dispatch below would misclassify an exhausted tool turn as a
-    // cut-off reply and fail it (or show a bogus partial notice).
-    const bool loopExhausted = stopReason == QLatin1String("tool_use")
-                            || stopReason == QLatin1String("pause_turn");
+    // [barista-fork] A `tool_use` reaching the terminal means the CLIENT tool loop
+    // exhausted MAX_TOOL_ROUNDS. That is not truncation — it has its own friendly
+    // degrade path (below) — so it stays excluded from `unfinished`, or the
+    // truncation dispatch would misclassify it as a cut-off reply.
+    //
+    // `pause_turn` is different and is deliberately NOT excluded: a server-side turn
+    // that still says "pause_turn" after MAX_CONTINUATIONS never actually resolved,
+    // and its text is partial by definition. Treating it as unfinished routes it
+    // through dispatchTruncatedOrEmpty — Fail on the one-shot analyze()/analyzeUrl()
+    // paths (a half-extracted recipe must not be delivered as complete), ShowPartial
+    // (partial text + a "cut off" notice) on the barista conversation path.
+    const bool loopExhausted = stopReason == QLatin1String("tool_use");
     // Upstream #1691: anything that is not a natural end (and not a loop we already
     // handled) is an unfinished turn — max_tokens, refusal,
     // model_context_window_exceeded. Allow-listing the good reasons fails safe as

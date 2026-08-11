@@ -35,10 +35,10 @@ private:
     QVariant m_origCoachAudio;
     QVariant m_origSteamTimeout;
 
-    static constexpr const char* STRETCH = "Steaming — keep the tip near the surface to stretch";
-    static constexpr const char* ROLL    = "Submerge the tip — roll and texture";
-    static constexpr const char* ALMOST  = "Almost there — get ready";
-    static constexpr const char* DONE    = "Steam done";
+    static constexpr const char* STRETCH = "Adding air — keep the steam wand tip just under the milk surface";
+    static constexpr const char* ROLL    = "Lower the steam wand to spin the milk into a smooth whirlpool";
+    static constexpr const char* ALMOST  = "Steam's nearly done — get ready to shut it off";
+    static constexpr const char* DONE    = "That's your milk — steam's off, give the pitcher a swirl and it's ready to pour";
     static constexpr const char* NO_COACHING = "No coaching — milk weight not captured";
 
     struct Fixture {

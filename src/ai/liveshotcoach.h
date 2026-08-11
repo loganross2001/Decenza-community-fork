@@ -2,6 +2,7 @@
 
 #include <QObject>
 #include <QString>
+#include <QtQml/qqmlregistration.h>
 
 #include "../machine/machinestate.h"
 
@@ -25,8 +26,19 @@ struct ShotSample;
 //
 // Cues are exposed to QML as individual marshalable Q_PROPERTYs (QString / bool)
 // — never a struct return — so a banner can bind directly.
+// QML_ELEMENT promotes moc's metatype handling from the graceful (incomplete-OK)
+// path to a hard "type must be complete" requirement for every slot parameter — so
+// the forward-declared ShotSample used by onShotSampleReceived() below must be a
+// complete type in the generated moc TU. Q_MOC_INCLUDE pulls its definition into
+// moc_liveshotcoach.cpp ONLY, keeping the heavy BLE header out of this header's
+// normal include graph. Path is root-relative (src/ is on the include path); the
+// generated moc lives in the build tree, so a "../"-relative path would not resolve.
+Q_MOC_INCLUDE("ble/de1device.h")
+
 class LiveShotCoach : public QObject {
     Q_OBJECT
+    QML_ELEMENT
+    QML_UNCREATABLE("LiveShotCoach is created in C++ and reached via MainController")
 
     // QML-marshalable cue surface. The banner binds to these directly.
     // cueSeverity is one of "positive" | "info" | "caution".

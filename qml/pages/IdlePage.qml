@@ -179,7 +179,9 @@ T.Page {
     // into the bottom action bar — so the movable side is the column, exactly
     // the "slide content aside instead of overlapping" the picker popups already
     // do (bottomPanelClearance). Read the column's UN-OFFSET bottom against the
-    // band's static top so the slide can't feed back into its own input.
+    // band's un-offset (layout) top lowerMidBar.y — which the column slide never
+    // writes back to — so the slide can't feed into its own input. (The band DOES
+    // slide via its own transform; carouselOverlapsBand accounts for that.)
     readonly property real _bandOverlap: {
         if (idlePage.activePresetFunction === "" || !idlePage.lowerMidBarVisible)
             return 0
@@ -189,17 +191,22 @@ T.Page {
     // off the top under the status bar. Combined with the popup clearance (max)
     // where the transform is applied, so a picker over an active preset still works.
     readonly property real presetBandClearance: Math.min(idlePage._bandOverlap, idlePage._maxPanelClearance)
-    // Fall back to fading the band when the column's RENDERED bottom still overlaps
-    // it — mirror the transform below EXACTLY (slides up by max(bottomPanelClearance,
-    // presetBandClearance), down by topPanelClearance) so the fade re-engages whenever
-    // the slide is cancelled: a very short viewport (the _maxPanelClearance cap bites)
-    // OR an upper-half picker whose topPanelClearance pushes the column back down into
-    // the band. Gated on a real active-preset overlap (_bandOverlap > 0) so a picker
-    // alone never fades the band.
+    // Fade the band when the column's RENDERED bottom would still overlap the band's
+    // RENDERED top — i.e. the slide can't clear it. This accounts for BOTH transforms:
+    // the column slides up by max(bottomPanelClearance, presetBandClearance) and down
+    // by topPanelClearance (see the Translate below), and the band slides up by its OWN
+    // bottomPanelClearance transform too — so only the column's slide BEYOND the band's,
+    // i.e. max(0, presetBandClearance - bottomPanelClearance), actually reduces the
+    // overlap. Residual = _bandOverlap - max(0, presetBandClearance - bottomPanelClearance)
+    // + topPanelClearance. Fires when the slide falls short: a very short viewport (the
+    // _maxPanelClearance cap bites), an upper-half picker whose topPanelClearance pushes
+    // the column down, OR a lower-half picker open over an active preset (band and column
+    // ride up together, so the slide can't clear it and the fade takes over). Gated on a
+    // real active-preset overlap (_bandOverlap > 0) so a picker alone never fades the band.
     readonly property bool carouselOverlapsBand:
         idlePage._bandOverlap > 0
         && (idlePage._bandOverlap
-            - Math.max(idlePage.bottomPanelClearance, idlePage.presetBandClearance)
+            - Math.max(0, idlePage.presetBandClearance - idlePage.bottomPanelClearance)
             + idlePage.topPanelClearance) > 0.5
 
     Component.onCompleted: {

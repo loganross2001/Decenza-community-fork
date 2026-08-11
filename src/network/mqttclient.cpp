@@ -578,7 +578,7 @@ void MqttClient::onInternalDisconnected()
     emit connectedChanged();
 
     // A disconnect the USER asked for is not a fault to recover from. Without this,
-    // tapping Disconnect (or calling the mqtt_disconnect MCP tool, or the web
+    // tapping Disconnect (or calling mqtt action=disconnect, or the web
     // endpoint) immediately re-armed the timer and dialled back 5 s later — the
     // status would read "reconnecting (1/10)..." while the tool that just returned
     // {"success": true, "message": "MQTT disconnected"} was already being undone.
@@ -660,7 +660,7 @@ void MqttClient::scheduleReconnect(const QString& reason)
     if (!m_settingsMqtt || !m_settingsMqtt->mqttEnabled()) {
         // Do NOT retry — but do not swallow the failure either. A connect can be
         // initiated while MQTT is disabled: the Home Automation tab's Connect button
-        // gates only on host-non-empty, and neither the mqtt_connect MCP tool nor the
+        // gates only on host-non-empty, and neither mqtt action=connect nor the
         // ShotServer endpoint checks mqttEnabled(). Returning silently here left the
         // status latched at "Connecting...", discarded the Paho rc, and turned a precise
         // BAD_PROTOCOL (the tcp://tcp:// typo) into the ShotServer poller's generic
@@ -1058,19 +1058,23 @@ void MqttClient::publishState()
         publish(topicPath("profile_filename"), m_currentProfileFilename, true);
     }
 
-    // Steam mode: derive from Settings and current phase
-    // Per CLAUDE.md: steam is active in Ready/Steaming phases regardless of keepSteamHeaterOn
+    // Steam mode: the phase first, then the commanded target.
+    //
+    // Ready/Steaming report On regardless of settings because the firmware is
+    // running the heater in those phases whatever we last commanded — this
+    // topic reports what the MACHINE is doing. Everything below that is not a
+    // second derivation of the heater rule: it asks SteamHeaterPolicy, which is
+    // the only place that rule exists.
     QString steamMode;
+    auto* policy = m_mainController ? m_mainController->steamHeaterPolicy() : nullptr;
     if (!m_device || !m_settings || m_device->stateString() == "Sleep") {
-        steamMode = "Off";
-    } else if (m_settings->brew()->steamDisabled()) {
         steamMode = "Off";
     } else if (phase == "Ready" || phase == "Steaming") {
         steamMode = "On";
-    } else if (!m_settings->brew()->keepSteamHeaterOn()) {
+    } else if (!policy) {
         steamMode = "Off";
     } else {
-        steamMode = "On";
+        steamMode = policy->resolve().on ? "On" : "Off";
     }
     if (steamMode != m_lastPublishedSteamMode) {
         publish(topicPath("steam_mode"), steamMode, true);

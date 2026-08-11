@@ -5,15 +5,239 @@
 // iOS is the only exclusion because a raw multicast socket there needs an
 // entitlement Apple grants by application (see the header).
 //
-// macOS builds this deliberately even though it defaults to Bonjour: it is the
-// only way to exercise the backend Android and Windows/Linux ship without
-// deploying to a device. Do NOT narrow this to Q_OS_DARWIN / `NOT APPLE`.
+// macOS builds this AND defaults to it. Bonjour is the faster, more native
+// choice on an Apple platform and stays selectable, but the default is mjansson
+// because macOS is the development platform: it is the only way the backend
+// Android, Windows and Linux ship gets exercised daily without deploying to a
+// device. Do NOT narrow this to Q_OS_DARWIN / `NOT APPLE`.
 //
-// Wider than the original guard (Q_OS_ANDROID). resolveHostname() is still only
-// *called* on Android — WifiScaleDiscovery guards its call site — so compiling
-// it elsewhere changes no behaviour; it is browseService() that desktop
-// platforms need, because QHostInfo cannot enumerate services.
+// (This banner said "even though it defaults to Bonjour" until the default moved
+// in this same change. Re-read it if resolveBackend() changes again.)
+//
+// Wider than the original guard (Q_OS_ANDROID). It used to be true that
+// resolveHostname() was only *called* on Android; it no longer is. The call site
+// in WifiScaleDiscovery::probe() is now a runtime branch on
+// useDirectHostnameResolver(), so a desktop build can be pointed at the exact
+// A-record path Android ships — which is why this file has to compile
+// everywhere. See HostnameResolver in the header.
+namespace {
+// Declared ahead of the iOS guard below because the accessors that read it are
+// compiled on every platform, while the socket code that acts on it is not.
+// Written by the MCP tool on the main thread, read by whichever worker thread
+// opens the next query socket — same race, and same treatment, as g_backend.
+std::atomic<MdnsResolver::QueryPort> g_queryPort{MdnsResolver::QueryPort::Auto};
+}  // namespace
+
+
+// ---- This file's log prefix, defined ONCE -------------------------------
+//
+// Every line here used to hand-type "[MdnsResolver]", 22 times, with no entry in
+// the registry (core/logtags.h) behind it. Two consequences, both real: the
+// copies were free to drift, and a reader filtering a submitted log by a
+// registered marker got ZERO hits for the resolver — while this subsystem is
+// diagnosed almost entirely from submitted logs.
+//
+// These emit the registered [Network] marker plus a tag naming this file. The
+// streaming form is kept rather than the (tag, QString) helpers because these
+// sites interleave 2-8 values apiece and several are per-packet traces;
+// composing a QString at each would reflow the file for no gain in what a reader
+// sees.
+//
+// They ALIAS networklogging.h's stream helpers rather than spelling the
+// "[marker][tag] " shape out again — that shape has one definition, in
+// logtags.h, and copying a body to specialize it is the drift the whole
+// convention exists to stop. Aliasing also puts the bare qDebug/qWarning in a
+// helper header rather than in this file, which is what lets this file sit in
+// check_log_markers.py's COVERED_GLOBS: a future bare qDebug here now fails the
+// gate instead of quietly leaving the [Network] story a line short.
+#define MDNS_DBG  NETWORK_DBG_STREAM("MdnsResolver")
+#define MDNS_WARN NETWORK_WARN_STREAM("MdnsResolver")
+
+#include "core/networklogging.h"
+
+#include <QDir>
+#include <QFileInfo>
+#include <QMap>
+#include <QStringList>
+
+#include <cerrno>
+#ifdef Q_OS_WIN
+#include <winsock2.h>
+#else
+#include <poll.h>
+#endif
+
+namespace {
+
+// Wait until `fd` is readable, or `timeoutMs` elapses.
+// Returns >0 readable, 0 timed out, <0 error with errno set.
+//
+// poll(), never select(). select()'s fd_set is a fixed FD_SETSIZE-bit (1024)
+// bitmap indexed by descriptor NUMBER, so FD_SET() on a descriptor >= 1024
+// writes past the end of it. Android's bionic catches that and abort()s the
+// process — issue #1773: the app had 1024 descriptors open after ~96 h uptime,
+// discovery's four mDNS sockets therefore came back as fds 1024-1027, and the
+// first FD_SET killed it. bionic's check is UNCONDITIONAL, not gated on
+// _FORTIFY_SOURCE (the NDK sysroot's sys/select.h defines FD_SET as
+// __FD_SET_chk and says "Use <poll.h> instead"), so every Android build aborts.
+// Elsewhere it is worse rather than better: glibc only checks under
+// _FORTIFY_SOURCE and Apple's libc not at all, so an unfortified build corrupts
+// the stack silently. poll() takes the descriptor as a plain int, no ceiling.
+//
+// A high descriptor number is a symptom worth chasing separately; this only
+// makes it survivable.
+//
+// The two families also report descriptor FAULTS differently, which is why this
+// normalises rather than forwarding poll()'s return. POLLERR/POLLHUP/POLLNVAL
+// are output-only: the kernel raises them in `revents` whether or not they were
+// requested, and poll() counts that descriptor as ready. So an INVALID fd comes
+// back as ret == 1 with POLLNVAL where select() returned -1/EBADF — forwarded
+// raw, every caller's `ret < 0` arm goes unreachable, the browse reports an
+// empty network instead of an aborted one, and the resolve loop spins at 100%
+// for its whole deadline calling recvfrom() on a dead socket. Mapping POLLNVAL
+// back to -1 restores what select() did.
+//
+// POLLERR and POLLHUP are mapped the same way, which is deliberately STRICTER
+// than select() was — it reported both as readable. On unconnected UDP
+// multicast sockets neither is expected, and a socket in either state has
+// nothing left to give these loops.
+int waitReadable(int fd, int timeoutMs)
+{
+#ifdef Q_OS_WIN
+    WSAPOLLFD pfd;
+    pfd.fd = static_cast<SOCKET>(fd);
+    pfd.events = POLLRDNORM;
+#else
+    struct pollfd pfd;
+    pfd.fd = fd;
+    pfd.events = POLLIN;
+#endif
+    pfd.revents = 0;
+
+#ifdef Q_OS_WIN
+    const int ret = WSAPoll(&pfd, 1, timeoutMs);
+    if (ret < 0) {
+        // WSAPoll reports through WSAGetLastError(), not errno, so a caller
+        // reading errno would otherwise see a stale value. WSAEINTR is a
+        // different NUMBER from EINTR (10004 vs 4), so translate it rather than
+        // leaving the callers' `errno == EINTR` retry permanently false.
+        const int wsaErr = WSAGetLastError();
+        errno = (wsaErr == WSAEINTR) ? EINTR : wsaErr;
+        return -1;
+    }
+#else
+    const int ret = poll(&pfd, 1, timeoutMs);
+    if (ret < 0)
+        return -1;   // errno already set
+#endif
+
+    // Only a fault with NO readable data is an error: POLLHUP can arrive
+    // alongside pending data, and that data is still worth reading.
+#ifdef Q_OS_WIN
+    const bool readable = (pfd.revents & (POLLRDNORM | POLLRDBAND)) != 0;
+#else
+    const bool readable = (pfd.revents & POLLIN) != 0;
+#endif
+    if (ret > 0 && !readable && (pfd.revents & (POLLERR | POLLHUP | POLLNVAL))) {
+        errno = (pfd.revents & POLLNVAL) ? EBADF : EIO;
+        return -1;
+    }
+    return ret;
+}
+
+// Report what the process is holding descriptors on, but ONLY when a freshly
+// opened socket comes back with an alarmingly high number.
+//
+// POSIX hands out the lowest-numbered UNUSED descriptor, so a socket coming back
+// as fd N proves 0..N-1 are all in use — a lower bound on the count, not a
+// high-water mark. (With holes, from a partly reclaimed leak, a fresh socket can
+// come back low while the process still holds many high ones, so this can
+// under-report; it cannot over-report.) A lower bound is what diagnosed #1773:
+// the log read `sock= 1024` moments before the abort. What the number could not
+// say is WHAT held the other thousand, and on a user's device there is no second
+// chance to ask — the only channel back is the debug log attached to the crash
+// report.
+//
+// This matters more now than it did before, not less. The poll() change above
+// removes the abort, which also removes the alarm — a descriptor leak that used
+// to announce itself with a crash will otherwise go quiet and resurface as
+// sockets and files failing to open, much further from its cause.
+//
+// Costs nothing in the normal case: below the threshold this reads no directory
+// and formats no string.
+//
+// Linux/Android only, and the guard is around the WHOLE function rather than
+// just the /proc walk. The lowest-free-descriptor premise is POSIX; Windows does
+// not make it — mdns.h hands back `(int)socket(...)`, a kernel HANDLE allocated
+// in multiples of four and unrelated to how many descriptors are held, so a Qt
+// app with a few hundred open would clear the threshold immediately and warn on
+// every resolve about a condition that does not exist. macOS/iOS do return low
+// fds but cannot produce the breakdown, so a warning there would have no reader.
+#if defined(Q_OS_LINUX) || defined(Q_OS_ANDROID)
+void reportFdPressureIfHigh(int fd, const char* what)
+{
+    // Half of FD_SETSIZE. Well clear of anything normal (the app sits in the low
+    // tens) and still a wide margin before the 1024 that used to be fatal, so
+    // the report lands in the log BEFORE the situation is critical.
+    constexpr int kFdWarnThreshold = 512;
+    if (fd < kFdWarnThreshold)
+        return;
+
+    // Group by kind, not by individual entry: 900 lines of "socket:[12345]" is
+    // unreadable in a submitted log, while "socket=890, anon_inode=12" names the
+    // culprit's shape in one line. Sockets then point at the servers and
+    // clients; anon_inode at event loops and timers; a /data path at files.
+    QMap<QString, int> byKind;
+    QDir fdDir(QStringLiteral("/proc/self/fd"));
+    // Every entry is a symlink to a socket/pipe/anon_inode/file, so ask for all
+    // entry types and System — a QDir::Files filter matches almost none of them.
+    const QStringList entries = fdDir.entryList(QDir::AllEntries | QDir::System | QDir::NoDotAndDotDot);
+    if (entries.isEmpty()) {
+        // Empty is never a true answer — we hold at least the socket that
+        // triggered this. entryList() returns {} on failure and reports nothing,
+        // and the failure it hits here is EMFILE on the opendir: reading
+        // /proc/self/fd costs a descriptor, and the condition being reported is
+        // the process running out of them. "0 descriptors" next to "opened fd
+        // 1020" would read as a broken report on the one shot we get.
+        MDNS_WARN << "HIGH FD PRESSURE:" << what << "opened fd" << fd
+                  << "— /proc/self/fd unreadable, no breakdown available";
+        return;
+    }
+    for (const QString& entry : entries) {
+        QString kind = QFileInfo(fdDir.filePath(entry)).symLinkTarget();
+        const qsizetype colon = kind.indexOf(':');
+        if (colon > 0)
+            kind = kind.left(colon);          // socket:[123] -> socket
+        else if (kind.startsWith('/'))
+            kind = QFileInfo(kind).path();    // /data/user/0/... -> its directory
+        if (kind.isEmpty())
+            kind = QStringLiteral("(unknown)");
+        byKind[kind] += 1;
+    }
+
+    QStringList parts;
+    for (auto it = byKind.cbegin(); it != byKind.cend(); ++it)
+        parts << QStringLiteral("%1=%2").arg(it.key()).arg(it.value());
+
+    // entries.size() includes the descriptor entryList() itself held while
+    // scanning, so it reads one high. Not worth correcting for — it is an
+    // order-of-magnitude signal, and saying so beats a silently-off-by-one number.
+    MDNS_WARN << "HIGH FD PRESSURE:" << what << "opened fd" << fd
+              << "— process holds ~" << entries.size()
+              << "descriptors:" << parts.join(QStringLiteral(", "));
+}
+#else
+// Everywhere else the descriptor number carries no information about pressure,
+// so there is nothing honest to report. Inline and empty — the calls compile away.
+inline void reportFdPressureIfHigh(int, const char*) {}
+#endif
+
+}  // namespace
+
 #ifndef Q_OS_IOS
+
+#include "multicastlock.h"
+
 
 #include <QHostAddress>
 #include <QElapsedTimer>
@@ -92,7 +316,7 @@ int mdnsResolveCallback(int sock, const struct sockaddr* from, size_t addrlen,
         const char* entryStr = entry == MDNS_ENTRYTYPE_ANSWER ? "ANSWER"
                              : entry == MDNS_ENTRYTYPE_AUTHORITY ? "AUTH"
                              : entry == MDNS_ENTRYTYPE_ADDITIONAL ? "ADD'L" : "?";
-        qDebug().noquote() << "[MdnsResolver]   rx" << entryStr
+        MDNS_DBG << "  rx" << entryStr
                            << rtypeName(rtype) << "name=" << recordName;
     }
 
@@ -272,6 +496,92 @@ int mdnsBrowseCallback(int sock, const struct sockaddr* from, size_t addrlen,
     return 0;
 }
 
+// Open a query socket, and report which local port it actually landed on.
+//
+// THE PORT DECIDES WHO ANSWERS US. mjansson sets the QU (unicast-response) bit
+// on every query unless getsockname() says the socket is on 5353
+// (mdns.h:1085-1092). A query from an ephemeral port is a "legacy" query under
+// RFC 6762 section 6.7, which a responder must answer by UNICAST — so the reply
+// depends on the responder being able to address this host directly, and an
+// openscale scale has been measured refusing to answer a peer it has no fresh
+// path to for hours at a time. From 5353 the query is ordinary, the answer comes
+// back multicast to the group, and nothing per-peer is involved. Preferring 5353
+// is the openscale maintainers' own recommendation for working around it from the
+// client side.
+//
+// It is preferred, not required, because the bind can legitimately fail — some
+// platform or some other process may hold 5353 without SO_REUSEPORT — and a
+// legacy query that sometimes works beats no socket at all.
+//
+// SO THIS PREFERS 5353 EVERYWHERE EXCEPT ANDROID, where it is measurably worse
+// — see the switch below for that measurement, which is the important one.
+//
+// A separate defect was found while chasing this and is worth keeping here
+// because it is real on its own: multicast reception on Android requires a held
+// WifiManager.MulticastLock, and the app was not holding one. The lock belonged
+// to ShotServer, whose `shotServer/enabled` setting defaults to FALSE, so on a
+// default install no lock was ever taken while three comments in this tree
+// described it as held "for the whole app lifetime".
+//
+// That fix stands, but note what it did NOT do: it was offered as the
+// explanation for the older "5353 sees nothing on Android" measurement, and it
+// is not. With the lock demonstrably held, 5353 on Android still receives
+// records=0 for every host. Two independent problems, not one.
+int openQuerySocket(int* boundPortOut)
+{
+    if (boundPortOut) *boundPortOut = 0;
+
+    const MdnsResolver::QueryPort want = g_queryPort.load(std::memory_order_relaxed);
+
+    // ONE decision, in one place, and readable by the test suite —
+    // queryPortUsesMdnsPort() carries the platform branch and the reasoning.
+    // Duplicating that branch here is exactly how it would drift from what is
+    // asserted, and this is the invariant that shipped broken once already:
+    // binding 5353 on Android loses every inbound packet to the system mDNS
+    // daemon that already owns the port, so records=0 for EVERY host including
+    // the MQTT broker's ".local" name.
+    const bool try5353 = MdnsResolver::queryPortUsesMdnsPort();
+    const bool allowFallback = want == MdnsResolver::QueryPort::Auto;
+
+    int sock = -1;
+    if (try5353) {
+        struct sockaddr_in bindAddr;
+        memset(&bindAddr, 0, sizeof(bindAddr));
+        bindAddr.sin_family = AF_INET;
+        bindAddr.sin_addr.s_addr = INADDR_ANY;
+        bindAddr.sin_port = htons(MDNS_PORT);
+        // SO_REUSEADDR and SO_REUSEPORT are set by the library itself
+        // (mdns.h:405-408), so sharing 5353 with a system daemon is expected
+        // rather than something to arrange here.
+        sock = mdns_socket_open_ipv4(&bindAddr);
+        if (sock < 0 && !allowFallback)
+            return -1;
+    }
+    if (sock < 0) {
+        struct sockaddr_in bindAddr;
+        memset(&bindAddr, 0, sizeof(bindAddr));
+        bindAddr.sin_family = AF_INET;
+        bindAddr.sin_addr.s_addr = INADDR_ANY;
+        sock = mdns_socket_open_ipv4(&bindAddr);
+    }
+    if (sock < 0)
+        return -1;
+
+    // One report point for both backends' query sockets, since #1772 gave them a
+    // shared opener.
+    reportFdPressureIfHigh(sock, "mDNS query socket");
+
+    // Report the port the kernel gave us, not the one we asked for: those differ
+    // whenever the 5353 bind failed, and that difference is the whole diagnostic.
+    if (boundPortOut) {
+        struct sockaddr_in local;
+        socklen_t len = sizeof(local);
+        if (getsockname(sock, reinterpret_cast<struct sockaddr*>(&local), &len) == 0)
+            *boundPortOut = ntohs(local.sin_port);
+    }
+    return sock;
+}
+
 }  // namespace
 
 namespace MdnsResolver {
@@ -279,26 +589,25 @@ namespace MdnsResolver {
 QString resolveHostname(const QString& hostname, int timeoutMs,
                         ResolveStats* stats, const std::atomic<bool>* cancel)
 {
-    // Bind the query socket to an ephemeral port (NOT 5353). Binding to 5353
-    // on Android collides with the system mDNS daemon: even with SO_REUSEPORT,
-    // inbound multicast is delivered to the OS daemon's socket and our socket
-    // receives nothing (verified on-device: records=0 for ALL hosts when bound
-    // to 5353, including ones that resolve fine from an ephemeral port).
-    // An ephemeral source port is also what the esp-idf#7124 workaround
-    // recommends — it makes the ESP32 unicast its reply back to us.
-    struct sockaddr_in bindAddr;
-    memset(&bindAddr, 0, sizeof(bindAddr));
-    bindAddr.sin_family = AF_INET;
-    bindAddr.sin_addr.s_addr = INADDR_ANY;
-    int sock = mdns_socket_open_ipv4(&bindAddr);
+    // Held for the whole lookup. Without it Android's Wi-Fi driver silently drops
+    // every multicast frame addressed to the group, so a 5353 socket — whose
+    // answers come back multicast — receives nothing at all while the sends and
+    // the group join both report success. See MulticastLock.
+    MulticastLock::Holder multicastLock;
+
+    int boundPort = 0;
+    int sock = openQuerySocket(&boundPort);
     if (sock < 0) {
-        qWarning() << "[MdnsResolver] socket open FAILED for" << hostname
+        MDNS_WARN << "socket open FAILED for" << hostname
                    << "errno=" << errno;
         if (stats)
             stats->error = QString("mDNS socket open failed (errno %1)").arg(errno);
         return {};
     }
-    if (stats) stats->socketOpened = true;
+    if (stats) {
+        stats->socketOpened = true;
+        stats->boundPort = boundPort;
+    }
 
     char buffer[2048];
     QByteArray hostBytes = hostname.toUtf8();
@@ -309,8 +618,12 @@ QString resolveHostname(const QString& hostname, int timeoutMs,
         ctx.hostname.chop(1);
     ctx.verbose = false;  // flip to true to log every record seen (verbose probe diagnostics)
 
-    qDebug().noquote() << "[MdnsResolver] start host=" << hostname
-                       << "timeout=" << timeoutMs << "ms sock=" << sock;
+    // srcPort is not decoration: 5353 means an ordinary query answered by
+    // multicast, anything else a legacy query the responder must unicast back.
+    // Without it, "records=0" cannot be read.
+    MDNS_DBG << "start host=" << hostname
+                       << "timeout=" << timeoutMs << "ms sock=" << sock
+                       << "srcPort=" << boundPort;
 
     int sendCount = 0;
     int sendOk = 0;  // successful sends — distinguishes "no responder" from "couldn't send"
@@ -340,7 +653,7 @@ QString resolveHostname(const QString& hostname, int timeoutMs,
                                           buffer, sizeof(buffer), 0);
             ++sendCount;
             if (sendRet >= 0) ++sendOk;
-            qDebug().noquote() << "[MdnsResolver]   query #" << sendCount
+            MDNS_DBG << "  query #" << sendCount
                                << "sent ret=" << sendRet
                                << (sendRet < 0 ? QString(" errno=%1").arg(errno) : QString());
             nextSendAt = deadline.elapsed() + kRetransmitMs;
@@ -352,16 +665,18 @@ QString resolveHostname(const QString& hostname, int timeoutMs,
         if (remaining <= 0) break;
         const int slice = qMin(remaining, kRetransmitMs);
 
-        fd_set readfds;
-        FD_ZERO(&readfds);
-        FD_SET(sock, &readfds);
-        struct timeval tv;
-        tv.tv_sec = slice / 1000;
-        tv.tv_usec = (slice % 1000) * 1000;
-
-        int ret = select(sock + 1, &readfds, nullptr, nullptr, &tv);
+        int ret = waitReadable(sock, slice);
         if (ret < 0) {
             if (errno == EINTR) continue;
+            // Say which kind of failure this was. Falling through silently lands
+            // in the summary block below as "records=0", whose documented meaning
+            // is "no multicast responses reached our socket at all
+            // (interface/multicast-lock/routing problem)" — filing a descriptor
+            // fault as a network fault, in the one place written to stop exactly
+            // that misattribution. The browse loop already logs its copy.
+            MDNS_WARN << "resolve wait failed for" << hostname << "errno=" << errno;
+            if (stats && stats->error.isEmpty())
+                stats->error = QString("wait on socket failed (errno %1) — resolve aborted early").arg(errno);
             break;
         }
         if (ret == 0) continue;  // slice elapsed with no data — retransmit
@@ -381,18 +696,19 @@ QString resolveHostname(const QString& hostname, int timeoutMs,
     //                          query (responder/name issue), even though other
     //                          hosts on the LAN are.
     //  - result set          → success.
-    qDebug().noquote() << "[MdnsResolver] done host=" << hostname
+    MDNS_DBG << "done host=" << hostname
                        << "result=" << (ctx.resolvedIp.isEmpty() ? QString("(none)") : ctx.resolvedIp)
                        << "queries=" << sendCount
                        << "records=" << ctx.recordsSeen
                        << "aRecords=" << ctx.aRecordsSeen
+                       << "srcPort=" << boundPort
                        << "elapsed=" << deadline.elapsed() << "ms";
 
     // Distinguish a transport failure (every query send failed — e.g. no
     // multicast route / persistent ENOBUFS) from a silent responder, so triage
     // doesn't conflate "couldn't ask" with "asked but got no answer".
     if (sendCount > 0 && sendOk == 0) {
-        qWarning().noquote() << "[MdnsResolver] all" << sendCount
+        MDNS_WARN << "all" << sendCount
                              << "query sends FAILED for" << hostname
                              << "— transport problem, not necessarily an absent responder";
         if (stats)
@@ -416,19 +732,21 @@ QVector<ServiceInstance> browseServiceMjansson(const QString& serviceType, int t
                                               const std::atomic<bool>* cancel)
 {
     if (stats) stats->backend = QStringLiteral("mjansson");
-    // Same ephemeral-port rationale as resolveHostname() above — binding 5353
-    // loses every inbound packet to the system mDNS daemon.
-    struct sockaddr_in bindAddr;
-    memset(&bindAddr, 0, sizeof(bindAddr));
-    bindAddr.sin_family = AF_INET;
-    bindAddr.sin_addr.s_addr = INADDR_ANY;
-    int sock = mdns_socket_open_ipv4(&bindAddr);
+    // Same reason as resolveHostname() — a browse's answers are multicast when
+    // the query goes out from 5353, and Android filters those without this.
+    MulticastLock::Holder multicastLock;
+
+    // Same socket policy as resolveHostname() — see openQuerySocket() for why the
+    // source port decides whether the responder answers us at all.
+    int boundPort = 0;
+    int sock = openQuerySocket(&boundPort);
     if (sock < 0) {
-        qWarning() << "[MdnsResolver] browse socket open FAILED for" << serviceType
+        MDNS_WARN << "browse socket open FAILED for" << serviceType
                    << "errno=" << errno;
         if (stats) stats->error = QString("socket open failed (errno %1)").arg(errno);
         return {};
     }
+    if (stats) stats->boundPort = boundPort;
 
     char buffer[2048];
 
@@ -437,8 +755,9 @@ QVector<ServiceInstance> browseServiceMjansson(const QString& serviceType, int t
     if (ctx.serviceType.endsWith('.'))
         ctx.serviceType.chop(1);
 
-    qDebug().noquote() << "[MdnsResolver] browse start service=" << serviceType
-                       << "timeout=" << timeoutMs << "ms sock=" << sock;
+    MDNS_DBG << "browse start service=" << serviceType
+                       << "timeout=" << timeoutMs << "ms sock=" << sock
+                       << "srcPort=" << boundPort;
 
     // Retransmit for the same reason resolveHostname does: the scale's ESP32
     // shares one radio between BLE and WiFi and routinely misses a single
@@ -502,22 +821,15 @@ QVector<ServiceInstance> browseServiceMjansson(const QString& serviceType, int t
         if (remaining <= 0) break;
         const int slice = qMin(remaining, kRetransmitMs);
 
-        fd_set readfds;
-        FD_ZERO(&readfds);
-        FD_SET(sock, &readfds);
-        struct timeval tv;
-        tv.tv_sec = slice / 1000;
-        tv.tv_usec = (slice % 1000) * 1000;
-
-        int ret = select(sock + 1, &readfds, nullptr, nullptr, &tv);
+        int ret = waitReadable(sock, slice);
         if (ret < 0) {
             if (errno == EINTR) continue;
             // Anything else (EBADF, EINVAL, ENOMEM) aborts the browse. Without
             // recording it the summary is indistinguishable from an empty
             // network, which is the exact confusion BrowseStats exists to stop.
-            qWarning() << "[MdnsResolver] browse select() failed errno=" << errno;
+            MDNS_WARN << "browse wait failed errno=" << errno;
             if (stats && stats->error.isEmpty())
-                stats->error = QString("select() failed (errno %1) — browse aborted early").arg(errno);
+                stats->error = QString("wait on socket failed (errno %1) — browse aborted early").arg(errno);
             break;
         }
         if (ret == 0) continue;
@@ -552,7 +864,7 @@ QVector<ServiceInstance> browseServiceMjansson(const QString& serviceType, int t
         if (!browseInstanceResolved(it->target, it->port,
                                     ctx.addresses.contains(it->target))) {
             ++dropped;
-            qDebug().noquote() << "[MdnsResolver] browse dropped unresolved instance="
+            MDNS_DBG << "browse dropped unresolved instance="
                                << instanceLabel
                                << "(srv=" << (it->target.isEmpty() ? "no" : "yes")
                                << " addr=" << (ctx.addresses.contains(it->target) ? "yes" : "no") << ")";
@@ -561,11 +873,12 @@ QVector<ServiceInstance> browseServiceMjansson(const QString& serviceType, int t
         results.append(makeInstance(it.key(), *it, ctx));
     }
 
-    qDebug().noquote() << "[MdnsResolver] browse done service=" << serviceType
+    MDNS_DBG << "browse done service=" << serviceType
                        << "resolved=" << results.size()
                        << "dropped=" << dropped
                        << "queries=" << sendCount
                        << "records=" << ctx.recordsSeen
+                       << "srcPort=" << boundPort
                        << "elapsed=" << deadline.elapsed() << "ms";
 
     if (stats) {
@@ -578,7 +891,7 @@ QVector<ServiceInstance> browseServiceMjansson(const QString& serviceType, int t
     }
 
     if (sendCount > 0 && sendOk == 0)
-        qWarning().noquote() << "[MdnsResolver] all" << sendCount
+        MDNS_WARN << "all" << sendCount
                              << "browse query sends FAILED for" << serviceType
                              << "— transport problem, not necessarily an absent responder";
 
@@ -608,7 +921,6 @@ QVector<ServiceInstance> browseServiceMjansson(const QString& serviceType, int t
 
 #include <dns_sd.h>
 #include <arpa/inet.h>
-#include <sys/select.h>
 
 #include <cerrno>
 
@@ -802,7 +1114,7 @@ void DNSSD_API appleBrowseReply(DNSServiceRef, DNSServiceFlags flags,
         // add-only, so a row the user has already seen is not retracted under
         // their finger. The next scan rebuilds from scratch.
         ctx->removesSeen++;
-        qDebug().noquote() << "[MdnsResolver] browse withdrawal (not applied mid-scan) instance="
+        MDNS_DBG << "browse withdrawal (not applied mid-scan) instance="
                            << key;
         return;
     }
@@ -850,7 +1162,7 @@ QVector<ServiceInstance> browseServiceBonjour(const QString& serviceType, int ti
 
     DNSServiceErrorType err = DNSServiceCreateConnection(&ctx.connection);
     if (err != kDNSServiceErr_NoError) {
-        qWarning() << "[MdnsResolver] DNSServiceCreateConnection failed err=" << err;
+        MDNS_WARN << "DNSServiceCreateConnection failed err=" << err;
         if (stats) stats->error = QString("DNSServiceCreateConnection failed (err %1)").arg(err);
         return {};
     }
@@ -861,14 +1173,14 @@ QVector<ServiceInstance> browseServiceBonjour(const QString& serviceType, int ti
                            regtype.toUtf8().constData(), domain.toUtf8().constData(),
                            appleBrowseReply, &ctx);
     if (err != kDNSServiceErr_NoError) {
-        qWarning() << "[MdnsResolver] DNSServiceBrowse failed err=" << err;
+        MDNS_WARN << "DNSServiceBrowse failed err=" << err;
         if (stats) stats->error = describeBrowseError(err);
         DNSServiceRefDeallocate(ctx.connection);
         return {};
     }
     ctx.children.append(browseRef);
 
-    qDebug().noquote() << "[MdnsResolver] browse start (Bonjour) service=" << serviceType
+    MDNS_DBG << "browse start (Bonjour) service=" << serviceType
                        << "timeout=" << timeoutMs << "ms";
 
     // How often the loop below re-reads `cancel`. Unlike the mjansson path this
@@ -881,10 +1193,14 @@ QVector<ServiceInstance> browseServiceBonjour(const QString& serviceType, int ti
         // Warn as well as record: every other failure path here does both, and
         // with a null `stats` this would otherwise produce an empty result set
         // with no diagnostic anywhere — the loop below simply never runs.
-        qWarning() << "[MdnsResolver] DNSServiceRefSockFD returned no usable socket";
+        MDNS_WARN << "DNSServiceRefSockFD returned no usable socket";
         if (stats)
             stats->error = QStringLiteral("DNSServiceRefSockFD returned no usable socket");
     }
+    // A no-op here: this block only compiles on Apple platforms, where
+    // reportFdPressureIfHigh is the empty stub. Kept so the site does not read as
+    // an oversight if a non-Apple Bonjour backend ever exists.
+    reportFdPressureIfHigh(fd, "Bonjour browse connection");
     QDeadlineTimer deadline(timeoutMs);
 
     // Stay subscribed for the whole window rather than taking an early snapshot.
@@ -899,27 +1215,21 @@ QVector<ServiceInstance> browseServiceBonjour(const QString& serviceType, int ti
         const qint64 remaining = deadline.remainingTime();
         if (remaining <= 0) break;
 
-        fd_set readfds;
-        FD_ZERO(&readfds);
-        FD_SET(fd, &readfds);
         // Wait in slices, not for the whole remaining deadline. `cancel` is only
-        // read at the top of this loop, and on a quiet LAN nothing wakes
-        // select() — so a full-deadline timeout meant a cancelled browse stayed
+        // read at the top of this loop, and on a quiet LAN nothing wakes the
+        // wait — so a full-deadline timeout meant a cancelled browse stayed
         // parked for up to 15 s, holding the QThreadPool thread that
         // ~QCoreApplication's unconditional waitForDone() then blocks on. That
         // is exactly the hang the cancel flag exists to prevent. The mjansson
         // loop already slices (kRetransmitMs) for the same reason.
         const qint64 slice = qMin<qint64>(remaining, kCancelPollMs);
-        struct timeval tv;
-        tv.tv_sec = static_cast<time_t>(slice / 1000);
-        tv.tv_usec = static_cast<suseconds_t>((slice % 1000) * 1000);
 
-        const int ret = select(fd + 1, &readfds, nullptr, nullptr, &tv);
+        const int ret = waitReadable(fd, static_cast<int>(slice));
         if (ret < 0) {
             if (errno == EINTR) continue;
-            qWarning() << "[MdnsResolver] browse select() failed errno=" << errno;
+            MDNS_WARN << "browse wait failed errno=" << errno;
             if (stats && stats->error.isEmpty())
-                stats->error = QString("select() failed (errno %1) — browse aborted early").arg(errno);
+                stats->error = QString("wait on socket failed (errno %1) — browse aborted early").arg(errno);
             break;
         }
         if (ret == 0) continue;
@@ -929,7 +1239,7 @@ QVector<ServiceInstance> browseServiceBonjour(const QString& serviceType, int ti
             // kDNSServiceErr_ServiceNotRunning). Anything collected so far is
             // still returned, but the caller must know the browse was cut short
             // rather than simply finding nothing more.
-            qWarning() << "[MdnsResolver] DNSServiceProcessResult failed err=" << procErr;
+            MDNS_WARN << "DNSServiceProcessResult failed err=" << procErr;
             if (stats && stats->error.isEmpty())
                 stats->error = QString("mDNSResponder connection failed mid-browse (err %1)").arg(procErr);
             break;
@@ -944,7 +1254,7 @@ QVector<ServiceInstance> browseServiceBonjour(const QString& serviceType, int ti
     ctx.callbackContexts.clear();
 
     const qsizetype dropped = ctx.pending.size() - ctx.results.size();
-    qDebug().noquote() << "[MdnsResolver] browse done (Bonjour) service=" << serviceType
+    MDNS_DBG << "browse done (Bonjour) service=" << serviceType
                        << "resolved=" << ctx.results.size()
                        << "dropped=" << dropped
                        << "adds=" << ctx.addsSeen
@@ -965,8 +1275,8 @@ QVector<ServiceInstance> browseServiceBonjour(const QString& serviceType, int ti
     }
 
     if (ctx.permissionDenied) {
-        qWarning().noquote()
-            << "[MdnsResolver] Local Network permission DENIED — the browse could not run."
+        MDNS_WARN
+            << "Local Network permission DENIED — the browse could not run."
             << "This is not an empty network; the user must grant Local Network access.";
     }
 
@@ -1019,11 +1329,36 @@ std::atomic<BrowseBackend> g_backend{BrowseBackend::Auto};
 BrowseBackend resolveBackend(BrowseBackend requested)
 {
 #ifdef Q_OS_DARWIN
-    if (requested == BrowseBackend::Auto)
-        return BrowseBackend::Bonjour;   // ships this way on macOS and iOS
   #ifdef Q_OS_IOS
+    Q_UNUSED(requested);
     return BrowseBackend::Bonjour;       // mjansson is not compiled on iOS
   #else
+    // macOS defaults to MJANSSON, not Bonjour, and that is a deliberate
+    // inversion of "ship what the platform prefers".
+    //
+    // macOS is not a production platform here — it is the development one. The
+    // shipped populations are Android (hundreds of users) and iOS; the macOS
+    // installs number about two, both of them developers. Bonjour is measurably
+    // the better citizen on macOS (mDNSResponder's cache is always warm, so it
+    // reaches a first row in 66-113 ms against mjansson's 160-270 ms on the
+    // reference LAN) — but that ~100 ms is paid by two people, and what it buys
+    // is that the browse path THREE platforms ship goes unexercised in daily use
+    // by the only machine anyone develops on. That asymmetry is what let a
+    // multi-hour Android discovery outage survive review, and BrowseBackend was
+    // added to work around it by hand.
+    //
+    // Bonjour is NOT thereby untested: iOS ships it, and iOS is production. What
+    // this does cost is early warning — an iOS release build is only compiled by
+    // CI, so the Mac was the one place a Bonjour regression would be noticed
+    // before users saw it. Run a browse with backend=bonjour before an iOS
+    // release; that is the check this default gives up.
+    //
+    // Only the BROWSE moves. The hostname resolver stays on QHostInfo here
+    // (see resolveHostnameResolver) precisely so the other iOS path keeps its
+    // dev coverage — its mjansson variant is Android-only, and pointing the Mac
+    // at it on demand is enough.
+    if (requested == BrowseBackend::Auto)
+        return BrowseBackend::Mjansson;
     return requested;                    // macOS has both
   #endif
 #else
@@ -1047,6 +1382,93 @@ QString activeBrowseBackendName()
         ? QStringLiteral("bonjour") : QStringLiteral("mjansson");
 }
 
+namespace {
+// Same race as g_backend: written by the MCP tool on the main thread, read by
+// the lookup that WifiScaleDiscovery starts.
+std::atomic<HostnameResolver> g_hostnameResolver{HostnameResolver::Auto};
+
+// Same rule as resolveBackend(): report what CAN run here, never what was asked
+// for. On iOS mjansson is not compiled at all, so a request for it is the system
+// resolver — and saying otherwise would attribute a Bonjour result to a backend
+// that does not exist in the binary.
+HostnameResolver resolveHostnameResolver(HostnameResolver requested)
+{
+#ifdef Q_OS_IOS
+    Q_UNUSED(requested);
+    return HostnameResolver::System;
+#else
+    if (requested != HostnameResolver::Auto)
+        return requested;
+  #ifdef Q_OS_ANDROID
+    // Android's getaddrinfo returns NXDOMAIN for ".local", so the direct query
+    // is not a diagnostic option there — it is the only thing that works.
+    return HostnameResolver::Mjansson;
+  #else
+    return HostnameResolver::System;
+  #endif
+#endif
+}
+}  // namespace
+
+void setQueryPort(QueryPort port)
+{
+    g_queryPort.store(port, std::memory_order_relaxed);
+}
+
+QueryPort queryPort() { return g_queryPort.load(std::memory_order_relaxed); }
+
+bool queryPortUsesMdnsPort()
+{
+    switch (g_queryPort.load(std::memory_order_relaxed)) {
+        case QueryPort::Mdns:      return true;
+        case QueryPort::Ephemeral: return false;
+        case QueryPort::Auto:      break;
+    }
+    // See openQuerySocket() for the measurement behind the Android exclusion.
+#ifdef Q_OS_ANDROID
+    return false;
+#else
+    return true;
+#endif
+}
+
+QString queryPortName()
+{
+    // The REQUEST, unlike the two backend selectors, which report what ran. Here
+    // "what ran" is a number the socket knows and this function does not — every
+    // browse and lookup reports its own ResolveStats/BrowseStats::boundPort,
+    // which is the honest answer and can differ between two calls under one
+    // policy if a bind fails once.
+    switch (g_queryPort.load(std::memory_order_relaxed)) {
+        case QueryPort::Mdns:      return QStringLiteral("mdns");
+        case QueryPort::Ephemeral: return QStringLiteral("ephemeral");
+        case QueryPort::Auto:      break;
+    }
+    return QStringLiteral("auto");
+}
+
+void setHostnameResolver(HostnameResolver resolver)
+{
+    g_hostnameResolver.store(resolver, std::memory_order_relaxed);
+}
+
+HostnameResolver hostnameResolver()
+{
+    return g_hostnameResolver.load(std::memory_order_relaxed);
+}
+
+QString activeHostnameResolverName()
+{
+    return useDirectHostnameResolver() ? QStringLiteral("mjansson")
+                                       : QStringLiteral("system");
+}
+
+bool useDirectHostnameResolver()
+{
+    return resolveHostnameResolver(g_hostnameResolver.load(std::memory_order_relaxed))
+        == HostnameResolver::Mjansson;
+}
+
 QVector<ServiceInstance> browseService(const QString& serviceType, int timeoutMs,
                                        const std::function<void(const ServiceInstance&)>& onResolved,
                                        BrowseStats* stats,
@@ -1068,7 +1490,7 @@ QVector<ServiceInstance> browseService(const QString& serviceType, int timeoutMs
     return browseServiceMjansson(serviceType, timeoutMs, onResolved, stats, cancel);
 #else
     // Unreachable: iOS always resolves to Bonjour above.
-    qWarning() << "[MdnsResolver] no browse backend available";
+    MDNS_WARN << "no browse backend available";
     return {};
 #endif
 }

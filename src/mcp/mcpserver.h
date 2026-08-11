@@ -39,6 +39,37 @@ struct PendingConfirmation {
     QString protocolVersion = QStringLiteral("2024-11-05");  // captured at request time; default to legacy gating so a missed assignment never silently emits 2025-spec fields
 };
 
+// The MCP server's own version, reported as `serverInfo.version` at initialize.
+//
+// BUMP THIS WHENEVER THE TOOL SURFACE CHANGES — a tool added, removed or renamed, an
+// action added to a merged tool, an argument that changes meaning. It is not the app
+// version and does not follow it: 2.0.2 shipped a 97-tool server and then a 66-tool
+// one, and a client reporting the app version would have shown the same string for
+// both. `serverInfo.appVersion` carries the build alongside it.
+//
+// This is a correctness obligation before it is anything else. The handshake is
+// where a server states what it is, and a server whose surface has changed while
+// its version has not is making a false statement on the wire — independently of
+// whether any particular client acts on it. A client that DOES key on the version
+// (today, or under the 2026-07-28 caching semantics) can only behave correctly if
+// we tell it the truth; pinning "1.0.0" forever defeated exactly those clients.
+//
+// It does not, on its own, invalidate an existing cache: a client caches the tool
+// list it fetched at initialize and refreshes only on RECONNECT, some not even
+// then. This server declares no `tools.listChanged` and could not usefully send
+// one, since tools are registered once at startup and never change while the app
+// runs. The useful side effect is that a stale session becomes VISIBLE — a
+// connector still reporting an old version is talking to a session that predates
+// the change, which otherwise can only be inferred by counting tools.
+//
+// scripts/check_mcp_tool_budget.py fingerprints the registered tools and their
+// actions and fails the PR if the surface moved without this string moving, so the
+// rule above is enforced rather than remembered.
+inline constexpr const char* McpSurfaceVersion = "1.2.0";
+// Fingerprint of the tool surface this version was recorded against. Update it in
+// the same edit as the version; the check prints the value to paste.
+inline constexpr const char* McpSurfaceFingerprint = "8ada4d203b66";
+
 class McpServer : public QObject {
     Q_OBJECT
     Q_PROPERTY(int activeSessionCount READ activeSessionCount NOTIFY activeSessionCountChanged)
@@ -85,6 +116,12 @@ public:
     // Registries (accessible for tool/resource registration in later phases)
     McpToolRegistry* toolRegistry() const { return m_toolRegistry; }
     McpResourceRegistry* resourceRegistry() const { return m_resourceRegistry; }
+
+    // Control/settings calls allowed per session per minute. Public because it is a
+    // policy a test asserts against: the per-action rate limiting added with merged
+    // tools is only meaningful if a read verb can be shown NOT to spend this budget
+    // and a write verb can be shown to.
+    static constexpr int RateLimitPerMinute = 60;
 
     // Protocol versions this server can negotiate. First entry is preferred.
     static const QStringList& supportedProtocolVersions();
@@ -160,9 +197,16 @@ private:
     // End a pending confirmation that will never be answered, ANSWERING the
     // client holding the open request. See the definition.
     void abandonPendingConfirmation(const QString& reason);
-    bool needsInAppConfirmation(const QString& toolName) const;
-    bool needsChatConfirmation(const QString& toolName) const;
-    QString confirmationDescription(const QString& toolName) const;
+    // All three take the call's arguments, not just its name: a merged tool has one
+    // name and several verbs, and only the arguments say which one is being asked
+    // for. For an unmerged tool the arguments are ignored and the name list below
+    // decides, exactly as before.
+    bool needsInAppConfirmation(const QString& toolName, const QJsonObject& arguments) const;
+    bool needsChatConfirmation(const QString& toolName, const QJsonObject& arguments) const;
+    QString confirmationDescription(const QString& toolName, const QJsonObject& arguments) const;
+    // "steam_pitcher.delete" for a merged tool, the bare name otherwise — what the
+    // confirmation payload and the in-app dialog report as the pending action.
+    QString confirmationActionId(const QString& toolName, const QJsonObject& arguments) const;
 
     // Response helpers
     void sendJsonRpcResponse(QTcpSocket* socket, const QJsonObject& result,
@@ -258,7 +302,7 @@ private:
     // ending in `:*` match any port.
     QSet<QString> m_allowedOrigins;
 
-    // In-app confirmation (machine_start_* tools)
+    // In-app confirmation (the machine_start tool)
     std::optional<PendingConfirmation> m_pendingConfirmation;
 
     // Async tool response helper — sends the tool result back on the held HTTP connection.
@@ -285,5 +329,5 @@ private:
     // one-byte-per-character estimate suggests.
     static constexpr int MaxTerminatedSessions = 256;
     static constexpr int SessionTimeoutMinutes = 30;  // idle-session cleanup; runs every 60s on m_cleanupTimer and again opportunistically when a new session is created
-    static constexpr int RateLimitPerMinute = 60;
+
 };

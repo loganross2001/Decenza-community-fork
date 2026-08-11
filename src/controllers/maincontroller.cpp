@@ -126,8 +126,59 @@ MainController::MainController(QNetworkAccessManager* networkManager,
     , m_shotDataModel(shotDataModel)
     , m_profileStorage(profileStorage)
 {
+    // The one place the steam-heater target is decided. Created before
+    // ProfileManager because ProfileManager resolves through it too — a second,
+    // drifted copy of this rule inside uploadCurrentProfile() is what made a
+    // recipe activation's heater state get silently overwritten.
+    m_steamHeaterPolicy = new SteamHeaterPolicy(m_settings, this);
+    // The rule itself lives on SteamHeaterPolicy so it can be asserted without a
+    // MainController; this lambda only supplies the row it reads.
+    m_steamHeaterPolicy->setRecipeIntentProvider([this]() {
+        return SteamHeaterPolicy::intentForRecipe(m_activeRecipe);
+    });
+    // The active recipe is a resolve() input, so the readouts have to hear about
+    // it. Without this, activating a pitcher-less recipe commanded the DE1 to 0
+    // correctly while every steam readout kept showing a temperature until some
+    // unrelated setting happened to change — and deactivation had the mirror bug.
+    connect(this, &MainController::activeRecipeChanged,
+            this, &MainController::steamHeaterStateChanged);
+    connect(m_steamHeaterPolicy, &SteamHeaterPolicy::resolvedChanged,
+            this, &MainController::steamHeaterStateChanged);
+
+    // Re-announce the resolved heater state whenever any of its inputs move, so
+    // the steam readouts can bind to it, AND push the new target to the machine.
+    // Every one of these can flip the answer: the two settings, the transient
+    // flag, and which pitcher is effective.
+    //
+    // The push belongs HERE, on the change, not at each writer. Every caller
+    // that stored one of these settings had to remember to call
+    // applySteamSettings() afterwards, and the ones that forgot were invisible:
+    // the QML switches remembered, the MCP settings_set never did, so setting
+    // the steam temperature over MCP moved the number on screen and left the
+    // boiler on its old target until something unrelated happened to write. Now
+    // no writer has to remember — MCP, the web UI, a settings import and QML all
+    // reach the machine by the same route. The BLE layer dedups an unchanged
+    // payload, so the redundant pushes from paths that DO still call
+    // applySteamSettings() cost nothing on the wire.
+    for (auto signal : {&SettingsBrew::keepWarmWhenIdleChanged,
+                        &SettingsBrew::letRecipeDecideChanged,
+                        &SettingsBrew::steamDisabledChanged,
+                        &SettingsBrew::selectedSteamPitcherChanged,
+                        &SettingsBrew::steamPitcherPresetsChanged,
+                        &SettingsBrew::steamTemperatureChanged}) {
+        connect(m_settings->brew(), signal, this, &MainController::steamHeaterStateChanged);
+        connect(m_settings->brew(), signal, this, [this]() {
+            // Not while a recipe is mid-apply: activation writes several of
+            // these in sequence and ends with its own send, so the intermediate
+            // states are noise.
+            if (!m_applyingRecipe)
+                sendMachineSettings(QStringLiteral("steam-setting-changed"));
+        });
+    }
+
     // Create ProfileManager — owns all profile lifecycle operations
-    m_profileManager = new ProfileManager(m_settings, m_device, m_machineState, m_profileStorage, this);
+    m_profileManager = new ProfileManager(m_settings, m_device, m_machineState, m_profileStorage,
+                                          m_steamHeaterPolicy, this);
 
     // Create LiveShotCoach — local, real-time during-shot coaching cues.
     // Subscribes itself to DE1Device::shotSampleReceived and MachineState
@@ -219,11 +270,48 @@ MainController::MainController(QNetworkAccessManager* networkManager,
         // so it resets to normal behavior on next wake/reconnect
         connect(m_machineState, &MachineState::phaseChanged, this, [this]() {
             auto phase = m_machineState->phase();
-            if ((phase == MachineState::Phase::Sleep || phase == MachineState::Phase::Disconnected)
-                && m_settings && m_settings->brew()->steamDisabled()) {
-                qDebug() << "Machine entering" << m_machineState->phaseString() << "- clearing temporary steamDisabled flag";
-                m_settings->brew()->setSteamDisabled(false);
+            const int previousPhase = m_lastPhaseForSteam;
+            m_lastPhaseForSteam = static_cast<int>(phase);
+
+            const bool dormant = phase == MachineState::Phase::Sleep
+                              || phase == MachineState::Phase::Disconnected;
+            if (dormant) {
+                if (m_settings && m_settings->brew()->steamDisabled()) {
+                    qDebug() << "Machine entering" << m_machineState->phaseString() << "- clearing temporary steamDisabled flag";
+                    m_settings->brew()->setSteamDisabled(false);
+                }
+                // Event permission is for the steam session in front of you; it
+                // does not survive a sleep or a disconnect.
+                if (m_steamHeaterPolicy)
+                    m_steamHeaterPolicy->setEventPermission(false);
             }
+
+            // Coming BACK from dormant — waking, or connecting for the first
+            // time this run — re-assert the resolved target.
+            //
+            // The block above clears the transient veto and sends nothing, so
+            // without this the machine keeps whatever it was last told. Observed
+            // on a simulated DE1: the app launched with a persisted
+            // steamDisabled, pushed TargetSteamTemp=0, then cleared the flag on
+            // the Disconnected→connected transition and never re-sent — leaving
+            // a boiler commanded off while every setting said it should be warm,
+            // and the settings screen reading "Current: 0°C" instead of "Off"
+            // because the RESOLVED state was (correctly) on.
+            //
+            // "Never seen a phase yet" (-1) counts as dormant, and that is the
+            // STARTUP case, not an edge case: nothing else pushes ShotSettings
+            // when a machine first becomes live. The profile upload used to
+            // carry the steam target along by accident, but it runs before the
+            // device is connected — in simulator mode the log shows loadProfile
+            // ahead of "Simulated DE1 attached" — so its write is dropped and
+            // never retried. Verified on a running simulated DE1: every input
+            // said warm/160 while the machine sat at 0 from launch.
+            const bool wasDormant = previousPhase < 0
+                                 || previousPhase == static_cast<int>(MachineState::Phase::Sleep)
+                                 || previousPhase == static_cast<int>(MachineState::Phase::Disconnected);
+            if (wasDormant && !dormant)
+                sendMachineSettings(QStringLiteral("wake-steam-reassert"));
+
 
             // Steam session ended — run post-session analysis. m_steamStartTimeMs
             // is only set when isFlowing() was true (Steaming/Pouring substates),
@@ -313,6 +401,27 @@ MainController::MainController(QNetworkAccessManager* networkManager,
     // override for a whole session. ProfileManager scanned its catalog in
     // its constructor, so the title→temperature snapshot is ready.
     requestRecipeTempOffsetConversion();
+    // Second half of the "Off" preset migration (steam-heater-policy). The
+    // settings half already removed the presets and remapped the selection;
+    // this rewrites the recipes that named them, which needs a database and so
+    // could not happen in SettingsBrew's constructor.
+    if (m_recipeStorage && m_settings) {
+        // PEEK, don't take: the rewrite is asynchronous and can fail (a bad
+        // SELECT, a mid-batch UPDATE error). Consuming the names up front lost
+        // them permanently on any failure, leaving those recipes naming a preset
+        // that no longer exists — and activation would then resurrect it as a
+        // real pitcher, which is the junk-pitcher outcome the migration exists to
+        // prevent. Cleared only once the pass reports success, so a failure
+        // simply retries next launch.
+        const QStringList removed = m_settings->brew()->migratedHeaterOffNames();
+        if (!removed.isEmpty()) {
+            QPointer<Settings> settingsGuard(m_settings);
+            m_recipeStorage->requestHeaterOffPitcherRewrite(removed, [settingsGuard](bool ok) {
+                if (ok && settingsGuard)
+                    settingsGuard->brew()->clearMigratedHeaterOffNames();
+            });
+        }
+    }
     setupRecipeConnections();
 
     // One-time idle-button injections (issue #1586). What the gate means is
@@ -453,6 +562,54 @@ MainController::MainController(QNetworkAccessManager* networkManager,
     // independent of the migration16 drain above — see OpenSpec change
     // persist-visualizer-id-in-controller.
     processVisualizerReconciliation();
+
+    // The bean-repair queue's result handler: connected ONCE here, because
+    // processVisualizerBeanRepair can run many times a session (startup, and
+    // every bag inventory change).
+    connect(m_shotHistory, &ShotHistoryStorage::pendingBeanRepairsReady, this,
+            [this](bool ok, const QVector<BeanRepair>& repairs) {
+        if (!ok) {
+            // NOT the same as an empty queue: the read failed, so shots that
+            // need repairing may be sitting there unseen.
+            qWarning() << "MainController: Visualizer bean-repair queue could not be read "
+                          "- no repair this session";
+            return;
+        }
+        // Handed over even when empty: repairShotBeans clears its
+        // dropped-snapshot flag for any snapshot it accepts, and stays silent on
+        // an empty one, so this is what stops a re-drain answering itself.
+        if (m_visualizer)
+            m_visualizer->repairShotBeans(repairs);
+    });
+
+    // A shot the server confirmed needs nothing (repaired, already right, or
+    // deleted there) leaves the queue for good.
+    connect(m_visualizer, &VisualizerUploader::beanRepairSettled, this, [this](qint64 shotId) {
+        if (m_shotHistory)
+            m_shotHistory->clearBeanRepairPending(shotId);
+    });
+
+    // A pass ignores re-entry while it runs, so a bag unlinked mid-pass leaves
+    // its shots flagged but unseen by the snapshot already draining. Re-draining
+    // on completion picks them up now instead of at the next bag change or
+    // launch. Terminates because repairShotBeans emits nothing for an empty
+    // snapshot AND clears the flag it is gated on — both halves are needed, and
+    // both live there, not here.
+    connect(m_visualizer, &VisualizerUploader::beanRepairFinished, this, [this](int, bool) {
+        if (m_visualizer && m_visualizer->beanRepairMissedWork())
+            processVisualizerBeanRepair();
+    });
+
+    // Drain the Visualizer bean-repair queue: the shots whose bag was unlinked
+    // from a borrowed canonical record. There is no index on the flag, so this
+    // is a full scan of `shots` — it runs on the serial DB worker, never the
+    // main thread, and the empty-queue case (the normal one) ends there.
+    processVisualizerBeanRepair();
+
+    // A bag edited into (or out of) a borrowed link queues its shots, so drain
+    // again when the inventory changes rather than waiting for the next launch.
+    connect(m_bagStorage, &CoffeeBagStorage::bagsChanged, this,
+            [this]() { processVisualizerBeanRepair(); });
 
     connect(m_visualizer, &VisualizerUploader::updateSuccess, this,
             [this](const QString& visualizerId) {
@@ -633,7 +790,8 @@ MainController::MainController(QNetworkAccessManager* networkManager,
 
     // Steam settings changes -> republish state
     connect(m_settings->brew(), &SettingsBrew::steamDisabledChanged, m_mqttClient, &MqttClient::onSteamSettingsChanged);
-    connect(m_settings->brew(), &SettingsBrew::keepSteamHeaterOnChanged, m_mqttClient, &MqttClient::onSteamSettingsChanged);
+    connect(m_settings->brew(), &SettingsBrew::keepWarmWhenIdleChanged, m_mqttClient, &MqttClient::onSteamSettingsChanged);
+    connect(m_settings->brew(), &SettingsBrew::letRecipeDecideChanged, m_mqttClient, &MqttClient::onSteamSettingsChanged);
 
     // Recipe-aware brew baseline (recipe-baseline-not-override, #1485): the
     // effective baseline + real-override flags change with the active recipe, the
@@ -684,14 +842,14 @@ MainController::MainController(QNetworkAccessManager* networkManager,
     m_firmwareAssetCache = new DE1::Firmware::FirmwareAssetCache(this);
     m_firmwareAssetCache->setNetworkManager(m_networkManager);
     if (m_settings) {
-        m_firmwareAssetCache->setChannel(m_settings->app()->firmwareNightlyChannel()
-            ? DE1::Firmware::FirmwareAssetCache::Channel::Nightly
+        m_firmwareAssetCache->setChannel(m_settings->app()->firmwareEarlyAccess()
+            ? DE1::Firmware::FirmwareAssetCache::Channel::EarlyAccess
             : DE1::Firmware::FirmwareAssetCache::Channel::Stable);
-        connect(m_settings->app(), &SettingsApp::firmwareNightlyChannelChanged,
+        connect(m_settings->app(), &SettingsApp::firmwareEarlyAccessChanged,
                 this, [this]() {
             if (!m_firmwareAssetCache) return;
-            m_firmwareAssetCache->setChannel(m_settings->app()->firmwareNightlyChannel()
-                ? DE1::Firmware::FirmwareAssetCache::Channel::Nightly
+            m_firmwareAssetCache->setChannel(m_settings->app()->firmwareEarlyAccess()
+                ? DE1::Firmware::FirmwareAssetCache::Channel::EarlyAccess
                 : DE1::Firmware::FirmwareAssetCache::Channel::Stable);
             // Re-check immediately so the UI reflects the new channel's
             // available version without waiting for the weekly poll.
@@ -714,7 +872,7 @@ MainController::MainController(QNetworkAccessManager* networkManager,
     m_firmwareUpdater->setInstalledVersionProvider([this]() -> uint32_t {
         if (!m_device) return 0;
         // Simulator: pretend to be on an ancient firmware so both the
-        // stable and nightly channels always register as "update available",
+        // stable and early access channels always register as "update available",
         // letting a developer exercise the Firmware page end-to-end without
         // a real DE1 to flash. The simulator never ships a firmware
         // build-number, so this is the only signal the page has anyway.
@@ -1005,8 +1163,14 @@ namespace {
 
 // The recipe steam block's JSON shape, shared by activation, the shot-save
 // snapshot, the composer prefill, MCP, and the web UI:
-//   { "hasMilk": bool, "milkWeightG": n, "pitcherName": s,
+//   { "hasMilk": bool, "milkWeightG": n, "heaterOff": bool, "pitcherName": s,
 //     "durationSec": n, "flow": n, "temperatureC": n }
+//
+// "heaterOff" is the built-in "Heater off" entry chosen deliberately, and is
+// mutually exclusive with the pitcher fields — it carries no values of its own.
+// It exists because ABSENT and OFF are different states: a recipe that names no
+// pitcher never had the question put to it, while one carrying this marker was
+// answered "keep the boiler cold".
 QJsonObject parseSteamBlock(const QString& json) {
     if (json.isEmpty())
         return QJsonObject();
@@ -1237,7 +1401,6 @@ void MainController::setupRecipeConnections() {
         }
         const qint64 resolvedBagId = m_activeRecipe.value(
             QStringLiteral("resolvedBagId"), m_settings->dye()->activeBagId()).toLongLong();
-        const bool hadMilk = activeRecipeHasMilk();
         m_activeRecipe = recipe;
         m_activeRecipe.insert(QStringLiteral("resolvedBagId"), resolvedBagId);
         // Claim the dose rung from the row we just read (dose-source-precedence).
@@ -1254,11 +1417,11 @@ void MainController::setupRecipeConnections() {
                 ? 0.0
                 : m_activeRecipe.value(QStringLiteral("doseG")).toDouble());
         emit activeRecipeChanged();
-        // Re-assert the heater hold when hasMilk changed (composer/MCP edit
-        // of the active recipe) or on the startup restore of a milk recipe —
-        // the 5-9 minute warm-up means the hold must follow the cache.
-        if (activeRecipeHasMilk() != hadMilk || activeRecipeHasMilk())
-            applySteamSettings();
+        // The active recipe is one of the policy's inputs, so any refresh of the
+        // cache — startup restore, composer/MCP/web edit — can change the
+        // resolved target. Re-resolve unconditionally; the BLE layer dedups an
+        // unchanged payload.
+        applySteamSettings();
         // Re-seed the brew overrides from the edited recipe, exactly as
         // re-activating it would (add-yield-ratio-anchor). An edit changes the
         // recipe's DESIGN, and the live setup must follow it — the grind push
@@ -1764,13 +1927,26 @@ void MainController::applyActivatedRecipe(qint64 recipeId, const QVariantMap& re
         // Steam block: pitcher (the pitcher preset IS the steam spec —
         // duration/flow/temperature live on it), milk weight, heater intent.
         const QJsonObject steam = parseSteamBlock(recipe.value("steamJson").toString());
-        if (!steam.isEmpty()) {
+        {
             auto* brew = m_settings->brew();
+            // The recipe's pitcher OVERRIDES the standing selection for as long
+            // as the recipe is active — it is part of the drink, not a new
+            // preference. NoStandingPitcher means "this recipe names none", which
+            // unwinds any override from the recipe before it.
+            int overrideIndex = SettingsBrew::NoStandingPitcher;
             const QString pitcherName = steam.value("pitcherName").toString();
-            if (!pitcherName.isEmpty()) {
+            if (steam.value("heaterOff").toBool()) {
+                // An explicit "Heater off" choice, distinct from naming no
+                // pitcher at all: the first is a decision, the second is silence.
+                overrideIndex = SettingsBrew::HeaterOffPitcherIndex;
+            } else if (!pitcherName.isEmpty()) {
                 const QVariantList presets = brew->steamPitcherPresets();
+                // -1: the synthetic built-in is appended last, and it is not a
+                // name match candidate. Counting with steamPitcherCount() here
+                // re-parsed the whole preset blob on every iteration.
+                const int realCount = static_cast<int>(presets.size()) - 1;
                 int index = -1;
-                for (int i = 0; i < presets.size(); ++i) {
+                for (int i = 0; i < realCount; ++i) {
                     if (presets.at(i).toMap().value("name").toString()
                             .compare(pitcherName, Qt::CaseInsensitive) == 0) {
                         index = i;
@@ -1780,41 +1956,45 @@ void MainController::applyActivatedRecipe(qint64 recipeId, const QVariantMap& re
                 if (index < 0) {
                     // The snapshotted pitcher was deleted — resurrect it from
                     // the recipe's own values so the drink steams as saved
-                    // (snapshot-not-reference; visible, not silent).
+                    // (snapshot-not-reference; visible, not silent). Never for
+                    // the built-in entry: that arrives as the marker above, and
+                    // recreating it as a user preset would put two "Heater off"
+                    // rows in the picker.
                     brew->addSteamPitcherPreset(pitcherName,
                                                 steam.value("durationSec").toInt(),
                                                 steam.value("flow").toInt(),
                                                 steam.value("temperatureC").toDouble());
-                    index = static_cast<int>(brew->steamPitcherPresets().size()) - 1;
+                    index = brew->steamPitcherCount() - 1;
                     qDebug() << "applyActivatedRecipe: recreated deleted pitcher" << pitcherName;
                 }
-                brew->setSelectedSteamCup(index);
+                overrideIndex = index;
             }
+            // Selects AND applies the pitcher's own duration/flow/temperature.
+            // This used to be a bare setSelectedSteamCup(), which stored the
+            // index without applying anything — so activating a recipe heated
+            // to whatever global temperature was last written rather than to
+            // its own pitcher's.
+            setRecipeSteamPitcherOverride(overrideIndex);
+
             const double milkG = steam.value("milkWeightG").toDouble();
             if (milkG > 0)
                 brew->setLastSteamMilkG(milkG);
         }
 
-        // Cache before the heater derivation below: sendMachineSettings
-        // reads activeRecipeHasMilk() from this cache. Safe — the watchers
-        // are still behind the m_applyingRecipe guard.
+        // Cache before the re-resolve below: the policy's intent provider reads
+        // m_activeRecipe through SteamHeaterPolicy::intentForRecipe(). Safe —
+        // the watchers are still behind the m_applyingRecipe guard.
         m_activeRecipe = recipe;
         m_activeRecipe.insert(QStringLiteral("resolvedBagId"), linkedBagId);
 
-        // Heater intent derives from hasMilk — no new setting. The steam
-        // heater takes 5-9 MINUTES to warm, so a milk recipe HOLDS the
-        // heater on for as long as it is active and the machine is awake:
-        // sendMachineSettings treats an active milk recipe like
-        // keepSteamHeaterOn, so every later settings re-send (wake,
-        // reconnect, edits) keeps it warm. A milk-less recipe returns the
-        // heater to the user's baseline. Never fights an explicit keep-on.
-        // Profile-less (hot-water) recipes never take the hold — hot water
-        // needs no pre-warm, and activeRecipeHasMilk() mirrors this rule so
-        // later sendMachineSettings re-sends don't re-assert it either.
-        if (steam.value("hasMilk").toBool() && !profileLess)
-            startSteamHeating(QStringLiteral("recipe-activated"));
-        else
-            applySteamSettings();
+        // Activation does NOT grant permission — it only changes the inputs the
+        // policy resolves from (the recipe, and the pitcher selected above).
+        // Users park a recipe as the machine's resting state between drinks, so
+        // "a milk recipe is selected" is a stale signal for "milk is coming";
+        // Let the recipe decide cashes in at SHOT START instead. This used to
+        // call startSteamHeating(), which lit the boiler for a latte selected
+        // hours before anyone wanted one.
+        applySteamSettings();
 
         // Hot-water block (Americano): opt-in, vessel-carried. Re-select the
         // snapshotted vessel by name so its values become the live hot-water
@@ -2120,7 +2300,6 @@ bool MainController::yieldIsRealOverride() const {
 }
 
 void MainController::deactivateRecipe() {
-    const bool hadMilk = activeRecipeHasMilk();
     // Drop any in-flight self-write count with the recipe it belonged to —
     // its echo would otherwise land with no active recipe and leak the count.
     m_pendingRecipeSelfWrites = 0;
@@ -2132,11 +2311,16 @@ void MainController::deactivateRecipe() {
         m_activeRecipe.clear();
         emit activeRecipeChanged();
     }
-    // Leaving a milk recipe releases the heater hold: re-send settings so
-    // the heater returns to the user's baseline (keep-on users stay warm,
-    // eco users go cold).
-    if (hadMilk)
-        applySteamSettings();
+    // Unwind any pitcher override back to the user's standing selection. That
+    // path re-sends the settings itself, so the applySteamSettings() below is
+    // redundant when an override was unwound — it still runs unconditionally,
+    // and the BLE layer dedups the second identical payload.
+    setRecipeSteamPitcherOverride(SettingsBrew::NoStandingPitcher);
+    // The recipe is one of the policy's inputs in BOTH directions — leaving a
+    // milk recipe drops a permission, leaving an espresso drops a VETO — so
+    // re-resolve unconditionally. The BLE layer dedups an unchanged payload, so
+    // the redundant case costs nothing on the wire.
+    applySteamSettings();
 }
 
 void MainController::loadAutoLoadRecipeIfNeeded() {
@@ -2155,18 +2339,6 @@ void MainController::loadAutoLoadRecipeIfNeeded() {
     // accessor for a single row.
     m_pendingAutoLoadRecipeId = recipeId;
     m_recipeStorage->requestRecipe(recipeId);
-}
-
-bool MainController::activeRecipeHasMilk() const {
-    if (m_activeRecipe.isEmpty())
-        return false;
-    // A profile-less (hot-water tea) recipe never holds the steam heater,
-    // even if an MCP/web author attached a milk block to one — activation
-    // skipped the hold and re-sends must not re-assert it.
-    if (m_activeRecipe.value(QStringLiteral("profileTitle")).toString().trimmed().isEmpty())
-        return false;
-    return parseSteamBlock(m_activeRecipe.value(QStringLiteral("steamJson")).toString())
-        .value(QStringLiteral("hasMilk")).toBool();
 }
 
 void MainController::stampActiveRecipe(const QString& field, const QVariant& value) {
@@ -2201,7 +2373,14 @@ QString MainController::currentSteamSpecJson() const {
             o.insert("hasMilk", active.value("hasMilk"));
     }
     const QVariantMap pitcher = brew->getSteamPitcherPreset(brew->selectedSteamPitcher());
-    if (!pitcher.isEmpty() && !pitcher.value("disabled").toBool()) {
+    if (SettingsBrew::isHeaterOffPitcher(pitcher)) {
+        // "Heater off" is a CHOICE and has to be recorded as one. Dropping it —
+        // which is what this did, because the built-in carries no name or values
+        // worth snapshotting — made it indistinguishable from a recipe that
+        // names no pitcher, so a drink saved with the heater deliberately off
+        // reopened as one that had simply never been asked.
+        o.insert("heaterOff", true);
+    } else if (!pitcher.isEmpty()) {
         o.insert("pitcherName", pitcher.value("name").toString());
         o.insert("durationSec", pitcher.value("duration").toInt());
         o.insert("flow", pitcher.value("flow").toInt());
@@ -2255,6 +2434,47 @@ QString MainController::currentHotWaterSpecJson() const {
         o.insert("temperatureC", vessel.value("temperature").toDouble());
     }
     return compactJson(o);
+}
+
+ShotMetadata MainController::buildShotMetadataFromSettings() const {
+    // Every field here is sticky DYE state that describes the SETUP — the bean,
+    // the grinder, the bag, the recipe — and is identical for a real shot and a
+    // simulated one. Per-shot measurements (beanWeight, drinkWeight) and
+    // per-shot provenance (yieldMode, yieldAnchorValue) are deliberately absent:
+    // each caller supplies them, so the reasoning about where a weight comes
+    // from stays next to the assignment. A third copy of this block lived in
+    // uploadPendingShot() until that dead method was deleted; centralizing is
+    // what stops the next copy drifting (CLAUDE.md, "Centralize anything
+    // produced at more than one site").
+    ShotMetadata metadata;
+    metadata.beanBrand = m_settings->dye()->dyeBeanBrand();
+    metadata.beanType = m_settings->dye()->dyeBeanType();
+    metadata.roastDate = m_settings->dye()->dyeRoastDate();
+    metadata.roastLevel = m_settings->dye()->dyeRoastLevel();
+    metadata.grinderBrand = m_settings->dye()->dyeGrinderBrand();
+    metadata.grinderModel = m_settings->dye()->dyeGrinderModel();
+    metadata.grinderBurrs = m_settings->dye()->dyeGrinderBurrs();
+    metadata.grinderSetting = m_settings->dye()->dyeGrinderSetting();
+    metadata.equipmentId = m_settings->dye()->activeEquipmentId();
+    metadata.rpm = m_settings->dye()->dyeGrinderRpm();
+    metadata.drinkTds = m_settings->dye()->dyeDrinkTds();
+    metadata.drinkEy = m_settings->dye()->dyeDrinkEy();
+    metadata.espressoNotes = m_settings->dye()->dyeShotNotes();
+    metadata.barista = m_settings->dye()->dyeBarista();
+    metadata.beanBaseJson = m_settings->dye()->dyeBeanBaseData();
+    // Coffee bag snapshot: which bag this shot was pulled with, and the
+    // beans' freeze lifecycle at shot time (bean-bag-inventory).
+    metadata.bagId = m_settings->dye()->activeBagId();
+    metadata.frozenDate = m_settings->dye()->activeBagFrozenDate();
+    metadata.defrostDate = m_settings->dye()->activeBagDefrostDate();
+    metadata.storageHint = m_settings->dye()->activeBagStorageHint();
+    metadata.openedDate = m_settings->dye()->activeBagOpenedDate();
+    // Recipe provenance (add-recipes): the recipe active at shot time and
+    // the steam spec in effect, so promote-from-shot round-trips the drink.
+    metadata.recipeId = m_settings->dye()->activeRecipeId();
+    metadata.steamJson = currentSteamSpecJson();
+    metadata.hotWaterJson = currentHotWaterSpecJson();
+    return metadata;
 }
 
 void MainController::copyToClipboard(const QString& text) {
@@ -2318,7 +2538,7 @@ void MainController::onShotSettingsReported(double deviceSteamTargetC, int devic
     // Compare reported against COMMANDED — "did the DE1 honor our last
     // write?" This is the authoritative question for #746, and it correctly
     // handles code paths that write values diverging from Settings
-    // (startSteamHeating forces heater on regardless of keepSteamHeaterOn,
+    // (startSteamHeating forces heater on regardless of the resolved heater policy,
     // softStopSteam writes a 1s timeout, etc.). Comparing against
     // Settings-derived "expected" would make the drift handler clobber
     // those writes.
@@ -2493,40 +2713,12 @@ void MainController::onShotSettingsReported(double deviceSteamTargetC, int devic
 void MainController::sendMachineSettings(const QString& reason) {
     if (!m_device || !m_device->isConnected() || !m_settings) return;
 
-    // Determine steam temperature to send:
-    // - If the currently selected steam preset is an "Off" pill: send 0
-    //   (matches de1app's persistent steam_disabled behavior — target 0 is
-    //   pushed so the DE1 firmware can still honor GHC presses with no
-    //   steam produced.)
-    // - If steam is disabled (session flag): send 0
-    // - If keepSteamHeaterOn is false: send 0 (user doesn't want heater on)
-    // - Otherwise: send configured temperature
-    //
-    // Rationalization: if the user has selected a non-Off preset, the session
-    // flag is stale (set by a previous turnOffSteamHeater call on a prior Off
-    // selection). The preset is the authoritative user intent — clear the
-    // flag so downstream code sees a consistent state. Without this, IdlePage
-    // / SteamItem applySteamSettings paths (which don't call startSteamHeating)
-    // would leave the flag set and the heater off until the user opened
-    // SteamPage.
-    const QVariantMap currentPitcher = m_settings->brew()->getSteamPitcherPreset(m_settings->brew()->selectedSteamPitcher());
-    const bool currentPitcherDisabled = currentPitcher.value("disabled").toBool();
-    if (!currentPitcherDisabled && m_settings->brew()->steamDisabled()) {
-        m_settings->brew()->setSteamDisabled(false);
-    }
-    double steamTemp;
-    if (currentPitcherDisabled || m_settings->brew()->steamDisabled()) {
-        steamTemp = 0.0;
-    } else if (!m_settings->brew()->keepSteamHeaterOn() && !activeRecipeHasMilk()) {
-        // The steam heater needs 5-9 MINUTES to come up to temperature, so a
-        // milk recipe must HOLD the heater on for as long as it is active and
-        // the machine is awake (add-recipes) — a one-time warm at activation
-        // would be undone by the next settings re-send for keep-heater-off
-        // users, and warming at steam time would mean a long wait.
-        steamTemp = 0.0;
-    } else {
-        steamTemp = m_settings->brew()->steamTemperature();
-    }
+    // Resolved, never derived here — SteamHeaterPolicy is the only place the
+    // rule lives, and this function is a SEND path: it must not mutate the
+    // inputs it is about to read. (It used to clear a stale session flag inline,
+    // which put a second, invisible piece of the rule in the sender. The flag is
+    // now cleared where the user expresses the intent — selectSteamPitcher.)
+    const double steamTemp = m_steamHeaterPolicy->commandedTemperatureC();
 
     double groupTemp = getGroupTemperature();
     qDebug() << "sendMachineSettings: steam=" << steamTemp << "°C, groupTemp=" << groupTemp << "°C";
@@ -2556,6 +2748,65 @@ void MainController::sendMachineSettings(const QString& reason) {
     // 4. Flush timeout MMR (value × 10)
     int secondsValue = static_cast<int>(m_settings->brew()->flushSeconds() * 10);
     m_device->writeMMR(0x803848, secondsValue, mmrReason);
+}
+
+void MainController::selectSteamPitcher(int index, double milkFallbackG) {
+    if (!m_settings) return;
+    auto* brew = m_settings->brew();
+
+    brew->setSelectedSteamCup(index);
+
+    // Net milk on the scale now; the caller's fallback otherwise. This is the one
+    // part that legitimately differs per surface, which is why it is resolved
+    // here and the values themselves are applied by SettingsBrew.
+    double milk = 0.0;
+    if (m_machineState && m_machineState->scale() && !m_machineState->scale()->isFlowScale())
+        milk = brew->netMilkForPitcher(index, m_machineState->scaleWeight());
+    if (milk <= 0.0)
+        milk = milkFallbackG;
+
+    // Selecting a pitcher never GRANTS permission — the row says what the user
+    // would steam with, not whether the boiler runs. Selecting "Heater off" IS
+    // the veto (the policy reads the effective pitcher), so it needs no
+    // transient flag; setting one here would outlive the selection and keep the
+    // heater cold after the user picked a real pitcher again. It does end any
+    // steam event in progress, which is the one thing a tap on it must do.
+    // Switch, not if/else, and deliberately without a `default`: this dispatch
+    // shipped as an if/else that handled two of the enum's three states, so a
+    // stale index fell into the "real pitcher" branch. -Wswitch now makes a
+    // fourth state a build error rather than a silent fall-through.
+    const SettingsBrew::PitcherApply applied = brew->applySteamPitcherValues(index, milk);
+    switch (applied) {
+    case SettingsBrew::PitcherApply::Missing:
+        // A stale index wrote NOTHING, so there is no pitcher behind this
+        // selection. Treating it as a real pitcher cleared the transient veto
+        // and then steamed with whatever numbers happened to be in Settings —
+        // a machine steaming to parameters nobody chose. Fail safe to cold.
+        qWarning() << "MainController: steam pitcher" << index
+                   << "no longer exists — leaving the heater cold rather than"
+                      " steaming with stale values";
+        m_steamHeaterPolicy->setEventPermission(false);
+        break;
+    case SettingsBrew::PitcherApply::HeaterOff:
+        m_steamHeaterPolicy->setEventPermission(false);
+        break;
+    case SettingsBrew::PitcherApply::Applied:
+        // Picking a real pitcher REMOVES the transient veto — otherwise a
+        // turnOffSteamHeater() from a previous session would keep the boiler
+        // cold through every later selection, with nothing on screen to explain
+        // it. It grants nothing: what happens next is still the policy's call.
+        brew->setSteamDisabled(false);
+        break;
+    }
+    applySteamSettings();
+}
+
+void MainController::setRecipeSteamPitcherOverride(int index) {
+    if (!m_settings) return;
+    // The park/unwind decision is SettingsBrew's; this half is only the push.
+    const int select = m_settings->brew()->resolveRecipePitcherOverride(index);
+    if (select != SettingsBrew::NoStandingPitcher)
+        selectSteamPitcher(select);
 }
 
 void MainController::applySteamSettings() {
@@ -3271,6 +3522,28 @@ double MainController::getGroupTemperature() const {
     return m_profileManager->currentProfile().espressoTemperature();
 }
 
+bool MainController::pushShotSettings(double steamTempC, const QString& reason) {
+    if (!m_device || !m_device->isConnected() || !m_settings) {
+        // Say so. The callers below used to log "Turned off steam heater" whether
+        // or not the command left the app, so a log read during a disconnect
+        // asserted something that had not happened. applyHeaterTweaks in this
+        // same file logs exactly this skip — local precedent this did not follow.
+        qDebug() << "pushShotSettings: skipped," << reason
+                 << "(device connected:" << (m_device && m_device->isConnected()) << ")";
+        return false;
+    }
+
+    m_device->setShotSettings(
+        steamTempC,
+        m_settings->brew()->steamTimeout(),
+        m_settings->brew()->waterTemperature(),
+        m_settings->brew()->effectiveHotWaterVolume(),
+        getGroupTemperature(),
+        reason
+    );
+    return true;
+}
+
 void MainController::setSteamTemperatureImmediate(double temp) {
     if (!m_device || !m_device->isConnected() || !m_settings) return;
 
@@ -3281,124 +3554,69 @@ void MainController::setSteamTemperatureImmediate(double temp) {
         m_settings->brew()->setSteamDisabled(false);
     }
 
-    double groupTemp = getGroupTemperature();
-
-    // Send all shot settings with updated temperature
-    m_device->setShotSettings(
-        temp,
-        m_settings->brew()->steamTimeout(),
-        m_settings->brew()->waterTemperature(),
-        m_settings->brew()->effectiveHotWaterVolume(),
-        groupTemp,
-        QStringLiteral("setSteamTemperatureImmediate")
-    );
+    // Resolved, not `temp`: with the heater off, moving the target temperature
+    // stores the new value without waking the boiler. The old code sent `temp`
+    // straight through, so nudging the slider was an undocumented second way to
+    // turn the heater on.
+    pushShotSettings(m_steamHeaterPolicy->commandedTemperatureC(),
+                     QStringLiteral("setSteamTemperatureImmediate"));
 
     qDebug() << "Steam temperature set to:" << temp;
 }
 
-void MainController::sendSteamTemperature(double temp) {
-    // File-based logging for debugging when not connected to console
-    auto logToFile = [](const QString& msg) {
-        QString logPath = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/steam_debug.log";
-        QFile file(logPath);
-        if (file.open(QIODevice::Append | QIODevice::Text)) {
-            QTextStream out(&file);
-            out << QDateTime::currentDateTime().toString("hh:mm:ss.zzz") << " " << msg << "\n";
-            file.close();
-        }
-    };
+void MainController::startSteamHeating(const QString& reason) {
+    if (!m_settings) return;
 
-    logToFile(QString("sendSteamTemperature called with temp=%1").arg(temp));
-    qDebug() << "sendSteamTemperature:" << temp << "°C";
+    // An explicit steam action. Clear the transient veto and grant event
+    // permission, then send what the policy resolves — which is now on, because
+    // event permission outranks the remaining veto (a "Heater off" selection).
+    m_settings->brew()->setSteamDisabled(false);
+    m_steamHeaterPolicy->setEventPermission(true);
 
-    // Update steamDisabled flag based on temperature
-    // 0°C means disabled, any other temp means enabled
-    if (m_settings) {
-        m_settings->brew()->setSteamDisabled(temp == 0);
-    }
+    const QString tag = reason.isEmpty() ? QStringLiteral("startSteamHeating") : reason;
+    const double steamTemp = m_steamHeaterPolicy->commandedTemperatureC();
+    const bool sent = pushShotSettings(steamTemp, tag);
 
-    if (!m_device) {
-        logToFile("ERROR: No device");
-        return;
-    }
-    if (!m_device->isConnected()) {
-        logToFile("ERROR: Device not connected");
-        return;
-    }
-    if (!m_settings) {
-        logToFile("ERROR: No settings");
-        return;
-    }
+    // Steam flow rides along — it is part of the same steam spec.
+    if (m_device && m_device->isConnected())
+        m_device->writeMMR(0x803828, m_settings->brew()->steamFlow(), tag);
 
-    double groupTemp = getGroupTemperature();
-
-    logToFile(QString("Sending: steamTemp=%1 timeout=%2 waterTemp=%3 waterVol=%4 groupTemp=%5")
-              .arg(temp)
-              .arg(m_settings->brew()->steamTimeout())
-              .arg(m_settings->brew()->waterTemperature())
-              .arg(m_settings->brew()->effectiveHotWaterVolume())
-              .arg(groupTemp));
-
-    // Send to machine without saving to settings (for enable/disable toggle)
-    m_device->setShotSettings(
-        temp,
-        m_settings->brew()->steamTimeout(),
-        m_settings->brew()->waterTemperature(),
-        m_settings->brew()->effectiveHotWaterVolume(),
-        groupTemp,
-        QStringLiteral("sendSteamTemperature")
-    );
-
-    logToFile("Command queued successfully");
+    if (sent)
+        qDebug() << "Started steam heating to" << steamTemp << "°C from" << tag;
 }
 
-void MainController::startSteamHeating(const QString& reason) {
-    if (!m_device || !m_device->isConnected() || !m_settings) return;
-
-    // Clear steamDisabled flag - we're explicitly starting steam heating
-    m_settings->brew()->setSteamDisabled(false);
-
-    // Always send the configured steam temperature
-    double steamTemp = m_settings->brew()->steamTemperature();
-
-    double groupTemp = getGroupTemperature();
-
-    m_device->setShotSettings(
-        steamTemp,
-        m_settings->brew()->steamTimeout(),
-        m_settings->brew()->waterTemperature(),
-        m_settings->brew()->effectiveHotWaterVolume(),
-        groupTemp,
-        reason.isEmpty() ? QStringLiteral("startSteamHeating") : reason
-    );
-
-    // Also send steam flow via MMR
-    m_device->writeMMR(0x803828, m_settings->brew()->steamFlow(),
-                       QStringLiteral("startSteamHeating"));
-
-    qDebug() << "Started steam heating to" << steamTemp << "°C"
-             << "from" << (reason.isEmpty() ? QStringLiteral("<unspecified>") : reason);
+void MainController::releaseSteamEventPermission() {
+    if (!m_steamHeaterPolicy) return;
+    m_steamHeaterPolicy->setEventPermission(false);
+    // Re-resolve rather than sending 0: a user with Keep warm when idle on, or
+    // a milk recipe still under way, keeps the boiler. The QML used to send 0
+    // unconditionally here, which is what made steaming once turn the heater
+    // off for a keep-warm user.
+    pushShotSettings(m_steamHeaterPolicy->commandedTemperatureC(),
+                     QStringLiteral("steam-event-ended"));
 }
 
 void MainController::turnOffSteamHeater() {
-    if (!m_device || !m_device->isConnected() || !m_settings) return;
+    if (!m_settings) return;
 
-    // Set steamDisabled flag - this ensures consistent state management
+    // The transient veto, and the end of any steam event that was overriding it.
     m_settings->brew()->setSteamDisabled(true);
+    m_steamHeaterPolicy->setEventPermission(false);
 
-    double groupTemp = getGroupTemperature();
+    if (pushShotSettings(m_steamHeaterPolicy->commandedTemperatureC(),
+                         QStringLiteral("turnOffSteamHeater"))) {
+        qDebug() << "Turned off steam heater (steamDisabled=true)";
+    }
+}
 
-    // Send 0°C to turn off steam heater
-    m_device->setShotSettings(
-        0.0,
-        m_settings->brew()->steamTimeout(),
-        m_settings->brew()->waterTemperature(),
-        m_settings->brew()->effectiveHotWaterVolume(),
-        groupTemp,
-        QStringLiteral("turnOffSteamHeater")
-    );
-
-    qDebug() << "Turned off steam heater (steamDisabled=true)";
+void MainController::toggleSteamHeater(const QString& reason) {
+    // One place decides which direction "toggle" means. Two QML sites carried
+    // this if/else, and the comment on one of them records that a sweep which
+    // changed the condition missed the other.
+    if (steamHeaterOn())
+        turnOffSteamHeater();
+    else
+        startSteamHeating(reason);
 }
 
 void MainController::setHotWaterFlowRateImmediate(int flow) {
@@ -3483,6 +3701,16 @@ void MainController::onEspressoCycleStarted() {
     // its own stopReason to "" on shotStarted; this is belt-and-suspenders
     // and independent of QML/C++ signal ordering.)
     m_pendingStopReason.clear();
+
+    // Shot start is where Let the recipe decide cashes in. The user is making
+    // the drink NOW, so a recipe that steams gets its heater warming while the
+    // espresso pours. Deliberately NOT at recipe activation: users park a
+    // recipe as the machine's resting state, so a selected latte says nothing
+    // about when milk is wanted — see applyActivatedRecipe().
+    if (m_settings && m_settings->brew()->letRecipeDecide()
+        && m_steamHeaterPolicy && m_steamHeaterPolicy->activeRecipeWantsSteam()) {
+        startSteamHeating(QStringLiteral("shot-start-recipe-steams"));
+    }
 
     // Safety check: abort shot if user has a saved scale but it's not connected,
     // AND the current profile actually uses weight (stop-at-weight or frame exit weights).
@@ -3730,10 +3958,11 @@ void MainController::onShotEnded() {
     // Must run before stopCapture() so its debug output is included in the shot log.
     computeAutoFlowCalibration();
 
-    // Capture shot-end epoch now so uploads (including deferred pending uploads) use consistent time.
-    // Held in a local until after the discard branch so a dropped shot doesn't corrupt
-    // m_pendingShotEpoch / m_pendingDebugLog that may still belong to a prior unflushed shot
-    // (uploadPendingShot is gated on m_hasPendingShot, which the discard path doesn't touch).
+    // Shot-end epoch for the visualizer upload. A local captured by value into
+    // the save callback below, alongside duration/finalWeight/metadata/debugLog
+    // — so it describes THIS shot even if another shot ends while the save is
+    // still in flight. It was a member until the dead uploadPendingShot() that
+    // needed it across calls was removed.
     const qint64 pendingShotEpoch = QDateTime::currentSecsSinceEpoch();
 
     // Stop debug logging and get the captured log
@@ -3743,42 +3972,22 @@ void MainController::onShotEnded() {
         debugLog = m_shotDebugLogger->getCapturedLog();
     }
 
-    // Build metadata for history
-    ShotMetadata metadata;
+    // Build metadata for history. The sticky DYE fields come from the shared
+    // helper; what follows is what only THIS shot can supply.
+    ShotMetadata metadata = buildShotMetadataFromSettings();
     // [prime-first-frame] record whether this shot's upload injected the priming
     // frame, so the skip-first-frame detector accounts for the extra firmware frame.
+    // This is the shot-end save path (onShotEnded), where the device latch is read
+    // fresh — the helper deliberately omits it (see the manual re-upload path below).
     metadata.preFillInjected = m_device && m_device->lastShotPrimedFirstFrame();
-    metadata.beanBrand = m_settings->dye()->dyeBeanBrand();
-    metadata.beanType = m_settings->dye()->dyeBeanType();
-    metadata.roastDate = m_settings->dye()->dyeRoastDate();
-    metadata.roastLevel = m_settings->dye()->dyeRoastLevel();
-    metadata.grinderBrand = m_settings->dye()->dyeGrinderBrand();
-    metadata.grinderModel = m_settings->dye()->dyeGrinderModel();
-    metadata.grinderBurrs = m_settings->dye()->dyeGrinderBurrs();
-    metadata.grinderSetting = m_settings->dye()->dyeGrinderSetting();
-    metadata.equipmentId = m_settings->dye()->activeEquipmentId();
-    metadata.rpm = m_settings->dye()->dyeGrinderRpm();
     metadata.beanWeight = m_settings->dye()->dyeBeanWeight();
-    metadata.drinkWeight = m_settings->dye()->dyeDrinkWeight();
-    metadata.drinkTds = m_settings->dye()->dyeDrinkTds();
-    metadata.drinkEy = m_settings->dye()->dyeDrinkEy();
+    // The yield is NOT set here. It reaches the uploader as the finalWeight
+    // argument below — see ShotMetadata in visualizeruploader.h for why the
+    // struct deliberately has no drink-weight field.
+    //
     // No enjoyment: a just-pulled shot has not been tasted, so it saves
     // unrated (ShotMetadata defaults to 0). See settings_dye.h.
-    metadata.espressoNotes = m_settings->dye()->dyeShotNotes();
-    metadata.barista = m_settings->dye()->dyeBarista();
-    metadata.beanBaseJson = m_settings->dye()->dyeBeanBaseData();
-    // Coffee bag snapshot: which bag this shot was pulled with, and the
-    // beans' freeze lifecycle at shot time (bean-bag-inventory).
-    metadata.bagId = m_settings->dye()->activeBagId();
-    metadata.frozenDate = m_settings->dye()->activeBagFrozenDate();
-    metadata.defrostDate = m_settings->dye()->activeBagDefrostDate();
-    metadata.storageHint = m_settings->dye()->activeBagStorageHint();
-    metadata.openedDate = m_settings->dye()->activeBagOpenedDate();
-    // Recipe provenance (add-recipes): the recipe active at shot time and
-    // the steam spec in effect, so promote-from-shot round-trips the drink.
-    metadata.recipeId = m_settings->dye()->activeRecipeId();
-    metadata.steamJson = currentSteamSpecJson();
-    metadata.hotWaterJson = currentHotWaterSpecJson();
+    //
     // Yield anchor provenance (add-yield-ratio-anchor): what was MEANT,
     // alongside the resolved grams in shotTargetWeight (what ran).
     metadata.yieldMode = shotYieldMode;
@@ -3820,11 +4029,6 @@ void MainController::onShotEnded() {
         }
     }
 
-    // Past the discard gate — commit the pending-shot snapshot used by uploadPendingShot()
-    // and the synchronous visualizer auto-upload below.
-    m_pendingShotEpoch = pendingShotEpoch;
-    m_pendingDebugLog = debugLog;
-
     // Always save shot to local history (async — DB work runs on background thread)
     qDebug() << "[metadata] Saving shot - shotHistory:" << (m_shotHistory ? "exists" : "null")
              << "isReady:" << (m_shotHistory ? m_shotHistory->isReady() : false);
@@ -3839,8 +4043,8 @@ void MainController::onShotEnded() {
 
             // Connect to shotSaved signal for completion (single-shot, auto-disconnects)
             connect(m_shotHistory, &ShotHistoryStorage::shotSaved, this,
-                    [this, finalWeight, shotDateTime, showPostShot,
-                     duration, doseWeight, metadata, debugLog](qint64 shotId) {
+                    [this, finalWeight, shotDateTime, showPostShot, duration,
+                     doseWeight, metadata, debugLog, pendingShotEpoch](qint64 shotId) {
                 m_savingShot = false;
 
                 if (shotId > 0) {
@@ -3869,7 +4073,7 @@ void MainController::onShotEnded() {
                         m_visualizer->uploadShot(
                             m_shotDataModel, m_profileManager->currentProfilePtr(),
                             duration, finalWeight, doseWeight, metadata, debugLog,
-                            m_pendingShotEpoch, shotId);
+                            pendingShotEpoch, shotId);
                     }
 
                     // Set shot date/time for display on metadata page
@@ -4002,95 +4206,14 @@ void MainController::onShotEnded() {
     // persisted to the right row from C++. Do NOT auto-upload here —
     // before save the id is unknown and the upload would orphan.
 
-    // Store pending shot data for later upload (user can re-upload with updated metadata)
     // Note: shotEndedShowMetadata is emitted from the shotSaved callback above,
     // after m_lastSavedShotId is set, so PostShotReviewPage gets a valid shot ID.
-    if (showPostShot) {
-        m_hasPendingShot = true;
-        m_pendingShotDuration = duration;
-        m_pendingShotFinalWeight = finalWeight;
-        m_pendingShotDoseWeight = doseWeight;
+    if (showPostShot)
         qDebug() << "  -> Will show metadata page after shot is saved";
-    }
 
     // Reset extraction flag so that subsequent Steam/HotWater/Flush operations
     // don't incorrectly trigger shot metadata page or upload
     m_extractionStarted = false;
-}
-
-void MainController::uploadPendingShot() {
-    if (!m_hasPendingShot || !m_settings || !m_shotDataModel || !m_visualizer) {
-        qDebug() << "MainController: No pending shot to upload";
-        return;
-    }
-
-    // Build metadata from current settings
-    ShotMetadata metadata;
-    // Note: preFillInjected is intentionally NOT set here. This is the manual
-    // Visualizer re-upload path (uploadShot → buildShotJson), which never calls
-    // saveShot and never reads preFillInjected — the flag is persisted only on the
-    // shot-end save path (onShotEnded), where the device latch is read fresh.
-    metadata.beanBrand = m_settings->dye()->dyeBeanBrand();
-    metadata.beanType = m_settings->dye()->dyeBeanType();
-    metadata.roastDate = m_settings->dye()->dyeRoastDate();
-    metadata.roastLevel = m_settings->dye()->dyeRoastLevel();
-    metadata.grinderBrand = m_settings->dye()->dyeGrinderBrand();
-    metadata.grinderModel = m_settings->dye()->dyeGrinderModel();
-    metadata.grinderBurrs = m_settings->dye()->dyeGrinderBurrs();
-    metadata.grinderSetting = m_settings->dye()->dyeGrinderSetting();
-    metadata.equipmentId = m_settings->dye()->activeEquipmentId();
-    metadata.rpm = m_settings->dye()->dyeGrinderRpm();
-    metadata.beanWeight = m_settings->dye()->dyeBeanWeight();
-    metadata.drinkWeight = m_settings->dye()->dyeDrinkWeight();
-    metadata.drinkTds = m_settings->dye()->dyeDrinkTds();
-    metadata.drinkEy = m_settings->dye()->dyeDrinkEy();
-    // Unrated on save — see the espresso path above.
-    metadata.barista = m_settings->dye()->dyeBarista();
-    metadata.beanBaseJson = m_settings->dye()->dyeBeanBaseData();
-    metadata.bagId = m_settings->dye()->activeBagId();
-    metadata.frozenDate = m_settings->dye()->activeBagFrozenDate();
-    metadata.defrostDate = m_settings->dye()->activeBagDefrostDate();
-    metadata.storageHint = m_settings->dye()->activeBagStorageHint();
-    metadata.openedDate = m_settings->dye()->activeBagOpenedDate();
-    // Recipe provenance (add-recipes): the recipe active at shot time and
-    // the steam spec in effect, so promote-from-shot round-trips the drink.
-    metadata.recipeId = m_settings->dye()->activeRecipeId();
-    metadata.steamJson = currentSteamSpecJson();
-    metadata.hotWaterJson = currentHotWaterSpecJson();
-
-    // Build notes: user notes + AI recommendation (if any)
-    QString notes = m_settings->dye()->dyeShotNotes();
-    if (m_aiManager && !m_aiManager->lastRecommendation().isEmpty()) {
-        QString aiRec = m_aiManager->lastRecommendation();
-        QString provider = m_aiManager->selectedProvider();
-        QString providerName = provider;
-        if (provider == "openai") providerName = "OpenAI GPT-4o";
-        else if (provider == "anthropic") providerName = "Anthropic Claude";
-        else if (provider == "gemini") providerName = "Google Gemini";
-        else if (provider == "ollama") providerName = "Ollama";
-
-        if (!notes.isEmpty()) {
-            notes += "\n\n---\n\n";
-        }
-        notes += aiRec + "\n\n---\nAdvice by " + providerName;
-    }
-    metadata.espressoNotes = notes;
-
-    qDebug() << "MainController: Uploading pending shot with metadata -"
-             << "Profile:" << m_profileManager->currentProfile().title()
-             << "Duration:" << m_pendingShotDuration << "s"
-             << "Bean:" << metadata.beanBrand << metadata.beanType;
-
-    // Manual re-upload of the just-finished shot: by now the shot is
-    // saved and m_lastSavedShotId holds its row id, so the link is
-    // persisted from C++ via uploadSucceededForShot.
-    m_visualizer->uploadShot(m_shotDataModel, m_profileManager->currentProfilePtr(),
-                             m_pendingShotDuration, m_pendingShotFinalWeight,
-                             m_pendingShotDoseWeight, metadata, m_pendingDebugLog,
-                             m_pendingShotEpoch, m_lastSavedShotId);
-
-    m_hasPendingShot = false;
-    m_pendingDebugLog.clear();
 }
 
 void MainController::generateFakeShotData() {
@@ -4177,11 +4300,10 @@ void MainController::generateFakeShotData() {
     m_shotDataModel->addPhaseMarker(preinfusionEnd, "Extraction", 1, false);
     m_shotDataModel->addPhaseMarker(steadyEnd, "Ending", 3, false);
 
-    // Set up pending shot state
-    m_hasPendingShot = true;
-    m_pendingShotDuration = totalDuration;
-    m_pendingShotFinalWeight = 40.0;
-    m_pendingShotDoseWeight = 18.0;
+    // The simulated shot's weights, read by the save block below. Locals, not
+    // members: nothing outside this call needs them.
+    const double simulatedFinalWeight = 40.0;
+    const double simulatedDoseWeight = 18.0;
 
     qDebug() << "DEV: Generated" << numSamples << "fake samples";
 
@@ -4192,40 +4314,16 @@ void MainController::generateFakeShotData() {
         } else {
             m_savingShot = true;
 
-            ShotMetadata metadata;
-            metadata.beanBrand = m_settings->dye()->dyeBeanBrand();
-            metadata.beanType = m_settings->dye()->dyeBeanType();
-            metadata.roastDate = m_settings->dye()->dyeRoastDate();
-            metadata.roastLevel = m_settings->dye()->dyeRoastLevel();
-            metadata.grinderBrand = m_settings->dye()->dyeGrinderBrand();
-            metadata.grinderModel = m_settings->dye()->dyeGrinderModel();
-            metadata.grinderBurrs = m_settings->dye()->dyeGrinderBurrs();
-            metadata.grinderSetting = m_settings->dye()->dyeGrinderSetting();
-            metadata.equipmentId = m_settings->dye()->activeEquipmentId();
-            metadata.rpm = m_settings->dye()->dyeGrinderRpm();
-            metadata.beanWeight = m_pendingShotDoseWeight;
-            metadata.drinkWeight = m_settings->dye()->dyeDrinkWeight();
-            metadata.drinkTds = m_settings->dye()->dyeDrinkTds();
-            metadata.drinkEy = m_settings->dye()->dyeDrinkEy();
-            // Unrated on save — see the espresso path above.
-            metadata.espressoNotes = m_settings->dye()->dyeShotNotes();
-            metadata.barista = m_settings->dye()->dyeBarista();
-            metadata.beanBaseJson = m_settings->dye()->dyeBeanBaseData();
-            metadata.bagId = m_settings->dye()->activeBagId();
-            metadata.frozenDate = m_settings->dye()->activeBagFrozenDate();
-            metadata.defrostDate = m_settings->dye()->activeBagDefrostDate();
-            metadata.storageHint = m_settings->dye()->activeBagStorageHint();
-            metadata.openedDate = m_settings->dye()->activeBagOpenedDate();
-            metadata.recipeId = m_settings->dye()->activeRecipeId();
-            metadata.steamJson = currentSteamSpecJson();
-            metadata.hotWaterJson = currentHotWaterSpecJson();
+            // Same sticky DYE metadata a real shot records; only the dose is
+            // per-shot here. The yield goes to saveShot() as an argument.
+            ShotMetadata metadata = buildShotMetadataFromSettings();
+            metadata.beanWeight = simulatedDoseWeight;
 
             // Use current profile's temperature and target weight as overrides
             double temperatureOverride = m_profileManager->currentProfile().espressoTemperature();
             double targetWeight = m_profileManager->currentProfile().targetWeight();
 
-            double pendingFinalWeight = m_pendingShotFinalWeight;
-            connect(m_shotHistory, &ShotHistoryStorage::shotSaved, this, [this, pendingFinalWeight](qint64 shotId) {
+            connect(m_shotHistory, &ShotHistoryStorage::shotSaved, this, [this](qint64 shotId) {
                 m_savingShot = false;
 
                 if (shotId > 0) {
@@ -4233,8 +4331,12 @@ void MainController::generateFakeShotData() {
                     m_lastSavedShotId = shotId;
                     emit lastSavedShotIdChanged();
 
-                    // Update drink weight
-                    m_settings->dye()->setDyeDrinkWeight(pendingFinalWeight);
+                    // Deliberately NOT setDyeDrinkWeight() here, unlike the real
+                    // espresso path: this shot's weight is invented, and that
+                    // setting is real persisted user data — written from the
+                    // review page (PostShotReviewPage.qml:844), carried in the
+                    // settings transfer, and readable over MCP. A dev gesture
+                    // should not plant a made-up yield in it.
 
                     // Reset shot-specific metadata for next shot
                     m_settings->dye()->setDyeShotNotes("");
@@ -4248,7 +4350,7 @@ void MainController::generateFakeShotData() {
 
             m_shotHistory->saveShot(
                 m_shotDataModel, m_profileManager->currentProfilePtr(),
-                totalDuration, m_pendingShotFinalWeight, m_pendingShotDoseWeight,
+                totalDuration, simulatedFinalWeight, simulatedDoseWeight,
                 metadata, "[Simulated shot]",
                 temperatureOverride, targetWeight);
         }
@@ -4730,6 +4832,31 @@ void MainController::dispatchNextPendingVisualizerSync()
     m_shotHistory->requestShot(shotId);
 }
 
+void MainController::processVisualizerBeanRepair()
+{
+    if (!m_visualizer || !m_shotHistory || !m_shotHistory->isReady())
+        return;
+
+    AppSettings s;
+    if (s.value(QStringLiteral("visualizer/username")).toString().isEmpty()
+        || s.value(QStringLiteral("visualizer/password")).toString().isEmpty()) {
+        // Logged, like processVisualizerReconciliation's identical case: a
+        // reader of the log must be able to tell "no account" from "never ran".
+        qDebug() << "MainController: Visualizer bean repair skipped (no credentials)";
+        return;
+    }
+
+    // No run-once flag and no library walk: the queue IS the state. Shots are
+    // flagged where their bag's borrowed canonical link is dropped (migration 38
+    // and the storage rule), and each flag is cleared once the server confirms
+    // that shot needs nothing. An empty queue costs one scan on the DB worker.
+    //
+    // The result handler is connected once, at setup — see the note there. A
+    // single-shot connection per call would stack handlers that one emission
+    // consumes together, leaving later requests with nobody listening.
+    m_shotHistory->requestPendingBeanRepairs();
+}
+
 void MainController::processVisualizerReconciliation()
 {
     if (!m_visualizer || !m_shotHistory) return;
@@ -4814,5 +4941,3 @@ void MainController::processVisualizerReconciliation()
              << kReconcileWindowDays << "days)";
     m_visualizer->fetchShotListSince(windowStartEpoch);
 }
-
-

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(Decenza VERSION 2.0.2 LANGUAGES CXX)
+project(Decenza VERSION 2.0.3 LANGUAGES CXX)
 
 message(STATUS "Developer note: executable target is now 'Decenza'. If Qt Creator shows 'No executable specified', re-run CMake and select the 'Decenza' Run configuration.")
 
@@ -763,6 +763,7 @@ set(SOURCES
     src/controllers/maincontroller.cpp
     src/controllers/autoflowcalclassifier.cpp
     src/controllers/profilemanager.cpp
+    src/controllers/steamheaterpolicy.cpp
     src/controllers/shottimingcontroller.cpp
     src/controllers/firmwareupdater.cpp
     src/screensaver/screensavervideomanager.cpp
@@ -833,6 +834,7 @@ set(SOURCES
     src/mcp/mcptools_ai_conversations.cpp
     src/network/mqttclient.cpp
     src/network/mdnsresolver.cpp
+    src/network/multicastlock.cpp
     src/network/wifiscaleresult.cpp
     src/network/webdebuglogger.cpp
     src/network/locationprovider.cpp
@@ -991,6 +993,7 @@ set(HEADERS
     src/machine/steamhealthtracker.h
     src/controllers/maincontroller.h
     src/controllers/profilemanager.h
+    src/controllers/steamheaterpolicy.h
     src/controllers/shottimingcontroller.h
     src/screensaver/screensavervideomanager.h
     src/screensaver/iosbrightness.h
@@ -1289,6 +1292,7 @@ set_source_files_properties(qml/components/SettingsTabs.qml PROPERTIES QT_QML_SI
 set_source_files_properties(qml/components/layout/WidgetColor.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
 set_source_files_properties(qml/components/layout/LayoutActions.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
 set_source_files_properties(qml/components/DrinkType.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
+set_source_files_properties(qml/components/SteamLabels.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
 set_source_files_properties(qml/components/LastShotChartSource.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
 set_source_files_properties(qml/components/GraphSeries.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
 
@@ -1359,6 +1363,7 @@ set(QML_FILES
     qml/components/FavoritesListView.qml
     qml/components/FavoritesRowAction.qml
     qml/components/RepeaterDelegateItem.qml
+    qml/components/StatusToast.qml
     qml/components/layout/LayoutWidgetItem.qml
     qml/components/PresetPillRow.qml
     qml/components/ValueInput.qml
@@ -1418,6 +1423,7 @@ set(QML_FILES
     qml/components/RecipeField.qml
     qml/components/RecipeResolver.qml
     qml/components/DrinkType.qml
+    qml/components/SteamLabels.qml
     qml/components/ProfileKnowledgeDialog.qml
     qml/components/BeanThumbnail.qml
     qml/components/BackgroundSurface.qml

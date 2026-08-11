@@ -113,7 +113,9 @@ See `docs/CLAUDE_MD/PROJECT_STRUCTURE.md` for the full source tree, signal/slot 
 - **Centralize anything produced at more than one site — never hand-roll it per call, never copy a helper's body.** A repeated format, prefix, tag, wording, or policy is a drift opportunity: each copy is free to change alone, silently, and nothing fails when one does. Put it behind one function or macro and call that. This is not a tidiness preference, it is how the copies stay true to each other.
   - **Never copy a macro/helper body to specialize it** — alias it. `difluidr1.cpp` and `difluidr2.cpp` each hand-copied `SCALE_LOG`/`SCALE_WARN` from `scalelogging.h` instead of aliasing, so a one-line fix to the shared macro had to be found and applied in three places; the two copies were only still identical by luck. `#define R1_LOG(msg) SCALE_LOG("DiFluidR1", msg)` is the correct shape.
   - **A log/error prefix belongs in one helper, not at the call site.** `usbscalemanager.cpp` wrote `"[USB Scale] "` inline at 73 sites with no helper, and drifted exactly as predicted: at 21 of them the `qDebug` and the `emit logMessage` described the same event in *different words*. Worse, a comment was then written asserting the two were deliberately "separate", which made the drift look like a design. Prefixes also multiplied to four families (`[Scale]`, `[BLE <Driver>]`, `[USB Scale]`, `[WifiScaleDiscovery]`) so no single `grep` returned the whole story — and this subsystem is diagnosed from user-submitted logs, where a reader cannot know which family they forgot.
+  - **A generated web page's CSS/HTML/JS is code, and the same rule binds it.** The `.lib-toast` bottom-centre message was hand-written twice — once in `shotserver_layout.cpp`, once in `webtemplates/theme_css.h`/`theme_html.h`/`theme_js.h` — and had drifted in five style values (including a z-index of 9999 against 300) plus one behavioural one: only the layout copy cleared its dismiss timer, so on the theme page a second toast inherited the first's countdown and vanished early. Nothing failed; the two pages simply never render together. It is now `WEB_CSS_TOAST` / `WEB_HTML_TOAST` / `WEB_JS_TOAST` in `webtemplates/toast.h`, with the one genuinely per-page value (its place in that page's stack) as a `var(--z-toast, …)` override rather than a second copy.
   - When you find yourself about to write the second copy, stop and extract. When you touch code that already has copies, collapse them in that pass — see the pre-existing-issues rule under Accessibility, which applies to all code, not just QML.
+  - **Take the opportunity when you see it, even when it is not what you were asked to do.** A duplicate spotted in passing is the cheapest it will ever be to remove: right now it is one extraction, and every later edit to either copy is a chance for them to diverge silently. Extracting costs more up front than leaving it — do it anyway, in the same change, and say so in the PR. The bar is that the extraction is real (one definition, all callers on it), not that the diff stays small.
 
 ### C++
 - Classes: `PascalCase`; methods/variables: `camelCase`; members: `m_` prefix; slots: `onEventName()`
@@ -228,7 +230,30 @@ MCP tool responses are consumed by LLMs which cannot reliably interpret raw numb
 - **Include scale in field names for bounded values.** `enjoyment0to100` instead of `enjoyment`.
 - **Use human-readable strings for enums.** Machine phases, editor types, and states as strings (`"idle"`, `"pouring"`), not numeric codes.
 
-See `docs/CLAUDE_MD/MCP_SERVER.md` for the full data conventions section.
+**Adding a tool is adding to a budget, and it is enforced.** `tools/list` goes to every client on
+every connection and real clients TRUNCATE it silently — ChatGPT exposed 87 of 97 tools, so two
+flow-calibration tools simply did not exist for that user while a third from the same trio did.
+`scripts/check_mcp_tool_budget.py` runs in the build-free per-PR job and fails on more than 80
+tools, a tool description over 500 characters, a property description over 120, an inline `data:`
+payload, or an estimated `tools/list` over 85 KB. Three rules follow from it:
+
+- **A verb of an existing noun is an `action` on that tool, not a new tool.** Twelve families
+  merged this way (97 → 66). Each action declares its own category and confirmation, resolved
+  server-side from the ARGUMENTS and failing closed on an action it cannot resolve.
+- **Declare a tier** (`McpTierCore` / `McpTierStandard` / `McpTierNiche`). Listing order is
+  `(tier, name)`, so a truncating client loses the niche tail rather than an arbitrary ten.
+- **Bump `McpSurfaceVersion`** (`src/mcp/mcpserver.h`) whenever the surface changes. It is
+  `serverInfo.version` — the SURFACE, not the build, since 2.0.2 shipped both a 97-tool and a
+  66-tool server. A version that no longer matches what the server serves is a false statement in
+  the handshake, and the clients that key on it can only be correct if we are. The budget check
+  fingerprints the tools and fails the PR if one moved without the other. It does not by itself
+  refresh a cache a client is already holding.
+- **Long-form prose goes in `resources/ai/tools/<topic>.md`**, served by `get_agent_file(topic)`
+  and `decenza://tools/<topic>`. The description keeps only what picks the tool and fills its
+  arguments.
+
+Full rules, the measured payload breakdown, and the `registerActionTool` contract are in
+`docs/CLAUDE_MD/MCP_SERVER.md`, which also carries the full data conventions section.
 
 ## Subsystem Pointers
 

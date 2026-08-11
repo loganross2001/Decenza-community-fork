@@ -39,6 +39,7 @@ class FirmwareUpdater : public QObject {
     Q_PROPERTY(QString stateText READ stateText NOTIFY stateChanged)
     Q_PROPERTY(bool updateAvailable READ updateAvailable NOTIFY availabilityChanged)
     Q_PROPERTY(bool isDowngrade READ isDowngrade NOTIFY availabilityChanged)
+    Q_PROPERTY(bool isReflash READ isReflash NOTIFY availabilityChanged)
     // True while wired to the DE1 simulator (no real BLE). The check,
     // download, and version surfaces still run so the page is usable;
     // only the flash itself is blocked.
@@ -49,6 +50,9 @@ class FirmwareUpdater : public QObject {
     // flash duration.
     Q_PROPERTY(bool isFlashing READ isFlashing NOTIFY stateChanged)
     Q_PROPERTY(int availableVersion READ availableVersion NOTIFY availabilityChanged)
+    Q_PROPERTY(QString availableVersionLabel READ availableVersionLabel NOTIFY availabilityChanged)
+    Q_PROPERTY(QString availableChannelLabel READ availableChannelLabel NOTIFY availabilityChanged)
+    Q_PROPERTY(QString availableReleaseNotes READ availableReleaseNotes NOTIFY availabilityChanged)
     Q_PROPERTY(int installedVersion READ installedVersion NOTIFY installedVersionChanged)
     Q_PROPERTY(double progress READ progress NOTIFY progressChanged)
     Q_PROPERTY(QString errorMessage READ errorMessage NOTIFY stateChanged)
@@ -101,7 +105,7 @@ public:
 
     // Timing knobs (defaults match the spec). Tests set these to small
     // values to avoid minute-long test runs.
-    void setPostEraseWaitMs(int ms);          // default 10000 (Android) or 1000 (other)
+    void setPostEraseWaitMs(int ms);          // default 10000, every platform
     void setChunkPumpIntervalMs(int ms);      // default 1
     void setEraseTimeoutMs(int ms);           // default 30000
     void setVerifyTimeoutMs(int ms);          // default 60000
@@ -117,6 +121,12 @@ public:
     // Mirrors de1app's "Firmware downgrade available" affordance: the user
     // is allowed to flash it, but the UI should label it as a downgrade.
     bool isDowngrade() const { return m_isDowngrade; }
+    // True when the available firmware is the *same build* as what's
+    // installed. Flashing is still permitted — de1app has no version gate at
+    // all (every check in start_firmware_update is commented out), and a
+    // re-flash is the only way to recover a bank that verified but did not
+    // take. The UI warns rather than disabling the button.
+    bool isReflash() const { return m_isReflash; }
     bool isSimulated() const;
     bool isFlashing() const {
         return m_state == State::Erasing ||
@@ -126,6 +136,9 @@ public:
     }
     bool needsManualReboot() const { return m_needsManualReboot; }
     int availableVersion() const { return static_cast<int>(m_availableVersion); }
+    QString availableVersionLabel() const { return m_availableVersionLabel; }
+    QString availableChannelLabel() const { return m_availableChannelLabel; }
+    QString availableReleaseNotes() const { return m_availableReleaseNotes; }
     int installedVersion() const;  // logs [firmware] getter call so we can verify QML reads it
     double progress() const { return m_progress; }
     QString errorMessage() const { return m_errorMessage; }
@@ -158,7 +171,8 @@ private slots:
     void onDownloadFinished(QString path, DE1::Firmware::Header header);
     void onDownloadFailed(QString reason);
     void onDownloadProgress(qint64 received, qint64 total);
-    void onFwMapResponse(uint8_t fwToErase, uint8_t fwToMap, QByteArray firstError);
+    void onFwMapResponse(uint16_t windowIncrement, uint8_t fwToErase,
+                         uint8_t fwToMap, QByteArray firstError);
     void onDeviceConnectionChanged();
     void onDeviceFirmwareVersionChanged();
     void onPostEraseWaitComplete();
@@ -184,7 +198,16 @@ private:
     State       m_state            = State::Idle;
     bool        m_updateAvailable  = false;
     bool        m_isDowngrade      = false;
+    bool        m_isReflash        = false;
+    // Set when the erase FWMapRequest's own write ACK arrives. Until then an
+    // A009 notification in state Erasing cannot be this cycle's erase-complete
+    // — a terminal verify notification is byte-identical, and the retry path
+    // can deliver one late.
+    bool        m_eraseRequestAcked = false;
     uint32_t    m_availableVersion = 0;
+    QString     m_availableVersionLabel;
+    QString     m_availableChannelLabel;
+    QString     m_availableReleaseNotes;
     uint32_t    m_installedVersion = 0;
     double      m_progress         = 0.0;
     QString     m_errorMessage;
@@ -204,9 +227,12 @@ private:
     qsizetype   m_chunksQueued     = 0;   // handed to BleTransport
     qsizetype   m_chunksAcked      = 0;   // confirmed by DE1 via writeComplete
 
-    // Erase state: de1app expects *two* notifications — first fwToErase=1
-    // (erase in progress), then fwToErase=0 (erase complete). We only
-    // proceed after the second.
+    // Erase state. de1app's spec describes *two* notifications — fwToErase=1
+    // (in progress), then fwToErase=0 (complete) — but v1333+ sends only the
+    // second, so progression cannot be gated on having seen the first. This
+    // records whether it arrived, for the log and for older firmware; the
+    // transition is driven by the completion notification alone (with the
+    // post-erase timer as fallback).
     bool        m_eraseInProgressSeen = false;
 
     // Dismissed-version memory. When the user taps the banner's "x",
@@ -257,7 +283,7 @@ private:
     // NB: these inline initializers are the actual defaults. The
     // constexpr DEFAULT_*_MS values in firmwareupdater.cpp are advisory
     // documentation only — they're never used to construct these members.
-    int         m_postEraseWaitMs      = 0;       // overridden in ctor based on OS
+    int         m_postEraseWaitMs      = 0;       // set in ctor; see DEFAULT_POST_ERASE_WAIT_MS
     int         m_chunkPumpIntervalMs  = 1;
     int         m_eraseTimeoutMs       = 30000;
     int         m_verifyTimeoutMs      = 60000;   // bumped from 10000; see below

@@ -1,5 +1,8 @@
 #include <QtTest>
 #include <QSignalSpy>
+#include <QSignalBlocker>
+
+#include <algorithm>
 #include <QTemporaryDir>
 #include <QFile>
 #include <QRegularExpression>
@@ -20,7 +23,7 @@
 // test runs in < 100 ms instead of the real 45-second flash.
 //
 // This file starts with the happy path only (§4a); error-path tests
-// (disconnect, timeout, verify failure, precondition, race guard) land
+// (disconnect, timeout, verify failure, precondition, same-version) land
 // in §4b, and retry/dismiss/verify-retroactive-success semantics in §4c.
 
 namespace {
@@ -38,11 +41,20 @@ void packU32LE(QByteArray& buf, int off, uint32_t v) {
 // side accepts this per the spec (BoardMarker + size check only).
 QByteArray makeFirmwareBlob(uint32_t version, qsizetype payloadSize = 256) {
     QByteArray blob(DE1::Firmware::HEADER_SIZE + payloadSize, char(0));
+    packU32LE(blob, 0,  0x11223344);                            // CheckSum
     packU32LE(blob, 4,  DE1::Firmware::BOARD_MARKER);
     packU32LE(blob, 8,  version);
-    packU32LE(blob, 12, static_cast<uint32_t>(payloadSize));
-    // IV (offsets 28-59) stays all zeros; DE1 side decrypts in real flash,
-    // but tests never reach a real device so content doesn't matter.
+    packU32LE(blob, 12, static_cast<uint32_t>(payloadSize));    // ByteCount
+    packU32LE(blob, 16, static_cast<uint32_t>(payloadSize / 2));// CpuBytes
+    // offset 20 Unused stays zero
+    packU32LE(blob, 24, 0x55667788);                            // DCSum
+    // The checksum words and the IV must be non-zero: validateFile() rejects
+    // an all-zero one, because no published image leaves them empty and that
+    // is what distinguishes a real header from a spliced or synthetic one.
+    for (int i = 0; i < 32; ++i) {
+        blob[28 + i] = static_cast<char>(i + 1);                // IV
+    }
+    packU32LE(blob, 60, 0x99AABBCC);                            // HeaderCheckSum
     return blob;
 }
 
@@ -58,12 +70,29 @@ void writeCachedBlob(const FirmwareUpdater*, DE1::Firmware::FirmwareAssetCache* 
 // queued into MockTransport, then simulating BLE ACKs for each. Returns
 // after the state has advanced to Verifying (or whatever follows, depending
 // on timings in the specific test).
+// A firmware chunk on the wire: 20 bytes on WRITE_TO_MMR whose length byte
+// is 16. Same discriminator FirmwareUpdater::onFirmwareWriteAcked uses to
+// tell chunks from the MMR writes that share the characteristic.
+bool isFirmwareChunkWrite(const QPair<QBluetoothUuid, QByteArray>& w) {
+    return w.first == DE1::Characteristic::WRITE_TO_MMR &&
+           w.second.size() == 20 &&
+           static_cast<uint8_t>(w.second[0]) == 16;
+}
+
+qsizetype firmwareChunkWriteCount(const MockTransport& transport) {
+    return std::count_if(transport.writes.begin(), transport.writes.end(),
+                         isFirmwareChunkWrite);
+}
+
 void simulateFullUpload(MockTransport& transport, const QByteArray& blob,
                         int ackWaitTimeoutMs = 5000) {
     const qsizetype expectedChunks = (blob.size() + 15) / 16;
-    // Expected writes at this point: 1 erase FWMapRequest + N chunks.
+    // Count the CHUNK writes, not the total. This used to wait for
+    // `writes.size() >= 1 + expectedChunks` assumes exactly one non-chunk
+    // write (the erase FWMapRequest) precedes them. Count the chunk packets
+    // instead, so this helper stays correct if the setup traffic changes.
     QTRY_VERIFY_WITH_TIMEOUT(
-        transport.writes.size() >= 1 + expectedChunks, ackWaitTimeoutMs);
+        firmwareChunkWriteCount(transport) >= expectedChunks, ackWaitTimeoutMs);
     transport.ackAllWritesInOrder();
 }
 
@@ -122,6 +151,91 @@ private slots:
         QVERIFY(f.updater.errorMessage().contains("Erase"));
     }
 
+    void erasePhase_keepsTheMachineAwake() {
+        Fixture f;
+        writeCachedBlob(&f.updater, &f.cache, makeFirmwareBlob(1352));
+        f.updater.startUpdate();
+        QTRY_COMPARE(f.updater.state(), FirmwareUpdater::State::Uploading);
+
+        for (const auto& w : f.transport.writes) {
+            QVERIFY2(!(w.first == DE1::Characteristic::REQUESTED_STATE &&
+                       w.second == QByteArray(1, static_cast<char>(DE1::State::Sleep))),
+                     "firmware updates must not put the DE1 to sleep");
+        }
+    }
+
+    void eraseCompleteNotification_startsUploadBeforeFallbackTimer() {
+        Fixture f;
+        // The post-erase wait is a fallback, not the trigger. With it set far
+        // beyond the test's patience, the only thing that can reach Uploading
+        // is the erase-complete notification. A captured DE1+/PCB 1.3 flash
+        // reported it at +1.31 s against a 10 s wait, so this is the normal
+        // path and the timer is the exception.
+        f.updater.setPostEraseWaitMs(60000);
+        f.updater.setEraseTimeoutMs(60000);
+        writeCachedBlob(&f.updater, &f.cache, makeFirmwareBlob(1352));
+        f.updater.startUpdate();
+        QTRY_COMPARE(f.updater.state(), FirmwareUpdater::State::Erasing);
+
+        // The erase request's own write ACK is what marks this erase cycle as
+        // started; a notification arriving before it cannot be its answer.
+        emit f.transport.writeComplete(DE1::Characteristic::FW_MAP_REQUEST,
+                                       QByteArray::fromHex("00000101000000"));
+
+        // firstError here is the 0,0,0 we sent on the erase request, echoed
+        // back — the transition must not depend on its value.
+        emit f.transport.dataReceived(DE1::Characteristic::FW_MAP_REQUEST,
+                                      QByteArray::fromHex("00000001000000"));
+        QTRY_COMPARE_WITH_TIMEOUT(f.updater.state(),
+                                  FirmwareUpdater::State::Uploading, 2000);
+    }
+
+    void eraseCompleteBeforeRequestAck_isIgnored() {
+        Fixture f;
+        // A terminal VERIFY notification is byte-identical to an
+        // erase-complete one. The retry path makes that reachable: a verify
+        // that timed out at 60 s leaves the DE1 still scanning, the user taps
+        // Retry, and the late response lands in the new Erasing window. Acting
+        // on it would stream the whole upload into a bank still being erased.
+        // Without the ACK gate this test transitions to Uploading.
+        f.updater.setPostEraseWaitMs(60000);
+        f.updater.setEraseTimeoutMs(60000);
+        writeCachedBlob(&f.updater, &f.cache, makeFirmwareBlob(1352));
+        f.updater.startUpdate();
+        QTRY_COMPARE(f.updater.state(), FirmwareUpdater::State::Erasing);
+
+        // No writeComplete for the erase request — so this notification cannot
+        // be its answer.
+        emit f.transport.dataReceived(DE1::Characteristic::FW_MAP_REQUEST,
+                                      QByteArray::fromHex("00000001FFFFFD"));
+        QTest::qWait(100);
+        QCOMPARE(f.updater.state(), FirmwareUpdater::State::Erasing);
+
+        // Once the request is ACKed, the next notification is acted on.
+        emit f.transport.writeComplete(DE1::Characteristic::FW_MAP_REQUEST,
+                                       QByteArray::fromHex("00000101000000"));
+        emit f.transport.dataReceived(DE1::Characteristic::FW_MAP_REQUEST,
+                                      QByteArray::fromHex("00000001000000"));
+        QTRY_COMPARE_WITH_TIMEOUT(f.updater.state(),
+                                  FirmwareUpdater::State::Uploading, 2000);
+    }
+
+    void eraseInProgressNotification_doesNotStartUpload() {
+        Fixture f;
+        // fwToErase=1 is "still erasing" — v1333+ skips it, but older
+        // firmware sends it first and it must not be mistaken for completion.
+        f.updater.setPostEraseWaitMs(60000);
+        f.updater.setEraseTimeoutMs(60000);
+        writeCachedBlob(&f.updater, &f.cache, makeFirmwareBlob(1352));
+        f.updater.startUpdate();
+        QTRY_COMPARE(f.updater.state(), FirmwareUpdater::State::Erasing);
+
+        emit f.transport.dataReceived(DE1::Characteristic::FW_MAP_REQUEST,
+                                      QByteArray::fromHex("00000101000000"));
+        QTest::qWait(100);
+        QCOMPARE(f.updater.state(), FirmwareUpdater::State::Erasing);
+    }
+
     void disconnectDuringUpload_failsRetryable() {
         Fixture f;
         QTest::ignoreMessage(QtWarningMsg,
@@ -160,6 +274,31 @@ private slots:
         QVERIFY(f.updater.errorMessage().contains("Verification"));
     }
 
+    void verifyIgnoresNonTerminalNotification_thenAcceptsVerdict() {
+        Fixture f;
+        const QByteArray blob = makeFirmwareBlob(1352);
+        writeCachedBlob(&f.updater, &f.cache, blob);
+        f.updater.startUpdate();
+        QTRY_COMPARE(f.updater.state(), FirmwareUpdater::State::Uploading);
+        simulateFullUpload(f.transport, blob);
+        QTRY_COMPARE(f.updater.state(), FirmwareUpdater::State::Verifying);
+
+        // WindowIncrement 0x0120 — the bootloader talking mid-scan. Its
+        // FirstError is a cursor, not a corrupt-block address. Treating it as
+        // a verdict reports "Verification failed at block 0.72.0" on a flash
+        // that is still verifying, and Retry cannot help because the next
+        // attempt reports the same cursor.
+        emit f.transport.dataReceived(DE1::Characteristic::FW_MAP_REQUEST,
+                                      QByteArray::fromHex("01200001004800"));
+        QTest::qWait(50);
+        QCOMPARE(f.updater.state(), FirmwareUpdater::State::Verifying);
+
+        // The real verdict still lands.
+        emit f.transport.dataReceived(DE1::Characteristic::FW_MAP_REQUEST,
+                                      QByteArray::fromHex("00000001FFFFFD"));
+        QTRY_COMPARE(f.updater.state(), FirmwareUpdater::State::AwaitingReboot);
+    }
+
     void preconditionRefuses_duringShot() {
         Fixture f;
         // The precondition-fail path goes through setState(Failed) in
@@ -186,22 +325,29 @@ private slots:
         QVERIFY(!sawFirmwareWrite);
     }
 
-    void raceGuardAlreadyUpdated_jumpsToSucceeded() {
+    void sameVersion_stillFlashes() {
         Fixture f;
-        // Installed version already equals what the file contains.
+        // Installed version already equals what the file contains. This used
+        // to short-circuit to Succeeded without writing anything, which made
+        // the case that most needs a flash — a bank that verified but did not
+        // take, so the DE1 reports the new build while running the old one —
+        // unreachable. de1app has no version gate at all (every check in
+        // start_firmware_update is commented out); we match it and warn in the
+        // UI instead. The flash must actually start.
         f.updater.setInstalledVersionProvider([]{ return 1352u; });
         writeCachedBlob(&f.updater, &f.cache, makeFirmwareBlob(1352));
         f.updater.startUpdate();
 
-        QTRY_COMPARE(f.updater.state(), FirmwareUpdater::State::Succeeded);
-        // Race guard fired before any BLE write: no erase, no chunks.
+        QTRY_VERIFY(f.updater.state() != FirmwareUpdater::State::Downloading);
+        QVERIFY(f.updater.state() != FirmwareUpdater::State::Succeeded);
+
         bool sawEraseReq = false;
         for (const auto& w : f.transport.writes) {
             if (w.first == DE1::Characteristic::FW_MAP_REQUEST) {
                 sawEraseReq = true; break;
             }
         }
-        QVERIFY(!sawEraseReq);
+        QVERIFY(sawEraseReq);
     }
 
     // ===== §4b+: firmware-flash MMR-write guard =====
@@ -379,10 +525,80 @@ private slots:
         QVERIFY(!f.updater.updateAvailable());
     }
 
+    void bundledCheck_exposesReleaseNotesForQml() {
+        DE1Device device;
+        DE1::Firmware::FirmwareAssetCache cache;
+        FirmwareUpdater updater(&device, &cache);
+        updater.setInstalledVersionProvider([]{ return 1200u; });
+
+        updater.checkForUpdate();
+
+        QCOMPARE(updater.availableVersion(), 1352);
+        QCOMPARE(updater.availableVersionLabel(), QStringLiteral("1352"));
+        QCOMPARE(updater.availableChannelLabel(), QStringLiteral("Stable"));
+        QVERIFY(updater.availableReleaseNotes().contains(QStringLiteral("NoAC")));
+
+        cache.setChannel(DE1::Firmware::FirmwareAssetCache::Channel::EarlyAccess);
+        updater.checkForUpdate();
+
+        QCOMPARE(updater.availableVersion(), 1358);
+        QCOMPARE(updater.availableVersionLabel(), QStringLiteral("1358"));
+        QCOMPARE(updater.availableChannelLabel(), QStringLiteral("Early access"));
+        QVERIFY(updater.availableReleaseNotes().contains(QStringLiteral("Cold maintenance")));
+    }
+
+    void bundledCheckError_surfacesNonRetryableFileValidityFailure() {
+        Fixture f;
+        DE1::Firmware::FirmwareAssetCache::CheckResult r;
+        r.kind = DE1::Firmware::FirmwareAssetCache::CheckResult::Error;
+        r.errorDetail = QStringLiteral("Bundled firmware manifest is unreadable");
+
+        QTest::ignoreMessage(
+            QtWarningMsg,
+            QRegularExpression(R"(\[firmware\] FAIL phase=\s*Idle.*reason=\s*The firmware file is not valid)"));
+        emit f.cache.checkFinished(r);
+
+        QCOMPARE(f.updater.state(), FirmwareUpdater::State::Failed);
+        QCOMPARE(f.updater.errorMessage(),
+                 QStringLiteral("The firmware file is not valid. Please report this."));
+        QVERIFY(!f.updater.retryAvailable());
+        QCOMPARE(f.updater.availableVersion(), 0u);
+        QVERIFY(f.updater.availableVersionLabel().isEmpty());
+        QVERIFY(f.updater.availableChannelLabel().isEmpty());
+        QVERIFY(f.updater.availableReleaseNotes().isEmpty());
+        QVERIFY(!f.updater.updateAvailable());
+    }
+
+    void bundledDownloadFailure_surfacesGenericNonRetryableError() {
+        DE1Device device;
+        DE1::Firmware::FirmwareAssetCache cache;
+        FirmwareUpdater updater(&device, &cache);
+        updater.setPreconditionProvider([]{ return true; });
+        updater.setInstalledVersionProvider([]{ return 1200u; });
+
+        QSignalBlocker blockCacheSignals(&cache);
+        updater.startUpdate();
+        QCOMPARE(updater.state(), FirmwareUpdater::State::Downloading);
+        blockCacheSignals.unblock();
+
+        QTest::ignoreMessage(
+            QtWarningMsg,
+            QRegularExpression(R"(\[firmware\] bundled source validation failed:.*digest mismatch)"));
+        QTest::ignoreMessage(
+            QtWarningMsg,
+            QRegularExpression(R"(\[firmware\] FAIL phase=\s*Downloading.*reason=\s*The firmware file is not valid)"));
+        emit cache.downloadFailed(QStringLiteral("Bundled firmware digest mismatch"));
+
+        QCOMPARE(updater.state(), FirmwareUpdater::State::Failed);
+        QCOMPARE(updater.errorMessage(),
+                 QStringLiteral("The firmware file is not valid. Please report this."));
+        QVERIFY(!updater.retryAvailable());
+    }
+
     void olderRemoteSetsDowngradeAvailability() {
         // Mirrors de1app's "Firmware downgrade available" UX: when the
         // cached firmware is strictly older than what's on the DE1 (e.g.
-        // user flipped channel nightly → stable), updateAvailable still
+        // user flipped channel early access -> stable), updateAvailable still
         // becomes true and isDowngrade is set.
         Fixture f;
         f.updater.setInstalledVersionProvider([]{ return uint32_t(1352); });
@@ -497,11 +713,12 @@ private slots:
         QVERIFY(f.transport.subscribes.contains(DE1::Characteristic::FW_MAP_REQUEST));
 
         // Wait for all chunks to land in MockTransport (the pump queues them
-        // synchronously with a 0 ms interval). The expected write count is
-        // 1 (erase FWMapRequest) + N (firmware chunks).
+        // synchronously with a 0 ms interval). Count chunk writes rather than
+        // total writes — the erase FWMapRequest is a non-chunk write. See
+        // firmwareChunkWriteCount().
         const qsizetype expectedChunksQueued = (blob.size() + 15) / 16;
         QTRY_VERIFY_WITH_TIMEOUT(
-            f.transport.writes.size() >= 1 + expectedChunksQueued, 5000);
+            firmwareChunkWriteCount(f.transport) >= expectedChunksQueued, 5000);
 
         // Now simulate BLE ACKing each write. The updater counts
         // WRITE_TO_MMR ACKs with length==16; after the last chunk's ACK

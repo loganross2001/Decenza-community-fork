@@ -118,6 +118,10 @@ set(CORE_SOURCES
 
 set(CONTROLLER_SOURCES
     ${CMAKE_SOURCE_DIR}/src/controllers/shottimingcontroller.cpp
+    # The steam-target derivation. One small TU whose only dependency is Settings,
+    # which decenza_testlib already carries — so this is the cheap shape (compiled
+    # once here) rather than the expensive one the header warns about.
+    ${CMAKE_SOURCE_DIR}/src/controllers/steamheaterpolicy.cpp
 )
 
 # Shot analysis / projection layer. Plain Qt Core — no Quick or Graphs — so it
@@ -330,6 +334,14 @@ add_library(decenza_testresources OBJECT ${CMAKE_SOURCE_DIR}/resources/resources
 set_target_properties(decenza_testresources PROPERTIES AUTORCC ON)
 target_link_libraries(decenza_testresources PUBLIC Qt6::Core)
 
+# FirmwareAssetCache is exercised by exactly these two targets. Keep its
+# Q_OBJECT implementation in one narrow library so it is compiled once.
+add_library(decenza_firmwareassetcachelib STATIC
+    ${CMAKE_SOURCE_DIR}/src/core/firmwareassetcache.cpp
+)
+set_target_properties(decenza_firmwareassetcachelib PROPERTIES AUTOMOC ON AUTOMOC_PATH_PREFIX OFF)
+target_link_libraries(decenza_firmwareassetcachelib PUBLIC decenza_testlib)
+
 add_decenza_test(tst_binarycodec
     tst_binarycodec.cpp
 )
@@ -403,6 +415,10 @@ add_decenza_test(tst_firmwareheader
 # covered by the integration test in tst_firmwareflow. ---
 add_decenza_test(tst_firmwareassetcachehelpers
     tst_firmwareassetcachehelpers.cpp
+)
+target_link_libraries(tst_firmwareassetcachehelpers PRIVATE
+    decenza_firmwareassetcachelib
+    decenza_testresources
 )
 
 # --- tst_migrationinterfaceselect: pure interface-selection ordering for
@@ -532,6 +548,11 @@ add_decenza_test(tst_closeintent
 add_decenza_test(tst_speakerembedder
     tst_speakerembedder.cpp
     ${CMAKE_SOURCE_DIR}/src/barista/mfccembedder.cpp
+)
+
+# --- tst_steamheaterpolicy: THE steam-target derivation, and that it stays the only one ---
+add_decenza_test(tst_steamheaterpolicy
+    tst_steamheaterpolicy.cpp
 )
 
 # --- tst_settings: Settings persistence and defaults ---
@@ -907,7 +928,10 @@ add_decenza_test(tst_firmwareupdater
     tst_firmwareupdater.cpp
     mocks/MockTransport.h
     ${CMAKE_SOURCE_DIR}/src/controllers/firmwareupdater.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/firmwareassetcache.cpp
+)
+target_link_libraries(tst_firmwareupdater PRIVATE
+    decenza_firmwareassetcachelib
+    decenza_testresources
 )
 
 # --- tst_profileupload: Profile upload frame-ACK verification ---
@@ -1210,6 +1234,10 @@ add_decenza_test(tst_wifiscalediscovery
     tst_wifiscalediscovery.cpp
     ${CMAKE_SOURCE_DIR}/src/network/wifiscalediscovery.cpp
     ${CMAKE_SOURCE_DIR}/src/network/mdnsresolver.cpp
+    # Two files, one TU each, both tiny — not worth a library. multicastlock.cpp
+    # is a no-op off Android and exists here only because mdnsresolver.cpp calls
+    # into it; see the duplication rules in TESTING.md before widening this.
+    ${CMAKE_SOURCE_DIR}/src/network/multicastlock.cpp
 )
 target_link_libraries(tst_wifiscalediscovery PRIVATE decenza_wifiscaleresultlib)
 
@@ -1566,8 +1594,10 @@ target_link_libraries(tst_mcpserver_protocol PRIVATE decenza_mcpserverlib decenz
 target_include_directories(tst_mcpserver_protocol PRIVATE ${CMAKE_BINARY_DIR})
 
 # Compile the production qrc so :/icons/* paths resolve at runtime — the
-# `icons[]` round-trip test reads SVGs out of the resource bundle and would
-# fail with an empty array otherwise.
+# RESOURCE listing still carries icons (five records, five distinct icons) and
+# resourcesListAt2025_11_25EmitsTitleAndIcons reads the SVGs out of the bundle.
+# Tools no longer carry icons at all, so the tool-side round-trip test this
+# comment used to name is gone; the link is still load-bearing for resources.
 target_link_libraries(tst_mcpserver_protocol PRIVATE decenza_testresources)
 
 # --- tst_mcpremoteaccess: remote connector (add-remote-mcp-connector) —

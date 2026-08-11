@@ -189,9 +189,18 @@ T.Page {
     // off the top under the status bar. Combined with the popup clearance (max)
     // where the transform is applied, so a picker over an active preset still works.
     readonly property real presetBandClearance: Math.min(idlePage._bandOverlap, idlePage._maxPanelClearance)
-    // Fall back to fading the band ONLY when the bounded slide can't fully clear
-    // the overlap (very short viewports) — otherwise the slide keeps it visible.
-    readonly property bool carouselOverlapsBand: idlePage._bandOverlap > idlePage.presetBandClearance + 0.5
+    // Fall back to fading the band when the column's RENDERED bottom still overlaps
+    // it — mirror the transform below EXACTLY (slides up by max(bottomPanelClearance,
+    // presetBandClearance), down by topPanelClearance) so the fade re-engages whenever
+    // the slide is cancelled: a very short viewport (the _maxPanelClearance cap bites)
+    // OR an upper-half picker whose topPanelClearance pushes the column back down into
+    // the band. Gated on a real active-preset overlap (_bandOverlap > 0) so a picker
+    // alone never fades the band.
+    readonly property bool carouselOverlapsBand:
+        idlePage._bandOverlap > 0
+        && (idlePage._bandOverlap
+            - Math.max(idlePage.bottomPanelClearance, idlePage.presetBandClearance)
+            + idlePage.topPanelClearance) > 0.5
 
     Component.onCompleted: {
         MainController.bagStorage.requestInventory()

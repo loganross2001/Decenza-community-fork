@@ -217,6 +217,7 @@ Item {
                 case "ratioQuickSelect": src = "items/RatioQuickSelectItem.qml"; break
                 case "grindQuickSelect": src = "items/GrindQuickSelectItem.qml"; break
                 case "temperatureQuickSelect": src = "items/TempQuickSelectItem.qml"; break
+                case "profileQuickSelect": src = "items/ProfileQuickSelectItem.qml"; break
                 case "brewQuickSelect":  src = "items/BrewQuickSelectItem.qml"; break
                 case "shotPlan":         src = "items/ShotPlanItem.qml"; break
                 case "spacer":           src = "items/SpacerItem.qml"; break

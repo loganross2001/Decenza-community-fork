@@ -38,8 +38,11 @@ LayoutWidgetItem {
     implicitWidth: col.implicitWidth
     implicitHeight: col.implicitHeight
 
-    // 11 rows for n = -5..+5 around the current temperature, clamped to a sane
-    // brew range (70–100 °C) and de-duplicated. Each row:
+    // Up to 11 rows for n = -5..+5 around the current temperature, clamped to the
+    // brew range (70–100 °C, the same window the BrewDialog override editor uses)
+    // and de-duplicated. If the current temperature is itself out of range (a tea
+    // or calibration profile) no row is isCurrent and the ladder may be empty —
+    // canQuickSelect gates the pill on that. Each row:
     //   { value: <Celsius double>, label: <display string>, isCurrent: bool }.
     readonly property var rows: {
         // Reference for reactivity across setting + unit + translation changes.
@@ -52,7 +55,7 @@ LayoutWidgetItem {
         var seen = ({})
         for (var n = -5; n <= 5; n++) {
             var v = cur + n * step
-            if (v < 70 || v > 100) continue        // clamp to a sane brew range
+            if (!(v >= 70 && v <= 100)) continue   // clamp to the brew range (NaN-safe)
             // Round to 2 decimals to fold float dirt and de-duplicate.
             var key = v.toFixed(2)
             if (seen[key]) continue
@@ -61,6 +64,11 @@ LayoutWidgetItem {
         }
         return out
     }
+    // The quick-select only makes sense when the current temperature is in range,
+    // i.e. the ladder contains it. Otherwise the pill is a plain read-out so it
+    // never opens an empty/currentless picker. Both guards key off rows so they
+    // can't drift.
+    readonly property bool canQuickSelect: root.rows.some(function(r) { return r.isCurrent })
 
     function applyValueC(v) {
         // Plain property write: temperatureOverride's WRITE setter is NOT
@@ -92,13 +100,17 @@ LayoutWidgetItem {
                                    + Theme.spacingMedium * 2
             Layout.preferredHeight: Theme.scaled(32)
             radius: height / 2
-            color: tempMa.pressed ? Qt.darker(root.zoneTextColor, 1.15) : root.zoneTextColor
+            color: (tempMa.pressed && root.canQuickSelect) ? Qt.darker(root.zoneTextColor, 1.15) : root.zoneTextColor
+            // Dim to a plain read-out when the current temperature is out of range.
+            opacity: root.canQuickSelect ? 1.0 : 0.55
 
-            Accessible.role: Accessible.Button
-            Accessible.name: root.labelText + " " + root.valueText + ". "
-                             + TranslationManager.translate("temp.quickSelect.tapToChange", "Tap to change")
+            Accessible.role: root.canQuickSelect ? Accessible.Button : Accessible.StaticText
+            Accessible.name: root.canQuickSelect
+                ? root.labelText + " " + root.valueText + ". "
+                  + TranslationManager.translate("temp.quickSelect.tapToChange", "Tap to change")
+                : root.labelText + " " + root.valueText
             Accessible.focusable: true
-            Accessible.onPressAction: tempMa.clicked(null)
+            Accessible.onPressAction: { if (root.canQuickSelect) tempMa.clicked(null) }
 
             // Hidden width reference: a representative ratio value in the identical font, measured only
             // (never drawn), so the temp pill is at least as wide as a ratio pill for brew-bar parity.
@@ -117,7 +129,12 @@ LayoutWidgetItem {
                 font.pixelSize: Theme.scaled(20)
                 font.bold: true
             }
-            MouseArea { id: tempMa; anchors.fill: parent; onClicked: tempDialog.open() }
+            MouseArea {
+                id: tempMa
+                anchors.fill: parent
+                enabled: root.canQuickSelect   // inert read-out when the temp is out of range
+                onClicked: tempDialog.open()
+            }
         }
     }
 

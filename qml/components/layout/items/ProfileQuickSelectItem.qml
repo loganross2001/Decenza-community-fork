@@ -88,6 +88,7 @@ LayoutWidgetItem {
                 elide: Text.ElideRight
                 horizontalAlignment: Text.AlignHCenter
                 text: root.valueText
+                Accessible.ignored: true   // the pill Rectangle carries Accessible.name
                 color: Theme.primaryColor
                 font.pixelSize: Theme.scaled(20)
                 font.bold: true

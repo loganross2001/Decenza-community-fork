@@ -6,18 +6,20 @@ import "../.."
 // Layout widget: brew-temperature quick-select (composable-brew-bar).
 // Shows the effective brew temperature as a pill; tapping opens a value picker
 // of temperatures at the current ±5 steps (11 entries, current centered).
-// Tapping a value writes it to the brew temperature override via a plain
-// property assignment (Settings.brew.temperatureOverride = x) — the same value
-// the shipped temperature UI (TemperatureItem / BrewDialog) reads and writes.
+// Tapping a value arms it as the brew-temperature override AND pushes it to the
+// machine via ProfileManager.applyTemperatureOverride() — the canonical writer,
+// which does a set-or-clear against the profile baseline and re-uploads the
+// profile, so the same override the shipped temperature UI (TemperatureItem /
+// BrewDialog) reads takes effect on the DE1 immediately (a bare override write
+// only lands on the next profile upload).
 //
 // The step is a global preference (Settings.brew.temperatureQuickSelectStep,
-// default 0.5 °C) — no per-instance option. (The grind pill's step is now
-// history-derived upstream, but this fork-only temperature step stays a
-// preference.) Values are stepped in Celsius (the internal/stored unit);
-// the pill and picker DISPLAY them in the user's unit via Theme.formatTemperature.
+// default 0.5 °C, edited in Settings -> Machine and shared with BrewQuickSelectDialog)
+// — a fork-only control. (The upstream PR of this widget drops the setting and fixes
+// the step at 0.5 °C.) Values are stepped in Celsius (the internal/stored unit); the
+// pill and picker DISPLAY them in the user's unit via Theme.formatTemperature.
 //
-// Pure layout widget: no barista / AI / feedback dependencies, so it can be
-// cherry-picked cleanly onto upstream/main.
+// Pure layout widget: no barista / AI / feedback dependencies.
 LayoutWidgetItem {
     id: root
 
@@ -31,8 +33,9 @@ LayoutWidgetItem {
         : ProfileManager.profileTargetTemperature
     readonly property string valueText: Theme.formatTemperature(effectiveTempC, 1)
 
-    // Global configurable step (°C). Default 0.5, edited in Settings.
-    readonly property double tempStepC: (Settings.brew.temperatureQuickSelectStep > 0)
+    // Global configurable step (°C); the C++ setter clamps it to 0.1–5 °C. A
+    // non-positive stored value falls back to 0.5.
+    readonly property real tempStepC: (Settings.brew.temperatureQuickSelectStep > 0)
         ? Settings.brew.temperatureQuickSelectStep : 0.5
 
     implicitWidth: col.implicitWidth
@@ -45,8 +48,8 @@ LayoutWidgetItem {
     // canQuickSelect gates the pill on that. Each row:
     //   { value: <Celsius double>, label: <display string>, isCurrent: bool }.
     readonly property var rows: {
-        // Reference for reactivity across setting + unit + translation changes.
-        var _ = TranslationManager.translationVersion
+        // Reference the unit so the labels re-evaluate on a unit change
+        // (Theme.formatTemperature reads it in JS).
         var __ = Settings.app.temperatureUnit
         var cur = root.effectiveTempC
         var step = root.tempStepC
@@ -71,10 +74,11 @@ LayoutWidgetItem {
     readonly property bool canQuickSelect: root.rows.some(function(r) { return r.isCurrent })
 
     function applyValueC(v) {
-        // Plain property write: temperatureOverride's WRITE setter is NOT
-        // Q_INVOKABLE, so it must be assigned, never called as a setter. This is
-        // the same override the shipped temperature UI writes.
-        Settings.brew.temperatureOverride = v
+        // The canonical writer: set-or-clear the override against the profile
+        // baseline (tapping the profile's own temperature disarms it) AND push it
+        // to the machine. A bare Settings.brew.temperatureOverride write would not
+        // reach the DE1 until the next profile upload.
+        ProfileManager.applyTemperatureOverride(v)
     }
 
     ColumnLayout {
@@ -125,6 +129,7 @@ LayoutWidgetItem {
                 id: tempValue
                 anchors.centerIn: parent
                 text: root.valueText
+                Accessible.ignored: true   // the pill Rectangle carries Accessible.name
                 color: Theme.primaryColor
                 font.pixelSize: Theme.scaled(20)
                 font.bold: true

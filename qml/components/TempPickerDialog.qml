@@ -1,3 +1,7 @@
+// The value-row delegate declares its injected model role required, so Bound
+// cannot break role injection here and this file's ids resolve statically.
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
@@ -11,7 +15,11 @@ import Decenza
 // Pure UI: no barista / AI dependencies. The list (`rows`) is computed by the
 // item, each row: { value: <Celsius double>, label: <display string>,
 // isCurrent: bool }, ordered cool -> hot (ascending Celsius).
-Dialog {
+//
+// Roots at DecenzaDialog (the shared dialog base every dialog in the app uses),
+// not QtQuick.Controls Dialog: the app base keeps AOT compilation and the app's
+// dialog theming (dim, enter/exit transitions). See DecenzaDialog.qml.
+DecenzaDialog {
     id: root
     parent: Overlay.overlay
     anchors.centerIn: parent
@@ -28,7 +36,7 @@ Dialog {
     signal valuePicked(double value)
 
     background: Rectangle {
-        color: Theme.surfaceColor
+        color: Theme.dialogBackgroundColor
         radius: Theme.cardRadius
         border.width: 1
         border.color: Theme.borderColor
@@ -109,6 +117,7 @@ Dialog {
                             color: rowRect.isCurrent ? Theme.primaryColor : Theme.textColor
                             font.pixelSize: Theme.scaled(20)
                             font.bold: rowRect.isCurrent
+                            Accessible.ignored: true   // the delegate Rectangle carries Accessible.name
                         }
                         Item { Layout.fillWidth: true }
                         Text {
@@ -116,6 +125,7 @@ Dialog {
                             text: TranslationManager.translate("temp.picker.current", "current").toUpperCase()
                             color: Theme.primaryColor
                             font: Theme.captionFont
+                            Accessible.ignored: true   // the delegate Rectangle carries Accessible.name
                         }
                     }
 
@@ -161,6 +171,7 @@ Dialog {
                     text: TranslationManager.translate("common.button.close", "Close")
                     color: Theme.primaryContrastColor
                     font: Theme.bodyFont
+                    Accessible.ignored: true   // the Close Rectangle carries Accessible.name
                 }
                 MouseArea { id: closeMa; anchors.fill: parent; onClicked: root.close() }
             }

@@ -190,6 +190,10 @@ T.Page {
     // How far the column slides up to clear the band, bounded so it never slides
     // off the top under the status bar. Combined with the popup clearance (max)
     // where the transform is applied, so a picker over an active preset still works.
+    // NOTE (fit-picker-keeps-band): with the fit-to-gap cap below, an active preset's
+    // content never overflows the band, so _bandOverlap stays 0 and this slide (and
+    // the carouselOverlapsBand fade) self-disable — they only re-engage as a fallback
+    // if the cap ever can't apply. See _presetPinnedTop / _presetFitCap.
     readonly property real presetBandClearance: Math.min(idlePage._bandOverlap, idlePage._maxPanelClearance)
     // Fade the band when the column's RENDERED bottom would still overlap the band's
     // RENDERED top — i.e. the slide can't clear it. This accounts for BOTH transforms:
@@ -208,6 +212,24 @@ T.Page {
         && (idlePage._bandOverlap
             - Math.max(0, idlePage.presetBandClearance - idlePage.bottomPanelClearance)
             + idlePage.topPanelClearance) > 0.5
+
+    // ============================================================
+    // Fit the active preset content into the gap above the band
+    // (fit-picker-keeps-band). Keep the shot plan, action buttons AND the brew bar
+    // all on screen: instead of sliding the whole column up (which pushed the shot
+    // plan off the top) or fading the band (which hid the brew bar), PIN the column
+    // top while a preset is open over a visible band and CAP the preset content to
+    // the room above the band — it scrolls internally if taller than that room.
+    // ============================================================
+    property real _presetPinnedTop: 0        // centered top captured at activation, held while pinned
+    property bool _presetPinned: false        // true while a preset is open over a visible band
+    property bool _wasPresetActive: false     // edge-detect the "" -> preset transition for the capture
+    // Page-coord top of the preset content. presetRowContainer.y is its position
+    // inside the pinned column, fixed by the zones ABOVE it (never by its own
+    // height), so this feeds the cap without a binding loop; lowerMidBar.y is the
+    // band's fixed (bottom-anchored) top.
+    readonly property real _presetItemTop: _presetPinnedTop + presetRowContainer.y
+    readonly property real _presetFitGap: Math.max(0, lowerMidBar.y - _presetItemTop - Theme.spacingMedium)
 
     Component.onCompleted: {
         MainController.bagStorage.requestInventory()
@@ -746,6 +768,19 @@ T.Page {
 
     // Auto-tare scale and announce presets when activePresetFunction changes
     onActivePresetFunctionChanged: {
+        // Pin the column top the moment a preset opens over a visible band (fit-picker-
+        // keeps-band). Capture the current centered/collapsed top BEFORE flipping the
+        // pin, so switching to top-anchoring doesn't move anything on screen; the cap
+        // (_presetFitGap) then holds the growing picker above the band.
+        if (activePresetFunction !== "") {
+            if (!_wasPresetActive)
+                _presetPinnedTop = centerContent.y
+            _presetPinned = idlePage.lowerMidBarVisible
+        } else {
+            _presetPinned = false
+        }
+        _wasPresetActive = (activePresetFunction !== "")
+
         _publishOperationMode()
         // [barista-fork] hook — Espresso selection is now a CONTEXT update, not a conversation trigger
         // (user-initiated model): the barista no longer cold-greets on select. It refreshes what the
@@ -921,8 +956,13 @@ T.Page {
         id: centerContent
         anchors.left: parent.left
         anchors.right: parent.right
-        anchors.verticalCenter: parent.verticalCenter
+        // Centered at idle; while a preset is open over the band we PIN the top at the
+        // captured centered position (fit-picker-keeps-band) so expanding the picker
+        // grows DOWN toward the band instead of drifting the shot plan off the top.
+        anchors.verticalCenter: idlePage._presetPinned ? undefined : parent.verticalCenter
         anchors.verticalCenterOffset: Theme.scaled(50)
+        anchors.top: idlePage._presetPinned ? parent.top : undefined
+        anchors.topMargin: idlePage._presetPinned ? idlePage._presetPinnedTop : 0
         anchors.leftMargin: Theme.standardMargin
         anchors.rightMargin: Theme.standardMargin
         spacing: Theme.scaled(20)
@@ -964,15 +1004,31 @@ T.Page {
             zoneStyle: idlePage.zoneOpts("centerTop").style || "standard"
         }
 
-        // Inline preset rows (for center-zone action buttons)
-        Item {
+        // Inline preset rows (for center-zone action buttons). A Flickable so that
+        // when the preset content is capped to the gap above the band (fit-picker-
+        // keeps-band) it SCROLLS rather than clipping — pills stay reachable.
+        Flickable {
+            id: presetRowContainer
             Layout.alignment: Qt.AlignHCenter
-            Layout.preferredHeight: idlePage.activePresetFunction !== "" ? activePresetRow.implicitHeight : 0
+            // Full content height when idle-anchored (no band to fit under); capped to
+            // the room above the band while pinned, so the picker never overruns it.
+            Layout.preferredHeight: {
+                if (idlePage.activePresetFunction === "") return 0
+                var implicit = activePresetRow ? activePresetRow.implicitHeight : 0
+                return idlePage._presetPinned ? Math.min(implicit, idlePage._presetFitGap) : implicit
+            }
             Layout.fillWidth: true
             Layout.maximumWidth: Theme.scaled(900)
             Layout.leftMargin: Theme.standardMargin
             Layout.rightMargin: Theme.standardMargin
             clip: true
+            contentWidth: width
+            contentHeight: activePresetRow ? activePresetRow.implicitHeight : 0
+            // Only steal drags when there is actually overflow to scroll — otherwise a
+            // tap on a pill must reach the pill, not start a flick.
+            interactive: contentHeight > height + 0.5
+            flickableDirection: Flickable.VerticalFlick
+            boundsBehavior: Flickable.StopAtBounds
 
             property var activePresetRow: {
                 switch (idlePage.activePresetFunction) {

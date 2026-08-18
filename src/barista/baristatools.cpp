@@ -1192,6 +1192,33 @@ QJsonArray BaristaTools::webToolDefinitions()
     lub["input_schema"] = lubSchema;
     tools.append(lub);
 
+    // [fork-index] tool=fetch_bag_page | domain=bean | change=-
+    //   what: fetch a roaster product page's readable text so the model can extract bean details itself
+    // fetch_bag_page — read a roaster's product page so YOU (the conversation model) can pull the bean's
+    // details and add it. This deliberately returns the page TEXT rather than a parsed result: extraction
+    // must NOT nest an AIManager call inside a live turn (that path is single-flight — it returns "busy" or
+    // misroutes this conversation's own completion). The keyless page fetch runs off BaristaCloudTools'
+    // dedicated BeanBaseClient, never the conversation provider.
+    QJsonObject fbp;
+    fbp["name"] = QString("fetch_bag_page");
+    fbp["description"] = QString(
+        "Read a coffee/tea roaster's PRODUCT PAGE so you can add or enrich a bag from a roaster you don't have "
+        "catalogued — especially a bean the user has never had before, where look_up_bean returns nothing. Pass "
+        "the product-page URL (ask the user for it, or use one they gave); this returns the page's plain text. YOU "
+        "then read it and pull the fields the page STATES — origin, region, producer, variety, process, elevation, "
+        "roast level, tasting notes — and call add_bag (new bean) or update_bag (existing bag) with them plus the "
+        "roaster and coffee name. Never invent a value the page doesn't state, and confirm the details you "
+        "assembled with the user before saving. If the page can't be read (a JavaScript-only shop returns nothing), "
+        "say so and offer to add the bean from what the user tells you, or to read it off a photo of the bag.");
+    QJsonObject fbpSchema;
+    fbpSchema["type"] = QString("object");
+    QJsonObject fbpProps;
+    fbpProps["url"] = strProp("The roaster's product-page URL for this bean, e.g. \"https://onyxcoffeelab.com/products/southern-weather\".");
+    fbpSchema["properties"] = fbpProps;
+    fbpSchema["required"] = QJsonArray{ QString("url") };
+    fbp["input_schema"] = fbpSchema;
+    tools.append(fbp);
+
     return tools;
 }
 
@@ -1345,7 +1372,7 @@ void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage*
         || name == QLatin1String("get_local_news")
         // [barista-fork] Coffee CLOUD tools ride the SAME seam (the module dispatches by name to BaristaCloudTools).
         || name == QLatin1String("get_visualizer_shot") || name == QLatin1String("search_visualizer_shots")
-        || name == QLatin1String("look_up_bean")) {
+        || name == QLatin1String("look_up_bean") || name == QLatin1String("fetch_bag_page")) {
         if (!webTools) {
             done(QJsonObject{{QStringLiteral("error"), QStringLiteral("web tools unavailable")}});
             return;

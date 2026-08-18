@@ -313,6 +313,10 @@ BaristaModule::BaristaModule(MainController* mainController, MachineState* machi
                     cloud->lookUpBean(input.value(QStringLiteral("query")).toString(), std::move(done));
                     return;
                 }
+                if (name == QLatin1String("fetch_bag_page")) {
+                    cloud->fetchBagPage(input.value(QStringLiteral("url")).toString(), std::move(done));
+                    return;
+                }
                 const QString home = settings ? settings->homeLocation().trimmed() : QString();
                 if (name == QLatin1String("get_weather")) {
                     QString location = input.value(QStringLiteral("location")).toString().trimmed();

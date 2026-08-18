@@ -32,6 +32,9 @@ public:
     void getVisualizerShot(const QString& shotIdOrUrl, Done done);
     void searchVisualizerShots(const QJsonObject& input, Done done);
     void lookUpBean(const QString& query, Done done);
+    // [fork-index] api=fetchBagPage | domain=bean | change=-
+    //   what: fetch a roaster product page's readable text (keyless) for the model to extract bean details
+    void fetchBagPage(const QString& url, Done done);
 
 private:
     QString authHeader() const;                          // "Basic ..." from stored creds, or "" if unset

@@ -239,3 +239,56 @@ void BaristaCloudTools::lookUpBean(const QString& query, Done done)
         });
     m_beanBase->search(q);
 }
+
+void BaristaCloudTools::fetchBagPage(const QString& url, Done done)
+{
+    const QString u = url.trimmed();
+    if (u.isEmpty()) {
+        done(errObj(QStringLiteral("no url given")));
+        return;
+    }
+    // Deliberately returns the page TEXT for the CONVERSATION model to extract — NOT a parsed result. The
+    // AIManager extraction path (extractCoffeeBagDetailsFromUrl) is single-flight and can't be nested inside a
+    // live turn (it returns "busy" or misroutes this conversation's completion). This keyless fetch rides our
+    // OWN BeanBaseClient, off the conversation provider entirely. Page text is capped so a long shop page can't
+    // blow up the turn's token budget — roaster product pages are small, and the stated bean facts sit near the
+    // top; the model gets an honest note when we truncate.
+    static constexpr qsizetype kMaxPageChars = 16000;
+    // One-shot listeners on our dedicated client, matched to THIS url, torn down as soon as either fires.
+    auto conn = std::make_shared<QMetaObject::Connection>();
+    auto connFail = std::make_shared<QMetaObject::Connection>();
+    *conn = connect(m_beanBase, &BeanBaseClient::pageTextReady, this,
+        [u, done, conn, connFail](const QString& rurl, const QString& text) {
+            if (rurl != u)
+                return;
+            QObject::disconnect(*conn);
+            QObject::disconnect(*connFail);
+            QString body = text;
+            const bool truncated = body.size() > kMaxPageChars;
+            if (truncated)
+                body.truncate(kMaxPageChars);
+            if (body.trimmed().isEmpty()) {
+                // A reachable page with no extractable text (JS-only shop) — tell the model so it can fall back.
+                done(errObj(QStringLiteral("page had no readable text (a JavaScript-only shop) — add the bean "
+                                           "from what the user tells you, or offer to read it off a photo")));
+                return;
+            }
+            done(QJsonObject{ {QStringLiteral("url"), u},
+                              {QStringLiteral("chars"), static_cast<double>(body.size())},
+                              {QStringLiteral("truncated"), truncated},
+                              {QStringLiteral("pageText"), body} });
+        });
+    *connFail = connect(m_beanBase, &BeanBaseClient::pageTextFailed, this,
+        [u, done, conn, connFail](const QString& rurl, const QString& error) {
+            if (rurl != u)
+                return;
+            QObject::disconnect(*conn);
+            QObject::disconnect(*connFail);
+            const QString hint = (error == QLatin1String("emptyPage"))
+                ? QStringLiteral("page had no readable text (a JavaScript-only shop) — add the bean from what "
+                                 "the user tells you, or offer to read it off a photo")
+                : QStringLiteral("could not read the page (") + error + QStringLiteral(")");
+            done(errObj(hint));
+        });
+    m_beanBase->fetchPageText(u);
+}

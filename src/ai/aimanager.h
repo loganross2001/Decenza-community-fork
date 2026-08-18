@@ -96,6 +96,13 @@ public:
     // provider) drives grind/recipe/taste/memory the same as Claude. See AIProvider::supportsClientTools/WebSearch.
     Q_INVOKABLE bool currentProviderSupportsTools() const;
     Q_INVOKABLE bool currentProviderSupportsWebSearch() const;
+    // [barista-fork] Can the selected provider/model read an image on a conversation turn? Gates the barista's
+    // "add a bean from a photo" flow — the UI hides/disables the photo affordance and the flow fails honestly
+    // when false, rather than silently rerouting to a vision-capable provider (CLAUDE.md provider rule).
+    Q_INVOKABLE bool currentProviderSupportsVision() const;
+    // [barista-fork] Stage an image (already normalized JPEG/PNG bytes) to ride the NEXT conversation turn's
+    // RequestOptions. Consumed and cleared inside analyzeConversation — one turn only, never persisted.
+    void stagePendingImage(const QByteArray& data, const QString& mediaType);
     // Running-cost estimate (see AIProvider::costHintFor). Pass a modelId to
     // price a specific model, or leave it empty for the provider's current
     // selection. Depends on the model, so re-read it when the selection changes
@@ -583,6 +590,10 @@ private:
     QString m_bagExtractionToken;
     bool m_isCoachPhrasebookRequest = false;   // [barista-fork]
     QString m_coachPhrasebookToken;            // [barista-fork]
+    // [barista-fork] Image staged for the NEXT conversation turn (add-a-bean-from-a-photo). Consumed+cleared in
+    // analyzeConversation, so it rides exactly one turn and never enters the persisted message history.
+    QByteArray m_pendingImageData;
+    QString m_pendingImageMediaType;
 
 #ifdef DECENZA_TESTING
     friend class tst_AIManager;

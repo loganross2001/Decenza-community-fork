@@ -5,6 +5,7 @@
 #include <QJsonObject>
 #include <QRegularExpression>
 #include <QVariantMap>
+#include <QUrl>                     // [barista-fork] followUpWithImage() parameter type
 #include <optional>
 #include <QtQml/qqmlregistration.h>
 
@@ -97,6 +98,14 @@ public:
      * Uses the existing system prompt and history
      */
     Q_INVOKABLE bool followUp(const QString& userMessage);
+
+    // [barista-fork] Follow up with an IMAGE attached (add-a-bean-from-a-photo). Reads + downscales the picked
+    // file on a WORKER THREAD (a phone photo is multi-MB — main-thread decode would hitch the UI), then stages
+    // the JPEG on AIManager and dispatches `userMessage` as a normal tool-enabled turn, so the vision model reads
+    // the bag label and calls add_bag. Fails fast + honestly if the selected provider can't read images
+    // (currentProviderSupportsVision()) — never reroutes to a vision-capable provider. Async: returns true once
+    // the decode is scheduled; the turn fires when it completes (or errorOccurred if the image can't be read).
+    Q_INVOKABLE bool followUpWithImage(const QString& userMessage, const QUrl& imageUrl);
 
     // [barista-fork] Re-stamp the system prompt for a new session WITHOUT touching message history.
     // The system prompt is re-sent on every request and is never trimmed, so a surface that owns the
@@ -323,6 +332,10 @@ private slots:
 
 private:
     void sendRequest();
+    // [barista-fork] Read an image file (local path or Android content:// URL) and downscale/re-encode it to a
+    // JPEG small enough to ride a turn cheaply (longest side ≤ 1568 px). Runs on a WORKER THREAD — a phone photo
+    // is multi-MB and decoding it would hitch the main thread. Returns empty on any read/decode failure.
+    static QByteArray readAndDownscaleImage(const QString& pathOrContentUrl);
     // Translate a user-visible string via the injected TranslationManager,
     // falling back to the English source when none is set.
     QString tr_(const char* key, const char* fallback) const;

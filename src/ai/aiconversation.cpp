@@ -7,6 +7,11 @@
 #include <QDateTime>
 #include <QDebug>
 #include <QSettings>
+#include <QBuffer>       // [barista-fork] followUpWithImage image encode
+#include <QFile>         // [barista-fork] read picked image (local + Android content://)
+#include <QImage>        // [barista-fork] decode + downscale the picked image
+#include <QThread>       // [barista-fork] off-main image decode
+#include <QUrl>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -159,6 +164,92 @@ bool AIConversation::followUp(const QString& userMessage)
     sendRequest();
 
     emit historyChanged();
+    return true;
+}
+
+QByteArray AIConversation::readAndDownscaleImage(const QString& pathOrContentUrl)
+{
+    // QFile handles both a normal filesystem path and an Android content:// URL (Qt's Android content engine),
+    // so we read bytes once and decode from memory rather than trusting QImage::load to route a content URL.
+    QFile f(pathOrContentUrl);
+    if (!f.open(QIODevice::ReadOnly))
+        return QByteArray();
+    const QByteArray raw = f.readAll();
+    QImage img;
+    if (!img.loadFromData(raw))
+        return QByteArray();
+    // Bound the payload: a vision model reads a bag label fine at ~1568 px, and this keeps the base64 well under
+    // provider image limits AND keeps the turn's token cost sane. Only shrink — never upscale a small image.
+    constexpr int kMaxSide = 1568;
+    if (img.width() > kMaxSide || img.height() > kMaxSide)
+        img = img.scaled(kMaxSide, kMaxSide, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    QByteArray out;
+    QBuffer buf(&out);
+    buf.open(QIODevice::WriteOnly);
+    if (!img.save(&buf, "JPEG", 85))
+        return QByteArray();
+    return out;
+}
+
+bool AIConversation::followUpWithImage(const QString& userMessage, const QUrl& imageUrl)
+{
+    if (!m_aiManager) {
+        qWarning() << "AIConversation::followUpWithImage called without AIManager";
+        m_errorMessage = tr_("ai.error.notAvailable", "AI not available");
+        emit errorOccurred(m_errorMessage);
+        return false;
+    }
+    if (m_busy) {
+        qDebug() << "AIConversation::followUpWithImage ignored — already busy";
+        return false;
+    }
+    if (m_systemPrompt.isEmpty()) {
+        qWarning() << "AIConversation::followUpWithImage called without prior ask()";
+        m_errorMessage = tr_("ai.error.startNewFirst", "Please start a new conversation first");
+        emit errorOccurred(m_errorMessage);
+        return false;
+    }
+    // Honest gate: the selected provider/model must be able to read images. NEVER reroute a vision turn to a
+    // different provider because it happens to be capable — that is the silent-substitution the provider rule
+    // forbids (CLAUDE.md). Tell the user instead.
+    if (!m_aiManager->currentProviderSupportsVision()) {
+        m_errorMessage = tr_("ai.error.visionUnsupported",
+            "The AI model you've selected can't read images. Switch to one that supports vision, "
+            "or just tell me the bean's details and I'll add it.");
+        emit errorOccurred(m_errorMessage);
+        return false;
+    }
+
+    m_errorMessage.clear();
+    const QString path = imageUrl.isLocalFile() ? imageUrl.toLocalFile() : imageUrl.toString();
+
+    // Decode + downscale off the main thread (multi-MB phone photo), then stage + dispatch back on the main
+    // thread. The turn fires from the queued callback, not from this call — hence the async contract.
+    QThread* worker = QThread::create([this, path, userMessage]() {
+        const QByteArray jpeg = readAndDownscaleImage(path);
+        QMetaObject::invokeMethod(this, [this, jpeg, userMessage]() {
+            if (jpeg.isEmpty()) {
+                m_errorMessage = tr_("ai.error.imageUnreadable",
+                                     "I couldn't read that image — try another photo of the bag.");
+                emit errorOccurred(m_errorMessage);
+                return;
+            }
+            if (m_busy) {   // a turn started while we were decoding — don't clobber it
+                m_errorMessage = tr_("ai.error.analysisInProgress", "Analysis already in progress");
+                emit errorOccurred(m_errorMessage);
+                return;
+            }
+            // Stage for exactly this turn (AIManager consumes+clears it), then dispatch a normal tool-enabled
+            // turn — the provider attaches the image to this user message and the model calls add_bag.
+            m_aiManager->stagePendingImage(jpeg, QStringLiteral("image/jpeg"));
+            dropTrailingFailedUserTurn();
+            addUserMessage(userMessage);
+            sendRequest();
+            emit historyChanged();
+        }, Qt::QueuedConnection);
+    });
+    QObject::connect(worker, &QThread::finished, worker, &QObject::deleteLater);
+    worker->start();
     return true;
 }
 

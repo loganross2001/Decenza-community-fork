@@ -489,6 +489,18 @@ bool AIManager::currentProviderSupportsWebSearch() const
     return p && p->supportsWebSearch();
 }
 
+bool AIManager::currentProviderSupportsVision() const
+{
+    AIProvider* p = currentProvider();
+    return p && p->supportsVision();
+}
+
+void AIManager::stagePendingImage(const QByteArray& data, const QString& mediaType)
+{
+    m_pendingImageData = data;
+    m_pendingImageMediaType = mediaType;
+}
+
 std::optional<QJsonObject> AIManager::parseStructuredNext(const QString& assistantMessage)
 {
     // Locate the LAST fenced ```json ... ``` block whose closing fence is
@@ -2476,11 +2488,22 @@ void AIManager::analyzeConversation(const QString& systemPrompt, const QJsonArra
     // tools) forces tool_choice:"any" + a `respond` answer tool on Anthropic, so a turn can never end with a bare
     // "let me check…" promise and no tool call. Scoped here — analyzeUrl/advisor never set clientTools, so they're
     // untouched; non-Anthropic providers ignore the flag.
+    // [barista-fork] Consume any image staged for THIS turn (add-a-bean-from-a-photo). Cleared unconditionally so
+    // it can ride only one turn — never persisted, never re-billed on a follow-up. Only attached when the selected
+    // provider can read images; otherwise dropped (the UI already gates the affordance on currentProviderSupportsVision).
+    QByteArray turnImage = m_pendingImageData;
+    QString turnImageType = m_pendingImageMediaType;
+    m_pendingImageData.clear();
+    m_pendingImageMediaType.clear();
+    if (!turnImage.isEmpty() && !(provider->supportsVision())) {
+        turnImage.clear();
+        turnImageType.clear();
+    }
     provider->analyzeConversation(systemPrompt, apiMessages,
                                   // [barista-fork] {webSearch, clientTools, timeoutMs, forceRespond, imageData,
-                                  // imageMediaType} — no image on a normal text turn (Phase 2C sets it for a photo).
+                                  // imageMediaType} — imageData set only on a photo turn (else empty = normal text turn).
                                   AIProvider::RequestOptions{webSearch, clientTools, 30000, clientTools,
-                                                             QByteArray(), QString()});
+                                                             turnImage, turnImageType});
 }
 
 void AIManager::refreshOllamaModels()

@@ -3,6 +3,7 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Shapes
 import QtQuick.Effects
+import QtQuick.Dialogs      // [barista-fork] FileDialog for "add a bean from a photo"
 import Decenza
 
 // [barista-fork] The user-initiated barista assistant — a REAL conversation, not a script. The barista is
@@ -1896,6 +1897,18 @@ Item {
                     Layout.fillWidth: true
                     spacing: Theme.scaled(6)
                     Item { Layout.fillWidth: true }   // push the controls to the right
+                    // [barista-fork] Add a bean from a photo of the bag. Shown only when the selected AI model can
+                    // read images (currentProviderSupportsVision) — no silent reroute to a vision provider. Picks
+                    // an image (OS gallery/files), which followUpWithImage decodes off-thread and hands to the model.
+                    AccessibleButton {
+                        subtle: true
+                        visible: typeof MainController !== "undefined" && MainController.aiManager
+                                 && MainController.aiManager.currentProviderSupportsVision()
+                        icon.source: "qrc:/icons/coffeebeans.svg"
+                        icon.color: Theme.textColor
+                        accessibleName: TranslationManager.translate("barista.addBeanPhoto", "Add a bean from a photo")
+                        onClicked: bagPhotoDialog.open()
+                    }
                     AccessibleButton {
                         subtle: true
                         icon.source: "qrc:/icons/settings.svg"
@@ -2735,5 +2748,24 @@ Item {
         root._collapsed = false
         if (root._state !== "conversing" && root._orch)
             root._orch.engage()
+    }
+
+    // [barista-fork] "Add a bean from a photo": pick an image (OS gallery/files — you can snap the bag in the
+    // camera app first), and the barista reads the label and adds it. followUpWithImage decodes off-thread and
+    // dispatches a normal tool-enabled turn with the image attached, so the vision model calls add_bag.
+    FileDialog {
+        id: bagPhotoDialog
+        title: TranslationManager.translate("barista.addBeanPhoto.choose", "Choose a photo of the bag…")
+        nameFilters: ["Images (*.png *.jpg *.jpeg *.webp *.heic)", "All files (*)"]
+        onAccepted: {
+            if (root._conv)
+                root._conv.followUpWithImage(
+                    TranslationManager.translate("barista.addBeanPhoto.instruction",
+                        "Here's a photo of a coffee bag. Read its label and add this bean to my inventory — call "
+                        + "add_bag with the roaster and the coffee name plus every detail you can read (origin, "
+                        + "region, producer, variety, process, roast level, tasting notes). Use only what the "
+                        + "label actually states; don't guess. Tell me what you found and confirm before saving."),
+                    selectedFile)
+        }
     }
 }

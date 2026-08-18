@@ -938,7 +938,14 @@ void AnthropicProvider::analyzeConversation(const QString& systemPrompt, const Q
     requestBody["max_tokens"] = MAX_OUTPUT_TOKENS;
     disableAnthropicThinking(requestBody);
     requestBody["system"] = buildCachedSystemPrompt(systemPrompt);
-    requestBody["messages"] = messagesWithCachedFirstUser(messages);
+    // [barista-fork] Cache-wrap the first user message, then (for a vision turn) attach the image to the LAST
+    // user message. Order matters: the cache wrap turns the first message's content into an array, and when the
+    // conversation is a single message (first == last) messagesWithImageOnLastUser then appends the image block
+    // to that same array. The image rides options (per-turn), never the persisted messages — no re-billing.
+    QJsonArray outMessages = messagesWithCachedFirstUser(messages);
+    if (!options.imageData.isEmpty())
+        outMessages = messagesWithImageOnLastUser(outMessages, options.imageData, options.imageMediaType);
+    requestBody["messages"] = outMessages;
     // [barista-fork] Tools. web_search runs on Anthropic's side (resume on "pause_turn"); the client-side
     // tools (registered via setClientTools) are CLIENT-side (we run them and feed the tool_result back on
     // "tool_use"). Both can coexist. When neither option is set (advisor/coach, or a caller with no client
@@ -1035,6 +1042,47 @@ QJsonArray AnthropicProvider::messagesWithCachedFirstUser(const QJsonArray& mess
     out.append(first);
     for (qsizetype i = 1; i < messages.size(); ++i)
         out.append(messages[i]);
+    return out;
+}
+
+QJsonArray AnthropicProvider::messagesWithImageOnLastUser(const QJsonArray& messages,
+                                                          const QByteArray& imageData, const QString& mediaType)
+{
+    if (imageData.isEmpty()) return messages;
+    // Find the last user message — that is the CURRENT turn the image belongs to.
+    qsizetype target = -1;
+    for (qsizetype i = messages.size() - 1; i >= 0; --i) {
+        if (messages[i].toObject().value("content").isNull()) continue;
+        if (messages[i].toObject().value("role").toString() == QLatin1String("user")) { target = i; break; }
+    }
+    if (target < 0) return messages;   // no user message — nothing to attach to
+
+    QJsonObject msg = messages[target].toObject();
+    // Content is either a plain string (typical) or already an array (single-message case: the cache wrap ran
+    // first). Normalize to an array of blocks, preserving whatever text is there, then append the image block.
+    QJsonArray content;
+    const QJsonValue cv = msg.value("content");
+    if (cv.isArray()) {
+        content = cv.toArray();
+    } else {
+        QJsonObject textBlock;
+        textBlock["type"] = QString("text");
+        textBlock["text"] = cv.toString();
+        content.append(textBlock);
+    }
+
+    QJsonObject source;
+    source["type"] = QString("base64");
+    source["media_type"] = mediaType.isEmpty() ? QString("image/jpeg") : mediaType;
+    source["data"] = QString::fromLatin1(imageData.toBase64());
+    QJsonObject imageBlock;
+    imageBlock["type"] = QString("image");
+    imageBlock["source"] = source;
+    content.append(imageBlock);
+
+    msg["content"] = content;
+    QJsonArray out = messages;
+    out[target] = msg;
     return out;
 }
 
@@ -1652,6 +1700,32 @@ void GeminiProvider::analyzeUrl(const QString& systemPrompt, const QString& user
     sendRequest(requestBody);
 }
 
+QJsonArray GeminiProvider::contentsWithImageOnLastUser(const QJsonArray& contents,
+                                                       const QByteArray& imageData, const QString& mediaType)
+{
+    if (imageData.isEmpty()) return contents;
+    // The last user-role content is the current turn (Gemini maps assistant→"model", so user stays "user").
+    qsizetype target = -1;
+    for (qsizetype i = contents.size() - 1; i >= 0; --i) {
+        if (contents[i].toObject().value("role").toString() == QLatin1String("user")) { target = i; break; }
+    }
+    if (target < 0) return contents;
+
+    QJsonObject content = contents[target].toObject();
+    QJsonArray parts = content.value("parts").toArray();
+    QJsonObject inlineData;
+    inlineData["mimeType"] = mediaType.isEmpty() ? QString("image/jpeg") : mediaType;
+    inlineData["data"] = QString::fromLatin1(imageData.toBase64());
+    QJsonObject imagePart;
+    imagePart["inlineData"] = inlineData;
+    parts.append(imagePart);
+    content["parts"] = parts;
+
+    QJsonArray out = contents;
+    out[target] = content;
+    return out;
+}
+
 void GeminiProvider::analyzeConversation(const QString& systemPrompt, const QJsonArray& messages)
 {
     // [barista-fork] Forward to the options-aware overload with defaults (no tools) — mirrors AnthropicProvider,
@@ -1731,6 +1805,10 @@ void GeminiProvider::analyzeConversation(const QString& systemPrompt, const QJso
         content["parts"] = parts;
         contents.append(content);
     }
+    // [barista-fork] Vision turn: append the image as an inlineData part on the current (last user) content.
+    // Rides options (per-turn), never the persisted messages.
+    if (!options.imageData.isEmpty())
+        contents = contentsWithImageOnLastUser(contents, options.imageData, options.imageMediaType);
     requestBody["contents"] = contents;
 
     // [barista-fork] Function-calling tools. The client tools (setClientTools) and the fast-path web tools

@@ -32,6 +32,7 @@
 #include <QDate>
 
 #include "ai/aimanager.h"
+#include "ai/aiprovider.h"
 #include "mcp/mcpagentdocs.h"
 #include "ai/aiconversation.h"
 #include "core/settings.h"
@@ -142,6 +143,76 @@ private:
 
 private slots:
     void init() { QTest::failOnWarning(); }
+
+    // [barista-fork] Vision plumbing (Phase 2A): the image rides RequestOptions and the provider attaches it to
+    // the CURRENT (last user) message only, in that provider's own format — never into persisted history. These
+    // drive the pure static transforms directly (no network, no live call), so they can actually fail.
+    void anthropicAttachesImageToLastUserMessage()
+    {
+        QJsonArray messages{
+            QJsonObject{{"role", "user"}, {"content", "per-shot context"}},
+            QJsonObject{{"role", "assistant"}, {"content", "ok"}},
+            QJsonObject{{"role", "user"}, {"content", "here is the bag"}},
+        };
+        const QByteArray jpeg = QByteArrayLiteral("fake-jpeg-bytes-0123");
+
+        // No image ⇒ untouched (byte-identical).
+        QCOMPARE(AnthropicProvider::messagesWithImageOnLastUser(messages, QByteArray(), "image/jpeg"), messages);
+
+        const QJsonArray out = AnthropicProvider::messagesWithImageOnLastUser(messages, jpeg, "image/jpeg");
+        // First/second messages unchanged; only the LAST user message gains the image.
+        QCOMPARE(out[0].toObject().value("content").toString(), QString("per-shot context"));
+        QCOMPARE(out[1].toObject().value("content").toString(), QString("ok"));
+        const QJsonArray content = out[2].toObject().value("content").toArray();
+        QCOMPARE(content.size(), 2);
+        QCOMPARE(content[0].toObject().value("type").toString(), QString("text"));
+        QCOMPARE(content[0].toObject().value("text").toString(), QString("here is the bag"));
+        const QJsonObject img = content[1].toObject();
+        QCOMPARE(img.value("type").toString(), QString("image"));
+        const QJsonObject src = img.value("source").toObject();
+        QCOMPARE(src.value("type").toString(), QString("base64"));
+        QCOMPARE(src.value("media_type").toString(), QString("image/jpeg"));
+        QCOMPARE(src.value("data").toString(), QString::fromLatin1(jpeg.toBase64()));
+
+        // Empty media type ⇒ defaults to image/jpeg.
+        const QJsonArray out2 = AnthropicProvider::messagesWithImageOnLastUser(messages, jpeg, QString());
+        QCOMPARE(out2[2].toObject().value("content").toArray()[1].toObject()
+                     .value("source").toObject().value("media_type").toString(), QString("image/jpeg"));
+
+        // Single message whose content is ALREADY an array (cache-wrap ran first): append, don't clobber.
+        QJsonArray wrapped{ QJsonObject{{"role", "user"},
+            {"content", QJsonArray{ QJsonObject{{"type", "text"}, {"text", "ctx"}} }}} };
+        const QJsonArray outW = AnthropicProvider::messagesWithImageOnLastUser(wrapped, jpeg, "image/png");
+        const QJsonArray wc = outW[0].toObject().value("content").toArray();
+        QCOMPARE(wc.size(), 2);
+        QCOMPARE(wc[0].toObject().value("text").toString(), QString("ctx"));
+        QCOMPARE(wc[1].toObject().value("type").toString(), QString("image"));
+        QCOMPARE(wc[1].toObject().value("source").toObject().value("media_type").toString(), QString("image/png"));
+    }
+
+    void geminiAttachesImageToLastUserContent()
+    {
+        // Gemini `contents` are already role-mapped (assistant→"model").
+        QJsonArray contents{
+            QJsonObject{{"role", "user"}, {"parts", QJsonArray{ QJsonObject{{"text", "ctx"}} }}},
+            QJsonObject{{"role", "model"}, {"parts", QJsonArray{ QJsonObject{{"text", "ok"}} }}},
+            QJsonObject{{"role", "user"}, {"parts", QJsonArray{ QJsonObject{{"text", "here is the bag"}} }}},
+        };
+        const QByteArray jpeg = QByteArrayLiteral("fake-jpeg-bytes-0123");
+
+        QCOMPARE(GeminiProvider::contentsWithImageOnLastUser(contents, QByteArray(), "image/jpeg"), contents);
+
+        const QJsonArray out = GeminiProvider::contentsWithImageOnLastUser(contents, jpeg, "image/jpeg");
+        // The model turn is untouched; the last user turn gains an inlineData part after its text.
+        QCOMPARE(out[1].toObject().value("parts").toArray().size(), 1);
+        const QJsonArray parts = out[2].toObject().value("parts").toArray();
+        QCOMPARE(parts.size(), 2);
+        QCOMPARE(parts[0].toObject().value("text").toString(), QString("here is the bag"));
+        const QJsonObject inl = parts[1].toObject().value("inlineData").toObject();
+        QCOMPARE(inl.value("mimeType").toString(), QString("image/jpeg"));
+        QCOMPARE(inl.value("data").toString(), QString::fromLatin1(jpeg.toBase64()));
+    }
+
     // parseBagExtraction: the "Get info" response contract — JSON possibly
     // wrapped in markdown fences, whitelisted to the blob vocabulary keys.
     void parseBagExtractionHandlesFencesWhitelistAndGarbage()

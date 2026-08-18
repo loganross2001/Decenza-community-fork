@@ -2477,7 +2477,10 @@ void AIManager::analyzeConversation(const QString& systemPrompt, const QJsonArra
     // "let me check…" promise and no tool call. Scoped here — analyzeUrl/advisor never set clientTools, so they're
     // untouched; non-Anthropic providers ignore the flag.
     provider->analyzeConversation(systemPrompt, apiMessages,
-                                  AIProvider::RequestOptions{webSearch, clientTools, 30000, clientTools});
+                                  // [barista-fork] {webSearch, clientTools, timeoutMs, forceRespond, imageData,
+                                  // imageMediaType} — no image on a normal text turn (Phase 2C sets it for a photo).
+                                  AIProvider::RequestOptions{webSearch, clientTools, 30000, clientTools,
+                                                             QByteArray(), QString()});
 }
 
 void AIManager::refreshOllamaModels()

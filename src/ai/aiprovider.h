@@ -37,6 +37,12 @@ public:
                                     // so the model can NEVER end a turn with a bare "let me check…" promise and no
                                     // tool call (the stall bug). It must call a real tool (→ loop) or `respond`
                                     // (→ the answer). Gated to the barista conversation; ignored by other providers.
+        // [barista-fork] Optional image for a VISION turn (e.g. reading a coffee bag's label off a photo).
+        // Rides the per-turn options, NEVER the persisted messages array: an image in history would re-bill on
+        // every follow-up turn and pollute the cached first-user block. The vision-capable providers attach it
+        // to the CURRENT (last user) message only; non-vision providers ignore it (gate on supportsVision()).
+        QByteArray imageData;          // raw JPEG/PNG bytes; empty ⇒ no image this turn
+        QString imageMediaType;        // e.g. "image/jpeg" or "image/png"; empty with data ⇒ defaults to image/jpeg
     };
 
     explicit AIProvider(QNetworkAccessManager* networkManager, QObject* parent = nullptr);
@@ -114,6 +120,12 @@ public:
     // it; providers without a server-side fetch tool (Ollama, OpenRouter)
     // keep the default (unsupported).
     virtual bool supportsUrlAnalysis() const { return false; }
+    // [barista-fork] Can this provider carry an image to the model on a conversation turn (RequestOptions.
+    // imageData)? Only the providers whose message-build attaches the image return true (Anthropic, Gemini).
+    // A caller MUST NOT route a vision turn to a different provider because this one can't — the selected
+    // provider/model is the one that runs, and the honest answer when it can't read images is to say so
+    // (CLAUDE.md: never silently substitute a provider). Default false.
+    virtual bool supportsVision() const { return false; }
     virtual void analyzeUrl(const QString& systemPrompt, const QString& userPrompt) {
         Q_UNUSED(systemPrompt); Q_UNUSED(userPrompt);
         emit analysisFailed(tr_("ai.error.urlNotSupported", "URL analysis not supported by this provider"));
@@ -324,8 +336,17 @@ public:
     // round trip. URL validation requires the URL to appear in the message,
     // which the extraction prompt guarantees.
     bool supportsUrlAnalysis() const override { return true; }
+    bool supportsVision() const override { return true; }   // [barista-fork] Claude models read images
     void analyzeUrl(const QString& systemPrompt, const QString& userPrompt) override;
     void testConnection() override;
+
+    // [barista-fork] Attach an image block to the LAST user message for a vision turn (Anthropic content-array
+    // format). Pure transform, public+static so it is unit-testable without a live call. Converts a string
+    // content to `[{type:text},{type:image}]`, or appends the image block to an existing content array (the
+    // single-message case, where messagesWithCachedFirstUser already wrapped it). No-op if there is no user
+    // message. mediaType empty ⇒ image/jpeg.
+    static QJsonArray messagesWithImageOnLastUser(const QJsonArray& messages, const QByteArray& imageData,
+                                                  const QString& mediaType);
 
     // [barista-fork] Generic client-side-tool seam. A feature module (the barista) registers BOTH the tool
     // JSON definitions and the executor here; the provider knows nothing about which tools they are. The
@@ -444,8 +465,15 @@ public:
     // prompt during generateContent (supported by every catalog model —
     // 2.5 and 3.x families).
     bool supportsUrlAnalysis() const override { return true; }
+    bool supportsVision() const override { return true; }   // [barista-fork] Gemini models read images
     void analyzeUrl(const QString& systemPrompt, const QString& userPrompt) override;
     void testConnection() override;
+
+    // [barista-fork] Append an inlineData image part to the LAST user-role entry of an already-built Gemini
+    // `contents` array (Gemini part format). Pure transform, public+static for unit testing. No-op if there is
+    // no user-role content. mediaType empty ⇒ image/jpeg.
+    static QJsonArray contentsWithImageOnLastUser(const QJsonArray& contents, const QByteArray& imageData,
+                                                  const QString& mediaType);
 
     // [barista-fork] Generic client-side-tool seam — the exact counterpart of AnthropicProvider::setClientTools.
     // A feature module (the barista) registers BOTH the tool JSON definitions (Anthropic {name, description,

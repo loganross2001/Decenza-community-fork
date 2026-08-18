@@ -20,11 +20,13 @@
 #include "../ble/de1device.h"
 #include "../ble/de1logging.h"
 #include "../machine/machinestate.h"
+#include "../machine/frameexitreason.h"
 #include "../models/shotdatamodel.h"
 #include "../models/shotcomparisonmodel.h"
 #include "../network/visualizeruploader.h"
 #include "../network/visualizerimporter.h"
 #include "../ai/aimanager.h"
+#include "../ai/shotanalysis.h"
 #include "../history/equipmentlogging.h"
 #include "../history/shothistorystorage.h"
 #include "../history/shotimporter.h"
@@ -2784,15 +2786,15 @@ void MainController::sendMachineSettings(const QString& reason) {
         ? QStringLiteral("sendMachineSettings") : reason;
 
     // 2. Steam flow MMR
-    m_device->writeMMR(0x803828, m_settings->brew()->steamFlow(), mmrReason);
+    m_device->writeMMR(DE1::MMR::STEAM_FLOW, m_settings->brew()->steamFlow(), mmrReason);
 
     // 3. Flush flow MMR (value × 10)
     int flowValue = static_cast<int>(m_settings->brew()->flushFlow() * 10);
-    m_device->writeMMR(0x803840, flowValue, mmrReason);
+    m_device->writeMMR(DE1::MMR::FLUSH_FLOW_RATE, flowValue, mmrReason);
 
     // 4. Flush timeout MMR (value × 10)
     int secondsValue = static_cast<int>(m_settings->brew()->flushSeconds() * 10);
-    m_device->writeMMR(0x803848, secondsValue, mmrReason);
+    m_device->writeMMR(DE1::MMR::FLUSH_TIMEOUT, secondsValue, mmrReason);
 }
 
 void MainController::selectSteamPitcher(int index, double milkFallbackG) {
@@ -3624,7 +3626,7 @@ void MainController::startSteamHeating(const QString& reason) {
 
     // Steam flow rides along — it is part of the same steam spec.
     if (m_device && m_device->isConnected())
-        m_device->writeMMR(0x803828, m_settings->brew()->steamFlow(), tag);
+        m_device->writeMMR(DE1::MMR::STEAM_FLOW, m_settings->brew()->steamFlow(), tag);
 
     if (sent)
         qDebug() << "Started steam heating to" << steamTemp << "°C from" << tag;
@@ -3680,13 +3682,30 @@ void MainController::setSteamFlowImmediate(int flow) {
 
     m_settings->brew()->setSteamFlow(flow);
 
-    // Verify-and-retry as defensive insurance: a single MMR write should be
-    // enough (on-device testing showed zero retries needed across many slider
-    // drags), but steam flow is user-visible enough that we read the register
-    // back and retry on mismatch rather than relying on the write alone. One
-    // caller-side call (slider release, preset tap) stays one logical command.
-    m_device->writeMMRVerified(0x803828, flow,
-                               QStringLiteral("setSteamFlowImmediate"));
+    // Unverified, like the other two sites that write this register
+    // (sendMachineSettings and startSteamHeating). This used to be a
+    // writeMMRVerified, which made 0x803828 the one register whose assurance
+    // level depended on which code path last touched it — so whether the
+    // setting was checked was decided by how the user reached it, and that is
+    // not something a log or the machine's behaviour can tell you afterwards.
+    //
+    // Levelled DOWN rather than up, for three reasons. The verified site's own
+    // comment recorded on-device testing showing zero retries were ever needed
+    // across many slider drags, so it was insurance against something not
+    // observed. An MMR read is itself a write — sendMMRReadRequest() writes 20
+    // bytes to a005 (de1device.cpp:777-785) — so a read-back costs a second
+    // write plus a retry ladder of further a005 writes, on the link whose write
+    // failures would be the only reason to want it. And neither reference
+    // implementation verifies an MMR write at all (de1app's mmr_write,
+    // de1_comms.tcl:1086; decaid's _mmrWriteRawPermitted,
+    // unified_de1.mmr.dart:116), while both retry MMR reads — which is the
+    // asymmetry this protocol actually justifies.
+    //
+    // writeMMR's dedup cache (#773) now applies here, where writeMMRVerified's
+    // force=true bypassed it, so a slider dragged back to its current value no
+    // longer writes at all.
+    m_device->writeMMR(DE1::MMR::STEAM_FLOW, flow,
+                       QStringLiteral("setSteamFlowImmediate"));
 
     qDebug() << "Steam flow set to:" << flow;
 }
@@ -3828,6 +3847,9 @@ void MainController::onEspressoCycleStarted() {
     m_frameWeightSkipSent = -1;
     m_frameStartTime = 0;
     m_lastPressure = 0;
+    m_prevPressure = 0;
+    m_prevFlow = 0;
+    m_prevValid = false;
     if (m_filteredGoalPressure != 0 || m_filteredGoalFlow != 0) {
         m_filteredGoalPressure = 0;
         m_filteredGoalFlow = 0;
@@ -4537,7 +4559,12 @@ void MainController::onShotSampleReceived(const ShotSample& sample) {
         return;
     }
 
-    // Track latest sensor values for transition reason inference
+    // Track the latest two sensor values for transition reason inference. The
+    // previous sample is what gives FrameExit::inferReason its extrapolation
+    // tolerance — see frameexitreason.h.
+    m_prevPressure = m_lastPressure;
+    m_prevFlow = m_lastFlow;
+    m_prevValid = m_extractionStarted;
     m_lastPressure = sample.groupPressure;
     m_lastFlow = sample.groupFlow;
 
@@ -4625,6 +4652,19 @@ void MainController::onShotSampleReceived(const ShotSample& sample) {
             frameName = QString("F%1").arg(frameIndex);
         }
 
+        // The machine reported a non-zero frame without the app ever having
+        // seen frame 0 — the firmware skip that ShotAnalysis' skip-first-frame
+        // detector exists to catch, observed live. Name the firmware build:
+        // this is reported against specific builds (#1813 cites v1333 and
+        // v1352) and a submitted log otherwise leaves the reader guessing
+        // which one produced it.
+        if (m_lastFrameNumber < 0 && sample.frameNumber > 0) {
+            qWarning() << "MainController: extraction opened at frame" << sample.frameNumber
+                       << "- frame 0 never reported by the machine (firmware skip)"
+                       << "firmwareBuild:" << (m_device ? m_device->firmwareBuildNumber() : 0)
+                       << "t:" << time;
+        }
+
         // Determine transition reason for the PREVIOUS frame that just exited
         QString transitionReason;
         int prevFrameIndex = m_lastFrameNumber;   // raw firmware index (timing controller keys on this)
@@ -4635,46 +4675,69 @@ void MainController::onShotSampleReceived(const ShotSample& sample) {
         const int origPrevFrameIndex = primed ? prevFrameIndex - 1 : prevFrameIndex;
         if (origPrevFrameIndex >= 0 && origPrevFrameIndex < steps.size()) {
             const ProfileFrame& prevFrame = steps[origPrevFrameIndex];
+            const double frameElapsed = time - m_frameStartTime;
 
-            if (m_timingController && m_timingController->wasWeightExit(prevFrameIndex)) {   // firmware index — NOT offset
-                // App sent skipToNextFrame() due to weight - 100% certain
-                transitionReason = QStringLiteral("weight");
-            } else if (prevFrame.exitIf) {
-                // Machine-side exit condition was configured - infer from sensor values
-                double frameElapsed = time - m_frameStartTime;
-                bool timeExpired = frameElapsed >= prevFrame.seconds * 0.9;
+            FrameExit::Inputs in;
+            in.exitIf = prevFrame.exitIf;
+            in.exitType = prevFrame.exitType;
+            in.exitPressureOver = prevFrame.exitPressureOver;
+            in.exitPressureUnder = prevFrame.exitPressureUnder;
+            in.exitFlowOver = prevFrame.exitFlowOver;
+            in.exitFlowUnder = prevFrame.exitFlowUnder;
+            in.configuredSeconds = prevFrame.seconds;
+            in.pressure = m_lastPressure;
+            in.flow = m_lastFlow;
+            in.prevPressure = m_prevPressure;
+            in.prevFlow = m_prevFlow;
+            in.prevValid = m_prevValid;
+            in.frameElapsedSec = frameElapsed;
+            in.weightExit = m_timingController
+                && m_timingController->wasWeightExit(prevFrameIndex);   // firmware index — NOT offset
 
-                if (prevFrame.exitType == QStringLiteral("pressure_over") && m_lastPressure >= prevFrame.exitPressureOver) {
-                    transitionReason = QStringLiteral("pressure");
-                } else if (prevFrame.exitType == QStringLiteral("pressure_under") && m_lastPressure > 0 && m_lastPressure <= prevFrame.exitPressureUnder) {
-                    transitionReason = QStringLiteral("pressure");
-                } else if (prevFrame.exitType == QStringLiteral("flow_over") && m_lastFlow >= prevFrame.exitFlowOver) {
-                    transitionReason = QStringLiteral("flow");
-                } else if (prevFrame.exitType == QStringLiteral("flow_under") && m_lastFlow > 0 && m_lastFlow <= prevFrame.exitFlowUnder) {
-                    transitionReason = QStringLiteral("flow");
-                } else if (timeExpired) {
-                    // Exit condition configured but time ran out first
-                    transitionReason = QStringLiteral("time");
-                } else {
-                    // Exit condition was configured, but the sensor threshold was NOT
-                    // confirmed above and time did not expire — usually a real sensor
-                    // exit whose crossing fell between BLE samples. Record it as an
-                    // UNCONFIRMED sensor exit (hint from exitType): displays render it
-                    // like the sensor exit it probably was, the grind detector's
-                    // limiter-tail trim treats pressure_unconfirmed as limiter
-                    // engagement, but the skip-first-frame guard only trusts confirmed
-                    // "pressure"/"flow"/"weight" — so a genuinely skipped frame (which
-                    // lands in this branch) still flags.
-                    transitionReason = prevFrame.exitType.contains(QStringLiteral("pressure"))
-                        ? QStringLiteral("pressure_unconfirmed") : QStringLiteral("flow_unconfirmed");
-                    qDebug() << "MainController: Frame" << prevFrameIndex
-                             << "exit reason unconfirmed - exitType:" << prevFrame.exitType
-                             << "pressure:" << m_lastPressure << "flow:" << m_lastFlow
-                             << "recorded as" << transitionReason;
-                }
-            } else {
-                // No exit condition configured - frame ended by time
-                transitionReason = QStringLiteral("time");
+            const FrameExit::Result exit = FrameExit::inferReason(in);
+            transitionReason = exit.reason;
+
+            if (exit.extrapolated) {
+                qDebug() << "MainController: Frame" << prevFrameIndex
+                         << "exit confirmed by extrapolation - exitType:" << prevFrame.exitType
+                         << "pressure:" << m_lastPressure << "(prev" << m_prevPressure << ")"
+                         << "flow:" << m_lastFlow << "(prev" << m_prevFlow << ")"
+                         << "recorded as" << transitionReason;
+            } else if (transitionReason.endsWith(QStringLiteral("_unconfirmed"))) {
+                qDebug() << "MainController: Frame" << prevFrameIndex
+                         << "exit reason unconfirmed - exitType:" << prevFrame.exitType
+                         << "pressure:" << m_lastPressure << "(prev" << m_prevPressure << ")"
+                         << "flow:" << m_lastFlow << "(prev" << m_prevFlow << ")"
+                         << "recorded as" << transitionReason;
+            }
+
+            // Frame 0 ending unconfirmed and shorter than the detector's
+            // cutoff is the exact shape that makes
+            // ShotAnalysis::detectSkipFirstFrame badge the shot "First step
+            // skipped". The cutoff comes from the detector's own helper rather
+            // than a copy of its formula, so this line predicts the badge
+            // instead of approximating it and cannot drift out of agreement
+            // with it. Logged with the firmware build so a report of that badge
+            // can be answered from the log alone: whether the frame ran, for
+            // how long, against what threshold, and on which firmware. (The
+            // detector additionally requires a profile of 2+ frames, which any
+            // frame change proves.)
+            const double skipCutoffSec =
+                ShotAnalysis::skipFirstFrameCutoffSec(prevFrame.seconds);
+            if (prevFrameIndex == 0 && frameElapsed < skipCutoffSec
+                && transitionReason.endsWith(QStringLiteral("_unconfirmed"))) {
+                qWarning() << "MainController: frame 0 ended at" << frameElapsed
+                           << "s unconfirmed, under the" << skipCutoffSec
+                           << "s skip cutoff - skip-first-frame badge will fire."
+                           << "exitType:" << prevFrame.exitType
+                           << "thresholds P>" << prevFrame.exitPressureOver
+                           << "P<" << prevFrame.exitPressureUnder
+                           << "F>" << prevFrame.exitFlowOver
+                           << "F<" << prevFrame.exitFlowUnder
+                           << "samples P:" << m_prevPressure << "->" << m_lastPressure
+                           << "F:" << m_prevFlow << "->" << m_lastFlow
+                           << "configuredSeconds:" << prevFrame.seconds
+                           << "firmwareBuild:" << (m_device ? m_device->firmwareBuildNumber() : 0);
             }
         }
 

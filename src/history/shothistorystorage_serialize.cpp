@@ -11,6 +11,7 @@
 #include "shotprojection.h"
 
 #include "ai/shotanalysis.h"
+#include "ai/shotsummarizer.h"   // canonicalNameForKbId
 
 #include <QDateTime>
 #include <QJsonDocument>
@@ -138,11 +139,26 @@ ShotProjection ShotHistoryStorage::convertShotRecord(const ShotRecord& record)
         const ShotAnalysis::AnalysisResult* analysisPtr = nullptr;
         if (record.cachedAnalysis.has_value()) {
             analysisPtr = &record.cachedAnalysis.value();
+            // Cached beside the analysis, because re-deriving it here means
+            // redoing the AnalysisInputs walk the cache exists to skip. This
+            // used to be computed ONLY in the else branch below, which the
+            // production path never takes — loadShotRecordStatic always
+            // caches — so the "Based on X" line was dead everywhere except in
+            // tests that build a ShotRecord by hand.
+            p.profileKbDerivedFrom = record.cachedKbDerivedFrom;
         } else {
             const AnalysisInputs inputs = prepareAnalysisInputs(record.profileKbId, record.profileJson, record.preFillInjected);
-            // KB-resolved bit gates grind Arm 1 — see openspec change
-            // skip-grind-arm1-when-kb-unresolved.
-            const bool profileKbResolved = !record.profileKbId.isEmpty();
+            // Off AnalysisInputs, not the persisted id — the id holds a TITLE
+            // resolution only, so a shape-resolved profile carries an empty
+            // one while having full context. Three of the FOUR sites that
+            // derived this by hand read this field; the fourth is
+            // ShotSummarizer::runShotAnalysisAndPopulate, which cannot reach
+            // AnalysisInputs (wrong layer — it is called from the AI module,
+            // not the storage one) and instead takes the resolved id set as a
+            // parameter from its caller. Both routes derive the bit from a
+            // resolution rather than from the persisted column, which is the
+            // property that matters; neither derives it locally.
+            const bool profileKbResolved = inputs.profileKbResolved;
             analysisOwned = ShotAnalysis::analyzeShot(
                 record.pressure, record.flow, record.weight,
                 record.conductanceDerivative,
@@ -153,6 +169,14 @@ ShotProjection ShotHistoryStorage::convertShotRecord(const ShotRecord& record)
                 inputs.frameCount, inputs.expertBand,
                 profileKbResolved, inputs.preFillInjected);
             analysisPtr = &analysisOwned;
+
+            // The shot's OWN derivation, for the "Based on X" line. Only a
+            // SHAPE match is a derivation worth explaining: a title match
+            // needs no explanation (the profile's own name said so) and an
+            // ambiguous match has no single entry to name.
+            if (inputs.identityFromShape && !inputs.identityKbId.isEmpty())
+                p.profileKbDerivedFrom =
+                    ShotSummarizer::canonicalNameForKbId(inputs.identityKbId);
         }
         const ShotAnalysis::AnalysisResult& analysis = *analysisPtr;
         p.summaryLines = analysis.lines;

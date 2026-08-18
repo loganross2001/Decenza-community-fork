@@ -18,16 +18,31 @@
 // healthy shot still surfaces the normal observations.
 
 #include <QtTest>
+#include <QFileInfo>
+#include <functional>
 
 #include <QVariantMap>
 #include <QVariantList>
 #include <QString>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonArray>
+#include <QFile>
+#include <QDir>
+#include <QSet>
+#include <QRegularExpression>
 #include <QJsonParseError>
+#include <QTemporaryDir>
+#include <QSqlDatabase>
+#include <QSqlQuery>
+#include <QSqlError>
 
 #include "ai/shotsummarizer.h"
 #include "history/shotprojection.h"
+#include "profile/profile.h"
+#include "ai/profileshapeindex.h"
+#include "history/shothistorystorage_internal.h"
+#include "history/shothistorystorage.h"
 
 namespace {
 
@@ -1845,6 +1860,1341 @@ private slots:
         const ShotSummary undosed =
             summarizer.summarizeFromHistory(ShotProjection::fromVariantMap(noDose));
         QCOMPARE(undosed.ratio, 0.0);
+    }
+
+    // --- Recipe-alias boundary rule (change: resolve-profile-kb-by-shape) ---
+    //
+    // These are IDENTITY assertions, deliberately secondary to the corpus
+    // fixture blooming_choker_renamed_profile.json, which asserts the same
+    // regression as an OUTCOME (a shot that must not be told it channeled).
+    // Identity is asserted too because it fails faster and names the cause
+    // directly, rather than reporting a resolution break through a downstream
+    // finding.
+    //
+    // Live case: a user's "Best practice (light roast)_cris" resolved to
+    // nothing because '_' was absent from the old enumerated separator set
+    // (/ - space ASCII-digit), so every shot on it lost that entry's
+    // flow_trend_ok AND channeling_expected and was eligible for two
+    // false-positive findings. The rule is now the complement — a boundary is
+    // any character that is NOT a letter — because a letter is the only case
+    // the rule actually turns on.
+    void recipePrefix_nonLetterBoundaryResolvesRenamedProfiles_data()
+    {
+        QTest::addColumn<QString>("title");
+        QTest::addColumn<QString>("expectedId");
+
+        // The live defect, pinned by name.
+        QTest::newRow("underscore suffix (the #cris case)")
+            << QStringLiteral("Best practice (light roast)_cris")
+            << QStringLiteral("best-practice-light-roast");
+        // Punctuation the old enumeration would equally have missed. Listed
+        // not because these were reported but because the enumeration's
+        // failure mode was "whatever the author did not think of".
+        QTest::newRow("dot suffix")    << QStringLiteral("Londinium.v2")     << QStringLiteral("londinium");
+        QTest::newRow("comma suffix")  << QStringLiteral("Londinium, decaf") << QStringLiteral("londinium");
+        QTest::newRow("paren suffix")  << QStringLiteral("Londinium(decaf)") << QStringLiteral("londinium");
+        // Separators the old set already admitted — unchanged behaviour, kept
+        // so a future narrowing of the rule cannot pass silently.
+        QTest::newRow("hyphen suffix") << QStringLiteral("Londinium - Jeff") << QStringLiteral("londinium");
+        QTest::newRow("digit suffix")  << QStringLiteral("Londinium2")       << QStringLiteral("londinium");
+    }
+
+    void recipePrefix_nonLetterBoundaryResolvesRenamedProfiles()
+    {
+        QFETCH(QString, title);
+        QFETCH(QString, expectedId);
+        QCOMPARE(ShotSummarizer::computeProfileKbId(title), expectedId);
+    }
+
+    // The one case the rule exists to block. A following LETTER is not a
+    // boundary, so a longer word that merely starts with an alias must not
+    // inherit that alias's entry.
+    void recipePrefix_followingLetterStillBlocks_data()
+    {
+        QTest::addColumn<QString>("title");
+
+        QTest::newRow("longer word after alias") << QStringLiteral("D-Flow / Quark");
+        QTest::newRow("alias run into a letter") << QStringLiteral("D-FlowX");
+        QTest::newRow("longer word, no editor")  << QStringLiteral("Londiniumesque");
+        // isLetter() is Unicode-aware: a non-Latin letter blocks exactly as an
+        // ASCII one does. The old enumeration admitted these as boundaries by
+        // omission, which was never intended.
+        QTest::newRow("cyrillic letter after alias") << QStringLiteral("Londiniumд");
+        QTest::newRow("cjk letter after alias")      << QStringLiteral("Londinium一");
+    }
+
+    void recipePrefix_followingLetterStillBlocks()
+    {
+        QFETCH(QString, title);
+        // No editor hint: the editor-type default (step 3) is a separate path
+        // and would mask what this asserts about step 2.
+        QVERIFY2(ShotSummarizer::computeProfileKbId(title).isEmpty(),
+                 qPrintable(QStringLiteral("expected no resolution for ") + title
+                            + QStringLiteral(", got ")
+                            + ShotSummarizer::computeProfileKbId(title)));
+    }
+
+    // Longest-wins across the boundary. A renamed variant must inherit the
+    // MOST specific recipe alias it extends, never a shorter one belonging to
+    // a different entry — "D-Flow / Q - Jeff" is D-Flow/Q, not band-less
+    // D-Flow/default. This can regress from the longest-first sort or the
+    // loop's first-hit-wins shortcut, and nothing else in the suite covers it:
+    // the spec names a `tst_kb_resolution` binary that has never existed.
+    void recipePrefix_longestAliasWinsAcrossBoundary()
+    {
+        const QString qVariant = ShotSummarizer::computeProfileKbId(
+            QStringLiteral("D-Flow / Q"), QStringLiteral("dflow"));
+        const QString dflowDefault = ShotSummarizer::computeProfileKbId(
+            QStringLiteral("D-Flow"), QStringLiteral("dflow"));
+        QVERIFY2(!qVariant.isEmpty() && qVariant != dflowDefault,
+                 "fixture precondition: D-Flow / Q must be its own entry");
+
+        // Each of these extends the longer alias across a boundary.
+        for (const QString& t : { QStringLiteral("D-Flow / Q - Jeff"),
+                                  QStringLiteral("D-Flow / Q2"),
+                                  QStringLiteral("D-Flow / Q_cris") }) {
+            QCOMPARE(ShotSummarizer::computeProfileKbId(t, QStringLiteral("dflow")), qVariant);
+        }
+    }
+
+    // The shipped profile set as a MAINTAINER edits it, read from the source
+    // tree via DECENZA_SOURCE_DIR (defined for every test target — see
+    // add_decenza_test in tests/CMakeLists.txt).
+    //
+    // This binary now links profiles.qrc too — ProfileShapeIndex reads
+    // `:/profiles`, so the 494 KB an earlier comment here argued against is
+    // already compiled in. The slots below still read the source tree anyway:
+    // they assert against the files a maintainer edits, so a profile renamed on
+    // disk fails here even if the qrc list was not updated in the same commit.
+    //
+    // One definition, because six slots reach for this directory and a path
+    // written out six times is six chances for one of them to point elsewhere.
+    static QDir shippedProfileDir()
+    {
+        return QDir(QStringLiteral(DECENZA_SOURCE_DIR "/resources/profiles"));
+    }
+
+    // Corpus coverage: every shipped profile resolves to a KB entry. It can
+    // genuinely fail — a shipped profile renamed without its KB alias being
+    // updated drops to unresolved, silently losing that entry's suppression
+    // flags for every shot taken on it, the same defect class as the '_cris'
+    // case by a different route.
+    //
+    // "to a KB entry", not "to exactly one": computeProfileKbId returns a
+    // single QString, so multiplicity is impossible by the return type and the
+    // old name (…ResolvesToExactlyOneEntry) promised an assertion the body
+    // could not make. Uniqueness across the alias set is what
+    // recipePrefix_longestAliasWinsAcrossBoundary covers.
+    void everyShippedProfileResolvesToAKbEntry()
+    {
+        const QDir dir = shippedProfileDir();
+        const QStringList files = dir.entryList({ QStringLiteral("*.json") }, QDir::Files);
+        QVERIFY2(files.size() > 50,
+                 qPrintable(QStringLiteral("expected the shipped profile set, found %1 files")
+                                .arg(files.size())));
+
+        QStringList unresolved;
+        for (const QString& name : files) {
+            QFile f(dir.filePath(name));
+            if (!f.open(QIODevice::ReadOnly)) continue;
+            const QJsonObject o = QJsonDocument::fromJson(f.readAll()).object();
+            const QString title = o.value(QStringLiteral("title")).toString();
+            if (title.isEmpty()) continue;
+            // A-Flow/D-Flow editor outputs reach their entry through the
+            // editor-type default (step 3), so pass the hint the app passes.
+            QString hint;
+            if (title.startsWith(QStringLiteral("D-Flow"), Qt::CaseInsensitive))
+                hint = QStringLiteral("dflow");
+            else if (title.startsWith(QStringLiteral("A-Flow"), Qt::CaseInsensitive))
+                hint = QStringLiteral("aflow");
+            if (ShotSummarizer::computeProfileKbId(title, hint).isEmpty())
+                unresolved << title;
+        }
+        QVERIFY2(unresolved.isEmpty(),
+                 qPrintable(QStringLiteral("shipped profiles resolving to no KB entry: ")
+                                + unresolved.join(QStringLiteral(", "))));
+    }
+
+    // === Shape grouping over the shipped set ===
+    // (change: resolve-profile-kb-by-shape, task group 2)
+    //
+    // Lives here rather than in tst_builtinprofileformat, whose subject is the
+    // shipped profile set: these slots need the KB resource (:/ai) to resolve
+    // ids, and this is the binary that links ai.qrc. Putting them there meant
+    // "Failed to load profile knowledge resource" and four vacuous zeros.
+    // (This binary links profiles.qrc as well, since ProfileShapeIndex reads
+    // `:/profiles`; the slots below still read the FILES from the source tree
+    // so they assert against what a maintainer edits.)
+    //
+    // Every figure in that change's design.md was first derived from a Python
+    // proxy reading raw JSON fields. `Profile::fromJson` NORMALIZES — simple
+    // profiles regenerate their frames, preinfuseFrameCount is derived rather
+    // than read for non-advanced profiles — so the real grouping can differ
+    // from the proxy's. These slots re-derive the numbers from the shipped C++
+    // path and pin them.
+    //
+    // Why pinning matters beyond this change: a shipped profile edited so that
+    // it collapses into another's shape bucket silently changes which KB facts
+    // a user's look-alike profile inherits. That is invisible at review time
+    // and has no other detector.
+
+    // Group the shipped profiles by shape, keyed by signature, valued by the
+    // set of KB ids the bucket's profiles resolve to.
+    static QMap<QString, QSet<QString>> shippedShapeBuckets(bool dropSeconds = false)
+    {
+        QMap<QString, QSet<QString>> buckets;
+        const QDir dir = shippedProfileDir();
+        const QStringList files = dir.entryList({QStringLiteral("*.json")}, QDir::Files, QDir::Name);
+        for (const QString& name : files) {
+            QFile f(dir.filePath(name));
+            if (!f.open(QIODevice::ReadOnly)) continue;
+            const Profile p = Profile::fromJson(QJsonDocument::fromJson(f.readAll()));
+            const QString kbId =
+                ShotSummarizer::computeProfileKbId(p.title(), p.editorType());
+            if (kbId.isEmpty()) continue;   // unmapped shipped profile: not index material
+            QString sig = p.shapeSignature();
+            if (sig.isEmpty()) continue;
+            if (dropSeconds) {
+                // Strip only the duration term, reusing the real signature
+                // rather than reimplementing it — this is a measurement of the
+                // alternative, not a second definition of shape.
+                sig.remove(QRegularExpression(QStringLiteral("\\|s=[0-9.]+")));
+            }
+            buckets[sig].insert(kbId);
+        }
+        return buckets;
+    }
+
+    // Population smoke check: enough shipped profiles resolve to a KB id for
+    // the index to be worth building at all. It does NOT assert that a profile
+    // finds itself — that is shapeIndex_shippedProfileFindsItsOwnEntry below,
+    // which is strictly stronger. Named accordingly, after the old name
+    // (shippedProfilesMatchThemselvesByShape) was found to describe the
+    // stronger test rather than this one.
+    void shippedProfileSetIsLargeEnoughToIndex()
+    {
+        const QMap<QString, QSet<QString>> buckets = shippedShapeBuckets();
+        int mapped = 0;
+        for (const QSet<QString>& ids : buckets) mapped += ids.size();
+        QVERIFY2(mapped >= 40,
+                 qPrintable(QStringLiteral("only %1 shipped profiles mapped to a KB id — the "
+                                           "index would be nearly empty").arg(mapped)));
+        QVERIFY(!buckets.isEmpty());
+    }
+
+    // Pin the collision STRUCTURE by member name, not merely by count. A future
+    // shipped-profile edit that collapses d-flow-q-variant into d-flow fails
+    // here rather than silently widening a bucket.
+    //
+    // TWO, not the three design.md first measured. The third was
+    // {damians-lr-v2-v3, londinium}, and it was never a collision of two
+    // profiles — it was one profile carrying two KB entries. londonium.json
+    // and damian_s_lrv2.json are byte-identical across all seven frames,
+    // differing only in title, reference_file, notes, target_weight, the
+    // hidden flag and one frame popup; Londonium's own notes say "This is
+    // identical to the LRv2 profile, but renamed to be easier to understand."
+    // The entries were merged (LRv2 now resolves to `londinium`, which carries
+    // the cited pressure-peak band it was always entitled to) and LRv3 — a
+    // genuinely different profile, eight frames at 90C with a 9-bar hold —
+    // was split out to `damians-lr-v2-v3`. So this bucket does not reappear by
+    // widening the shape key; it disappeared because the KB stopped saying
+    // one thing twice.
+    void shippedShapeCollisionsAreExactlyTheKnownTwo()
+    {
+        const QMap<QString, QSet<QString>> buckets = shippedShapeBuckets();
+
+        QList<QStringList> collisions;
+        for (const QSet<QString>& ids : buckets) {
+            if (ids.size() < 2) continue;
+            QStringList sorted(ids.begin(), ids.end());
+            sorted.sort();
+            collisions << sorted;
+        }
+        std::sort(collisions.begin(), collisions.end(),
+                  [](const QStringList& a, const QStringList& b) {
+                      return a.join(QLatin1Char(',')) < b.join(QLatin1Char(','));
+                  });
+
+        QList<QStringList> expected{
+            {QStringLiteral("d-flow"), QStringLiteral("d-flow-la-pavoni-variant")},
+            {QStringLiteral("gentle-flat-long-preinfusion-family"),
+             QStringLiteral("preinfuse-then-45ml-of-water")},
+        };
+        std::sort(expected.begin(), expected.end(),
+                  [](const QStringList& a, const QStringList& b) {
+                      return a.join(QLatin1Char(',')) < b.join(QLatin1Char(','));
+                  });
+
+        QStringList got, want;
+        for (const QStringList& c : collisions) got << c.join(QLatin1Char('+'));
+        for (const QStringList& c : expected)   want << c.join(QLatin1Char('+'));
+        QCOMPARE(got.join(QStringLiteral(" | ")), want.join(QStringLiteral(" | ")));
+    }
+
+    // The evidence for keeping frame durations in the shape key. Dropping them
+    // must measurably WIDEN the buckets — if it does not, the decision has no
+    // support and design.md's 23-vs-6 figure is wrong for the real path.
+    void droppingDurationsFromTheKeyWidensTheBuckets()
+    {
+        auto involved = [](const QMap<QString, QSet<QString>>& b) {
+            int n = 0;
+            for (const QSet<QString>& ids : b) if (ids.size() > 1) n += ids.size();
+            return n;
+        };
+        const QMap<QString, QSet<QString>> withSeconds = shippedShapeBuckets(false);
+        const QMap<QString, QSet<QString>> without     = shippedShapeBuckets(true);
+
+        QVERIFY2(without.size() < withSeconds.size(),
+                 qPrintable(QStringLiteral("signatures: with=%1 without=%2")
+                                .arg(withSeconds.size()).arg(without.size())));
+        QVERIFY2(involved(without) > involved(withSeconds) * 2,
+                 qPrintable(QStringLiteral("profiles in colliding buckets: with=%1 without=%2 "
+                                           "— the >2x widening is design.md's justification for "
+                                           "keeping durations in the key")
+                                .arg(involved(withSeconds)).arg(involved(without))));
+
+        // The specific separation #1198 exists to protect: D-Flow/Q must not
+        // fall into the same bucket as D-Flow/default.
+        for (const QSet<QString>& ids : withSeconds) {
+            if (ids.contains(QStringLiteral("d-flow-q-variant")))
+                QVERIFY2(!ids.contains(QStringLiteral("d-flow")),
+                         "D-Flow/Q collapsed into D-Flow/default");
+        }
+    }
+
+    // Per-fact transfer: for each colliding bucket, do its members agree? This
+    // is what decides whether a fact may transfer to a look-alike profile at
+    // all. Pinned because the ANSWER drives the transfer rules (design D5/D5a):
+    // suppression flags agree almost everywhere, expert bands and UGS do not.
+    void collidingBucketsDisagreeOnAssertiveFactsButAgreeOnSuppression()
+    {
+        const QMap<QString, QSet<QString>> buckets = shippedShapeBuckets();
+        int bucketsSeen = 0, flagDisagreements = 0, bandDisagreements = 0;
+
+        for (const QSet<QString>& ids : buckets) {
+            if (ids.size() < 2) continue;
+            ++bucketsSeen;
+            QSet<QString> flagSets, bandSets;
+            for (const QString& id : ids) {
+                QStringList fl = ShotSummarizer::getAnalysisFlags(id);
+                fl.sort();
+                flagSets.insert(fl.join(QLatin1Char(',')));
+                const auto band = ShotSummarizer::expertBandForKbId(id);
+                bandSets.insert(band ? QStringLiteral("band") : QStringLiteral("none"));
+            }
+            if (flagSets.size() > 1) ++flagDisagreements;
+            if (bandSets.size() > 1) ++bandDisagreements;
+        }
+
+        QCOMPARE(bucketsSeen, 2);
+        // Measured: exactly one bucket disagrees on flags (flow_trend_ok, the
+        // safe direction the union rule handles); one disagrees on the band,
+        // which is why the band requires unanimity and is withheld otherwise.
+        //
+        // Was 3 buckets / 2 band disagreements. The third,
+        // {damians-lr-v2-v3, londinium}, was never two profiles — it was one
+        // profile with two KB entries, and its "band disagreement" was the KB
+        // describing the same extraction twice with different completeness.
+        // Merging the entries removed a disagreement rather than resolving
+        // one; see shippedShapeCollisionsAreExactlyTheKnownTwo.
+        QCOMPARE(flagDisagreements, 1);
+        QCOMPARE(bandDisagreements, 1);
+    }
+
+    // === ProfileShapeIndex (change: resolve-profile-kb-by-shape, group 3) ===
+    //
+    // The index maps a shipped profile's shape to the KB ids that shape can
+    // lend facts to. These assert the two properties a caller relies on:
+    // a profile finds ITSELF (or the index is useless), and the answer does not
+    // depend on the order the shipped directory happened to enumerate in.
+
+    void shapeIndex_shippedProfileFindsItsOwnEntry_data()
+    {
+        QTest::addColumn<QString>("filePath");
+        const QDir dir = shippedProfileDir();
+        const QStringList files =
+            dir.entryList({QStringLiteral("*.json")}, QDir::Files, QDir::Name);
+        QVERIFY(files.size() > 50);
+        for (const QString& f : files)
+            QTest::newRow(qPrintable(f)) << dir.absoluteFilePath(f);
+    }
+
+    void shapeIndex_shippedProfileFindsItsOwnEntry()
+    {
+        QFETCH(QString, filePath);
+        QFile f(filePath);
+        QVERIFY(f.open(QIODevice::ReadOnly));
+        const Profile p = Profile::fromJson(QJsonDocument::fromJson(f.readAll()));
+
+        const QString ownId = ShotSummarizer::computeProfileKbId(p.title(), p.editorType());
+        if (ownId.isEmpty()) return;          // unmapped shipped profile: not index material
+        if (p.shapeSignature().isEmpty()) return;  // no frames: nothing to match on
+
+        const QStringList got = ProfileShapeIndex::candidatesForShape(p);
+        QVERIFY2(got.contains(ownId),
+                 qPrintable(QStringLiteral("%1 (%2) did not find itself; got [%3]")
+                                .arg(p.title(), ownId, got.join(QStringLiteral(", ")))));
+
+        // The bucket must also name the FILE, not only the entry. The dial-in
+        // difference block compares against a bundled profile's values, so a
+        // bucket that resolves an id but cannot say which file backs it leaves
+        // that block with nothing to diff against. Basenames because the index
+        // reads `:/profiles` while this test enumerates the source tree.
+        QStringList bundledNames;
+        for (const ProfileShapeIndex::BundledMatch& m :
+             ProfileShapeIndex::bundledProfilesForShape(p))
+            bundledNames << QFileInfo(m.resourcePath).fileName();
+        QVERIFY2(bundledNames.contains(QFileInfo(filePath).fileName()),
+                 qPrintable(QStringLiteral("%1 is absent from its own bucket's files; got [%2]")
+                                .arg(QFileInfo(filePath).fileName(),
+                                     bundledNames.join(QStringLiteral(", ")))));
+    }
+
+    // A candidate set that varied with enumeration order would be an
+    // order-dependent RESOLUTION — the exact property the KB resolver's
+    // standing prohibition on non-deterministic matching rules out.
+    void shapeIndex_resultIsOrderIndependentAndStable()
+    {
+        // d_flow_default, deliberately: its bucket has TWO members, so the
+        // sorted-order assertion below can actually fail. A singleton bucket
+        // is trivially sorted and would make that check decorative — which is
+        // what this test did when it used blooming_espresso.
+        QFile f(shippedProfileDir().filePath(QStringLiteral("d_flow_default.json")));
+        QVERIFY2(f.open(QIODevice::ReadOnly), "fixture profile missing");
+        const Profile p = Profile::fromJson(QJsonDocument::fromJson(f.readAll()));
+
+        const QStringList first = ProfileShapeIndex::candidatesForShape(p);
+        QVERIFY2(first.size() > 1,
+                 qPrintable(QStringLiteral("fixture precondition: d_flow_default must sit in a "
+                                           "multi-member bucket, got [%1]")
+                                .arg(first.join(QStringLiteral(", ")))));
+
+        // Rebuild from scratch and compare. Same input, same answer, and the
+        // list is sorted rather than insertion-ordered.
+        ProfileShapeIndex::resetForTesting();
+        const QStringList second = ProfileShapeIndex::candidatesForShape(p);
+        QCOMPARE(second, first);
+
+        QStringList sorted = first;
+        sorted.sort();
+        QCOMPARE(first, sorted);
+    }
+
+    // A profile with no frames must match nothing rather than everything —
+    // an empty signature bucketing together would make every malformed
+    // profile a relative of every other.
+    void shapeIndex_framelessProfileMatchesNothing()
+    {
+        const Profile empty;
+        QVERIFY(ProfileShapeIndex::candidatesForShape(empty).isEmpty());
+    }
+
+    // A bucket's FILES, on the smaller of the two real collisions. Sorted for
+    // the same reason the id list is: a caller picks a base from this list, and
+    // an enumeration-order-dependent list is an enumeration-order-dependent
+    // attribution shown to the user.
+    void shapeIndex_bundledFilesCoverTheWholeBucketAndAreSorted()
+    {
+        QFile f(shippedProfileDir().filePath(QStringLiteral("d_flow_default.json")));
+        QVERIFY2(f.open(QIODevice::ReadOnly), "fixture profile missing");
+        const Profile p = Profile::fromJson(QJsonDocument::fromJson(f.readAll()));
+
+        const QVector<ProfileShapeIndex::BundledMatch> got =
+            ProfileShapeIndex::bundledProfilesForShape(p);
+
+        QStringList names, ids;
+        for (const ProfileShapeIndex::BundledMatch& m : got) {
+            names << QFileInfo(m.resourcePath).fileName();
+            ids << m.kbId;
+        }
+        QCOMPARE(names, (QStringList{ QStringLiteral("d_flow_default.json"),
+                                      QStringLiteral("d_flow_la_pavoni.json") }));
+        QCOMPARE(ids, (QStringList{ QStringLiteral("d-flow"),
+                                    QStringLiteral("d-flow-la-pavoni-variant") }));
+
+    }
+
+    // === Dial-in base selection (change: summarize-profile-changes-from-builtin) ===
+    //
+    // Fixtures are the REAL colliding bucket — hybrid_pour_over_espresso and
+    // preinfuse_then_45ml_of_water — because a synthetic pair would not exercise
+    // the index, and because both are `type: flow`, so a retitled copy misses
+    // every title step (the editor-type default covers only dflow/aflow) and
+    // genuinely reaches the shape step this feature is built on.
+
+    // Load a shipped profile, edit its JSON, hand back the Profile.
+    static Profile shippedProfileEdited(const QString& file,
+                                        const std::function<void(QJsonObject&)>& edit)
+    {
+        QFile f(shippedProfileDir().filePath(file));
+        if (!f.open(QIODevice::ReadOnly)) return Profile();
+        QJsonObject obj = QJsonDocument::fromJson(f.readAll()).object();
+        edit(obj);
+        return Profile::fromJson(QJsonDocument(obj));
+    }
+
+    // Set one key on every step.
+    static void setOnEveryStep(QJsonObject& obj, const QString& key, const QJsonValue& v)
+    {
+        QJsonArray steps = obj[QStringLiteral("steps")].toArray();
+        for (int i = 0; i < steps.size(); ++i) {
+            QJsonObject st = steps[i].toObject();
+            st[key] = v;
+            steps[i] = st;
+        }
+        obj[QStringLiteral("steps")] = steps;
+    }
+
+    static void setOnStep(QJsonObject& obj, int index, const QString& key, const QJsonValue& v)
+    {
+        QJsonArray steps = obj[QStringLiteral("steps")].toArray();
+        QJsonObject st = steps[index].toObject();
+        st[key] = v;
+        steps[index] = st;
+        obj[QStringLiteral("steps")] = steps;
+    }
+
+    // A re-tuned copy picks the profile it was copied FROM, not its bucket-mate.
+    // This is the whole point of selection: the shape alone cannot tell them
+    // apart, and the dial-in values can.
+    void dialInBase_aRetunedCopyPicksTheProfileItCameFrom()
+    {
+        const Profile user = shippedProfileEdited(
+            QStringLiteral("preinfuse_then_45ml_of_water.json"), [](QJsonObject& o) {
+                o[QStringLiteral("title")] = QStringLiteral("Zzz My Own Thing");
+                setOnEveryStep(o, QStringLiteral("temperature"), QStringLiteral("89.00"));
+            });
+        QVERIFY(user.isValid());
+
+        const KbResolution res = resolveProfileKb(user);
+        QCOMPARE(res.origin, KbResolution::Origin::Shape);
+        QVERIFY2(res.ids.size() > 1, "fixture precondition: this shape must be ambiguous");
+
+        const DialInComparison cmp = compareWithBundledBase(user, res);
+        QVERIFY(cmp.hasBase());
+        QCOMPARE(cmp.baseKbId, QStringLiteral("preinfuse-then-45ml-of-water"));
+        QCOMPARE(cmp.deltas.size(), 1);
+        QCOMPARE(cmp.deltas.first().kind, QStringLiteral("temperature"));
+        // Collapsed: one edit, not three frames' worth.
+        QCOMPARE(cmp.deltas.first().frameIndex, -1);
+    }
+
+    // Equidistant means no base. Naming one here would be a coin flip presented
+    // to the user as a fact, which is the failure the whole gate exists to
+    // prevent — the six fields below are exactly the ones on which the two
+    // bundled profiles disagree, and this fixture differs from both on all six.
+    void dialInBase_anEquidistantProfileGetsNoBase()
+    {
+        const Profile user = shippedProfileEdited(
+            QStringLiteral("hybrid_pour_over_espresso.json"), [](QJsonObject& o) {
+                o[QStringLiteral("title")] = QStringLiteral("Zzz Equidistant Fixture");
+                o[QStringLiteral("target_volume")] = QStringLiteral("18.0");   // 0 vs 36
+                // The AUTHORED brew temperature is its own dial-in row, separate
+                // from the frames', so it has to differ from both too or the
+                // fixture is not equidistant.
+                o[QStringLiteral("espresso_temperature")] = QStringLiteral("95.00"); // 92 vs 90
+                setOnEveryStep(o, QStringLiteral("temperature"), QStringLiteral("95.00")); // 92 vs 90
+                setOnStep(o, 0, QStringLiteral("flow"), QStringLiteral("5.00"));  // 2.00 vs 8.00
+                setOnStep(o, 1, QStringLiteral("flow"), QStringLiteral("2.50"));  // 2.20 vs 2.00
+                setOnStep(o, 2, QStringLiteral("flow"), QStringLiteral("1.40"));  // 1.80 vs 1.00
+                QJsonArray steps = o[QStringLiteral("steps")].toArray();
+                QJsonObject f0 = steps[0].toObject();
+                QJsonObject exit = f0[QStringLiteral("exit")].toObject();
+                exit[QStringLiteral("value")] = QStringLiteral("2.50");           // 1.50 vs 4.00
+                f0[QStringLiteral("exit")] = exit;
+                steps[0] = f0;
+                o[QStringLiteral("steps")] = steps;
+            });
+        QVERIFY(user.isValid());
+
+        const KbResolution res = resolveProfileKb(user);
+        QCOMPARE(res.origin, KbResolution::Origin::Shape);
+
+        // Precondition: genuinely equidistant. Asserted rather than assumed —
+        // if a bundled profile is retuned later this must fail loudly rather
+        // than quietly stop testing the tie path.
+        const Profile hybrid =
+            Profile::loadFromFile(QStringLiteral(":/profiles/hybrid_pour_over_espresso.json"));
+        const Profile preinf =
+            Profile::loadFromFile(QStringLiteral(":/profiles/preinfuse_then_45ml_of_water.json"));
+        QCOMPARE(Profile::dialInDeltas(hybrid, user).size(),
+                 Profile::dialInDeltas(preinf, user).size());
+
+        QVERIFY(!compareWithBundledBase(user, res).hasBase());
+    }
+
+    // The title path: an in-place edit of a bundled profile keeps its name, so it
+    // never reaches the shape step — yet it is the larger population and must
+    // still get its differences.
+    void dialInBase_aTitleResolvedInPlaceEditStillGetsItsBase()
+    {
+        const Profile user = shippedProfileEdited(
+            QStringLiteral("hybrid_pour_over_espresso.json"), [](QJsonObject& o) {
+                setOnEveryStep(o, QStringLiteral("temperature"), QStringLiteral("94.00"));
+            });
+        QVERIFY(user.isValid());
+
+        const KbResolution res = resolveProfileKb(user);
+        QCOMPARE(res.origin, KbResolution::Origin::Title);
+
+        const DialInComparison cmp = compareWithBundledBase(user, res);
+        QVERIFY(cmp.hasBase());
+        QCOMPARE(cmp.baseTitle, QStringLiteral("Hybrid pour over espresso"));
+        QCOMPARE(cmp.deltas.size(), 1);
+        QCOMPARE(cmp.deltas.first().kind, QStringLiteral("temperature"));
+    }
+
+    // A title match says nothing about frame structure. Diffing a differently
+    // shaped profile against its namesake would render "frame 4 does not exist"
+    // noise and falsely present it as a modified copy.
+    void dialInBase_aTitleMatchOfADifferentShapeGetsNoBase()
+    {
+        const Profile user = shippedProfileEdited(
+            QStringLiteral("hybrid_pour_over_espresso.json"), [](QJsonObject& o) {
+                QJsonArray steps = o[QStringLiteral("steps")].toArray();
+                steps.removeLast();                       // structural edit
+                o[QStringLiteral("steps")] = steps;
+            });
+        QVERIFY(user.isValid());
+
+        const KbResolution res = resolveProfileKb(user);
+        QCOMPARE(res.origin, KbResolution::Origin::Title);
+        QVERIFY(!compareWithBundledBase(user, res).hasBase());
+    }
+
+    // A bundled profile IS the documentation. "An unchanged copy of yourself" is
+    // not a thing to tell anyone.
+    void dialInBase_aBundledProfileComparedWithItselfGetsNoBase()
+    {
+        const Profile self =
+            Profile::loadFromFile(QStringLiteral(":/profiles/hybrid_pour_over_espresso.json"));
+        QVERIFY(self.isValid());
+        QVERIFY(!compareWithBundledBase(self, resolveProfileKb(self)).hasBase());
+    }
+
+    // A renamed but otherwise untouched copy DOES get a base, with no deltas —
+    // the "unchanged copy of X" case, which must be distinguishable from having
+    // no base at all.
+    void dialInBase_aRenamedUntouchedCopyHasABaseAndNoDeltas()
+    {
+        const Profile user = shippedProfileEdited(
+            QStringLiteral("preinfuse_then_45ml_of_water.json"), [](QJsonObject& o) {
+                o[QStringLiteral("title")] = QStringLiteral("Zzz Renamed Only");
+            });
+        QVERIFY(user.isValid());
+
+        const DialInComparison cmp = compareWithBundledBase(user, resolveProfileKb(user));
+        QVERIFY(cmp.hasBase());
+        QCOMPARE(cmp.baseKbId, QStringLiteral("preinfuse-then-45ml-of-water"));
+        QVERIFY(cmp.deltas.isEmpty());
+    }
+
+    // The Title branch restricts candidates to the entry whose prose is on
+    // screen. Without that filter the block can name a bundled profile from a
+    // DIFFERENT entry — "Your changes from D-Flow / La Pavoni" printed under the
+    // D-Flow entry's text. The fixture is discriminating: it carries La Pavoni's
+    // content under D-Flow's title, so deleting the filter elects the La Pavoni
+    // file (zero deltas) instead.
+    void dialInBase_theTitleBranchStaysInsideItsOwnEntry()
+    {
+        QFile f(shippedProfileDir().filePath(QStringLiteral("d_flow_la_pavoni.json")));
+        QVERIFY2(f.open(QIODevice::ReadOnly), "fixture profile missing");
+        QJsonObject obj = QJsonDocument::fromJson(f.readAll()).object();
+        obj[QStringLiteral("title")] = QStringLiteral("D-Flow / default");
+        const Profile user = Profile::fromJson(QJsonDocument(obj));
+        QVERIFY(user.isValid());
+
+        const KbResolution res = resolveProfileKb(user);
+        QCOMPARE(res.origin, KbResolution::Origin::Title);
+        QCOMPARE(res.ids, QStringList{ QStringLiteral("d-flow") });
+
+        const DialInComparison cmp = compareWithBundledBase(user, res);
+        QVERIFY(cmp.hasBase());
+        QCOMPARE(cmp.baseKbId, QStringLiteral("d-flow"));
+        QVERIFY2(!cmp.deltas.isEmpty(),
+                 "the D-Flow base really should differ from La Pavoni's values");
+    }
+
+    // A profile-level-only edit. Profile::functionallyEqual deliberately ignores
+    // the profile-level limits and never compares a frame name, so using it as
+    // the self-check told a user who changed ONLY their yield that nothing had
+    // changed — in the population this feature exists for.
+    void dialInBase_anInPlaceYieldEditIsNotMistakenForTheBuiltIn()
+    {
+        const Profile user = shippedProfileEdited(
+            QStringLiteral("hybrid_pour_over_espresso.json"), [](QJsonObject& o) {
+                o[QStringLiteral("target_weight")] = QStringLiteral("42.0");
+            });
+        QVERIFY(user.isValid());
+
+        const DialInComparison cmp = compareWithBundledBase(user, resolveProfileKb(user));
+        QVERIFY(cmp.hasBase());
+        QCOMPARE(cmp.deltas.size(), 1);
+        QCOMPARE(cmp.deltas.first().kind, QStringLiteral("targetWeight"));
+    }
+
+    // Six bundled tea profiles share one shape bucket and one KB entry, so a
+    // plain abstain-on-tie would exclude every tea profile from the feature.
+    // The tie is answered only when answering it says something true: the tied
+    // candidates must agree on the VALUES, not merely on how many fields
+    // differ. Two of the six (chinese green, white tea) are identical on every
+    // dial-in field, so a copy that is renamed and given ONE dial-in change
+    // ties at that one row against both of them, with the same before and
+    // after values either way — and the entry can be named without picking
+    // one of the two.
+    void dialInBase_aTieOnEquivalentValuesNamesTheEntry()
+    {
+        const Profile user = shippedProfileEdited(
+            QStringLiteral("tea_portafilter_white_tea.json"), [](QJsonObject& o) {
+                o[QStringLiteral("title")] = QStringLiteral("Zzz My Tea");
+                o[QStringLiteral("target_weight")] = QStringLiteral("5.0");
+            });
+        QVERIFY(user.isValid());
+
+        const DialInComparison cmp = compareWithBundledBase(user, resolveProfileKb(user));
+
+        QVERIFY2(cmp.hasBase(),
+                 "a tie whose candidates agree on the values must still produce a block");
+        QCOMPARE(cmp.baseKbId, QStringLiteral("tea"));
+        QCOMPARE(cmp.baseTitle, ShotSummarizer::canonicalNameForKbId(QStringLiteral("tea")));
+
+        // The LABEL being right is not the same as the numbers being right: an
+        // entry-level answer that kept an arbitrary candidate's deltas would
+        // pass every assertion above. Both tied candidates ship 0 g, so the row
+        // is true of the entry, which is what licenses naming it.
+        QCOMPARE(cmp.deltas.size(), 1);
+        QCOMPARE(cmp.deltas.first().kind, QStringLiteral("targetWeight"));
+        QCOMPARE(cmp.deltas.first().oldValue, 0.0);
+        QCOMPARE(cmp.deltas.first().newValue, 5.0);
+    }
+
+    // The other half of the rule, and the case that made it necessary. A tea at
+    // a temperature none of the six ships differs from every one of them on the
+    // same TWO fields, so the count cannot separate them — but each states a
+    // different "before" temperature, so there is no single true column to
+    // render. Naming the entry here would print one candidate's numbers under a
+    // heading claiming they describe all of them.
+    void dialInBase_aTieOnDifferentValuesInsideOneEntryStillAbstains()
+    {
+        const Profile user = shippedProfileEdited(
+            QStringLiteral("tea_portafilter_white_tea.json"), [](QJsonObject& o) {
+                o[QStringLiteral("title")] = QStringLiteral("Zzz My Tea");
+                setOnEveryStep(o, QStringLiteral("temperature"), QStringLiteral("85.00"));
+                o[QStringLiteral("espresso_temperature")] = QStringLiteral("85.00");
+            });
+        QVERIFY(user.isValid());
+
+        // The tie itself, pinned here rather than asserted in a comment. Every
+        // bucket member must produce the SAME number of rows (or there is no
+        // tie to abstain over) while disagreeing on the values (or abstaining
+        // would be wrong). Two comments in this change previously stated that
+        // count from memory and both were wrong; this reads it from the code.
+        const QVector<ProfileShapeIndex::BundledMatch> bucket =
+            ProfileShapeIndex::bundledProfilesForShape(user);
+        QCOMPARE(bucket.size(), 6);
+        qsizetype tiedCount = -1;
+        QSet<QString> distinctBefores;
+        for (const ProfileShapeIndex::BundledMatch& m : bucket) {
+            const Profile bundled = Profile::loadFromFile(m.resourcePath);
+            QVERIFY(bundled.isValid());
+            const QVector<ProfileFieldDelta> d = Profile::dialInDeltas(bundled, user);
+            if (tiedCount < 0) tiedCount = d.size();
+            QCOMPARE(d.size(), tiedCount);
+            QVERIFY(!d.isEmpty());
+            distinctBefores.insert(QString::number(d.first().oldValue));
+        }
+        QVERIFY2(distinctBefores.size() > 1,
+                 "fixture precondition: the tied candidates must disagree on the values, "
+                 "or there is nothing for the equivalent-deltas rule to reject");
+
+        const DialInComparison cmp = compareWithBundledBase(user, resolveProfileKb(user));
+
+        QVERIFY2(!cmp.hasBase(),
+                 "candidates that disagree on the values cannot be collapsed into one entry-level answer");
+    }
+
+    // The precondition both tests above rest on: the tea bucket really does hold
+    // six FILES under one id, and two of them really are indistinguishable. If a
+    // bundled profile is retuned later this fails loudly rather than quietly
+    // ceasing to test either half of the tie rule — the equivalent-values case
+    // needs the indistinguishable pair, the abstain case needs the other four to
+    // disagree with them.
+    void shapeIndex_theTeaBucketIsSixFilesUnderOneEntry()
+    {
+        const Profile tea =
+            Profile::loadFromFile(QStringLiteral(":/profiles/tea_portafilter_white_tea.json"));
+        QVERIFY(tea.isValid());
+
+        const QVector<ProfileShapeIndex::BundledMatch> bucket =
+            ProfileShapeIndex::bundledProfilesForShape(tea);
+        QCOMPARE(bucket.size(), 6);
+
+        QSet<QString> ids;
+        for (const ProfileShapeIndex::BundledMatch& m : bucket) ids.insert(m.kbId);
+        QCOMPARE(ids, QSet<QString>{ QStringLiteral("tea") });
+
+        const Profile green =
+            Profile::loadFromFile(QStringLiteral(":/profiles/tea_portafilter_chinese_green.json"));
+        QVERIFY2(Profile::dialInDeltas(green, tea).isEmpty(),
+                 "chinese green and white tea must remain indistinguishable on dial-in values");
+
+        // And the rest of the bucket must NOT be: the abstain half of the tie
+        // rule only has something to abstain over while the six disagree on the
+        // values they tie on.
+        int distinct = 0;
+        for (const ProfileShapeIndex::BundledMatch& m : bucket) {
+            const Profile other = Profile::loadFromFile(m.resourcePath);
+            QVERIFY(other.isValid());
+            if (!Profile::dialInDeltas(other, tea).isEmpty()) ++distinct;
+        }
+        QCOMPARE(distinct, 4);
+    }
+
+    // The "Based on X" line on the shot pages, end to end through the path
+    // production actually takes. convertShotRecord has a fast path (analysis
+    // already cached by loadShotRecordStatic) and a slow one (a fresh
+    // ShotRecord, which is how every other test builds one), and the
+    // derivation used to be computed ONLY in the slow branch — so every
+    // hand-built ShotRecord in the suite showed the line while no real shot
+    // ever did. Going through the database is the whole point: a fixture that
+    // skips loadShotRecordStatic exercises the branch that was never broken.
+    //
+    // It lives in this file rather than beside the other DB round-trips in
+    // tst_dbmigration because it needs BOTH profiles.qrc (for the shape index
+    // to have anything to match against) and ai.qrc (for the entry's canonical
+    // name). This binary already links both; tst_dbmigration links neither,
+    // and adding them there costs two resource compiles for one test.
+    void dialInBase_theDerivedFromNameSurvivesTheCachedAnalysisFastPath()
+    {
+        const QString profileJson = shippedProfileJson(QStringLiteral("blooming_espresso.json"),
+                                                       QStringLiteral("Zzz Unrelated Name"));
+        QVERIFY(!profileJson.isEmpty());
+
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString path = dir.path() + QStringLiteral("/derivedfrom.db");
+        {
+            ShotHistoryStorage storage;
+            QVERIFY(storage.initialize(path));
+            storage.close();
+            QTRY_VERIFY(storage.isDbWorkIdle());
+        }
+
+        qint64 shotId = -1;
+        const QString conn = QStringLiteral("derivedfrom_conn");
+        {
+            QSqlDatabase db = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), conn);
+            db.setDatabaseName(path);
+            QVERIFY(db.open());
+
+            QSqlQuery ins(db);
+            // profile_kb_id deliberately left NULL: a shape-resolved shot never
+            // persists one (it is the dial-in grouping key), so this is the
+            // state every such row is really in.
+            ins.prepare(QStringLiteral(
+                "INSERT INTO shots (uuid, timestamp, profile_name, duration_seconds, profile_json)"
+                " VALUES ('derivedfrom', 1000, 'Zzz Unrelated Name', 30, :pj)"));
+            ins.bindValue(QStringLiteral(":pj"), profileJson);
+            QVERIFY2(ins.exec(), qPrintable(ins.lastError().text()));
+            shotId = ins.lastInsertId().toLongLong();
+            QVERIFY(shotId > 0);
+
+            const ShotRecord r = ShotHistoryStorage::loadShotRecordStatic(db, shotId);
+            QVERIFY2(r.cachedAnalysis.has_value(),
+                     "precondition: the load path must cache, or this test cannot fail");
+            QVERIFY2(r.profileKbId.isEmpty(),
+                     "a shape match must not have been written to the grouping column");
+
+            const ShotProjection p = ShotHistoryStorage::convertShotRecord(r);
+            QCOMPARE(p.profileKbDerivedFrom, QStringLiteral("Blooming Espresso"));
+        }
+        QSqlDatabase::removeDatabase(conn);
+    }
+
+    // === Candidate-set transfer rules (group 4) ===
+    //
+    // These decide what a look-alike profile inherits. The governing principle
+    // is asymmetric: do not tell a user a by-design behaviour is a fault, but
+    // still report what genuinely went wrong. That asymmetry is why the rules
+    // differ per fact rather than being one policy.
+    //
+    // The buckets used as fixtures are the real shipped ones, pinned by
+    // shippedShapeCollisionsAreExactlyTheKnownTwo above.
+
+    // flow_trend_ok is carried by preinfuse-then-45ml-of-water and NOT by
+    // gentle-flat-long-preinfusion-family — a real disagreement in a real
+    // bucket. Union: the flag applies, so neither profile's look-alike is told
+    // its declining flow is fines migration.
+    void candidateSet_disputedShapeFlagStillSuppresses()
+    {
+        const QStringList bucket{ QStringLiteral("gentle-flat-long-preinfusion-family"),
+                                  QStringLiteral("preinfuse-then-45ml-of-water") };
+        // Precondition: this really is a disagreement, not a coincidence.
+        QVERIFY(!ShotSummarizer::getAnalysisFlags(bucket.at(0))
+                     .contains(QStringLiteral("flow_trend_ok")));
+        QVERIFY(ShotSummarizer::getAnalysisFlags(bucket.at(1))
+                    .contains(QStringLiteral("flow_trend_ok")));
+
+        QVERIFY2(ShotSummarizer::getAnalysisFlags(bucket).contains(QStringLiteral("flow_trend_ok")),
+                 "a disputed shape-silencing flag must still apply — missing beats wrong");
+    }
+
+    // The opposite direction, and the reason the rule is a table rather than a
+    // blanket union. grind_check_skip returns EARLY from analyzeFlowVsGoal, so
+    // it also silences the choked-puck and yield-overshoot arms — physics
+    // signals that hold on any profile. Applying it on one member's say-so
+    // would hide a genuinely faulty shot.
+    void candidateSet_disputedPhysicsFlagIsWithheld()
+    {
+        // turbo-shot carries grind_check_skip; blooming-espresso does not.
+        const QStringList mixed{ QStringLiteral("turbo-shot"),
+                                 QStringLiteral("blooming-espresso") };
+        QVERIFY(ShotSummarizer::getAnalysisFlags(mixed.at(0))
+                    .contains(QStringLiteral("grind_check_skip")));
+        QVERIFY(!ShotSummarizer::getAnalysisFlags(mixed.at(1))
+                     .contains(QStringLiteral("grind_check_skip")));
+
+        QVERIFY2(!ShotSummarizer::getAnalysisFlags(mixed).contains(QStringLiteral("grind_check_skip")),
+                 "a disputed physics-detector flag must NOT apply — it would hide a real fault");
+    }
+
+    // A disputed band is withheld. Two of the three real buckets disagree:
+    // d-flow has no band, d-flow-la-pavoni-variant cites 6-9 bar.
+    void candidateSet_disputedExpertBandIsWithheld()
+    {
+        const QStringList bucket{ QStringLiteral("d-flow"),
+                                  QStringLiteral("d-flow-la-pavoni-variant") };
+        QVERIFY(!ShotSummarizer::expertBandForKbId(bucket.at(0)).has_value());
+        QVERIFY(ShotSummarizer::expertBandForKbId(bucket.at(1)).has_value());
+
+        QVERIFY2(!ShotSummarizer::expertBandForKbIds(bucket).has_value(),
+                 "a disputed band must be withheld, not guessed in either direction");
+    }
+
+    // Agreement TRANSFERS a value — the branch the disputed test above cannot
+    // reach, and the one that carries a real number onto a shape-matched shot.
+    //
+    // Constructed, not a shipped bucket: of the two real multi-entry buckets
+    // one disputes (d-flow) and the other has no band on either member, so
+    // neither exercises this. `londinium` is paired with itself-by-alias so the
+    // band is identical by construction; what is under test is that agreement
+    // yields the value rather than nullopt.
+    //
+    // The `key` lambda in expertBandForKbIds deliberately excludes src and
+    // confidence, so two entries citing one band from different sources still
+    // agree. That exclusion had no assertion until this one.
+    void candidateSet_agreedBandTransfersItsValue()
+    {
+        const QStringList agreed{ QStringLiteral("londinium"),
+                                  QStringLiteral("londinium") };
+        const auto single = ShotSummarizer::expertBandForKbId(QStringLiteral("londinium"));
+        QVERIFY2(single.has_value(), "fixture precondition: londinium must carry a band");
+
+        const auto set = ShotSummarizer::expertBandForKbIds(agreed);
+        QVERIFY2(set.has_value(), "an agreed band must transfer, not be withheld");
+        QCOMPARE(set->axis, single->axis);
+        QCOMPARE(set->lo, single->lo);
+        QCOMPARE(set->hi, single->hi);
+    }
+
+    // Absence is also an agreement, and must stay absent rather than becoming
+    // a withheld-because-disputed nullopt by a different route. Weak on its
+    // own — both the correct rule and an "always withhold" bug return nullopt
+    // here — so it is paired with the transfer test above, which that bug
+    // would fail.
+    void candidateSet_agreedAbsentBandStaysAbsent()
+    {
+        const QStringList bucket{ QStringLiteral("gentle-flat-long-preinfusion-family"),
+                                  QStringLiteral("preinfuse-then-45ml-of-water") };
+        QVERIFY(!ShotSummarizer::expertBandForKbId(bucket.at(0)).has_value());
+        QVERIFY(!ShotSummarizer::expertBandForKbId(bucket.at(1)).has_value());
+        QVERIFY(!ShotSummarizer::expertBandForKbIds(bucket).has_value());
+    }
+
+    // UGS is an assertive number on the grind scale: d-flow is 0.5,
+    // d-flow-la-pavoni-variant is 1.0. Disputed -> nothing.
+    void candidateSet_disputedUgsIsWithheld()
+    {
+        const QStringList disputed{ QStringLiteral("d-flow"),
+                                    QStringLiteral("d-flow-la-pavoni-variant") };
+        QVERIFY(!std::isnan(ShotSummarizer::ugsForKbId(disputed.at(0))));
+        QVERIFY(!std::isnan(ShotSummarizer::ugsForKbId(disputed.at(1))));
+        QVERIFY2(std::isnan(ShotSummarizer::ugsForKbIds(disputed)),
+                 "a disputed UGS must be withheld");
+
+        // ...but an AGREED value transfers. damians-lr-v2-v3 and londinium are
+        // both 0.0. NOT a shipped shape bucket — LRv3 has eight frames to
+        // Londinium's seven — so this set is constructed to exercise the
+        // agreement branch, which the two real buckets cannot: d-flow's
+        // disputes above, and the gentle-flat pair carries no UGS at all.
+        const QStringList agreed{ QStringLiteral("damians-lr-v2-v3"),
+                                  QStringLiteral("londinium") };
+        QCOMPARE(ShotSummarizer::ugsForKbIds(agreed),
+                 ShotSummarizer::ugsForKbId(agreed.at(0)));
+    }
+
+    // The degeneracy that makes a unique shape match indistinguishable from a
+    // title match for every consumer. If this drifts, shape-resolved profiles
+    // quietly become second-class.
+    void candidateSet_singleMemberIsIdenticalToTitleResolution()
+    {
+        const QStringList ids{ QStringLiteral("londinium") };
+        QCOMPARE(ShotSummarizer::getAnalysisFlags(ids),
+                 ShotSummarizer::getAnalysisFlags(ids.first()));
+        QCOMPARE(ShotSummarizer::ugsForKbIds(ids), ShotSummarizer::ugsForKbId(ids.first()));
+        QCOMPARE(ShotSummarizer::expertBandForKbIds(ids).has_value(),
+                 ShotSummarizer::expertBandForKbId(ids.first()).has_value());
+    }
+
+    void candidateSet_emptySetYieldsNothing()
+    {
+        QVERIFY(ShotSummarizer::getAnalysisFlags(QStringList{}).isEmpty());
+        QVERIFY(!ShotSummarizer::expertBandForKbIds(QStringList{}).has_value());
+        QVERIFY(std::isnan(ShotSummarizer::ugsForKbIds(QStringList{})));
+    }
+
+    // === resolveProfileKb composition (4.1/4.5) ===
+
+    static Profile loadShipped(const QString& file)
+    {
+        QFile f(shippedProfileDir().filePath(file));
+        if (!f.open(QIODevice::ReadOnly)) return {};
+        return Profile::fromJson(QJsonDocument::fromJson(f.readAll()));
+    }
+
+    // Title resolution wins and the shape step is never consulted — the
+    // property that keeps every built-in's resolution byte-identical.
+    void resolveProfileKb_titleWinsAndIsUnique()
+    {
+        const Profile p = loadShipped(QStringLiteral("londonium.json"));
+        QVERIFY(!p.title().isEmpty());
+        const KbResolution r = resolveProfileKb(p);
+        QCOMPARE(r.origin, KbResolution::Origin::Title);
+        QCOMPARE(r.ids, QStringList{ QStringLiteral("londinium") });
+        QVERIFY(r.hasIdentity());
+    }
+
+    // The case the change exists for: same frames, a title no title-step can
+    // reach. Must resolve by shape, and must be flagged as an inference.
+    void resolveProfileKb_renamedProfileResolvesByShape()
+    {
+        Profile p = loadShipped(QStringLiteral("blooming_espresso.json"));
+        QVERIFY(!p.steps().isEmpty());
+        p.setTitle(QStringLiteral("Zzz Unrelated Name"));
+        QVERIFY2(ShotSummarizer::computeProfileKbId(p.title(), p.editorType()).isEmpty(),
+                 "fixture precondition: the title must not resolve on its own");
+
+        const KbResolution r = resolveProfileKb(p);
+        QCOMPARE(r.origin, KbResolution::Origin::Shape);
+        QVERIFY2(r.ids.contains(QStringLiteral("blooming-espresso")),
+                 qPrintable(QStringLiteral("got [%1]").arg(r.ids.join(QStringLiteral(", ")))));
+    }
+
+    // The inverse obligation: a structurally different profile must NOT match.
+    // Without this the positive case above proves only that something matched.
+    void resolveProfileKb_structurallyDifferentProfileDoesNotMatch()
+    {
+        Profile p = loadShipped(QStringLiteral("blooming_espresso.json"));
+        QVERIFY(p.steps().size() > 1);
+        p.setTitle(QStringLiteral("Zzz Unrelated Name"));
+
+        // Remove a frame — a structural edit, not a dial-in change.
+        QList<ProfileFrame> fewer = p.steps();
+        fewer.removeLast();
+        p.setSteps(fewer);
+
+        const KbResolution r = resolveProfileKb(p);
+        QVERIFY2(r.origin != KbResolution::Origin::Shape
+                     || !r.ids.contains(QStringLiteral("blooming-espresso")),
+                 "a profile with a frame removed must not inherit the original's knowledge");
+    }
+
+    // An ambiguous shape resolves for ANALYSIS but withholds IDENTITY — you
+    // can suppress a false positive without claiming to know which profile the
+    // shot's was derived from.
+    void resolveProfileKb_ambiguousShapeWithholdsIdentityButNotAnalysis()
+    {
+        // D-Flow / default shares its shape with D-Flow / La Pavoni, which is
+        // a real disagreement between two real profiles: the La Pavoni variant
+        // pulls coarser (UGS 1.0 vs 0.5) off a lower pressure target and an
+        // 84C fill, and only it carries an author-stated pressure-peak band.
+        //
+        // This fixture used to be londonium.json. That stopped being ambiguous
+        // when LRv2 and Londonium were recognised as one profile and their KB
+        // entries merged — see shippedShapeCollisionsAreExactlyTheKnownTwo.
+        Profile p = loadShipped(QStringLiteral("d_flow_default.json"));
+        p.setTitle(QStringLiteral("Zzz Unrelated Name"));
+        const KbResolution r = resolveProfileKb(p);
+
+        QCOMPARE(r.origin, KbResolution::Origin::Shape);
+        QVERIFY2(r.ids.size() > 1, "fixture precondition: this shape is ambiguous");
+        QVERIFY2(!r.hasIdentity(), "an ambiguous set must not claim an identity");
+
+        // Analysis facts still flow: both carry flow_trend_ok.
+        QVERIFY(ShotSummarizer::getAnalysisFlags(r.ids).contains(QStringLiteral("flow_trend_ok")));
+        // The band only one of them carries does not.
+        QVERIFY(!ShotSummarizer::expertBandForKbIds(r.ids).has_value());
+    }
+
+    // The payoff of the LRv2/Londonium KB merge, stated as behaviour rather
+    // than as a bucket count. A renamed copy of the profile the user actually
+    // sees (Londonium is the visible one; LRv2 ships hidden) now resolves to a
+    // SINGLE entry, so it gets an identity, the sparkle, a "Based on" name —
+    // and the cited pressure-peak band, which the pre-merge two-entry split
+    // withheld under unanimity even though both entries described one profile.
+    void resolveProfileKb_renamedLondoniumResolvesToOneEntryWithItsBand()
+    {
+        Profile p = loadShipped(QStringLiteral("londonium.json"));
+        p.setTitle(QStringLiteral("Zzz Unrelated Name"));
+        const KbResolution r = resolveProfileKb(p);
+
+        QCOMPARE(r.origin, KbResolution::Origin::Shape);
+        QVERIFY2(r.hasIdentity(),
+                 qPrintable(QStringLiteral("expected one candidate, got: %1")
+                                .arg(r.ids.join(QLatin1Char(',')))));
+        QCOMPARE(r.ids.first(), QStringLiteral("londinium"));
+
+        const auto band = ShotSummarizer::expertBandForKbIds(r.ids);
+        QVERIFY2(band.has_value(), "the merged entry must carry the cited band");
+        QCOMPARE(*band->lo, 8.0);
+        QCOMPARE(*band->hi, 9.0);
+    }
+
+    // Disabling the shape step must leave every shipped profile untouched.
+    void resolveProfileKb_shippedProfilesNeverDependOnTheShapeStep_data()
+    {
+        shapeIndex_shippedProfileFindsItsOwnEntry_data();
+    }
+
+    void resolveProfileKb_shippedProfilesNeverDependOnTheShapeStep()
+    {
+        QFETCH(QString, filePath);
+        QFile f(filePath);
+        QVERIFY(f.open(QIODevice::ReadOnly));
+        const Profile p = Profile::fromJson(QJsonDocument::fromJson(f.readAll()));
+        if (p.title().isEmpty()) return;
+
+        const KbResolution r = resolveProfileKb(p);
+        QVERIFY2(r.origin == KbResolution::Origin::Title,
+                 qPrintable(QStringLiteral("%1 reached the shape step; built-ins must resolve by title")
+                                .arg(p.title())));
+    }
+
+    // === prepareAnalysisInputs wiring (group 5) ===
+    //
+    // The two tests above prove the RULES; these prove the analysis path
+    // actually reaches them. Without these, every rule could be correct and
+    // no shot would ever benefit.
+
+    static QString shippedProfileJson(const QString& file, const QString& retitleTo = QString())
+    {
+        QFile f(shippedProfileDir().filePath(file));
+        if (!f.open(QIODevice::ReadOnly)) return {};
+        QJsonObject o = QJsonDocument::fromJson(f.readAll()).object();
+        if (!retitleTo.isEmpty()) o[QStringLiteral("title")] = retitleTo;
+        return QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact));
+    }
+
+    // The whole change, end to end at the analysis layer: a renamed copy of a
+    // documented profile, with NO persisted kbId, still receives that entry's
+    // suppression flags — so its shot is not told a by-design curve is a fault.
+    void prepareAnalysisInputs_renamedProfileStillGetsItsSuppressionFlags()
+    {
+        const QString json = shippedProfileJson(QStringLiteral("blooming_espresso.json"),
+                                                QStringLiteral("Zzz Unrelated Name"));
+        QVERIFY(!json.isEmpty());
+
+        // Empty persisted id: exactly what a shape-resolved profile carries.
+        const auto inputs = decenza::storage::detail::prepareAnalysisInputs(QString(), json);
+
+        QVERIFY2(inputs.analysisFlags.contains(QStringLiteral("channeling_expected")),
+                 qPrintable(QStringLiteral("got flags [%1]")
+                                .arg(inputs.analysisFlags.join(QStringLiteral(", ")))));
+        QVERIFY2(inputs.profileKbResolved,
+                 "Arm 1's gate must open for a shape-resolved profile");
+        QCOMPARE(inputs.identityKbId, QStringLiteral("blooming-espresso"));
+        QVERIFY2(inputs.identityFromShape,
+                 "a shape match must be marked as inferred, not presented as the profile's own name");
+    }
+
+    // The rule that decides what reaches the `profile_kb_id` COLUMN, which is
+    // the dial-in grouping key (`WHERE profile_kb_id = ?`) and not merely an
+    // analysis key. A shape match must never be written there: shape ignores
+    // temperature and setpoints, so persisting one merges a user's re-tuned
+    // variant into the documented profile's dial-in history.
+    //
+    // Pinned here rather than through saveShot(), which no test can reach
+    // without a ~50-field ShotSaveData fixture that does not exist in this
+    // tree. That leaves the CALL genuinely uncovered — see the note in the
+    // change's tasks.md — but the rule itself cannot drift unnoticed.
+    void persistableId_onlyATitleResolutionReachesTheColumn()
+    {
+        const KbResolution byTitle{ { QStringLiteral("blooming-espresso") },
+                                    KbResolution::Origin::Title };
+        QCOMPARE(byTitle.persistableId(), QStringLiteral("blooming-espresso"));
+
+        const KbResolution uniqueShape{ { QStringLiteral("blooming-espresso") },
+                                        KbResolution::Origin::Shape };
+        QVERIFY2(uniqueShape.persistableId().isEmpty(),
+                 "a UNIQUE shape match is still an inference, not a recorded identity - "
+                 "persisting it would regroup dial-in history");
+
+        const KbResolution ambiguousShape{ { QStringLiteral("d-flow"),
+                                             QStringLiteral("d-flow-la-pavoni-variant") },
+                                           KbResolution::Origin::Shape };
+        QVERIFY(ambiguousShape.persistableId().isEmpty());
+
+        QVERIFY(KbResolution{}.persistableId().isEmpty());
+    }
+
+    // The stored-id fallback branch, which every one of the tests around it
+    // leaves unexercised by passing an empty persisted id. It is the path for
+    // every legacy row whose profile_json is absent or unparseable, and it is
+    // what preserves pre-change behaviour for them.
+    void prepareAnalysisInputs_unparseableJsonFallsBackToTheStoredId()
+    {
+        for (const QString& json : { QString(), QStringLiteral("{ not json") }) {
+            if (!json.isEmpty())
+                QTest::ignoreMessage(QtWarningMsg,
+                                     QRegularExpression(QStringLiteral("stored profile JSON unparseable")));
+            const auto inputs = decenza::storage::detail::prepareAnalysisInputs(
+                QStringLiteral("blooming-espresso"), json);
+
+            QVERIFY2(inputs.profileKbResolved,
+                     "a legacy row with a stored id still has profile context");
+            QCOMPARE(inputs.analysisFlags,
+                     ShotSummarizer::getAnalysisFlags(QStringLiteral("blooming-espresso")));
+            QCOMPARE(inputs.identityKbId, QStringLiteral("blooming-espresso"));
+            QVERIFY2(!inputs.identityFromShape,
+                     "a stored id is a recorded identity, not a shape inference");
+        }
+    }
+
+    // The "Default" trap, asserted rather than left to the comment that
+    // documents it. A default-constructed Profile is titled "Default", which
+    // is a REAL shipped profile whose KB entry carries flow_trend_ok — so an
+    // unreadable shot with NO stored id must resolve to nothing rather than
+    // inherit that entry's suppression.
+    void prepareAnalysisInputs_unparseableJsonNeverInheritsTheDefaultEntry()
+    {
+        QVERIFY2(ShotSummarizer::getAnalysisFlags(QStringLiteral("default"))
+                     .contains(QStringLiteral("flow_trend_ok")),
+                 "fixture precondition: the 'default' KB entry must carry flow_trend_ok, "
+                 "otherwise this test cannot fail");
+
+        QTest::ignoreMessage(QtWarningMsg,
+                             QRegularExpression(QStringLiteral("stored profile JSON unparseable")));
+        const auto inputs = decenza::storage::detail::prepareAnalysisInputs(
+            QString(), QStringLiteral("{ not json"));
+        QVERIFY2(inputs.analysisFlags.isEmpty(),
+                 qPrintable(QStringLiteral("an unreadable profile inherited flags [%1]")
+                                .arg(inputs.analysisFlags.join(QStringLiteral(", ")))));
+        QVERIFY(!inputs.profileKbResolved);
+        QVERIFY(inputs.identityKbId.isEmpty());
+    }
+
+    // Every analysisFlags value in the shipped KB must be one the transfer
+    // rules classify. A misspelled flag is otherwise a silent no-op: no
+    // consumer matches it, and getAnalysisFlags(QStringList) additionally
+    // defaults it to unanimity, so it would neither suppress nor complain.
+    void everyShippedAnalysisFlagIsAKnownFlag()
+    {
+        static const QSet<QString> known{
+            QStringLiteral("flow_trend_ok"),        // union
+            QStringLiteral("channeling_expected"),  // union
+            QStringLiteral("grind_check_skip"),     // unanimity
+        };
+
+        QFile f(QStringLiteral(":/ai/profile_knowledge.json"));
+        QVERIFY2(f.open(QIODevice::ReadOnly), "KB resource missing");
+        const QJsonObject root = QJsonDocument::fromJson(f.readAll()).object();
+        const QJsonArray entries = root.value(QStringLiteral("profiles")).toArray();
+        QVERIFY2(!entries.isEmpty(), "fixture precondition: the KB must have entries");
+
+        int seen = 0;
+        for (const QJsonValue& e : entries) {
+            const QString id = e.toObject().value(QStringLiteral("id")).toString();
+            for (const QJsonValue& fl : e.toObject().value(QStringLiteral("analysisFlags")).toArray()) {
+                ++seen;
+                QVERIFY2(known.contains(fl.toString()),
+                         qPrintable(QStringLiteral("entry '%1' carries unknown analysisFlag '%2' - "
+                                                   "add it to the transfer classification in "
+                                                   "shotsummarizer_kb.cpp, or fix the typo")
+                                        .arg(id, fl.toString())));
+            }
+        }
+        QVERIFY2(seen > 0, "fixture precondition: some entry must carry an analysisFlag");
+    }
+
+    // Nothing about a title-resolvable profile may change.
+    void prepareAnalysisInputs_titleResolvedProfileIsUnchanged()
+    {
+        const QString json = shippedProfileJson(QStringLiteral("blooming_espresso.json"));
+        const auto inputs = decenza::storage::detail::prepareAnalysisInputs(QString(), json);
+
+        QCOMPARE(inputs.identityKbId, QStringLiteral("blooming-espresso"));
+        QVERIFY2(!inputs.identityFromShape, "this resolved by title, not shape");
+        QVERIFY(inputs.profileKbResolved);
+        QCOMPARE(inputs.analysisFlags,
+                 ShotSummarizer::getAnalysisFlags(QStringLiteral("blooming-espresso")));
+    }
+
+    // An unrecognisable profile must still gate Arm 1 OFF. If this regresses,
+    // the change has quietly turned grind advice on for every profile, which
+    // is the false-positive source skip-grind-arm1-when-kb-unresolved removed.
+    void prepareAnalysisInputs_unrecognisedProfileStaysUnresolved()
+    {
+        QJsonObject step{
+            {"name", "pour"}, {"pump", "flow"}, {"sensor", "coffee"},
+            {"transition", "smooth"}, {"temperature", QStringLiteral("93.0")},
+            {"flow", QStringLiteral("2.2")}, {"seconds", QStringLiteral("37.0")},
+        };
+        const QJsonObject o{
+            {"title", "Zzz Nothing Like Anything Shipped"},
+            {"beverage_type", "espresso"},
+            {"steps", QJsonArray{step}},
+        };
+        const auto inputs = decenza::storage::detail::prepareAnalysisInputs(
+            QString(), QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact)));
+
+        QVERIFY2(!inputs.profileKbResolved, "an unrecognisable profile must not gate Arm 1 on");
+        QVERIFY(inputs.analysisFlags.isEmpty());
+        QVERIFY(inputs.identityKbId.isEmpty());
+    }
+
+    // A shot with no usable profileJson must resolve to NOTHING — and
+    // specifically must not be attributed to the shipped "Default" profile.
+    //
+    // Profile default-constructs with the title "Default", and "Default" is a
+    // real shipped profile with a KB entry carrying flow_trend_ok and a UGS of
+    // 0.75. An unguarded resolve therefore hands every profile-less shot that
+    // entry's suppression, discarding real flow-trend findings on unrelated
+    // shots. This path stepped in exactly that during implementation.
+    void prepareAnalysisInputs_absentProfileJsonIsNotAttributedToTheDefaultProfile()
+    {
+        // Precondition: "Default" really does resolve and really does carry a
+        // suppression flag — otherwise this test proves nothing.
+        const QString defaultId = ShotSummarizer::computeProfileKbId(QStringLiteral("Default"));
+        QVERIFY2(!defaultId.isEmpty(), "fixture precondition: 'Default' is a resolvable profile");
+        QVERIFY2(ShotSummarizer::getAnalysisFlags(defaultId).contains(QStringLiteral("flow_trend_ok")),
+                 "fixture precondition: the Default entry carries a suppression flag to leak");
+
+        for (const QString& json : { QString(), QStringLiteral("not json at all"),
+                                     QStringLiteral("{}") }) {
+            // The unparseable case now reports itself (a legacy row whose own
+            // profile cannot be read is otherwise uninspectable). Declared
+            // rather than tolerated, so the warning is part of the assertion.
+            if (json == QStringLiteral("not json at all"))
+                QTest::ignoreMessage(QtWarningMsg,
+                                     QRegularExpression(QStringLiteral("stored profile JSON unparseable")));
+            const auto inputs = decenza::storage::detail::prepareAnalysisInputs(QString(), json);
+            QVERIFY2(!inputs.profileKbResolved, qPrintable(QStringLiteral("resolved for %1").arg(json)));
+            QVERIFY2(inputs.identityKbId.isEmpty(),
+                     qPrintable(QStringLiteral("attributed to '%1'").arg(inputs.identityKbId)));
+            QVERIFY2(inputs.analysisFlags.isEmpty(),
+                     qPrintable(QStringLiteral("leaked flags [%1]")
+                                    .arg(inputs.analysisFlags.join(QStringLiteral(", ")))));
+        }
     }
 
 };

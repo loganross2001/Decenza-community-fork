@@ -1,4 +1,5 @@
 #include <QtTest>
+#include <functional>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
@@ -1802,6 +1803,504 @@ private slots:
         QCOMPARE(parsed.maxFlowOrPressure, original.maxFlowOrPressure);
         QCOMPARE(parsed.maxFlowOrPressureRange, original.maxFlowOrPressureRange);
         QCOMPARE(parsed.popup, original.popup);
+    }
+
+    // === Profile shape (capability: profile-shape-equivalence) ===
+    //
+    // shapeSignature() decides whether a user's re-tuned copy of a
+    // documented profile is still the same extraction SHAPE, which is what
+    // lets the KB's suppression flags (flow_trend_ok, channeling_expected)
+    // reach it. Getting this wrong in the loose direction tells a user their
+    // by-design curve is a fault; in the strict direction it silently drops
+    // the flags. Both failures are silent in production, so they are pinned
+    // here.
+
+    // Two frames: a flow preinfusion with a pressure-over exit, then a
+    // pressure hold. Every magnitude is a named argument so a test can move
+    // exactly one and assert the consequence.
+    static Profile makeShapeProfile(double temp = 92.0,
+                                    double pressure = 9.0,
+                                    double flow = 4.0,
+                                    double seconds0 = 10.0,
+                                    double exitWeight = 0.0,
+                                    double volume = 100.0,
+                                    const QString& pump0 = QStringLiteral("flow"),
+                                    const QString& transition1 = QStringLiteral("smooth"),
+                                    bool exitIf0 = true,
+                                    int frames = 2,
+                                    const QString& beverage = QStringLiteral("espresso"))
+    {
+        Profile p;
+        p.setTitle(QStringLiteral("Shape Fixture"));
+        p.setBeverageType(beverage);
+        QList<ProfileFrame> steps;
+        ProfileFrame f0;
+        f0.name = QStringLiteral("preinfusion");
+        f0.pump = pump0;
+        f0.sensor = QStringLiteral("coffee");
+        f0.transition = QStringLiteral("fast");
+        f0.temperature = temp;
+        f0.flow = flow;
+        f0.pressure = pressure;
+        f0.seconds = seconds0;
+        f0.volume = volume;
+        f0.exitWeight = exitWeight;
+        f0.exitIf = exitIf0;
+        f0.exitType = QStringLiteral("pressure_over");
+        f0.exitPressureOver = 4.0;
+        steps << f0;
+        if (frames > 1) {
+            ProfileFrame f1;
+            f1.name = QStringLiteral("hold");
+            f1.pump = QStringLiteral("pressure");
+            f1.sensor = QStringLiteral("coffee");
+            f1.transition = transition1;
+            f1.temperature = temp;
+            f1.pressure = pressure;
+            f1.seconds = 25.0;
+            f1.volume = volume;
+            steps << f1;
+        }
+        p.setSteps(steps);
+        return p;
+    }
+
+    // The case the capability exists for: a user copies a documented profile
+    // and changes only what dialling in changes.
+    void shape_dialInVariablesDoNotChangeTheShape_data() {
+        QTest::addColumn<Profile>("variant");
+
+        QTest::newRow("temperature")  << makeShapeProfile(/*temp=*/88.0);
+        QTest::newRow("pressure")     << makeShapeProfile(92.0, /*pressure=*/6.0);
+        QTest::newRow("flow")         << makeShapeProfile(92.0, 9.0, /*flow=*/2.0);
+        QTest::newRow("exit weight")  << makeShapeProfile(92.0, 9.0, 4.0, 10.0, /*exitWeight=*/36.0);
+        QTest::newRow("volume")       << makeShapeProfile(92.0, 9.0, 4.0, 10.0, 0.0, /*volume=*/50.0);
+        QTest::newRow("all at once")  << makeShapeProfile(84.0, 6.0, 1.5, 10.0, 40.0, 20.0);
+    }
+
+    void shape_dialInVariablesDoNotChangeTheShape() {
+        QFETCH(Profile, variant);
+        const Profile base = makeShapeProfile();
+        QCOMPARE(variant.shapeSignature(), base.shapeSignature());
+    }
+
+    // The strict direction: anything that changes what the curve DOES is a
+    // different shape, at any magnitude.
+    void shape_structuralEditsChangeTheShape_data() {
+        QTest::addColumn<Profile>("variant");
+
+        QTest::newRow("frame removed")
+            << makeShapeProfile(92.0, 9.0, 4.0, 10.0, 0.0, 100.0,
+                                QStringLiteral("flow"), QStringLiteral("smooth"), true, /*frames=*/1);
+        QTest::newRow("pump mode")
+            << makeShapeProfile(92.0, 9.0, 4.0, 10.0, 0.0, 100.0, /*pump0=*/QStringLiteral("pressure"));
+        QTest::newRow("transition")
+            << makeShapeProfile(92.0, 9.0, 4.0, 10.0, 0.0, 100.0,
+                                QStringLiteral("flow"), /*transition1=*/QStringLiteral("fast"));
+        QTest::newRow("exit removed")
+            << makeShapeProfile(92.0, 9.0, 4.0, 10.0, 0.0, 100.0,
+                                QStringLiteral("flow"), QStringLiteral("smooth"), /*exitIf0=*/false);
+        QTest::newRow("beverage type")
+            << makeShapeProfile(92.0, 9.0, 4.0, 10.0, 0.0, 100.0,
+                                QStringLiteral("flow"), QStringLiteral("smooth"), true, 2,
+                                /*beverage=*/QStringLiteral("filter"));
+    }
+
+    void shape_structuralEditsChangeTheShape() {
+        QFETCH(Profile, variant);
+        const Profile base = makeShapeProfile();
+        QVERIFY2(variant.shapeSignature() != base.shapeSignature(),
+                 qPrintable(QStringLiteral("both signed as %1").arg(base.shapeSignature())));
+    }
+
+    // Frame durations ARE part of the shape. Measured justification: dropping
+    // them from the key puts 23 of 95 shipped profiles into ambiguous buckets
+    // instead of 6, collapsing D-Flow/Q and D-Flow/La-Pavoni into D-Flow —
+    // exactly the separation #1198 exists to protect.
+    void shape_frameDurationsArePartOfTheShape() {
+        const Profile base = makeShapeProfile();
+        const Profile longer = makeShapeProfile(92.0, 9.0, 4.0, /*seconds0=*/14.0);
+        QVERIFY(longer.shapeSignature() != base.shapeSignature());
+
+        // ...but serialization rounding must not split a profile from itself.
+        const Profile jittered = makeShapeProfile(92.0, 9.0, 4.0, /*seconds0=*/10.03);
+        QCOMPARE(jittered.shapeSignature(), base.shapeSignature());
+    }
+
+    // A frameless profile signs as EMPTY, which every caller must read as
+    // "matches nothing" rather than as a value two frameless profiles share.
+    // This is the whole of what the deleted sameShape() helper enforced that
+    // string comparison does not; symmetry and reflexivity were never worth
+    // asserting about operator==.
+    void shape_aFramelessProfileHasNoSignature() {
+        const Profile empty;
+        QVERIFY(empty.shapeSignature().isEmpty());
+        QVERIFY(!makeShapeProfile().shapeSignature().isEmpty());
+    }
+
+    // functionallyEqual() is the STRICTER import-de-duplication predicate and
+    // this change must not have moved it. It had no test at all before this
+    // one, so these also serve as its first pin — including the two
+    // subtleties its implementation depends on.
+    void functionallyEqual_unchangedByShapeWork() {
+        const Profile base = makeShapeProfile();
+        QVERIFY(Profile::functionallyEqual(base, makeShapeProfile()));
+
+        // Exact equality implies same shape. The converse must NOT hold —
+        // if it did, shape would have collapsed into equality and the whole
+        // point (a re-tuned profile still matches) would be lost.
+        const Profile retuned = makeShapeProfile(/*temp=*/88.0);
+        QVERIFY(!Profile::functionallyEqual(base, retuned));
+        QCOMPARE(retuned.shapeSignature(), base.shapeSignature());
+
+        // Empty-step guard, the same one shapeSignature() applies.
+        const Profile empty;
+        QVERIFY(!Profile::functionallyEqual(empty, empty));
+    }
+
+    // === Profile field deltas (change: summarize-profile-changes-from-builtin) ===
+    //
+    // One traversal now feeds two audiences: the developer report that gates
+    // TCL import parity, and the user-facing dial-in block. These assert the
+    // boundary between them, because the compiler cannot.
+
+    // Mutate one frame of a fixture and hand back the profile.
+    static Profile withFrame(Profile p, int index,
+                             const std::function<void(ProfileFrame&)>& edit)
+    {
+        QList<ProfileFrame> steps = p.steps();
+        edit(steps[index]);
+        p.setSteps(steps);
+        return p;
+    }
+
+    // The developer report's TEXT, not merely its emptiness. tst_tclimport
+    // asserts only that it comes back empty, which catches a field appearing or
+    // vanishing but says nothing about how a difference renders — so a format
+    // change would pass every gate while breaking profile_sync's output.
+    void frameDiffReport_renderedTextIsPinned()
+    {
+        const Profile a = makeShapeProfile();
+        Profile b = withFrame(makeShapeProfile(), 0, [](ProfileFrame& f) {
+            f.flow = 2.5;
+            f.exitPressureOver = 6.0;
+        });
+        b = withFrame(b, 1, [](ProfileFrame& f) { f.temperature = 88.0; });
+
+        QCOMPARE(Profile::frameDiffReport(a, b),
+                 QStringLiteral("  FRAME[0] flow: A=4 B=2.5\n"
+                                "  FRAME[0] exitPressureOver: A=4 B=6\n"
+                                "  FRAME[1] temperature: A=92 B=88\n"));
+    }
+
+    // The limiter RANGE is developer-only, so it reaches the user through
+    // nothing — but it still reaches the TCL parity gate, and fieldDeltas is
+    // the only thing that can hide it from there. It carries a continuous unit
+    // (bar or mL/s, whichever the frame's pump does not drive) and the shipped
+    // set authors it at 0.2, 0.9, 1.0, 1.5, 2.5, 3.0 and 3.5 — so typing it as
+    // an integral "count", whose 0.5 tolerance swallows a 0.3 change, silently
+    // loosened a gate that had compared at 0.1 since it was written. Pinned at
+    // a delta between the two: 0.3 is invisible at 0.5 and reported at 0.1.
+    void frameDiffReport_aSubHalfLimiterRangeChangeStillReachesTheParityGate()
+    {
+        const Profile base = makeShapeProfile();
+        const Profile user = withFrame(makeShapeProfile(), 0, [](ProfileFrame& f) {
+            f.maxFlowOrPressureRange += 0.3;
+        });
+
+        QVERIFY2(Profile::frameDiffReport(base, user)
+                     .contains(QStringLiteral("FRAME[0] maxFlowOrPressureRange")),
+                 "a 0.3 limiter-range change must not be filtered out before the gate sees it");
+        QVERIFY2(Profile::dialInDeltas(base, user).isEmpty(),
+                 "the limiter range is a control-loop constant, never a dial-in row");
+    }
+
+    // Frame 0 is flow-driven, so its pressure value is one the machine never
+    // applies. The parity gate still wants it; a user must not be shown it.
+    void dialInDeltas_theInactiveAxisIsDeveloperOnly()
+    {
+        const Profile base = makeShapeProfile();
+        const Profile user = withFrame(makeShapeProfile(), 0,
+                                       [](ProfileFrame& f) { f.pressure = 6.0; });
+
+        QVERIFY(Profile::frameDiffReport(base, user).contains(QStringLiteral("FRAME[0] pressure")));
+        QVERIFY(Profile::dialInDeltas(base, user).isEmpty());
+    }
+
+    // Frame 0 exits on pressure_over. de1app TCL leaves the other three
+    // thresholds carrying junk, so only the matching one may be reported.
+    void dialInDeltas_onlyTheMatchingExitThresholdIsReported()
+    {
+        const Profile base = makeShapeProfile();
+        const Profile user = withFrame(makeShapeProfile(), 0, [](ProfileFrame& f) {
+            f.exitPressureOver = 6.0;
+            f.exitFlowUnder = 1.5;
+        });
+
+        const QVector<ProfileFieldDelta> rows = Profile::dialInDeltas(base, user);
+        QCOMPARE(rows.size(), 1);
+        QCOMPARE(rows.first().kind, QStringLiteral("exitPressureOver"));
+        QCOMPARE(rows.first().oldValue, 4.0);
+        QCOMPARE(rows.first().newValue, 6.0);
+    }
+
+    // A renamed frame is a real signal to a user and is NOT an import defect,
+    // so it must reach the dial-in rows and must not reach the parity gate.
+    void dialInDeltas_aRenamedFrameIsUserFacingOnly()
+    {
+        const Profile base = makeShapeProfile();
+        const Profile user = withFrame(makeShapeProfile(), 1, [](ProfileFrame& f) {
+            f.name = QStringLiteral("pour");
+        });
+
+        QVERIFY(Profile::frameDiffReport(base, user).isEmpty());
+
+        const QVector<ProfileFieldDelta> rows = Profile::dialInDeltas(base, user);
+        QCOMPARE(rows.size(), 1);
+        QCOMPARE(rows.first().kind, QStringLiteral("name"));
+        QVERIFY(!rows.first().numeric);
+        QCOMPARE(rows.first().oldText, QStringLiteral("hold"));
+        QCOMPARE(rows.first().newText, QStringLiteral("pour"));
+        QCOMPARE(rows.first().frameIndex, 1);
+    }
+
+    // Shape fields cannot differ once the block's shape gate is met, so a
+    // dial-in row for one would be dead code that only ever misleads.
+    void dialInDeltas_shapeFieldsNeverReachTheUser()
+    {
+        const Profile base = makeShapeProfile();
+        // seconds IS a shape field, so under the gate it cannot differ at all.
+        // popup and the limiter RANGE are the dev-only fields that genuinely
+        // CAN differ between two same-shape profiles, so they are the ones this
+        // assertion has to cover to mean anything.
+        const Profile user = withFrame(makeShapeProfile(), 0, [](ProfileFrame& f) {
+            f.seconds = 18.0;
+            f.popup = QStringLiteral("swirl now");
+            f.maxFlowOrPressureRange = 1.4;
+        });
+
+        const QString report = Profile::frameDiffReport(base, user);
+        QVERIFY(report.contains(QStringLiteral("seconds")));
+        QVERIFY(report.contains(QStringLiteral("popup")));
+        QVERIFY(report.contains(QStringLiteral("maxFlowOrPressureRange")));
+        QVERIFY(Profile::dialInDeltas(base, user).isEmpty());
+    }
+
+    // Profile-level dial-in values are user-facing only: widening the parity
+    // gate to a yield difference would reject imports that are perfectly
+    // portable.
+    void dialInDeltas_profileLevelValuesAreUserFacingOnly()
+    {
+        const Profile base = makeShapeProfile();
+        Profile user = makeShapeProfile();
+        user.setTargetWeight(base.targetWeight() + 6.0);
+
+        QVERIFY(Profile::frameDiffReport(base, user).isEmpty());
+
+        const QVector<ProfileFieldDelta> rows = Profile::dialInDeltas(base, user);
+        QCOMPARE(rows.size(), 1);
+        QCOMPARE(rows.first().kind, QStringLiteral("targetWeight"));
+        QCOMPARE(rows.first().frameIndex, -1);
+    }
+
+    // Raising a two-frame profile's temperature is ONE edit. Reporting it once
+    // per frame is longer and less true.
+    void dialInDeltas_aChangeOnEveryFrameCollapsesToOneRow()
+    {
+        const Profile base = makeShapeProfile();
+        const Profile user = makeShapeProfile(/*temp=*/88.0);
+
+        const QVector<ProfileFieldDelta> rows = Profile::dialInDeltas(base, user);
+        QCOMPARE(rows.size(), 1);
+        QCOMPARE(rows.first().kind, QStringLiteral("temperature"));
+        QCOMPARE(rows.first().frameIndex, -1);
+        QVERIFY(rows.first().frameName.isEmpty());
+        QCOMPARE(rows.first().oldValue, 92.0);
+        QCOMPARE(rows.first().newValue, 88.0);
+    }
+
+    // ...but a change on SOME frames is genuinely several edits and keeps its
+    // frame numbers. This is the boundary the collapse rule must not cross.
+    void dialInDeltas_aChangeOnSomeFramesKeepsItsFrameNumbers()
+    {
+        const Profile base = makeShapeProfile();
+        const Profile user = withFrame(makeShapeProfile(), 1,
+                                       [](ProfileFrame& f) { f.temperature = 88.0; });
+
+        const QVector<ProfileFieldDelta> rows = Profile::dialInDeltas(base, user);
+        QCOMPARE(rows.size(), 1);
+        QCOMPARE(rows.first().kind, QStringLiteral("temperature"));
+        QCOMPARE(rows.first().frameIndex, 1);
+        QCOMPARE(rows.first().frameName, QStringLiteral("hold"));
+    }
+
+    // A yield change of one editor step (0.1 g) must be REPORTED. The inherited
+    // 0.1 tolerance was `<=`, so 36.0 -> 36.1 g landed exactly on the boundary,
+    // was dropped, and — because "unchanged" is "no rows" — rendered as
+    // "Unchanged copy of X" for a profile the user had just changed.
+    void dialInDeltas_oneEditorStepOfYieldIsReported()
+    {
+        const Profile base = makeShapeProfile();
+        Profile user = makeShapeProfile();
+        user.setTargetWeight(base.targetWeight() + 0.1);
+
+        const QVector<ProfileFieldDelta> rows = Profile::dialInDeltas(base, user);
+        QCOMPARE(rows.size(), 1);
+        QCOMPARE(rows.first().kind, QStringLiteral("targetWeight"));
+    }
+
+    // ...while the developer report keeps its looser 0.1, because that one
+    // absorbs TCL-vs-JSON serialization noise for an import-parity check. The
+    // two tolerances must not collapse into one.
+    void frameDiffReport_keepsItsLooserToleranceWhileDialInTightens()
+    {
+        const Profile base = makeShapeProfile();
+        const Profile user = withFrame(makeShapeProfile(), 0,
+                                       [](ProfileFrame& f) { f.flow += 0.05; });
+
+        QVERIFY(Profile::frameDiffReport(base, user).isEmpty());
+
+        const QVector<ProfileFieldDelta> rows = Profile::dialInDeltas(base, user);
+        QCOMPARE(rows.size(), 1);
+        QCOMPARE(rows.first().kind, QStringLiteral("flow"));
+    }
+
+    // The espresso temperature is AUTHORED, not derived from the frames — the
+    // top-level scalar stays authoritative and may legitimately differ from
+    // steps[0] (PR #961, the D-Flow/A-Flow built-ins). Omitting it made a copy
+    // whose only change was the group preheat render as "unchanged".
+    void dialInDeltas_theAuthoredBrewTemperatureIsItsOwnRow()
+    {
+        const Profile base = makeShapeProfile();
+        Profile user = makeShapeProfile();
+        user.setEspressoTemperature(base.espressoTemperature() - 3.0);
+
+        const QVector<ProfileFieldDelta> rows = Profile::dialInDeltas(base, user);
+        QCOMPARE(rows.size(), 1);
+        QCOMPARE(rows.first().kind, QStringLiteral("espressoTemperature"));
+        QCOMPARE(rows.first().unit, QStringLiteral("celsius"));
+        QCOMPARE(rows.first().frameIndex, -1);
+    }
+
+    // fromJson repairs a leaked 93.0 `espresso_temperature` by re-deriving it
+    // from the first frame, and flags that it did. A repaired value was never
+    // authored, so a difference against it describes OUR repair — the user
+    // would be told they changed a brew temperature they never touched.
+    void dialInDeltas_aHealedBrewTemperatureIsNotReportedAsAnEdit()
+    {
+        QJsonObject o = makeShapeProfile().toJson().object();
+        // 93.0 exactly, and outside the frames' 92.0 — the leaked-default
+        // fingerprint fromJson heals.
+        o[QStringLiteral("espresso_temperature")] = QStringLiteral("93.00");
+        const Profile healed = Profile::fromJson(QJsonDocument(o));
+        QVERIFY2(healed.espressoTemperatureHealed(),
+                 "fixture precondition: this JSON must trip the heal, or the test cannot fail");
+        QCOMPARE(healed.espressoTemperature(), 92.0);
+
+        Profile authored = makeShapeProfile();
+        authored.setEspressoTemperature(85.0);
+        QVERIFY(!authored.espressoTemperatureHealed());
+
+        // 7 °C apart, and silent — because one side of the comparison is ours.
+        QVERIFY(Profile::dialInDeltas(healed, authored).isEmpty());
+        QVERIFY(Profile::dialInDeltas(authored, healed).isEmpty());
+    }
+
+    // The limiter is a max FLOW on a pressure-driven frame and a max PRESSURE on
+    // a flow-driven one. The fixture is mixed-pump (frame 0 flow, frame 1
+    // pressure), as are 69 of the 100 bundled profiles, so collapsing on `kind`
+    // alone merged two physically different quantities into one row wearing the
+    // first frame's unit.
+    void dialInDeltas_theLimiterDoesNotCollapseAcrossPumpModes()
+    {
+        Profile base = makeShapeProfile();
+        Profile user = makeShapeProfile();
+        for (Profile* p : { &base, &user }) {
+            QList<ProfileFrame> steps = p->steps();
+            for (ProfileFrame& f : steps)
+                f.maxFlowOrPressure = (p == &base) ? 2.0 : 3.0;
+            p->setSteps(steps);
+        }
+
+        const QVector<ProfileFieldDelta> rows = Profile::dialInDeltas(base, user);
+        // Two rows, one per pump mode, each keeping its frame number and its own
+        // unit — never one collapsed row.
+        QCOMPARE(rows.size(), 2);
+        for (const ProfileFieldDelta& d : rows)
+            QCOMPARE(d.kind, QStringLiteral("maxFlowOrPressure"));
+        QVERIFY(rows.at(0).unit != rows.at(1).unit);
+        QVERIFY(rows.at(0).frameIndex >= 0 && rows.at(1).frameIndex >= 0);
+    }
+
+    // `unit` is the one field a surface cannot infer, and nothing asserted it.
+    // Transposing two of the profile-level lines, or flipping the limiter's
+    // ternary, is a one-character defect that renders a flow limit as bar.
+    void dialInDeltas_everyRowCarriesTheRightUnit_data()
+    {
+        QTest::addColumn<QString>("kind");
+        QTest::addColumn<QString>("unit");
+        QTest::addColumn<Profile>("user");
+
+        auto tweak = [](const std::function<void(Profile&)>& edit) {
+            Profile p = makeShapeProfile();
+            edit(p);
+            return p;
+        };
+
+        QTest::newRow("targetWeight") << "targetWeight" << "g"
+            << tweak([](Profile& p) { p.setTargetWeight(p.targetWeight() + 5); });
+        QTest::newRow("targetVolume") << "targetVolume" << "ml"
+            << tweak([](Profile& p) { p.setTargetVolume(p.targetVolume() + 5); });
+        QTest::newRow("maximumPressure") << "maximumPressure" << "bar"
+            << tweak([](Profile& p) { p.setMaximumPressure(p.maximumPressure() + 1); });
+        QTest::newRow("maximumFlow") << "maximumFlow" << "mlPerSec"
+            << tweak([](Profile& p) { p.setMaximumFlow(p.maximumFlow() + 1); });
+        QTest::newRow("brewTemperature") << "espressoTemperature" << "celsius"
+            << tweak([](Profile& p) { p.setEspressoTemperature(p.espressoTemperature() - 2); });
+        QTest::newRow("tankTemperature") << "tankTemperature" << "celsiusTank"
+            << tweak([](Profile& p) {
+                   p.setTankDesiredWaterTemperature(p.tankDesiredWaterTemperature() + 5);
+               });
+        // Frame 0 is flow-driven, so ITS limiter caps pressure.
+        QTest::newRow("limiterOnFlowFrame") << "maxFlowOrPressure" << "bar"
+            << withFrame(makeShapeProfile(), 0, [](ProfileFrame& f) { f.maxFlowOrPressure = 7.0; });
+        // Frame 1 is pressure-driven, so ITS limiter caps flow.
+        QTest::newRow("limiterOnPressureFrame") << "maxFlowOrPressure" << "mlPerSec"
+            << withFrame(makeShapeProfile(), 1, [](ProfileFrame& f) { f.maxFlowOrPressure = 7.0; });
+    }
+
+    // The tank token exists so it can be LOOSER than the frame/espresso one.
+    // A single token shared by both would have to pick one tolerance, and
+    // whichever it picked would be wrong for the other half: 0.05 hides three
+    // hundredths of a brew-temperature edit, 0.005 reports a tank difference
+    // that a ProfileJson round-trip invented at the first decimal.
+    void dialInDeltas_theTankTemperatureIsComparedMoreLoosely()
+    {
+        const Profile base = makeShapeProfile();
+
+        Profile tankNudged = base;
+        tankNudged.setTankDesiredWaterTemperature(base.tankDesiredWaterTemperature() + 0.03);
+        QCOMPARE(Profile::dialInDeltas(base, tankNudged).size(), 0);
+
+        const Profile frameNudged = withFrame(base, 0, [](ProfileFrame& f) {
+            f.temperature += 0.03;
+        });
+        const QVector<ProfileFieldDelta> rows = Profile::dialInDeltas(base, frameNudged);
+        QCOMPARE(rows.size(), 1);
+        QCOMPARE(rows.first().kind, QStringLiteral("temperature"));
+        QCOMPARE(rows.first().unit, QStringLiteral("celsius"));
+    }
+
+    void dialInDeltas_everyRowCarriesTheRightUnit()
+    {
+        QFETCH(QString, kind);
+        QFETCH(QString, unit);
+        QFETCH(Profile, user);
+
+        const QVector<ProfileFieldDelta> rows = Profile::dialInDeltas(makeShapeProfile(), user);
+        QCOMPARE(rows.size(), 1);
+        QCOMPARE(rows.first().kind, kind);
+        QCOMPARE(rows.first().unit, unit);
     }
 
 };

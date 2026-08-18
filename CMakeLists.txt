@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(Decenza VERSION 2.0.3 LANGUAGES CXX)
+project(Decenza VERSION 2.0.4 LANGUAGES CXX)
 
 message(STATUS "Developer note: executable target is now 'Decenza'. If Qt Creator shows 'No executable specified', re-run CMake and select the 'Decenza' Run configuration.")
 
@@ -783,6 +783,7 @@ set(SOURCES
     src/ai/shotanalysis.cpp
     src/ai/shotsummarizer.cpp
     src/ai/shotsummarizer_kb.cpp
+    src/ai/profileshapeindex.cpp
     src/history/shothistorystorage.cpp
     src/history/shothistorystorage_internal.cpp
     src/history/shothistorystorage_serialize.cpp
@@ -978,6 +979,7 @@ set(HEADERS
     src/core/asynclogger.h
     src/core/btlogfilter.h
     src/machine/machinestate.h
+    src/machine/frameexitreason.h
     src/machine/weightprocessor.h
     src/machine/stepexitarbiter.h
     src/profile/profile.h
@@ -1374,9 +1376,9 @@ set(QML_FILES
     qml/components/SteamGraph.qml
     qml/components/StatusBar.qml
     qml/components/RatioPresetDialog.qml
+    qml/components/TempPickerDialog.qml
     qml/components/GrindField.qml
     qml/components/GrindPickerDialog.qml
-    qml/components/TempPickerDialog.qml
     qml/components/ProfilePickerDialog.qml
     qml/components/BrewQuickSelectDialog.qml
     qml/components/GrindRowSource.qml
@@ -1385,6 +1387,7 @@ set(QML_FILES
     qml/components/SteamPlanText.qml
     qml/components/ProfileGraph.qml
     qml/components/ProfilePreviewPopup.qml
+    qml/components/ProfileDialInDiffBlock.qml
     qml/components/ProfileInfoButton.qml
     qml/components/BottomBar.qml
     qml/components/BottomBarSubtitle.qml
@@ -1409,6 +1412,7 @@ set(QML_FILES
     qml/components/ChangeBeansDialog.qml
     qml/components/BaristaChipRow.qml
     qml/components/BaristaEditDialog.qml
+    qml/components/CardTapArea.qml
     qml/components/BagCard.qml
     qml/components/SwitchEquipmentDialog.qml
     qml/components/EquipmentCard.qml
@@ -1426,6 +1430,7 @@ set(QML_FILES
     qml/components/DrinkType.qml
     qml/components/SteamLabels.qml
     qml/components/ProfileKnowledgeDialog.qml
+    qml/components/KbDerivedFromLabel.qml
     qml/components/BeanThumbnail.qml
     qml/components/BackgroundSurface.qml
     qml/components/LastShotChartRenderer.qml

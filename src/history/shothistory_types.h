@@ -34,9 +34,12 @@ struct HistoryPhaseMarker {
     int frameNumber = 0;
     bool isFlowMode = false;
     // Why the PRECEDING frame exited. Confirmed ground truth: "weight",
-    // "pressure", "flow". Likely-but-unconfirmed sensor exit (threshold not
-    // seen in the BLE sample at transition): "pressure_unconfirmed",
-    // "flow_unconfirmed". Time-based: "time". "" = unknown/old data.
+    // "pressure", "flow" — the threshold was satisfied at the transition
+    // sample, or reached by extrapolating one sample forward at the measured
+    // rate of change (see FrameExit::inferReason). Likely-but-unconfirmed
+    // sensor exit (threshold not reached even with that extrapolation):
+    // "pressure_unconfirmed", "flow_unconfirmed". Time-based: "time".
+    // "" = unknown/old data.
     QString transitionReason;
 };
 
@@ -223,6 +226,16 @@ struct ShotRecord {
     // this is structurally safe — but the rule is documented here so
     // future callers don't introduce a stale-cache bug.
     std::optional<ShotAnalysis::AnalysisResult> cachedAnalysis;
+
+    // Canonical KB entry name this shot's profile was resolved to BY SHAPE,
+    // empty for every other resolution. Populated beside cachedAnalysis and
+    // for the same reason: it is derived from the same AnalysisInputs walk,
+    // and the fast path in convertShotRecord has no way to re-derive it
+    // without redoing that walk — which is the whole cost the cache exists to
+    // avoid. Set it wherever cachedAnalysis is set; a cache holding one and
+    // not the other silently drops the "Based on X" line in production while
+    // every test that constructs a ShotRecord by hand still sees it.
+    QString cachedKbDerivedFrom;
 };
 
 // Grinder settings context from shot history (shared by MCP and in-app AI)

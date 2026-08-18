@@ -81,6 +81,135 @@ Sources: positions taken verbatim from the UGS calculator's profile list `[SRC:u
 
 ---
 
+## How a profile reaches an entry
+
+Four steps, first hit wins (`resolveProfileKb()`, `src/ai/profileshapeindex.h`):
+
+1. exact alias — `displayName` or any `alsoMatches` string, normalized
+2. recipe-alias longest-boundary-prefix (#1198) — a boundary is any character
+   that is not a letter, so `D-Flow / Q - Jeff` reaches `D-Flow / Q` but
+   `D-Flow / Quark` does not
+3. `defaultForEditorType`
+4. **shape** — the profile's frame structure, used only when 1–3 all miss
+
+Step 4 exists because a user who copies a documented profile, retunes
+temperature or yield and renames it loses every suppression flag the original
+carried, and is then told a by-design curve is a fault. The shape key is frame
+count, preinfuse count, beverage type, and per frame the pump, sensor,
+transition, exit *type* (never its threshold — that is dial-in, not shape) and
+duration rounded to 0.1 s. Values a user tunes are deliberately absent.
+
+Steps 1–3 return one id. **Step 4 returns a set**, because several documented
+profiles can share one structure (2 such buckets across the 100 shipped
+profiles). Facts transfer per fact:
+
+| Fact | Rule |
+|---|---|
+| `flow_trend_ok`, `channeling_expected` | **union** — any member suffices |
+| `grind_check_skip`, unlisted flags | **unanimity** |
+| expert band, UGS, roast affinity | **unanimity** |
+| "KB context exists" (grind Arm 1 gate) | any non-empty set |
+| canonical name, derivation label | **single member only** |
+
+The two directions are not symmetric, which is why this is a table rather than
+one policy. A shape-silencing flag says "this curve is by design"; not applying
+it emits a *wrong* finding, over-applying it omits a right one — missing beats
+wrong when the subject is "you did something wrong". `grind_check_skip` returns
+early from `analyzeFlowVsGoal` and so also disables the choked-puck and
+yield-overshoot arms, which read physics that holds on any profile; applying it
+on one member's say-so would hide a genuinely faulty shot, so the errors swap
+places and the conservative direction reverses.
+
+A new flag must be classified explicitly to get the union; omission means
+unanimity — and `tst_shotsummarizer::everyShippedAnalysisFlagIsAKnownFlag`
+fails the build on a flag the classification does not know, so a typo cannot
+become a silent no-op.
+
+### What a shape match may NOT do
+
+A shape match never reaches the shot's persisted `profile_kb_id`. Only a title
+resolution does (`KbResolution::persistableId()`).
+
+That column is not merely an analysis key — it is the grouping key for dial-in
+history (`WHERE profile_kb_id = ?` in `dialing_blocks.cpp`). Shape equivalence
+deliberately ignores temperature, setpoints, volume and exit thresholds, which
+is exactly what makes it safe for transferring suppression facts and exactly
+what makes it wrong as an identity: persisting one would merge a user's 6-bar
+variant into the documented 9-bar profile's `dialInSessions`, and the advisor
+would compute grind advice across two profiles that are not the same coffee.
+
+Shape answers *"does this curve shape mean the finding is by design?"*. It does
+not answer *"is this the same profile?"*. Nothing is lost by the restriction:
+every analysis path re-resolves from the shot's own stored profile JSON on
+load, so the facts still arrive; and the per-shot derivation label rides on
+`ShotProjection::profileKbDerivedFrom`, computed from that same resolution
+rather than looked up in the live catalog — so a shot keeps naming the entry
+its badges were actually computed under even after the user edits or deletes
+the profile.
+
+**Shape equivalence also checks the KB against itself.** A shape bucket whose
+members resolve to *different* entries is a claim that two structurally
+identical profiles are genuinely different, and it needs evidence from the
+profile data. Once it did not have that evidence — see the note under
+[Londinium](#londinium) — and the fix was in the knowledge source, not in the
+transfer rules.
+
+### The dial-in difference block
+
+The knowledge prose describes the **bundled** profile: its temperature, its
+yield, its pressure targets. A user reading it against a re-tuned copy cannot
+otherwise tell which of those numbers still describe what they are about to
+brew. So the knowledge dialog opens with *"Your changes from ‹profile›"* — one
+row per dial-in value that differs.
+
+Three rules decide whether it appears at all
+(`compareWithBundledBase()`, `src/ai/profileshapeindex.h`):
+
+1. **Shape equality is the gate, not resolution origin.** A title-resolved
+   profile gets the block too, whenever it is the same shape as the bundled
+   profile its entry was authored against — that is the larger population, a
+   user editing a bundled profile's temperature in place and keeping the name.
+   A title match of a *different* shape gets nothing: a title says nothing
+   about frame structure, and diffing there would render "frame 4 does not
+   exist" noise while falsely presenting the profile as a modified copy.
+2. **The base is a bundled FILE, never a KB id.** One entry can be authored
+   against several bundled profiles — `gentle-flat-long-preinfusion-family` has
+   four — so "distance to an entry" is not defined.
+3. **Fewest differing dial-in fields wins.** A tie is answered only when the
+   tied candidates would say the same thing — same KB id *and* equivalent
+   difference lists — and is then named for the entry rather than for an
+   arbitrary member of it. Same entry but different numbers still shows
+   nothing: the six `tea_portafilter_*` profiles all tie on the same number of
+   rows against a copy at a temperature none of them ships, while each states a
+   different brew temperature — so no single "before" column is true.
+   Nearness is
+   *not* how far apart the values are: a magnitude comparison would need a
+   weighting between bar, mL/s, °C and grams that nothing in the domain
+   supplies, and that weighting would silently decide the outcome. Counting
+   needs no weighting, and the winner's difference list is the same list that
+   selected it — the selection and the thing selected cannot disagree, because
+   they are one computation.
+
+The compared fields are the dialled ones among those the shape ignores: target weight,
+target volume, maximum pressure and flow at profile level; per frame the
+temperature, the **active** setpoint, the **matching** exit threshold, the exit
+weight, the volume cap, the limiter value and the step name. The inactive axis
+is excluded because the machine never applies it, the limiter *range* because it
+is a control-loop constant, and every shape field because it cannot differ once
+the gate is met. One field that changed identically on every frame collapses to
+a single row — raising a three-frame profile's temperature is one edit.
+
+An empty difference list with a base selected is **not** the same as no base:
+it means the profile is an unchanged copy, which the surface states, because it
+tells the reader the knowledge applies without qualification.
+
+`Profile::fieldDeltas()` is one traversal serving two audiences — this block and
+`frameDiffReport()`, the developer text behind `profile_sync` and the TCL import
+parity gate. Each row declares which it belongs to. They differ deliberately in
+three places: the inactive axis and the frame popup text are developer-only, the
+profile-level values are user-only, and a renamed frame reaches the user but not
+the parity gate, since a rename is not a portability defect.
+
 ## The 4 Mother Categories
 
 All DE1 profiles descend from four fundamental approaches. `[SRC:4mothers]`
@@ -268,6 +397,38 @@ All ship with the generic note *"A-Flow: an alternative profile for D-Flow"* `[S
 
 ### Londinium
 
+> **Also covers `Damian's LRv2`.** The shipped `londonium.json` and
+> `damian_s_lrv2.json` are byte-identical across all seven frames — same pump,
+> sensor, transition, temperature, target and exit on each — and differ only in
+> title, `reference_file`, notes, `target_weight` (42 vs 36), the `hidden` flag,
+> and one `popup: "$weight"` on frame 3. Londonium's own notes say so: *"This is
+> identical to the LRv2 profile, but renamed to be easier to understand."* They
+> are one profile and share one KB entry, so LRv2 carries this section's cited
+> pressure-peak band. `Damian's LRv3` is genuinely different — eight frames,
+> 90 °C, a 9-bar hold before the decline — and keeps its own entry.
+>
+> These were two entries until `resolve-profile-kb-by-shape`. The split rested
+> on a claim the profile files disprove (that LRv2 had "different fill/infuse
+> behavior and higher frame temperatures"; both run 89/89/88.5/88.5/88/88/88),
+> and its cost was concrete: a candidate set spanning both entries read the
+> duplication as disagreement and withheld the band from every shape match on
+> the pair. `[SRC:maintainer]`
+>
+> **Why the LRv3 entry's id still reads `damians-lr-v2-v3`.** That entry now
+> covers LRv3 alone, so the id names a profile it no longer holds — and it is
+> deliberately not renamed. The id is the persisted `profile_kb_id` column on
+> every shot already taken and the grouping key for dial-in history
+> (`WHERE profile_kb_id = ?`). Renaming strands those rows: the retired id
+> resolves to nothing, so their shots drop out of dial-in entirely. No alias
+> can heal them either, because a persisted `damians-lr-v2-v3` is genuinely
+> ambiguous between the two entries it used to span. Analysis is unaffected
+> either way — `prepareAnalysisInputs` re-resolves each shot from its own
+> stored profile JSON, so an LRv2 shot gets this section's facts regardless of
+> what its id column says. Ids are internal; `displayName` and `alsoMatches`
+> carry what a reader needs. `openspec/specs/dialing-context-payload/spec.md`
+> requires these ids to stay stable, and this is why that requirement is worth
+> keeping rather than amending.
+
 - **UGS**: 0 (canonical, Londinium / LRv3 — same fine grind as Cremina) `[SRC:ugs-chart]`
 - **Category**: Lever `[SRC:medium]`
 - **How it works**: Inspired by spring-lever machines. Fast fill, then pressurized soak at ~3 bar until dripping appears, then ramp to ~9 bar with declining pressure. Emulates: lift lever (water fills), slam lever down (pressure hold), wait for dripping, release to full pressure, spring declines. `[SRC:medium]` `[SRC:dark-video]`
@@ -295,7 +456,7 @@ All ship with the generic note *"A-Flow: an alternative profile for D-Flow"* `[S
 > These are **standalone profiles by Damian** (diy.brakel.com.au), shipped as their own built-in profiles. Their titles do **not** start with `D-Flow/`, so the app does **not** classify them as D-Flow-editor profiles (editor membership is by title prefix; see above). `Damian's LRv2` and `Damian's LRv3` are not editor-generated at all and are distinct profiles from each other; `Damian's Q` is a *related* profile — based on / similar to `D-Flow / Q` but built with the **Advanced** editor (not the D-Flow editor). They are *not* "variants of a D-Flow profile" (D-Flow is an editor, see above). Each has its own pressure target so each wants a different grind; do NOT transfer a grinder setting 1:1 between them.
 
 - **UGS (per profile — NOT grind-equivalent)**: LM Leva ≈ 0.5 (≈ `D-Flow / default`, ~8-bar); LRv2 & LRv3 ≈ 0 (canonical Londinium/LRv3 — finer); Q ≈ ~1.0 (inferred — 6-bar approach, coarser). `[SRC:ugs-chart]`
-- In the shipped KB (`resources/ai/profile_knowledge.json`) these resolve to separate entries so the AI keys guidance per profile. `[SRC:community-index]`
+- In the shipped KB (`resources/ai/profile_knowledge.json`) these resolve to separate entries so the AI keys guidance per profile, **except `Damian's LRv2`**, which is the same profile as the shipped `Londonium` and shares the [Londinium](#londinium) entry — see the note there. Same UGS as LRv3, different section: identical grind position is not evidence of identical profile. `[SRC:community-index]` `[SRC:maintainer]`
 
 #### Damian's LM Leva
 

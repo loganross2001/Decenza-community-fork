@@ -36,6 +36,73 @@ double profileJsonToDouble(const QJsonValue& val, double defaultVal = 0.0);
 // definition for why a silent default is dangerous there.
 bool profileJsonToBool(const QJsonValue& val, bool defaultVal = false, bool* ok = nullptr);
 
+// One field on which two profiles disagree, produced by Profile::fieldDeltas().
+//
+// TWO AUDIENCES, ONE WALK. The developer-facing frameDiffReport() (the TCL
+// import parity gate, profile_sync) and the user-facing dial-in block want
+// overlapping but different field sets, and the overlap is where the subtle
+// rules live: which setpoint axis is active, which of the four exit thresholds
+// counts. Those rules had already been three hand-maintained copies once; a
+// second walk here would be the fourth. So one traversal emits every row and
+// each row declares who it is for.
+struct ProfileFieldDelta {
+    // Stable identifier. For a row in the developer report this IS the label
+    // that report prints, which is what keeps its text byte-identical to the
+    // hand-written version it replaced. QML switches on it to build a
+    // translated label for the user-facing rows.
+    QString kind;
+
+    // Index of the frame this row is about, or -1 for a profile-level row and
+    // for a row the dial-in filter collapsed across every frame.
+    int frameIndex = -1;
+
+    // The frame's display name in profile `a` — the BASE, for dialInDeltas().
+    // Empty when frameIndex < 0. Carried so a surface can say "Pouring" instead
+    // of "frame 3".
+    QString frameName;
+
+    // Unit token for a numeric row: "celsius", "bar", "mlPerSec", "g", "ml",
+    // plus "s" and "count" which are developer-only today. Empty for a string
+    // row.
+    //
+    // Set HERE rather than inferred by the surface, because one row cannot be
+    // inferred at all: the frame limiter is a max FLOW on a pressure-driven
+    // frame and a max PRESSURE on a flow-driven one, and only this walk knows
+    // which. A token, not a suffix — the suffix is user-visible text and the
+    // temperature one depends on a user setting.
+    QString unit;
+
+    // How far apart two values must be to count as different, derived from the
+    // field's SERIALIZATION precision (ProfileJson) rather than picked: half of
+    // the last decimal place that survives a write, so a round-trip cannot
+    // manufacture a difference and one editor step always shows.
+    //
+    // This is deliberately TIGHTER than the flat 0.1 frameDiffReport() has
+    // always applied. That 0.1 is right for an import-parity check absorbing
+    // TCL-vs-JSON noise, and wrong for a user-facing diff: target weight's
+    // editor step IS 0.1 g, so a 36.0 -> 36.1 g edit landed exactly on the
+    // boundary and was reported as "unchanged". Rows are emitted at this
+    // tolerance and frameDiffReport() re-filters at its own 0.1, which is what
+    // keeps its output byte-identical while the dial-in block gets the truth.
+    double tolerance = 0.1;
+
+    // numeric rows carry oldValue/newValue; the rest carry oldText/newText.
+    // Defaults to the string branch: a delta that somehow skipped the emitters
+    // then renders as missing rather than as a real value of zero.
+    bool numeric = false;
+    double oldValue = 0.0;
+    double newValue = 0.0;
+    QString oldText;
+    QString newText;
+
+    // Who this row is for. A row can be in both, in either, or (for the frame
+    // display name) in only the user-facing one — adding it to the developer
+    // report would make a renamed frame fail the TCL parity gate, which is not
+    // a portability defect.
+    bool inDeveloperReport = false;
+    bool inDialIn = false;
+};
+
 class Profile {
 public:
     // Execution modes
@@ -387,6 +454,50 @@ public:
     // Returns false if either profile has no steps.
     static bool functionallyEqual(const Profile& a, const Profile& b);
 
+    // === Shape ===
+    // A profile's SHAPE is its structure and frame durations, with every
+    // magnitude a user changes while dialling in a coffee excluded:
+    // temperature, pressure/flow setpoints, volume, exit weight, exit
+    // THRESHOLDS, the limiter, and frame names all differ freely. What
+    // remains is frame count, preinfuse frame count, beverage type, and per
+    // frame the pump mode, sensor, transition, and exit type/direction plus
+    // its duration.
+    //
+    // The split is drawn there because the KB's per-profile suppression flags
+    // (flow_trend_ok, channeling_expected) are claims about the SHAPE — "this
+    // structure legitimately produces declining flow" — and remain true of a
+    // profile someone re-tuned. See the profile-shape-equivalence capability.
+    //
+    // NOT a relative of functionallyEqual(): that one answers "is this the
+    // same profile" for import de-duplication and is deliberately stricter.
+    // It is also inherently PAIRWISE — its inactive-axis rule reads both
+    // frames at once (skip when EITHER side is zero, because de1app writes a
+    // default our writer omits) — so it cannot be expressed as a per-frame
+    // signature and the two do not share a traversal. Nor do they share the
+    // 0.1 convention: functionallyEqual compares durations with a ±0.1 s
+    // TOLERANCE, this signature ROUNDS them to 0.1 s. Neither predicate
+    // implies the other. functionallyEqual does not imply same shape — it
+    // never compares beverage type, which the signature includes, and two
+    // frames 0.02 s apart can straddle a rounding bucket. What does hold:
+    // literal equality of every frame field the signature reads implies the
+    // same signature, by construction.
+    //
+    // Duration caveat, stated because it is a real edge: rounding and a
+    // tolerance differ at bucket boundaries — 2.04 s and 2.06 s are 0.02 s
+    // apart but round to 2.0 and 2.1. A tolerance is not transitive and so
+    // cannot produce a stable grouping key; rounding can, which is why this
+    // rounds. Profile durations are authored as whole or half seconds, so the
+    // boundary is not reachable from the shipped set, but a generated profile
+    // could sit on one.
+    //
+    // EMPTY for a profile with no frames — no frames, no shape. Callers must
+    // treat an empty signature as "matches nothing", never as a value two
+    // frameless profiles have in common; ProfileShapeIndex does this at both
+    // its entry points. There is deliberately no sameShape(a, b) helper: it
+    // existed, had no production caller, and its tests only re-asserted that
+    // string comparison is reflexive and symmetric.
+    QString shapeSignature() const;
+
     // Human-readable account of WHY functionallyEqual() said no: one line per
     // differing field, labelled with the frame index. Empty exactly when
     // functionallyEqual() is true.
@@ -397,6 +508,32 @@ public:
     // profile_sync and in tst_tclimport, and a rule added to one of them did not
     // reach the other.
     static QString frameDiffReport(const Profile& a, const Profile& b);
+
+    // Every field on which `a` and `b` disagree, both audiences, in a fixed
+    // order: profile-level rows first, then each frame's rows in frame order.
+    // Doubles compare PER UNIT, at half the last decimal ProfileJson writes for
+    // that unit — 0.005 for the two-decimal fields, 0.05 for the one-decimal
+    // ones (g, ml, tank temperature), 0.5 for integral counts. Each row carries
+    // the tolerance it was judged at, so a consumer comparing two delta lists
+    // does not have to re-derive it. This is TIGHTER than frameDiffReport(),
+    // which re-filters the same rows at a flat 0.1 of its own — it is a parity
+    // gate for TCL import, not a dial-in view, and loosening it here would
+    // silently weaken that gate.
+    //
+    // Frames are walked to min(a.steps(), b.steps()); a differing step count is
+    // reported as its own row rather than by inventing rows for frames one side
+    // does not have.
+    static QVector<ProfileFieldDelta> fieldDeltas(const Profile& a, const Profile& b);
+
+    // The user-facing subset: `base` is the bundled profile a knowledge entry
+    // was authored against, `user` the profile being looked at, so oldValue is
+    // what the documentation describes and newValue is what will actually brew.
+    //
+    // Filters fieldDeltas() to the dial-in rows and then COLLAPSES a row that
+    // changed identically on every frame into a single frameIndex == -1 row —
+    // raising a three-frame profile's temperature is one edit, and listing it
+    // three times is both longer and less true.
+    static QVector<ProfileFieldDelta> dialInDeltas(const Profile& base, const Profile& user);
 
     // Canonical profile-title → base filename mapping (no extension). Accents
     // are decomposed and stripped, every other non-alphanumeric becomes '_',

@@ -1317,6 +1317,141 @@ private slots:
         }
     }
 
+    // === Knowledge indicator follows the CANDIDATE SET, not the identity ===
+
+    void ambiguousShapeMatchStillOffersItsKnowledge() {
+        // A profile whose frame structure matches several documented profiles
+        // has no single identity — but its badges and summary are still shaped
+        // by what those entries agree on (union suppression, unanimous facts).
+        // So the indicator must light and the dialog must show all of them.
+        //
+        // The failure this prevents is silent and one-directional: findings
+        // suppressed by KB knowledge, with nothing on screen saying knowledge
+        // was involved. That is worse than a dark sparkle over nothing, which
+        // at least matches what the user is told.
+        McpTestFixture f;
+
+        // D-Flow / default shares its shape with D-Flow / La Pavoni, so a
+        // renamed copy resolves to both. Pinned in tst_shotsummarizer as
+        // resolveProfileKb_ambiguousShapeWithholdsIdentityButNotAnalysis.
+        QFile src(QStringLiteral(":/profiles/d_flow_default.json"));
+        QVERIFY(src.open(QIODevice::ReadOnly));
+        QJsonObject obj = QJsonDocument::fromJson(src.readAll()).object();
+        const QString renamed = QStringLiteral("Zzz Renamed Copy");
+        obj[QStringLiteral("title")] = renamed;
+        obj.remove(QStringLiteral("read_only"));
+
+        // userProfilesPath(), not profilesPath() — the catalog scan reads the
+        // user/ and downloaded/ subdirectories, so a file dropped in the base
+        // directory is never seen and the resolution comes back empty.
+        const QString dir = f.profileManager.userProfilesPath();
+        QVERIFY(QDir().mkpath(dir));
+        QFile out(dir + QStringLiteral("/zzz_renamed_copy.json"));
+        QVERIFY(out.open(QIODevice::WriteOnly));
+        out.write(QJsonDocument(obj).toJson());
+        out.close();
+        f.profileManager.refreshProfiles();
+
+        const QStringList names = f.profileManager.profileKbCandidateNames(renamed);
+        QVERIFY2(names.size() > 1,
+                 qPrintable(QStringLiteral("expected an ambiguous match, got: %1")
+                                .arg(names.join(QLatin1Char(',')))));
+
+        QVERIFY2(f.profileManager.profileHasKnowledge(renamed),
+                 "an ambiguous match must still light the indicator");
+
+        // Every named entry's body is present — not one member standing in for
+        // the set.
+        const QString content = f.profileManager.profileKnowledgeContent(renamed);
+        QVERIFY(!content.isEmpty());
+        for (const QString& n : names)
+            QVERIFY2(content.contains(n),
+                     qPrintable(QStringLiteral("dialog body omits candidate %1").arg(n)));
+
+        // ...but no identity is claimed: nothing to put after "Based on".
+        QVERIFY2(f.profileManager.profileKbDerivedFrom(renamed).isEmpty(),
+                 "an ambiguous match must not name a single source");
+    }
+
+    // === QML guard: no visibility gated on a shot's persisted profileKbId ===
+
+    void noQmlVisibilityGatedOnPersistedProfileKbId() {
+        // `shotData.profileKbId` is the column written at save time. It is the
+        // wrong input for any "do we know something about this profile" gate,
+        // and was wrong at two sites before resolve-profile-kb-by-shape:
+        //
+        //  - the QualityBadges row, where it hid the Shot Summary chip on a
+        //    clean shot, i.e. the affordance opening an analysis computed
+        //    entirely from the shot's own curves;
+        //  - the KB sparkle, which then disagreed with the dialog it opens,
+        //    since profileKnowledgeContent() resolves through the catalog.
+        //
+        // The column is empty for every row saved before that change and for
+        // any profile whose shape matched several KB entries (a candidate set
+        // establishes no identity, so nothing is persisted), and it says
+        // nothing about whether the profile is still in the catalog. Ask
+        // ProfileManager instead — profileHasKnowledge() / the catalog's
+        // hasKnowledgeBase — so the indicator and its dialog cannot disagree.
+        //
+        // Reading the field for other purposes is fine; only a visibility
+        // binding is flagged.
+        QDir qmlDir(QCoreApplication::applicationDirPath() + "/../../../../qml");
+        if (!qmlDir.exists())
+            qmlDir.setPath(QString(SRCDIR) + "/../qml");
+        if (!qmlDir.exists())
+            QSKIP("QML directory not found — run from source tree");
+
+        static const QRegularExpression visibleRe(
+            QStringLiteral("^\\s*visible\\s*:"));
+        static const QRegularExpression kbIdRe(QStringLiteral("\\bprofileKbId\\b"));
+
+        QStringList violations;
+        QDirIterator it(qmlDir.absolutePath(), {"*.qml"}, QDir::Files,
+                        QDirIterator::Subdirectories);
+        while (it.hasNext()) {
+            const QString filePath = it.next();
+            QFile file(filePath);
+            if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+                continue;
+            QStringList lines;
+            while (!file.atEnd())
+                lines.append(QString::fromUtf8(file.readLine()));
+            const QString relPath = qmlDir.relativeFilePath(filePath);
+
+            for (qsizetype i = 0; i < lines.size(); ++i) {
+                if (!visibleRe.match(lines[i]).hasMatch())
+                    continue;
+                // A visible binding may wrap; scan it to its last line. Cheap
+                // approximation of "the binding": keep going while the line
+                // does not close its parenthesis balance.
+                int depth = 0;
+                for (qsizetype j = i; j < lines.size(); ++j) {
+                    const QString& l = lines[j];
+                    // A commented-out line is not a binding. Crude but
+                    // sufficient: the flagged shape never carries a trailing
+                    // comment on the same line.
+                    if (!l.contains(QStringLiteral("//"))
+                        && kbIdRe.match(l).hasMatch()) {
+                        violations << QStringLiteral("%1:%2: visible gated on profileKbId")
+                                          .arg(relPath).arg(j + 1);
+                    }
+                    for (const QChar c : l) {
+                        if (c == u'(') ++depth;
+                        else if (c == u')') --depth;
+                    }
+                    if (depth <= 0) break;
+                }
+            }
+        }
+
+        if (!violations.isEmpty()) {
+            QFAIL(qPrintable(QStringLiteral("Visibility gated on the persisted "
+                                            "profileKbId in %1 place(s):\n  %2")
+                                 .arg(violations.size())
+                                 .arg(violations.join(QStringLiteral("\n  ")))));
+        }
+    }
+
     // === MCP resource: decenza://profiles/active ===
 
     void mcpResourceActiveProfileReturnsFilenameAndTitle() {
@@ -4604,6 +4739,240 @@ private slots:
         // Returns false: a built-in can never be fully deleted.
         QVERIFY(!f.profileManager.deleteProfile(builtInFilename));
         QCOMPARE(deletedSpy.count(), 0);
+    }
+
+    // === Dial-in difference block (change: summarize-profile-changes-from-builtin) ===
+    //
+    // The QML-facing half. Base selection itself is covered in tst_shotsummarizer;
+    // these assert the three outcomes a surface has to tell apart, and the rule
+    // that a shot is compared against the profile IT was pulled with.
+
+    // A retitled copy of a bundled profile, with `edit` applied to its JSON,
+    // written into the user store and picked up by the catalog scan.
+    static QJsonObject bundledJsonRetitled(const QString& file, const QString& title)
+    {
+        QFile f(QStringLiteral(":/profiles/") + file);
+        if (!f.open(QIODevice::ReadOnly)) return {};
+        QJsonObject o = QJsonDocument::fromJson(f.readAll()).object();
+        o[QStringLiteral("title")] = title;
+        o[QStringLiteral("read_only")] = 0;
+        return o;
+    }
+
+    static void setTempOnEveryStep(QJsonObject& o, const QString& temp)
+    {
+        QJsonArray steps = o[QStringLiteral("steps")].toArray();
+        for (int i = 0; i < steps.size(); ++i) {
+            QJsonObject st = steps[i].toObject();
+            st[QStringLiteral("temperature")] = temp;
+            steps[i] = st;
+        }
+        o[QStringLiteral("steps")] = steps;
+    }
+
+    static void writeUserProfile(McpTestFixture& f, const QString& fileName,
+                                 const QJsonObject& json)
+    {
+        QFile out(f.profileManager.userProfilesPath() + "/" + fileName + ".json");
+        QVERIFY(out.open(QIODevice::WriteOnly));
+        out.write(QJsonDocument(json).toJson());
+        out.close();
+        f.profileManager.refreshProfiles();
+    }
+
+    // Every dial-in `kind` and `unit` C++ can emit must be handled by the QML.
+    //
+    // The two lists are produced at different sites in different languages with
+    // nothing connecting them, which is exactly the drift the centralization
+    // rule targets, and the project already gates the same shape elsewhere
+    // (tst_customwidgethtml::everyCatalogActionHasADispatchArm). Without this,
+    // adding a dial-in field ships a raw identifier as a label, or a bare
+    // unitless number, to a user — and both look finished, so nobody reports it.
+    void profileDialInDiff_everyKindAndUnitIsHandledByTheQml()
+    {
+        QDir qmlDir(QCoreApplication::applicationDirPath() + "/../../../../qml");
+        if (!qmlDir.exists())
+            qmlDir.setPath(QString(SRCDIR) + "/../qml");
+        if (!qmlDir.exists())
+            QSKIP("QML directory not found — run from source tree");
+
+        QFile block(qmlDir.absolutePath() + "/components/ProfileDialInDiffBlock.qml");
+        QVERIFY2(block.open(QIODevice::ReadOnly | QIODevice::Text),
+                 "ProfileDialInDiffBlock.qml missing");
+        const QString qml = QString::fromUtf8(block.readAll());
+
+        // Hardcoded rather than scraped from C++: the point is that adding a
+        // field fails HERE until someone updates the QML too.
+        const QStringList kinds{
+            QStringLiteral("targetWeight"),    QStringLiteral("targetVolume"),
+            QStringLiteral("maximumPressure"), QStringLiteral("maximumFlow"),
+            QStringLiteral("minimumPressure"), QStringLiteral("tankTemperature"),
+            QStringLiteral("espressoTemperature"), QStringLiteral("recommendedDose"),
+            QStringLiteral("temperature"),     QStringLiteral("pressure"),
+            QStringLiteral("flow"),            QStringLiteral("volume"),
+            QStringLiteral("exitPressureOver"), QStringLiteral("exitPressureUnder"),
+            QStringLiteral("exitFlowOver"),    QStringLiteral("exitFlowUnder"),
+            QStringLiteral("exitWeight"),      QStringLiteral("maxFlowOrPressure"),
+            QStringLiteral("name"),
+        };
+        QStringList missing;
+        for (const QString& k : kinds)
+            if (!qml.contains(QStringLiteral("\"%1\":").arg(k))) missing << k;
+        QVERIFY2(missing.isEmpty(),
+                 qPrintable(QStringLiteral("dial-in kinds with no label in the QML: %1")
+                                .arg(missing.join(QStringLiteral(", ")))));
+
+        // "celsiusTank" is deliberately distinct from "celsius" in C++ so the
+        // two can carry different tolerances; the QML must still format it as a
+        // temperature rather than falling through to the raw-token suffix.
+        // QStringLiteral, not bare "…": a const QString& bound to a temporary
+        // built from a const char* is -Werror=range-loop-construct under GCC,
+        // which clang does not diagnose — so this compiled clean on macOS and
+        // broke the Linux release build. Every other range-for over strings in
+        // this tree already does it this way.
+        for (const QString& u : { QStringLiteral("celsius"), QStringLiteral("celsiusTank"),
+                                  QStringLiteral("bar"), QStringLiteral("mlPerSec"),
+                                  QStringLiteral("g"), QStringLiteral("ml") })
+            QVERIFY2(qml.contains(QStringLiteral("\"%1\"").arg(u)),
+                     qPrintable(QStringLiteral("unit token %1 is not formatted by the QML").arg(u)));
+
+        // And the fallback stays honest: an unmapped token must reach the user
+        // as a visible token, never as a bare number that looks finished.
+        QVERIFY2(qml.contains(QStringLiteral("suffix = \" \" + row.unit")),
+                 "the unmapped-unit fallback must append the raw token");
+
+        // Display precision has to reach at least as fine as the tolerance the
+        // row was EMITTED at, or the block renders a real change as two
+        // identical numbers. celsius, bar and mlPerSec are compared at 0.005
+        // (ProfileJson writes them at two decimals and the editor steps them at
+        // 0.01), so the QML must be willing to spend a second decimal on them.
+        const qsizetype fine = qml.indexOf(QStringLiteral("function maxDecimalsFor"));
+        QVERIFY2(fine >= 0, "the block must pick its decimals from the row's unit");
+        const QString fineBody = qml.mid(fine, 400);
+        for (const QString& u : { QStringLiteral("celsius"), QStringLiteral("bar"),
+                                  QStringLiteral("mlPerSec") })
+            QVERIFY2(fineBody.contains(QStringLiteral("\"%1\"").arg(u)),
+                     qPrintable(QStringLiteral("unit %1 is compared at 0.005 but is not granted "
+                                               "two decimals of display").arg(u)));
+    }
+
+    // The lookup order in loadProfileByFilename is what makes an IN-PLACE edit of
+    // a built-in work at all: the edit lands in the user folder under the
+    // built-in's own filename, refreshProfiles() keeps the built-in catalog
+    // entry, and only user-folder-before-:/profiles makes the diff read the
+    // user's bytes. Reverse the list and every in-place edit reports "unchanged".
+    void profileDialInDiff_readsTheUserCopyThatShadowsABuiltIn()
+    {
+        McpTestFixture f;
+        QJsonObject json = bundledJsonRetitled(
+            QStringLiteral("hybrid_pour_over_espresso.json"),
+            QStringLiteral("Hybrid pour over espresso"));   // title UNCHANGED
+        QVERIFY(!json.isEmpty());
+        setTempOnEveryStep(json, QStringLiteral("95.00"));
+        writeUserProfile(f, QStringLiteral("hybrid_pour_over_espresso"), json);
+
+        const QVariantMap diff =
+            f.profileManager.profileDialInDiff(QStringLiteral("Hybrid pour over espresso"));
+        QVERIFY2(diff.value(QStringLiteral("hasBase")).toBool(),
+                 "an in-place edit of a built-in must still find its base");
+        QVERIFY2(!diff.value(QStringLiteral("unchanged")).toBool(),
+                 "the shadowing user copy must be what gets compared");
+        const QVariantList rows = diff.value(QStringLiteral("rows")).toList();
+        QCOMPARE(rows.size(), 1);
+        QCOMPARE(rows.first().toMap().value(QStringLiteral("kind")).toString(),
+                 QStringLiteral("temperature"));
+    }
+
+    void profileDialInDiff_namesTheBundledBaseAndListsTheEdit()
+    {
+        McpTestFixture f;
+        QJsonObject json = bundledJsonRetitled(
+            QStringLiteral("preinfuse_then_45ml_of_water.json"),
+            QStringLiteral("Zzz Morning Variant"));
+        QVERIFY(!json.isEmpty());
+        setTempOnEveryStep(json, QStringLiteral("89.00"));
+        writeUserProfile(f, QStringLiteral("zzz_morning_variant"), json);
+
+        const QVariantMap diff =
+            f.profileManager.profileDialInDiff(QStringLiteral("Zzz Morning Variant"));
+        QVERIFY(diff.value(QStringLiteral("hasBase")).toBool());
+        QCOMPARE(diff.value(QStringLiteral("baseTitle")).toString(),
+                 QStringLiteral("Preinfuse then 45ml of water"));
+        QVERIFY(!diff.value(QStringLiteral("unchanged")).toBool());
+
+        const QVariantList rows = diff.value(QStringLiteral("rows")).toList();
+        QCOMPARE(rows.size(), 1);
+        const QVariantMap row = rows.first().toMap();
+        QCOMPARE(row.value(QStringLiteral("kind")).toString(), QStringLiteral("temperature"));
+        QCOMPARE(row.value(QStringLiteral("oldValue")).toDouble(), 90.0);
+        QCOMPARE(row.value(QStringLiteral("newValue")).toDouble(), 89.0);
+    }
+
+    // "Unchanged copy" must be distinguishable from "no base at all" — one says
+    // the knowledge applies without qualification, the other says nothing can be
+    // said. A single boolean conflating them would make the surface silent in
+    // the case that most deserves a sentence.
+    void profileDialInDiff_aRenamedCopyReportsUnchangedRatherThanNoBase()
+    {
+        McpTestFixture f;
+        const QJsonObject json = bundledJsonRetitled(
+            QStringLiteral("preinfuse_then_45ml_of_water.json"),
+            QStringLiteral("Zzz Renamed Untouched"));
+        QVERIFY(!json.isEmpty());
+        writeUserProfile(f, QStringLiteral("zzz_renamed_untouched"), json);
+
+        const QVariantMap diff =
+            f.profileManager.profileDialInDiff(QStringLiteral("Zzz Renamed Untouched"));
+        QVERIFY(diff.value(QStringLiteral("hasBase")).toBool());
+        QVERIFY(diff.value(QStringLiteral("unchanged")).toBool());
+        QVERIFY(diff.value(QStringLiteral("rows")).toList().isEmpty());
+    }
+
+    void profileDialInDiff_aTitleTheCatalogDoesNotHoldHasNoBase()
+    {
+        McpTestFixture f;
+        const QVariantMap diff =
+            f.profileManager.profileDialInDiff(QStringLiteral("Zzz Not Installed"));
+        QVERIFY(!diff.value(QStringLiteral("hasBase")).toBool());
+        QVERIFY(diff.value(QStringLiteral("rows")).toList().isEmpty());
+    }
+
+    // Unparseable JSON is "cannot be compared", not an error to announce: the
+    // shot loader already warns where such a row is READ, and warning again on
+    // every dialog open would double-report one defect. QTest::failOnWarning is
+    // active, so a warning here fails this test.
+    void profileDialInDiffForJson_unparseableJsonIsQuietlyNoBase()
+    {
+        McpTestFixture f;
+        const QVariantMap diff =
+            f.profileManager.profileDialInDiffForJson(QStringLiteral("{not json"));
+        QVERIFY(!diff.value(QStringLiteral("hasBase")).toBool());
+    }
+
+    // A shot must report the profile it was PULLED with. Editing the catalog
+    // copy afterwards must not rewrite what the shot's block says — this is the
+    // whole reason the JSON entry point exists rather than a flag on the other.
+    void profileDialInDiffForJson_readsTheShotsProfileNotTheCatalogs()
+    {
+        McpTestFixture f;
+        QJsonObject catalogJson = bundledJsonRetitled(
+            QStringLiteral("preinfuse_then_45ml_of_water.json"),
+            QStringLiteral("Zzz Drifted"));
+        QVERIFY(!catalogJson.isEmpty());
+        setTempOnEveryStep(catalogJson, QStringLiteral("85.00"));   // edited since
+        writeUserProfile(f, QStringLiteral("zzz_drifted"), catalogJson);
+
+        QJsonObject shotJson = bundledJsonRetitled(
+            QStringLiteral("preinfuse_then_45ml_of_water.json"),
+            QStringLiteral("Zzz Drifted"));
+        setTempOnEveryStep(shotJson, QStringLiteral("93.00"));      // as pulled
+
+        const QVariantMap diff = f.profileManager.profileDialInDiffForJson(
+            QString::fromUtf8(QJsonDocument(shotJson).toJson()));
+        QVERIFY(diff.value(QStringLiteral("hasBase")).toBool());
+        const QVariantList rows = diff.value(QStringLiteral("rows")).toList();
+        QCOMPARE(rows.size(), 1);
+        QCOMPARE(rows.first().toMap().value(QStringLiteral("newValue")).toDouble(), 93.0);
     }
 };
 

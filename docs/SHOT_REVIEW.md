@@ -169,10 +169,10 @@ fallback — a clean flow-mode preinfusion can hide a pressure-mode choke and
 vice versa.
 
 **Profile-context gate (Arm 1 only).** `analyzeFlowVsGoal` takes a
-`bool profileKbResolved` parameter. When `false` — i.e.
-`ShotSummarizer::matchProfileKey(profileTitle, profileType)` returned
-empty (no exact alias hit, no #1198 longest-boundary-prefix hit, no
-editor-type default hit) — Arm 1 is **skipped entirely**: the flow-mode
+`bool profileKbResolved` parameter. When `false` — i.e. `resolveProfileKb()`
+returned an empty candidate set: no exact alias hit, no #1198
+longest-boundary-prefix hit, no editor-type default hit, and no shape match
+either — Arm 1 is **skipped entirely**: the flow-mode
 range builder doesn't run, `sampleCount`/`delta` stay zero, and Arm 1
 contributes nothing to `hasData`. Arm 2 (choked-puck + yield-shortfall
 + yield-overshoot) still runs unconditionally — those arms read
@@ -181,9 +181,20 @@ depend on profile shape. The result
 projects through the existing `grindCoverage="notAnalyzable"` path when
 Arm 2 also has no data, or `"verified"` when it does. `skipped` stays
 `false`, distinct from the `grind_check_skip` flag's `"skipped"`
-coverage. Production call sites derive the bool from
-`!profileKbId.isEmpty()` of the resolved id already stored on
-`ShotRecord` / `ShotSaveData` / `ShotSummary`. Direct test callers
+coverage. All three storage-layer call sites read `AnalysisInputs::profileKbResolved`
+(`prepareAnalysisInputs`), which is `true` for ANY non-empty candidate set.
+They previously each derived it by hand from `!profileKbId.isEmpty()` on the
+persisted column, which is wrong since `resolve-profile-kb-by-shape`: the
+pipeline re-resolves on every load, and only a TITLE resolution is written to
+that column, so every shape-resolved shot has full KB context and an empty
+column. A fourth site, `ShotSummarizer::runShotAnalysisAndPopulate` (the
+`summarizeFromHistory` slow path for imported shots), sits in the AI module and
+cannot reach `AnalysisInputs`; it takes the resolved id set as a parameter from
+its caller instead. Both routes derive the bit from a resolution rather than
+from the column — that is the property that matters, and neither derives it
+locally. The
+question Arm 1's gate asks ("is this flow goal a real target or a safety
+limiter?") is structural, and a shape match answers it as well as a name does. Direct test callers
 default to `profileKbResolved = true`, preserving the pre-change
 contract. See openspec change `skip-grind-arm1-when-kb-unresolved` for
 the rationale: Arm 1 reads the firmware-reported `flow_goal` series as
@@ -363,10 +374,25 @@ frame exited on its own confirmed exit condition, so it executed as designed and
 was not skipped. DE1 preinfusion/fill frames routinely exit far earlier than
 their configured max duration (that is their purpose), and without this guard the
 duration checks below flag them as "skipped." These reasons are recorded only for
-a *confirmed* sensor exit. When the exit was configured but the threshold
-crossing fell between BLE samples (and time had not expired), `MainController`
-records `"pressure_unconfirmed"`/`"flow_unconfirmed"` instead — a hint, not
-ground truth. The guard intentionally does **not** match the unconfirmed
+a *confirmed* sensor exit. When the exit was configured but the threshold was
+not reached (and time had not expired), `MainController` records
+`"pressure_unconfirmed"`/`"flow_unconfirmed"` instead — a hint, not ground
+truth.
+
+"Reached" is not a bare comparison against the transition sample, and reading it
+as one is what made this detector badge correct shots. The DE1 evaluates its
+exit condition on its own internal cadence, an order of magnitude faster than
+the ~10 Hz BLE stream, so a fast-rising fill frame normally crosses its
+threshold *between* two samples the app can see —
+[#1813](https://github.com/Kulitorum/Decenza/issues/1813): `pressure_over 2.10`,
+transition sample 2.048 bar, preceding sample 1.869 bar, crossing ~60 ms after
+the last visible sample. `FrameExit::inferReason`
+(`src/machine/frameexitreason.h`) therefore confirms when the threshold falls
+within one sample-interval's worth of the *observed* change toward it. The
+tolerance is the measured per-sample delta, never a constant: flat, moving away,
+or no preceding sample in the shot all get none — which is what keeps a
+genuinely skipped frame (no rise to extrapolate from) in the unconfirmed branch
+where this detector can still catch it. The guard intentionally does **not** match the unconfirmed
 variants: a genuinely skipped frame lands in that same unconfirmed branch, so
 trusting the hint would mask the very bug this detector exists to catch.
 Unconfirmed, `"time"`, and empty (old-data) reasons all fall through to the
@@ -429,6 +455,23 @@ specific fix.
 ---
 
 ## 3. Shot Summary dialog
+
+The badge row is **not** gated on KB resolution: it renders for every shot, so
+the "Shot Summary" chip is always reachable. It used to be hidden unless a
+quality flag fired or the shot carried a `profileKbId`, which in practice hid
+it only on a *clean* shot — the case with the least other information — while
+the dialog's contents come from the shot's own curves and never needed the KB
+at all. The individual chips keep their own conditions: each flag chip on its
+flag, and the clean-extraction chip when none fired **and**
+`verdictCategory !== "insufficientData"`.
+
+That second term is load-bearing. `analyzeShot` short-circuits on
+`pressure.size() < 10` and returns with every detector `false`, so the four
+booleans alone cannot distinguish "nothing was wrong" from "nothing was
+checked" — without it an aborted or curve-less shot claims a clean extraction
+the app never established. (An empty `verdictCategory` still shows the chip:
+that is a legacy row with no serialized analysis, whose behaviour predates
+`detectorResults` and must not change.)
 
 The "Shot Summary" chip at the end of the badge row opens
 `qml/components/ShotAnalysisDialog.qml` — a non-AI, non-modal-blocking

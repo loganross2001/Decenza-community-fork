@@ -1907,7 +1907,7 @@ Item {
                         icon.source: "qrc:/icons/coffeebeans.svg"
                         icon.color: Theme.textColor
                         accessibleName: TranslationManager.translate("barista.addBeanPhoto", "Add a bean from a photo")
-                        onClicked: bagPhotoDialog.open()
+                        onClicked: bagCamera.open()   // in-app camera; a "choose from files" fallback lives inside it
                     }
                     AccessibleButton {
                         subtle: true
@@ -2750,27 +2750,36 @@ Item {
             root._orch.engage()
     }
 
-    // [barista-fork] "Add a bean from a photo": pick an image (OS gallery/files — you can snap the bag in the
-    // camera app first), and the barista reads the label and adds it. followUpWithImage decodes off-thread and
-    // dispatches a normal tool-enabled turn with the image attached, so the vision model calls add_bag.
+    // [barista-fork] "Add a bean from a photo": either snap it in-app (bagCamera) or pick an image from files
+    // (bagPhotoDialog). Both funnel through _addBeanFromImage → followUpWithImage, which decodes off-thread and
+    // dispatches a tool-enabled vision turn so the model reads the label and calls add_bag.
+    function _addBeanFromImage(imageUrl) {
+        // LOAD-BEARING: the image rides only THIS turn (AIManager consumes+clears it). With Anthropic's
+        // forceRespond, the model usually replies "I found X — save it?" first, ending the turn; the user's "yes"
+        // is a SEPARATE turn with NO image. So the instruction MUST make the model state the fields it read (in
+        // its confirming reply) — that is how the save turn still has them. Don't reword this so the model saves
+        // silently without naming the fields, and don't trim history below that confirming turn.
+        if (root._conv)
+            root._conv.followUpWithImage(
+                TranslationManager.translate("barista.addBeanPhoto.instruction",
+                    "Here's a photo of a coffee bag. Read its label and add this bean to my inventory — call "
+                    + "add_bag with the roaster and the coffee name plus every detail you can read (origin, "
+                    + "region, producer, variety, process, roast level, tasting notes). Use only what the "
+                    + "label actually states; don't guess. Tell me what you found and confirm before saving."),
+                imageUrl)
+    }
+
     FileDialog {
         id: bagPhotoDialog
         title: TranslationManager.translate("barista.addBeanPhoto.choose", "Choose a photo of the bag…")
         nameFilters: ["Images (*.png *.jpg *.jpeg *.webp *.heic)", "All files (*)"]
-        onAccepted: {
-            // LOAD-BEARING: the image rides only THIS turn (AIManager consumes+clears it). With Anthropic's
-            // forceRespond, the model usually replies "I found X — save it?" first, ending the turn; the user's
-            // "yes" is a SEPARATE turn with NO image. So the instruction MUST make the model state the fields it
-            // read (in its confirming reply) — that is how the save turn still has them. Don't reword this so the
-            // model saves silently without naming the fields, and don't trim history below that confirming turn.
-            if (root._conv)
-                root._conv.followUpWithImage(
-                    TranslationManager.translate("barista.addBeanPhoto.instruction",
-                        "Here's a photo of a coffee bag. Read its label and add this bean to my inventory — call "
-                        + "add_bag with the roaster and the coffee name plus every detail you can read (origin, "
-                        + "region, producer, variety, process, roast level, tasting notes). Use only what the "
-                        + "label actually states; don't guess. Tell me what you found and confirm before saving."),
-                    selectedFile)
-        }
+        onAccepted: root._addBeanFromImage(selectedFile)
+    }
+
+    // In-app camera (Phase 2B). Its "choose from files" affordance opens bagPhotoDialog instead.
+    BagCameraCapture {
+        id: bagCamera
+        onCaptured: function(imageUrl) { root._addBeanFromImage(imageUrl) }
+        onGalleryRequested: bagPhotoDialog.open()
     }
 }

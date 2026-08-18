@@ -35,6 +35,8 @@
 #include <QThread>
 #include <QTimer>
 #include <QUuid>
+#include <QPermissions>          // [barista-fork] QCameraPermission for the add-a-bean-from-a-photo viewfinder
+#include <QCoreApplication>      // [barista-fork] qApp->checkPermission / requestPermission
 #include <QCoreApplication>
 #include <memory>
 #include <initializer_list>
@@ -1074,4 +1076,24 @@ BaristaModule* BaristaModule::install(QQmlApplicationEngine* engine,
     auto* module = new BaristaModule(mainController, machineState, appSettings, parent ? parent : engine);
     engine->rootContext()->setContextProperty(QStringLiteral("Barista"), module);
     return module;
+}
+
+// [barista-fork] Camera permission for the add-a-bean-from-a-photo viewfinder. Mirrors BLEManager's QPermission
+// flow: resolve immediately when already Granted/Denied, else prompt and report the outcome via the signal.
+void BaristaModule::requestCameraPermission()
+{
+    QCameraPermission perm;
+    switch (qApp->checkPermission(perm)) {
+    case Qt::PermissionStatus::Granted:
+        emit cameraPermissionResult(true);
+        return;
+    case Qt::PermissionStatus::Denied:
+        emit cameraPermissionResult(false);
+        return;
+    case Qt::PermissionStatus::Undetermined:
+        qApp->requestPermission(perm, this, [this](const QPermission& p) {
+            emit cameraPermissionResult(p.status() == Qt::PermissionStatus::Granted);
+        });
+        return;
+    }
 }

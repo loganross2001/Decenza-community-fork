@@ -15,6 +15,10 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- [barista-fork] on-device speech recognition (Chat button) -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- [barista-fork] "add a bean from a photo" — take a picture of the bag in-app. Camera is optional
+         (required=false): the feature is additive and the gallery pick works without a camera. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera.any" android:required="false" />
     <!-- Android 11+ package visibility: without this, SpeechRecognizer.isRecognitionAvailable()
          returns false and binding fails, so voice input silently vanishes (S5). -->
     <queries>

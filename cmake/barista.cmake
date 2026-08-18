@@ -149,6 +149,7 @@ if(DECENZA_BARISTA)
         BASE "${CMAKE_CURRENT_SOURCE_DIR}/qml/assistant"
         FILES
             ${CMAKE_CURRENT_SOURCE_DIR}/qml/assistant/AssistantOverlay.qml
+            ${CMAKE_CURRENT_SOURCE_DIR}/qml/assistant/BagCameraCapture.qml
             ${CMAKE_CURRENT_SOURCE_DIR}/qml/assistant/AssistantSettingsPanel.qml
             ${CMAKE_CURRENT_SOURCE_DIR}/qml/assistant/AssistantSettingsSection.qml
             ${CMAKE_CURRENT_SOURCE_DIR}/qml/assistant/BaristaSectionCard.qml

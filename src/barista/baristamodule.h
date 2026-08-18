@@ -85,8 +85,14 @@ public:
     BaristaVoiceId* voiceId() const { return m_voiceId; }             // [barista-fork] on-device speaker enrollment
     CoachPhrasebook* coachPhrasebook() const { return m_coachPhrasebook; } // [barista-fork] live-coach varied phrasing + gameplan
 
+    // [barista-fork] Request the Android CAMERA permission for the "add a bean from a photo" viewfinder. Mirrors
+    // BLEManager's QPermission flow. Emits cameraPermissionResult(granted) once resolved (immediately if already
+    // determined). QML calls this before showing the camera; on denial it falls back to the gallery picker.
+    Q_INVOKABLE void requestCameraPermission();
+
 signals:
     void enabledChanged();
+    void cameraPermissionResult(bool granted);   // [barista-fork] resolution of requestCameraPermission()
 
 private:
     BaristaModule(MainController* mainController, MachineState* machineState,

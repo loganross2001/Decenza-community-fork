@@ -33,7 +33,10 @@
 
 #include "ai/aimanager.h"
 #include "ai/aiprovider.h"
+#include "ai/aiconversation.h"
 #include "mcp/mcpagentdocs.h"
+#include <QImage>
+#include <QFile>
 #include "ai/aiconversation.h"
 #include "core/settings.h"
 #include "core/settings_dye.h"
@@ -211,6 +214,38 @@ private slots:
         const QJsonObject inl = parts[1].toObject().value("inlineData").toObject();
         QCOMPARE(inl.value("mimeType").toString(), QString("image/jpeg"));
         QCOMPARE(inl.value("data").toString(), QString::fromLatin1(jpeg.toBase64()));
+    }
+
+    // [barista-fork] readAndDownscaleImage (Phase 2C): a too-large photo is decoded + shrunk to a bounded JPEG
+    // for the vision turn. Pure transform over a file → testable without threads/network.
+    void readAndDownscaleImageBoundsTheLongestSide()
+    {
+        // A 3000x2000 source (longest side 3000 > the 1568 cap).
+        QImage src(3000, 2000, QImage::Format_RGB32);
+        src.fill(Qt::darkGreen);
+        const QString path = QDir::tempPath() + "/tst_bagphoto_src.png";
+        QVERIFY(src.save(path, "PNG"));
+
+        const QByteArray jpeg = AIConversation::readAndDownscaleImage(path);
+        QVERIFY(!jpeg.isEmpty());
+        QImage out;
+        QVERIFY(out.loadFromData(jpeg));                 // it is a real, decodable image
+        QVERIFY(qMax(out.width(), out.height()) <= 1568); // longest side bounded
+        QVERIFY(qMax(out.width(), out.height()) >= 1560); // and it actually scaled TO the cap (aspect kept)
+
+        // A small image is passed through un-upscaled.
+        QImage small(400, 300, QImage::Format_RGB32);
+        small.fill(Qt::blue);
+        const QString spath = QDir::tempPath() + "/tst_bagphoto_small.png";
+        QVERIFY(small.save(spath, "PNG"));
+        QImage sout;
+        QVERIFY(sout.loadFromData(AIConversation::readAndDownscaleImage(spath)));
+        QCOMPARE(qMax(sout.width(), sout.height()), 400);  // unchanged — never upscaled
+
+        // A non-image / unreadable path returns empty (the caller surfaces an honest error).
+        QVERIFY(AIConversation::readAndDownscaleImage(QDir::tempPath() + "/tst_no_such_file.png").isEmpty());
+
+        QFile::remove(path); QFile::remove(spath);
     }
 
     // parseBagExtraction: the "Get info" response contract — JSON possibly

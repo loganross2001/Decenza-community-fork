@@ -2758,6 +2758,11 @@ Item {
         title: TranslationManager.translate("barista.addBeanPhoto.choose", "Choose a photo of the bag…")
         nameFilters: ["Images (*.png *.jpg *.jpeg *.webp *.heic)", "All files (*)"]
         onAccepted: {
+            // LOAD-BEARING: the image rides only THIS turn (AIManager consumes+clears it). With Anthropic's
+            // forceRespond, the model usually replies "I found X — save it?" first, ending the turn; the user's
+            // "yes" is a SEPARATE turn with NO image. So the instruction MUST make the model state the fields it
+            // read (in its confirming reply) — that is how the save turn still has them. Don't reword this so the
+            // model saves silently without naming the fields, and don't trim history below that confirming turn.
             if (root._conv)
                 root._conv.followUpWithImage(
                     TranslationManager.translate("barista.addBeanPhoto.instruction",

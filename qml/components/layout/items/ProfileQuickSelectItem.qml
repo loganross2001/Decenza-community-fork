@@ -12,6 +12,8 @@ import Decenza
 // nothing to pick, so it doesn't open an empty picker.
 //
 // Pure layout widget: no barista / AI dependencies.
+// [fork-index] pill=profileQuickSelect | domain=recipe | change=-
+//   what: brew-bar pill — pick from favorite profiles; ProfileManager.loadProfile
 LayoutWidgetItem {
     id: root
 

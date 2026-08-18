@@ -15,6 +15,8 @@ import "../.."
 // Values are staged in the dialog and applied together on Confirm.
 //
 // Pure layout widget: no barista / AI / feedback dependencies.
+// [fork-index] pill=brewQuickSelect | domain=recipe | change=-
+//   what: brew-bar pill — brew quick-select (dose/grind/temp/yield) via BrewQuickSelectDialog
 LayoutWidgetItem {
     id: root
 

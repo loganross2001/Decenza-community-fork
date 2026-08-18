@@ -70,6 +70,8 @@ signals:
 
 public slots:
     // Actuator inputs (wired by BaristaModule). These are the events of the transition table.
+    // [fork-index] entry=BaristaConversation::onFinalText | domain=voice | change=-
+    //   what: voice turn arbiter — STT final -> model turn; Listening/Thinking/Speaking state machine
     void onFinalText(const QString& text);        // VoiceInput.finalText  (C++→C++, never via QML)
     void onPartial(const QString& text);          // VoiceInput.partialChanged
     void onSttError(const QString& message);      // VoiceInput.error

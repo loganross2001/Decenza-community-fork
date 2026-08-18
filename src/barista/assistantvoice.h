@@ -77,6 +77,8 @@ public:
     // result is treated as shared by both the barista and coaching sections.
     Q_INVOKABLE void fetchElevenlabsVoices();
 
+    // [fork-index] entry=AssistantVoice::speak | domain=voice | change=-
+    //   what: TTS entry — speaks a reply (ElevenLabs/OpenAI), unit/ratio-normalized, muted-aware
     Q_INVOKABLE void speak(const QString& rawText);       // no-op when voice is muted; normalizes units/ratios for TTS
     Q_INVOKABLE void stop();
     Q_INVOKABLE void setVoiceByName(const QString& name);  // persists to settings + applies

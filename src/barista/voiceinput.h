@@ -45,6 +45,8 @@ signals:
     void listeningChanged();
     void pausedChanged();
     void partialChanged();
+    // [fork-index] entry=VoiceInput::finalText | domain=voice | change=-
+    //   what: STT entry — a complete spoken utterance enters the conversation (Android SpeechRecognizer)
     void finalText(const QString& text);   // a complete utterance → send to the conversation
     void error(const QString& message);
 

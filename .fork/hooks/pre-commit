@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Fork currency gate — refuses a commit whose fork index is stale or whose refs dangle,
+# and blocks a new fork-authored .md at the repo root.
+#
+# Zero merge surface: .git/hooks/ is untracked, so this file never conflicts on re-sync.
+# Canonical copy is committed at .fork/hooks/pre-commit; install with:
+#   ln -sf ../../.fork/hooks/pre-commit .git/hooks/pre-commit
+# Bypass (rare, deliberate):  git commit --no-verify
+set -euo pipefail
+ROOT="$(git rev-parse --show-toplevel)"
+if ! python3 "$ROOT/.fork/check_fork_index.py"; then
+  echo "" >&2
+  echo "pre-commit: fork index gate failed (above). Fix, or bypass with --no-verify." >&2
+  exit 1
+fi

@@ -98,6 +98,8 @@ QJsonArray BaristaTools::toolDefinitions()
     const auto strProp = [](const QString& d){ QJsonObject o; o["type"] = QString("string"); o["description"] = d; return o; };
     const auto intProp = [](const QString& d){ QJsonObject o; o["type"] = QString("integer"); o["description"] = d; return o; };
 
+    // [fork-index] tool=query_shots | domain=barista | change=-
+    //   what: on-demand lookup across the user's FULL local shot history
     // query_shots — on-demand lookup across the user's FULL local shot history.
     QJsonObject qs;
     qs["name"] = QString("query_shots");
@@ -121,6 +123,8 @@ QJsonArray BaristaTools::toolDefinitions()
     qs["input_schema"] = schema;
     tools.append(qs);
 
+    // [fork-index] tool=get_shot_detail | domain=barista | change=-
+    //   what: the follow-up to query_shots: pull ONE shot's full dial-in + quality analysis so
     // get_shot_detail — the follow-up to query_shots: pull ONE shot's full dial-in + quality analysis so
     // the barista can coach on what actually happened (channeling, truncated pour, grind/temp issues, notes)
     // instead of just the summary row. Same client-side tool-loop as query_shots.
@@ -141,6 +145,8 @@ QJsonArray BaristaTools::toolDefinitions()
     sd["input_schema"] = sdSchema;
     tools.append(sd);
 
+    // [fork-index] tool=compare_shots | domain=barista | change=-
+    //   what: diff 2-5 shots side by side (signed deltas + which quality verdicts flipped)
     // compare_shots — diff 2-5 shots side by side (signed deltas + which quality verdicts flipped).
     QJsonObject cs;
     cs["name"] = QString("compare_shots");
@@ -164,6 +170,8 @@ QJsonArray BaristaTools::toolDefinitions()
     cs["input_schema"] = csSchema;
     tools.append(cs);
 
+    // [fork-index] tool=get_bean_profile | domain=bean | change=-
+    //   what: any bean's freshness + history, or any profile's design intent, on demand
     // get_bean_profile — any bean's freshness + history, or any profile's design intent, on demand.
     QJsonObject bp;
     bp["name"] = QString("get_bean_profile");
@@ -182,6 +190,8 @@ QJsonArray BaristaTools::toolDefinitions()
     bp["input_schema"] = bpSchema;
     tools.append(bp);
 
+    // [fork-index] tool=detect_grind_drift | domain=bean | change=-
+    //   what: has a fixed grind setting drifted faster/slower over time (grinder wear / aging beans)?
     // detect_grind_drift — has a fixed grind setting drifted faster/slower over time (grinder wear / aging beans)?
     QJsonObject gd;
     gd["name"] = QString("detect_grind_drift");
@@ -205,6 +215,7 @@ QJsonArray BaristaTools::toolDefinitions()
     // call). CRITICAL: shot_id is NOT a field here — the executor stamps it app-side from the current anchor,
     // so a model-supplied id can't attach feedback to the wrong shot. Everything but raw_text is optional.
     QJsonObject lf;
+    // [fork-index] tool=log_tasting_feedback | domain=bean | change=-
     lf["name"] = QString("log_tasting_feedback");
     lf["description"] = QString(
         "Record the user's tasting/texture feedback about a shot to their private feedback knowledge base, so "
@@ -244,6 +255,7 @@ QJsonArray BaristaTools::toolDefinitions()
     // Proactive current-bean feedback is ALREADY folded into the context block every turn; this tool is the
     // secondary path for filtered queries (e.g. "when did I last call this sour") or a DIFFERENT bean.
     QJsonObject sf;
+    // [fork-index] tool=search_tasting_feedback | domain=bean | change=-
     sf["name"] = QString("search_tasting_feedback");
     sf["description"] = QString(
         "Look up the user's PAST tasting feedback for a bean from their feedback knowledge base — what they said, "
@@ -268,6 +280,8 @@ QJsonArray BaristaTools::toolDefinitions()
     // (dose/yield/ratio/temp), matching the inline pattern apply_dial_change uses.
     const auto numProp = [](const QString& d){ QJsonObject o; o["type"] = QString("number"); o["description"] = d; return o; };
 
+    // [fork-index] tool=list_bags | domain=bean | change=-
+    //   what: the inventory, so the model can resolve "the Ethiopia" to a bagId before editing it
     // list_bags (READ) — the inventory, so the model can resolve "the Ethiopia" to a bagId before editing it.
     QJsonObject lb;
     lb["name"] = QString("list_bags");
@@ -303,6 +317,8 @@ QJsonArray BaristaTools::toolDefinitions()
         p["link"]         = strProp("Product URL for the bag (optional).");
     };
 
+    // [fork-index] tool=add_bag | domain=bean | change=-
+    //   what: create a new bag in the inventory
     // add_bag (WRITE) — create a new bag in the inventory.
     QJsonObject ab;
     ab["name"] = QString("add_bag");
@@ -326,6 +342,8 @@ QJsonArray BaristaTools::toolDefinitions()
     ab["input_schema"] = abSchema;
     tools.append(ab);
 
+    // [fork-index] tool=update_bag | domain=bean | change=-
+    //   what: edit fields on an existing bag
     // update_bag (WRITE) — edit fields on an existing bag.
     QJsonObject ub;
     ub["name"] = QString("update_bag");
@@ -342,6 +360,8 @@ QJsonArray BaristaTools::toolDefinitions()
     ub["input_schema"] = ubSchema;
     tools.append(ub);
 
+    // [fork-index] tool=finish_bag | domain=bean | change=-
+    //   what: mark a bag as finished/empty (removes it from the active inventory)
     // finish_bag (WRITE, needs confirmation) — mark a bag as finished/empty (removes it from the active inventory).
     QJsonObject fb;
     fb["name"] = QString("finish_bag");
@@ -358,6 +378,8 @@ QJsonArray BaristaTools::toolDefinitions()
     fb["input_schema"] = fbSchema;
     tools.append(fb);
 
+    // [fork-index] tool=delete_bag | domain=bean | change=-
+    //   what: permanently remove a bag (refused if shots reference it)
     // delete_bag (WRITE, DESTRUCTIVE, needs confirmation) — permanently remove a bag (refused if shots reference it).
     QJsonObject db;
     db["name"] = QString("delete_bag");
@@ -383,6 +405,7 @@ QJsonArray BaristaTools::toolDefinitions()
     // machine); the grinder setting is grinder-specific free text, so it is applied as given (same as before —
     // the retired queue didn't validate it either). The executor reports applied/rejected so the barista confirms accurately.
     QJsonObject ad;
+    // [fork-index] tool=apply_dial_change | domain=recipe | change=-
     ad["name"] = QString("apply_dial_change");
     ad["description"] = QString(
         "Apply an agreed change to the NEXT shot's dial-in. Call this ONLY after you have proposed the change "
@@ -414,6 +437,7 @@ QJsonArray BaristaTools::toolDefinitions()
     // edit_in_place AND the base is one the user authored — the app refuses in-place on any read-only/stock
     // profile and the executor falls back to a copy with a note. Reuses ProfileManager via the recipeOp seam.
     QJsonObject crp;
+    // [fork-index] tool=create_related_profile | domain=recipe | change=-
     crp["name"] = QString("create_related_profile");
     crp["description"] = QString(
         "Create (or adjust) an espresso PROFILE — the pressure/flow curve — to carry out a coaching move the user "
@@ -455,6 +479,7 @@ QJsonArray BaristaTools::toolDefinitions()
     // so the user never has to hit stop and the sign-off is never cut off. No required args (an optional reason
     // is fine). The executor merely fires the endConversation seam (a main-thread signal emit) and returns.
     QJsonObject ec;
+    // [fork-index] tool=end_conversation | domain=barista | change=-
     ec["name"] = QString("end_conversation");
     ec["description"] = QString(
         "End this conversation and let the assistant panel collapse, when the user has clearly signalled they're "
@@ -476,6 +501,7 @@ QJsonArray BaristaTools::toolDefinitions()
     // (it can see today's date in sessionContext) and passes both the ISO due AND the user's own phrasing
     // through; the executor stamps epoch app-side. Optional recurrence for repeating chores.
     QJsonObject cr;
+    // [fork-index] tool=create_reminder | domain=barista | change=-
     cr["name"] = QString("create_reminder");
     cr["description"] = QString(
         "Create a reminder for the user when they ask to be reminded of something (\"remind me to flush the "
@@ -501,6 +527,7 @@ QJsonArray BaristaTools::toolDefinitions()
     // resolves the words to a month + day (and an optional year); the executor validates and stores it. It
     // combines with the built-in US holidays to drive the barista's greeting/goodbye "todaysOccasion".
     QJsonObject pd;
+    // [fork-index] tool=add_personal_date | domain=barista | change=-
     pd["name"] = QString("add_personal_date");
     pd["description"] = QString(
         "Remember a personal important date the user asks you to keep (\"remember my anniversary is June 3\", "
@@ -526,6 +553,7 @@ QJsonArray BaristaTools::toolDefinitions()
     // keep-worthy fact. Facts already known are injected each turn as [knownFacts], so the barista shouldn't
     // re-ask them. Scoped to the active user by the executor (never trusted from the model).
     QJsonObject rf;
+    // [fork-index] tool=remember_fact | domain=barista | change=-
     rf["name"] = QString("remember_fact");
     rf["description"] = QString(
         "Save a DURABLE BASIC FACT the user tells you about themselves or their world so you remember it in future "
@@ -550,6 +578,7 @@ QJsonArray BaristaTools::toolDefinitions()
 
     // [barista-fork] forget_fact (WRITE) — the correction/removal path for remember_fact.
     QJsonObject ff;
+    // [fork-index] tool=forget_fact | domain=barista | change=-
     ff["name"] = QString("forget_fact");
     ff["description"] = QString(
         "Remove a fact you previously remembered — a correction, or something that's no longer true. Pass a few "
@@ -567,6 +596,7 @@ QJsonArray BaristaTools::toolDefinitions()
     // are ALSO folded into the context block (dueItems) each turn, so reach for this for an explicit recall
     // ("what am I supposed to do today?") or after completing one, to see what's left.
     QJsonObject lr;
+    // [fork-index] tool=list_due_reminders | domain=barista | change=-
     lr["name"] = QString("list_due_reminders");
     lr["description"] = QString(
         "List the user's reminders that are now due (things they earlier asked to be reminded of). The most "
@@ -582,6 +612,7 @@ QJsonArray BaristaTools::toolDefinitions()
     // [barista-fork] complete_reminder (WRITE) — clear a reminder the user says they've done. A recurring
     // reminder rolls forward to its next occurrence instead of closing.
     QJsonObject cp;
+    // [fork-index] tool=complete_reminder | domain=barista | change=-
     cp["name"] = QString("complete_reminder");
     cp["description"] = QString(
         "Mark a reminder done when the user says they've handled it (\"done\", \"flushed it\", \"already did "
@@ -599,6 +630,7 @@ QJsonArray BaristaTools::toolDefinitions()
     // [barista-fork] log_maintenance (WRITE) — record that a recurring maintenance task was done, so its
     // next-due date resets. taskKey comes from the dueItems maintenance block (each due task carries its key).
     QJsonObject lm;
+    // [fork-index] tool=log_maintenance | domain=barista | change=-
     lm["name"] = QString("log_maintenance");
     lm["description"] = QString(
         "Record that the user just completed a maintenance task (backflush, descale, cleaned the shower screen, "
@@ -621,6 +653,7 @@ QJsonArray BaristaTools::toolDefinitions()
     // owner-overridden interval is never touched (the executor reports it skipped). Marks the doc change
     // reviewed so it isn't re-offered.
     QJsonObject um;
+    // [fork-index] tool=update_maintenance_default | domain=barista | change=-
     um["name"] = QString("update_maintenance_default");
     um["description"] = QString(
         "Apply an agreed update to a maintenance task's DEFAULT interval, sourced from Decent's updated "
@@ -651,6 +684,7 @@ QJsonArray BaristaTools::toolDefinitions()
     // the Decent-doc offer (or after all accepted changes are applied), call this ONCE to mark the change
     // reviewed so it is never re-offered until Decent changes the guide AGAIN. Takes no fields.
     QJsonObject dm;
+    // [fork-index] tool=dismiss_maintenance_doc_change | domain=barista | change=-
     dm["name"] = QString("dismiss_maintenance_doc_change");
     dm["description"] = QString(
         "Dismiss the current Decent cleaning-guide change (the maintenanceDocChanged block) so it is not "
@@ -666,6 +700,7 @@ QJsonArray BaristaTools::toolDefinitions()
     // [barista-fork] Recipes 2.0 — the barista can now know/discuss/use the user's whole-drink recipes.
     // Descriptions carry policy (read every turn) and mirror Fable's design spec §2.
     QJsonObject rlst;
+    // [fork-index] tool=list_recipes | domain=recipe | change=-
     rlst["name"] = QString("list_recipes");
     rlst["description"] = QString(
         "List the user's saved recipes. A recipe is a whole-drink preset (profile + bean + grind + "
@@ -687,6 +722,7 @@ QJsonArray BaristaTools::toolDefinitions()
     tools.append(rlst);
 
     QJsonObject rget;
+    // [fork-index] tool=get_active_recipe | domain=recipe | change=-
     rget["name"] = QString("get_active_recipe");
     rget["description"] = QString(
         "Return the currently active recipe as a full object (including steam and hot-water blocks), or "
@@ -700,6 +736,7 @@ QJsonArray BaristaTools::toolDefinitions()
     tools.append(rget);
 
     QJsonObject ract;
+    // [fork-index] tool=activate_recipe | domain=recipe | change=-
     ract["name"] = QString("activate_recipe");
     ract["description"] = QString(
         "Activate a recipe on the machine. HIGH-IMPACT MACHINE CHANGE: this loads the recipe's profile (replacing "
@@ -723,6 +760,7 @@ QJsonArray BaristaTools::toolDefinitions()
     // Approve-then-apply lives in the model (like activate_recipe): confirm the exact change with the user first.
     // (numProp is defined once, earlier with the bag tools, and reused here.)
     QJsonObject rupd;
+    // [fork-index] tool=update_recipe | domain=recipe | change=-
     rupd["name"] = QString("update_recipe");
     rupd["description"] = QString(
         "Change the saved settings of an existing recipe (its stored design — this does NOT activate it or change "
@@ -779,6 +817,7 @@ QJsonArray BaristaTools::toolDefinitions()
 
     // [barista-fork] create_recipe — make a NEW saved recipe (its stored design; does NOT activate the machine).
     QJsonObject rnew;
+    // [fork-index] tool=create_recipe | domain=recipe | change=-
     rnew["name"] = QString("create_recipe");
     rnew["description"] = QString(
         "Create a NEW saved recipe — a whole-drink preset. This ONLY saves the design; it does NOT activate it or "
@@ -828,6 +867,7 @@ QJsonArray BaristaTools::toolDefinitions()
 
     // [barista-fork] clone_recipe — duplicate an existing recipe under a new name (a starting point to tweak).
     QJsonObject rclone;
+    // [fork-index] tool=clone_recipe | domain=recipe | change=-
     rclone["name"] = QString("clone_recipe");
     rclone["description"] = QString(
         "Duplicate an existing recipe under a NEW name — copies all its settings (profile, beans, dial, steam/"
@@ -845,6 +885,7 @@ QJsonArray BaristaTools::toolDefinitions()
 
     // [barista-fork] archive_recipe — hide/unhide a recipe from the main inventory (reversible; keeps history).
     QJsonObject rarch;
+    // [fork-index] tool=archive_recipe | domain=recipe | change=-
     rarch["name"] = QString("archive_recipe");
     rarch["description"] = QString(
         "Archive a recipe (hide it from the main recipe list) or, with archived=false, restore it. Reversible and "
@@ -863,6 +904,7 @@ QJsonArray BaristaTools::toolDefinitions()
 
     // [barista-fork] delete_recipe — permanently remove a recipe (ONLY if it has no shot history).
     QJsonObject rdel;
+    // [fork-index] tool=delete_recipe | domain=recipe | change=-
     rdel["name"] = QString("delete_recipe");
     rdel["description"] = QString(
         "Permanently delete a recipe. This ONLY works when the recipe has NO shots recorded against it (a mistaken "
@@ -882,6 +924,7 @@ QJsonArray BaristaTools::toolDefinitions()
     // [barista-fork] list_profiles — see every profile the app can use, and resolve a spoken profile name to its
     // EXACT title for the recipe tools.
     QJsonObject rlp;
+    // [fork-index] tool=list_profiles | domain=recipe | change=-
     rlp["name"] = QString("list_profiles");
     rlp["description"] = QString(
         "List the PROFILES the app can use (a profile is the pressure/flow curve the machine runs — e.g. a lever "
@@ -900,6 +943,7 @@ QJsonArray BaristaTools::toolDefinitions()
     tools.append(rlp);
 
     QJsonObject rdeact;
+    // [fork-index] tool=deactivate_recipe | domain=recipe | change=-
     rdeact["name"] = QString("deactivate_recipe");
     rdeact["description"] = QString(
         "Deactivate the currently active recipe. This unlinks the recipe only — the machine keeps its current "
@@ -916,6 +960,7 @@ QJsonArray BaristaTools::toolDefinitions()
     // who they are. The model confirms a NEW name before calling (STT mishears names); a name matching the
     // [Who] roster just switches. Sets the roster active user (dyeBarista), which scopes shot attribution.
     QJsonObject sau;
+    // [fork-index] tool=set_active_user | domain=barista | change=-
     sau["name"] = QString("set_active_user");
     sau["description"] = QString(
         "Set who you're currently talking to when they identify themselves by name ('I'm Chris', 'this is Ana', "
@@ -938,6 +983,8 @@ QJsonArray BaristaTools::toolDefinitions()
     // fabricated extraction-yield number, grind changes as relative STEPS, and prep-before-parameters when the
     // trace shows channeling.
 
+    // [fork-index] tool=translate_taste | domain=bean | change=-
+    //   what: the Rosetta Stone: one perceptual word -> its mechanism
     // translate_taste — the Rosetta Stone: one perceptual word -> its mechanism.
     QJsonObject tt;
     tt["name"] = QString("translate_taste");
@@ -956,6 +1003,8 @@ QJsonArray BaristaTools::toolDefinitions()
     tt["input_schema"] = ttSchema;
     tools.append(tt);
 
+    // [fork-index] tool=recommend_next_shot | domain=recipe | change=-
+    //   what: the planner: taste + shot context -> ONE change, stated as a checkable hypothesis
     // recommend_next_shot — the planner: taste + shot context -> ONE change, stated as a checkable hypothesis.
     QJsonObject rns;
     rns["name"] = QString("recommend_next_shot");
@@ -984,6 +1033,8 @@ QJsonArray BaristaTools::toolDefinitions()
     rns["input_schema"] = rnsSchema;
     tools.append(rns);
 
+    // [fork-index] tool=plan_for_goal | domain=recipe | change=-
+    //   what: human goal -> target region + roast-aware dialing path
     // plan_for_goal — human goal -> target region + roast-aware dialing path.
     QJsonObject pfg;
     pfg["name"] = QString("plan_for_goal");
@@ -1015,6 +1066,8 @@ QJsonArray BaristaTools::webToolDefinitions()
     const auto strProp = [](const QString& d){ QJsonObject o; o["type"] = QString("string"); o["description"] = d; return o; };
     const auto intProp = [](const QString& d){ QJsonObject o; o["type"] = QString("integer"); o["description"] = d; return o; };
 
+    // [fork-index] tool=get_weather | domain=barista | change=-
+    //   what: current conditions for a city (open-meteo, keyless)
     // get_weather — current conditions for a city (open-meteo, keyless).
     QJsonObject gw;
     gw["name"] = QString("get_weather");
@@ -1036,6 +1089,8 @@ QJsonArray BaristaTools::webToolDefinitions()
     gw["input_schema"] = gwSchema;
     tools.append(gw);
 
+    // [fork-index] tool=get_stock_quote | domain=barista | change=-
+    //   what: latest price for a ticker (Yahoo Finance, keyless)
     // get_stock_quote — latest price for a ticker (Yahoo Finance, keyless).
     QJsonObject gs;
     gs["name"] = QString("get_stock_quote");
@@ -1053,6 +1108,8 @@ QJsonArray BaristaTools::webToolDefinitions()
     gs["input_schema"] = gsSchema;
     tools.append(gs);
 
+    // [fork-index] tool=get_local_news | domain=barista | change=-
+    //   what: recent headlines (Google News RSS, keyless)
     // get_local_news — recent headlines (Google News RSS, keyless).
     QJsonObject gn;
     gn["name"] = QString("get_local_news");
@@ -1075,6 +1132,8 @@ QJsonArray BaristaTools::webToolDefinitions()
     // canonical bean lookup). They ride the same internet gate as the fast-path web tools; the actual network
     // calls run in BaristaCloudTools, reached via the same webTools seam.
 
+    // [fork-index] tool=get_visualizer_shot | domain=barista | change=-
+    //   what: pull ANY shot by id/link (the user's own OR a public/community one)
     // get_visualizer_shot — pull ANY shot by id/link (the user's own OR a public/community one).
     QJsonObject gvs;
     gvs["name"] = QString("get_visualizer_shot");
@@ -1093,6 +1152,8 @@ QJsonArray BaristaTools::webToolDefinitions()
     gvs["input_schema"] = gvsSchema;
     tools.append(gvs);
 
+    // [fork-index] tool=search_visualizer_shots | domain=barista | change=-
+    //   what: the user's own cloud history, or the public feed, as ids to pull
     // search_visualizer_shots — the user's own cloud history, or the public feed, as ids to pull.
     QJsonObject svs;
     svs["name"] = QString("search_visualizer_shots");
@@ -1112,6 +1173,8 @@ QJsonArray BaristaTools::webToolDefinitions()
     svs["input_schema"] = svsSchema;
     tools.append(svs);
 
+    // [fork-index] tool=look_up_bean | domain=bean | change=-
+    //   what: canonical bean details (keyless Visualizer canonical search)
     // look_up_bean — canonical bean details (keyless Visualizer canonical search).
     QJsonObject lub;
     lub["name"] = QString("look_up_bean");

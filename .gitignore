@@ -67,3 +67,6 @@ logcat_*.txt
 # Python bytecode (from tools/*.py)
 __pycache__/
 *.pyc
+
+# fork session-state (local only)
+.fork/NOW

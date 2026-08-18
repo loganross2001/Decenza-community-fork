@@ -817,6 +817,9 @@ BaristaModule::BaristaModule(MainController* mainController, MachineState* machi
             // double-reply guard) bridges each async storage signal to the reply. Bean-detail edits (origin,
             // process, tastingNotes, ...) live in the beanBaseData blob, folded via BeanBaseBlob::mergeBeanDetails
             // exactly as the in-app bag editor and the MCP `bag` tool do.
+            // [fork-index] seam=bagOp | domain=bean | change=-
+            //   what: bridges barista bag tools (add/update/finish/delete/list) to storage
+            //   refs: CoffeeBagStorage::requestCreateBag
             ai->setBagOpHandler([mc](const QString& op, const QVariantMap& args,
                                      std::function<void(QJsonObject)> reply) {
                 CoffeeBagStorage* bags = mc ? mc->bagStorage() : nullptr;

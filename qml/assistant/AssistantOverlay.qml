@@ -1567,7 +1567,7 @@ Item {
         // [barista-fork] The barista called open_bag_camera (the user asked to add a coffee from a photo). Open the
         // in-app camera; the captured photo comes back on the next turn via followUpWithImage.
         function onOpenBagCameraRequested() {
-            bagCamera.open()
+            root._openBagCamera()
         }
     }
 
@@ -1928,7 +1928,7 @@ Item {
                         icon.source: "qrc:/icons/coffeebeans.svg"
                         icon.color: Theme.textColor
                         accessibleName: TranslationManager.translate("barista.addBeanPhoto", "Add a bean from a photo")
-                        onClicked: bagCamera.open()   // in-app camera; a "choose from files" fallback lives inside it
+                        onClicked: root._openBagCamera()   // lazy-loads the camera; "choose from files" fallback inside
                     }
                     AccessibleButton {
                         subtle: true
@@ -2800,10 +2800,27 @@ Item {
         onAccepted: root._addBeanFromImage(selectedFile)
     }
 
-    // In-app camera (Phase 2B). Its "choose from files" affordance opens bagPhotoDialog instead.
-    BagCameraCapture {
-        id: bagCamera
-        onCaptured: function(imageUrl) { root._addBeanFromImage(imageUrl) }
-        onGalleryRequested: bagPhotoDialog.open()
+    // In-app camera (Phase 2B). LAZY-LOADED: the camera + CaptureSession pipeline only exists while the camera is
+    // actually open. Instantiating it for the whole barista session held the camera/media pipeline live and
+    // CONTENDED WITH THE MIC / speech recognizer on Android (STT no-match loops, "talking doesn't work"). The
+    // Loader unloads it on close, freeing the mic. Its "choose from files" affordance opens bagPhotoDialog.
+    Loader {
+        id: bagCameraLoader
+        anchors.fill: parent
+        active: false
+        z: 100000
+        sourceComponent: BagCameraCapture {
+            onCaptured: function(imageUrl) { root._addBeanFromImage(imageUrl) }
+            onGalleryRequested: bagPhotoDialog.open()
+            onClosed: bagCameraLoader.active = false   // destroy the camera pipeline → mic is free again
+        }
+        onLoaded: item.open()
+    }
+    function _openBagCamera() {
+        if (bagCameraLoader.active) {
+            if (bagCameraLoader.item) bagCameraLoader.item.open()
+        } else {
+            bagCameraLoader.active = true   // onLoaded → item.open()
+        }
     }
 }

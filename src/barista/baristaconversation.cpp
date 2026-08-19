@@ -234,8 +234,13 @@ void BaristaConversation::tap()
     switch (m_state) {
     case State::Idle:      setState(State::Priming); break;
     case State::NeedsTap:  m_softErrors = 0; m_hardErrors = 0; setMessage(QString()); setState(State::Listening); break;
+    // [barista-fork] The button reads "Stop" (Stop listening) while Listening — a tap there must ACTUALLY stop the
+    // mic, not no-op. Go to NeedsTap (mic off, session alive); the button flips back to "Chat" to resume. This was
+    // the reported "Stop button doesn't work": the new-path tap() fell through to the default no-op (the old
+    // direct-VoiceInput path used to call stop() here). Confirmed by `tap_ignored detail=listening` in the logs.
+    case State::Listening: setState(State::NeedsTap); break;
     case State::Speaking:  if (m_voice) m_voice->stop(); onVoiceSpeakingChanged(); break;  // tap-to-skip barge-in
-    default: diag(QStringLiteral("tap_ignored"), stateName()); break;  // Priming/Listening/Thinking/Closing
+    default: diag(QStringLiteral("tap_ignored"), stateName()); break;  // Priming/Thinking/Closing
     }
 }
 

@@ -351,14 +351,54 @@ void BaristaConversation::onCloseRequested()
         setState(State::Closing);
 }
 
+// [barista-fork] Turn a raw provider error into a SHORT, actionable message the user can act on. The raw text
+// (e.g. Gemini's "Your prepayment credits are depleted. Please go to AI Studio…") is logged verbatim in the
+// diagnostic; what the user SEES should name the problem and the fix ("out of credits — add billing, or switch
+// models"), not read as a vague "service error". Returns "" when nothing matches, so the caller falls back to the
+// raw detail (still better than a generic string).
+static QString friendlyModelError(const QString& raw)
+{
+    const QString low = raw.toLower();
+    const QString who = low.contains(QLatin1String("gemini")) ? QStringLiteral("Gemini")
+                      : (low.contains(QLatin1String("claude")) || low.contains(QLatin1String("anthropic")))
+                            ? QStringLiteral("Claude")
+                      : (low.contains(QLatin1String("openai")) || low.contains(QLatin1String("gpt")))
+                            ? QStringLiteral("ChatGPT")
+                      : QStringLiteral("The AI service");
+    // Billing / out of credits / quota — the most common "service error".
+    if (low.contains(QLatin1String("credit")) || low.contains(QLatin1String("deplet"))
+        || low.contains(QLatin1String("billing")) || low.contains(QLatin1String("quota"))
+        || low.contains(QLatin1String("resource_exhausted")) || low.contains(QLatin1String("insufficient"))
+        || low.contains(QLatin1String("payment")) || low.contains(QLatin1String("balance")))
+        return who + QStringLiteral(" is out of credits. Add billing/credits for it, or switch to a different AI "
+                                    "model in the assistant Settings (Claude and Gemini both work here).");
+    // Auth / key.
+    if (low.contains(QLatin1String("api key")) || low.contains(QLatin1String("unauthorized"))
+        || low.contains(QLatin1String(" 401")) || low.contains(QLatin1String("authentication"))
+        || (low.contains(QLatin1String("invalid")) && low.contains(QLatin1String("key")))
+        || low.contains(QLatin1String("not configured")))
+        return who + QStringLiteral("'s API key is missing or invalid. Check it in the assistant Settings, or pick "
+                                    "a different AI model.");
+    // Temporary: rate limit / overloaded / unavailable.
+    if (low.contains(QLatin1String("rate")) || low.contains(QLatin1String(" 429"))
+        || low.contains(QLatin1String("overload")) || low.contains(QLatin1String(" 503"))
+        || low.contains(QLatin1String("unavailable")) || low.contains(QLatin1String("try again")))
+        return who + QStringLiteral(" is busy right now. Wait a moment and try again, or switch AI models in the "
+                                    "assistant Settings.");
+    return QString();
+}
+
 void BaristaConversation::onModelError(const QString& message)
 {
     if (m_state != State::Thinking && m_state != State::Speaking)
         return;
-    diag(QStringLiteral("model_error"), message);
+    diag(QStringLiteral("model_error"), message);   // raw detail preserved in the log
     m_turnInFlight = false;
     if (m_closingArmed) { setState(State::Closing); return; }
-    setMessage(message.isEmpty() ? QStringLiteral("Something went wrong — tap or type to try again.") : message);
+    const QString friendly = friendlyModelError(message);
+    setMessage(!friendly.isEmpty() ? friendly
+               : (message.isEmpty() ? QStringLiteral("Something went wrong — tap or type to try again.")
+                                    : message));
     setState(State::Listening);
 }
 

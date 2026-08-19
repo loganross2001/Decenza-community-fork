@@ -74,6 +74,7 @@ public:
                             TasksStorage* tasks,
                             const std::function<QVariantMap(const QVariantMap&, qint64)>& applyDial,
                             const std::function<void()>& endConversation,
+                            const std::function<void()>& openBagCamera,   // [barista-fork] open_bag_camera seam
                             const std::function<void(const QString&, const QJsonObject&,
                                                      std::function<void(QJsonValue)>)>& webTools,
                             const std::function<QVariantMap()>& getActiveRecipe,

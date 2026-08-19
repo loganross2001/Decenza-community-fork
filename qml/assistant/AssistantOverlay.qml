@@ -1136,6 +1136,18 @@ Item {
                 + "dismiss_maintenance_doc_change so it's not brought up again. For descaling, still defer to "
                 + "their water rather than asserting a fixed interval."
 
+        // [barista-fork] Photo bean-add: tell a vision+tools provider it can open the camera so it OFFERS the
+        // option (the user's #1 confusion was asking for it and being told "no camera"). Gated on vision AND tools
+        // — open_bag_camera is a client tool and the photo is only useful if the model can actually read images.
+        if (_supportsTools && typeof MainController !== "undefined" && MainController.aiManager
+                && MainController.aiManager.currentProviderSupportsVision())
+            persona += "\nYou can READ A COFFEE BAG FROM A PHOTO. When the user has a new bean in hand — a bag you "
+                + "don't have details for, or they say things like 'add this new coffee', 'I got a new bag', 'can "
+                + "you scan this', 'take a photo of this' — OFFER to open the camera and call open_bag_camera (say "
+                + "you're opening it, then call it in the SAME turn). After they snap the bag the photo comes to you "
+                + "on the next turn: read the label and call add_bag with only what it states. They can also tap the "
+                + "bean icon at the top of this panel to open the camera themselves."
+
         // Web tools — keep the persona truthful about what it can/can't reach. webOn (attach the keyless
         // get_weather/get_stock_quote/get_local_news tools) rides the tool loop, so it needs a tool-capable
         // provider AND the toggle. General web SEARCH is a stronger capability only some providers have
@@ -1547,6 +1559,11 @@ Item {
             if (root._nc) { root._nc.onCloseRequested(); return }   // [barista-fork] new path: arm the controller's deterministic close
             root._endAfterReply = true
             dismissFallbackTimer.restart()   // [barista-fork] guarantee the close even if the sign-off never speaks
+        }
+        // [barista-fork] The barista called open_bag_camera (the user asked to add a coffee from a photo). Open the
+        // in-app camera; the captured photo comes back on the next turn via followUpWithImage.
+        function onOpenBagCameraRequested() {
+            bagCamera.open()
         }
     }
 

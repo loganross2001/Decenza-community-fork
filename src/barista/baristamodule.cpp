@@ -292,6 +292,11 @@ BaristaModule::BaristaModule(MainController* mainController, MachineState* machi
             ai->setEndConversationHandler([orch]() {
                 orch->requestDismiss();
             });
+            // [barista-fork] open_bag_camera → orchestrator.requestOpenBagCamera(), which emits
+            // openBagCameraRequested() on the main thread; the overlay opens BagCameraCapture.
+            ai->setOpenBagCameraHandler([orch]() {
+                orch->requestOpenBagCamera();
+            });
             // [barista-fork] Fast-path web tools. The module lambda owns the app-side glue the pure
             // BaristaWebTools service shouldn't: (1) the homeLocation no-city fallback for weather/news, and
             // (2) building the Google-News query from topic/location. Then it forwards to the async getter,

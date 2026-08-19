@@ -46,6 +46,11 @@ void AssistantOrchestrator::requestDismiss() {
     emit dismissRequested();
 }
 
+void AssistantOrchestrator::requestOpenBagCamera() {
+    // [barista-fork] The open_bag_camera tool ran. Emit on the main thread; the overlay opens BagCameraCapture.
+    emit openBagCameraRequested();
+}
+
 void AssistantOrchestrator::noteEspressoSelected() {
     // Espresso selected → CONTEXT only. The barista does not speak or change state; a later user-initiated
     // chat will assemble fresh context (current bean/profile) at engage-time. Intentionally a no-op today;

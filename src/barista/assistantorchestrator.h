@@ -48,6 +48,11 @@ public:
     // which is the immediate "user hit ×" path.
     Q_INVOKABLE void requestDismiss();
 
+    // [barista-fork] The open_bag_camera tool ran → emit openBagCameraRequested() on the MAIN thread so the
+    // overlay opens the in-app camera (mirrors requestDismiss: a background tool-loop thread never touches the UI
+    // directly, it only signals intent).
+    Q_INVOKABLE void requestOpenBagCamera();
+
     // Espresso selected → pure CONTEXT update (current bean/profile). The barista does NOT speak here.
     Q_INVOKABLE void noteEspressoSelected();
 
@@ -70,6 +75,8 @@ signals:
     // [barista-fork] The barista asked to end the conversation (end_conversation tool). The overlay listens and
     // ends the session AFTER the sign-off is spoken (never cuts it off). See requestDismiss().
     void dismissRequested();
+    // [barista-fork] The barista asked to open the camera (open_bag_camera tool). The overlay opens BagCameraCapture.
+    void openBagCameraRequested();
 
 private slots:
     void onShotSaved(qlonglong shotId);   // pure bookkeeping: record the shot, mark it undiscussed

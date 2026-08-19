@@ -192,6 +192,11 @@ public:
     void setEndConversationHandler(std::function<void()> handler) {
         m_endConversationHandler = std::move(handler);
     }
+    // [barista-fork] open_bag_camera seam — fired when the model calls the tool to open the in-app camera. Wired
+    // from BaristaModule to the orchestrator; emits a main-thread signal the overlay acts on (opens BagCameraCapture).
+    void setOpenBagCameraHandler(std::function<void()> handler) {
+        m_openBagCameraHandler = std::move(handler);
+    }
     // [barista-fork] FAST-PATH web-tool handler for get_weather / get_stock_quote / get_local_news. A
     // std::function seam (not a BaristaWebTools* member) so this header/TU never names BaristaWebTools — keeps
     // QtNetwork's web-tool service out of the DB-only tests. Wired from BaristaModule to BaristaWebTools's async
@@ -492,6 +497,7 @@ private:
     std::function<QVariantMap(const QVariantMap&, qint64)> m_applyDialHandler;
     // [barista-fork] end_conversation handler → AssistantOrchestrator::requestDismiss (std::function seam; see setter).
     std::function<void()> m_endConversationHandler;
+    std::function<void()> m_openBagCameraHandler;   // [barista-fork] open_bag_camera seam
     // [barista-fork] fast-path web-tool handler → BaristaWebTools async getters (std::function seam; see setter).
     std::function<void(const QString&, const QJsonObject&, std::function<void(QJsonValue)>)> m_webToolsHandler;
     // [barista-fork] Recipes 2.0 tool handlers → MainController (std::function seams; see setters).

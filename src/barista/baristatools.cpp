@@ -496,6 +496,26 @@ QJsonArray BaristaTools::toolDefinitions()
     ec["input_schema"] = ecSchema;
     tools.append(ec);
 
+    // [barista-fork] open_bag_camera — the barista opens the in-app camera so the user can photograph a bag it
+    // then reads. This is how "add a new coffee I have here" works hands-free: the model calls this, the camera
+    // opens, the user snaps the bag, and the photo comes back on the NEXT turn (with the image attached) for the
+    // model to read and add_bag. The seam just fires a main-thread signal that opens the camera overlay.
+    // [fork-index] tool=open_bag_camera | domain=bean | change=-
+    QJsonObject obc;
+    obc["name"] = QString("open_bag_camera");
+    obc["description"] = QString(
+        "Open the camera so the user can take a photo of a coffee bag, which you then read to add the bean. Call "
+        "this when the user wants to add a NEW coffee/bean they physically have and it makes sense to read it off "
+        "the bag — e.g. \"add this new coffee\", \"I've got a new bag\", \"can you scan this\", \"take a photo of "
+        "this bag\". Tell them you're opening the camera in your reply, then call this in the same turn. After they "
+        "snap the photo it comes back to you automatically and you read the label and call add_bag. Only for a bean "
+        "the user has in hand — if they'd rather just tell you the details, use add_bag directly instead.");
+    QJsonObject obcSchema;
+    obcSchema["type"] = QString("object");
+    obcSchema["properties"] = QJsonObject{};
+    obc["input_schema"] = obcSchema;
+    tools.append(obc);
+
     // [barista-fork] create_reminder (WRITE) — the user asks to be reminded of something ("remind me to
     // flush the group head on Saturday"). The MODEL resolves the natural-language due to an ISO datetime
     // (it can see today's date in sessionContext) and passes both the ISO due AND the user's own phrasing
@@ -1345,6 +1365,7 @@ void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage*
                                TasksStorage* tasks,
                                const std::function<QVariantMap(const QVariantMap&, qint64)>& applyDial,
                                const std::function<void()>& endConversation,
+                               const std::function<void()>& openBagCamera,   // [barista-fork] open_bag_camera seam
                                const std::function<void(const QString&, const QJsonObject&,
                                                         std::function<void(QJsonValue)>)>& webTools,
                                const std::function<QVariantMap()>& getActiveRecipe,
@@ -1392,6 +1413,21 @@ void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage*
         }
         endConversation();
         done(QJsonObject{{QStringLiteral("ended"), true}});
+        return;
+    }
+
+    // [barista-fork] open_bag_camera — fire the main-thread seam that opens the camera overlay. Returns
+    // immediately so the model's turn (which already told the user "opening the camera…") completes; the photo
+    // arrives on the NEXT turn via followUpWithImage.
+    if (name == QLatin1String("open_bag_camera")) {
+        if (!openBagCamera) {
+            done(QJsonObject{{QStringLiteral("error"), QStringLiteral("camera unavailable")}});
+            return;
+        }
+        openBagCamera();
+        done(QJsonObject{{QStringLiteral("opened"), true},
+                         {QStringLiteral("note"), QStringLiteral("Camera opened — the user will photograph the "
+                          "bag and the image will arrive on the next turn for you to read.")}});
         return;
     }
 

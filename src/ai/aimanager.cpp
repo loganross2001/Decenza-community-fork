@@ -303,7 +303,7 @@ void AIManager::createProviders()
             if (m_settings && m_settings->dye())
                 anchor.insert(QStringLiteral("activeUser"), m_settings->dye()->dyeBarista());
             BaristaTools::executeTool(m_shotHistory, m_feedbackStorage, m_tasksStorage, m_applyDialHandler,
-                                      m_endConversationHandler, m_webToolsHandler,
+                                      m_endConversationHandler, m_openBagCameraHandler, m_webToolsHandler,
                                       m_getActiveRecipeHandler, m_activateRecipeHandler, m_deactivateRecipeHandler,
                                       m_updateRecipeHandler,
                                       m_recipeOpHandler,

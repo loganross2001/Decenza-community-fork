@@ -616,6 +616,19 @@ void AssistantSettings::setWebSearchEnabled(bool e) {
     emit webSearchEnabledChanged();
 }
 
+QString AssistantSettings::cameraFacing() const {
+    // Default "front": the tablet is typically mounted facing the user, who holds the bag up to it.
+    return m_settings.value(QStringLiteral("barista/cameraFacing"), QStringLiteral("front")).toString();
+}
+
+void AssistantSettings::setCameraFacing(const QString& facing) {
+    const QString f = (facing == QLatin1String("back")) ? QStringLiteral("back") : QStringLiteral("front");
+    if (cameraFacing() == f)
+        return;
+    m_settings.setValue(QStringLiteral("barista/cameraFacing"), f);
+    emit cameraFacingChanged();
+}
+
 // [barista-fork] Voice-ID Increment 1: opt-in concurrent-capture test. Default OFF so normal users are never
 // affected; when ON, the overlay fires one short parallel capture per turn and logs whether it worked.
 bool AssistantSettings::voiceIdProbe() const {

@@ -1141,12 +1141,16 @@ Item {
         // — open_bag_camera is a client tool and the photo is only useful if the model can actually read images.
         if (_supportsTools && typeof MainController !== "undefined" && MainController.aiManager
                 && MainController.aiManager.currentProviderSupportsVision())
-            persona += "\nYou can READ A COFFEE BAG FROM A PHOTO. When the user has a new bean in hand — a bag you "
-                + "don't have details for, or they say things like 'add this new coffee', 'I got a new bag', 'can "
-                + "you scan this', 'take a photo of this' — OFFER to open the camera and call open_bag_camera (say "
-                + "you're opening it, then call it in the SAME turn). After they snap the bag the photo comes to you "
-                + "on the next turn: read the label and call add_bag with only what it states. They can also tap the "
-                + "bean icon at the top of this panel to open the camera themselves."
+            persona += "\nYou can READ A COFFEE BAG FROM A PHOTO — YOU open the camera yourself. When the user wants "
+                + "to add a new coffee they have in hand, or asks you to take/scan a photo of a bag ('add this new "
+                + "coffee', 'I got a new bag', 'take a photo of this', 'scan this', 'can you look at this bag') — "
+                + "IMMEDIATELY call open_bag_camera to bring up the camera. Say a quick 'opening the camera…' and "
+                + "call it in the SAME turn. Do NOT tell the user to tap a button or do it themselves — YOU open it. "
+                + "After they snap the bag the photo arrives on your next turn: read the label, call add_bag with "
+                + "what it states, THEN look_up_bean to pull the rest from the bean database and update_bag with "
+                + "anything the label didn't show (origin, region, producer, variety, process, elevation, tasting "
+                + "notes). Then tell them what you added. (A bean icon at the top also opens the camera, but if they "
+                + "asked you, just open it — don't make them tap it.)"
 
         // Web tools — keep the persona truthful about what it can/can't reach. webOn (attach the keyless
         // get_weather/get_stock_quote/get_local_news tools) rides the tool loop, so it needs a tool-capable
@@ -2771,18 +2775,21 @@ Item {
     // (bagPhotoDialog). Both funnel through _addBeanFromImage → followUpWithImage, which decodes off-thread and
     // dispatches a tool-enabled vision turn so the model reads the label and calls add_bag.
     function _addBeanFromImage(imageUrl) {
-        // LOAD-BEARING: the image rides only THIS turn (AIManager consumes+clears it). With Anthropic's
-        // forceRespond, the model usually replies "I found X — save it?" first, ending the turn; the user's "yes"
-        // is a SEPARATE turn with NO image. So the instruction MUST make the model state the fields it read (in
-        // its confirming reply) — that is how the save turn still has them. Don't reword this so the model saves
-        // silently without naming the fields, and don't trim history below that confirming turn.
+        // LOAD-BEARING: the image rides only THIS turn (AIManager consumes+clears it), but it stays in context
+        // across the tool ROUNDS of this turn — so the model must do the WHOLE job in this one turn: read →
+        // add_bag → look_up_bean → update_bag → report. Do NOT reword this into a "found X, save it?" question
+        // that ends the turn, because the user's "yes" would be a separate turn with NO image and the details
+        // would be lost.
         if (root._conv)
             root._conv.followUpWithImage(
                 TranslationManager.translate("barista.addBeanPhoto.instruction",
-                    "Here's a photo of a coffee bag. Read its label and add this bean to my inventory — call "
-                    + "add_bag with the roaster and the coffee name plus every detail you can read (origin, "
-                    + "region, producer, variety, process, roast level, tasting notes). Use only what the "
-                    + "label actually states; don't guess. Tell me what you found and confirm before saving."),
+                    "Here's a photo of a coffee bag. In THIS turn: (1) read the label and call add_bag with the "
+                    + "roaster and coffee name plus every detail you can read (origin, region, producer, variety, "
+                    + "process, roast level, tasting notes) — use only what the label states, don't guess; (2) then "
+                    + "call look_up_bean for that roaster + coffee and use update_bag to fill in anything the label "
+                    + "didn't show from the bean database (origin, region, producer, variety, process, elevation, "
+                    + "tasting notes); (3) then tell me what you added and what you pulled from the database. Don't "
+                    + "ask me to confirm first — just add it and report."),
                 imageUrl)
     }
 

@@ -57,6 +57,10 @@ class AssistantSettings : public QObject {
     Q_PROPERTY(double baristaVoiceVolume READ baristaVoiceVolume WRITE setBaristaVoiceVolume NOTIFY baristaVoiceVolumeChanged)
     Q_PROPERTY(double coachingVoiceVolume READ coachingVoiceVolume WRITE setCoachingVoiceVolume NOTIFY coachingVoiceVolumeChanged)
     Q_PROPERTY(bool webSearchEnabled READ webSearchEnabled WRITE setWebSearchEnabled NOTIFY webSearchEnabledChanged)
+    // [barista-fork] Which camera the "add a bean from a photo" viewfinder uses: "front" (default — a machine-
+    // mounted tablet faces the user, who holds the bag toward it) or "back". Picked in Settings + flippable in the
+    // viewfinder.
+    Q_PROPERTY(QString cameraFacing READ cameraFacing WRITE setCameraFacing NOTIFY cameraFacingChanged)
     // [barista-fork] Voice-ID Increment 1: opt-in "capture test" — fire a short parallel QAudioSource capture
     // during a live turn and log whether it works alongside STT. Off by default; validation aid only.
     Q_PROPERTY(bool voiceIdProbe READ voiceIdProbe WRITE setVoiceIdProbe NOTIFY voiceIdProbeChanged)
@@ -177,6 +181,8 @@ public:
 
     bool webSearchEnabled() const;                // let the barista search the web (Anthropic; default on)
     void setWebSearchEnabled(bool e);
+    QString cameraFacing() const;                 // [barista-fork] "front" (default) | "back"
+    void setCameraFacing(const QString& facing);
 
     bool voiceIdProbe() const;                    // opt-in concurrent-capture test (default off)
     void setVoiceIdProbe(bool on);
@@ -253,6 +259,7 @@ signals:
     void baristaVoiceVolumeChanged();
     void coachingVoiceVolumeChanged();
     void webSearchEnabledChanged();
+    void cameraFacingChanged();   // [barista-fork] add-a-bean-from-a-photo camera choice
     void voiceIdProbeChanged();
     void voiceIdEngageTestChanged();
     void voiceIdEnabledChanged();

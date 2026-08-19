@@ -977,9 +977,10 @@ void AnthropicProvider::analyzeConversation(const QString& systemPrompt, const Q
     // MUST call a tool every turn — it can no longer end a turn with a bare "let me check…" promise and stop
     // (the reported stall). The only "answer" tool is `respond`, so every reply the user hears comes through it;
     // to actually check something the model must call a real tool first (get_weather/query_shots/…), whose result
-    // loops back, and then call `respond`. disable_parallel_tool_use keeps it to ONE tool per turn (so it can't
-    // emit get_weather AND respond at once and answer before the result). `respond` is intercepted in
-    // onAnalysisReply — never executed — and its `text` becomes the turn's answer. Anthropic-only; other providers
+    // loops back, and then call `respond`. (We used to also set disable_parallel_tool_use to keep it to ONE tool
+    // per turn, but Anthropic now rejects that alongside its server tools — see the tool_choice block below.)
+    // `respond` is intercepted in onAnalysisReply — never executed — and its `text` becomes the turn's answer.
+    // Anthropic-only; other providers
     // never see options.forceRespond. Fail-safe: if a turn somehow ends without `respond`, the terminal path below
     // still delivers whatever text exists, so this can't be worse than the auto/heuristic path.
     if (m_forceRespond && !tools.isEmpty()) {
@@ -1001,7 +1002,14 @@ void AnthropicProvider::analyzeConversation(const QString& systemPrompt, const Q
         tools.append(respondTool);
         QJsonObject toolChoice;
         toolChoice["type"] = QString("any");
-        toolChoice["disable_parallel_tool_use"] = true;
+        // [barista-fork] DO NOT set disable_parallel_tool_use here. Anthropic now REJECTS the whole request with
+        // "tool_choice.disable_parallel_tool_use: true cannot be used with programmatic tool calling" whenever a
+        // server-side tool is present (the web_search tool this barista adds under the web toggle). That killed
+        // every forced-respond turn on Claude — the user talked, the request 400'd, and the turn dropped straight
+        // back to listening ("I have to ask multiple times / it never stops"). Verified in barista-diagnostics
+        // 2026-08-19. Losing the single-tool guarantee only means the model MAY emit a real tool AND `respond`
+        // together; `respond` is still intercepted (never executed) and the terminal path delivers its text, so
+        // this is strictly safer than the request failing.
         requestBody["tool_choice"] = toolChoice;
     }
     if (!tools.isEmpty())

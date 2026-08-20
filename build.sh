@@ -65,11 +65,15 @@ if [[ "$OS" == "Darwin" ]]; then
 
     case "$TARGET" in
         "OSX")
-            QT_CMAKE=$(find "$QT_PATH" -name "qt-cmake" -path "*/macos/*" | head -1)
+            # [barista-fork] Pick the NEWEST installed Qt (sort -V), not the first found — multiple versions can
+            # coexist (e.g. 6.11.1 + 6.11.2) and `head -1` grabs an arbitrary/older one, breaking the qmlcache
+            # gate that tracks the current Qt's output naming.
+            QT_CMAKE=$(find "$QT_PATH" -name "qt-cmake" -path "*/macos/*" | sort -V | tail -1)
             BUILD_DIR="build/Qt_6_10_1_for_macOS_$BUILD_TYPE"
             ;;
         "ANDROID")
-            QT_CMAKE=$(find "$QT_PATH" -name "qt-cmake" -path "*/android_arm64_v8a/*" | head -1)
+            # [barista-fork] Newest Qt (see OSX note).
+            QT_CMAKE=$(find "$QT_PATH" -name "qt-cmake" -path "*/android_arm64_v8a/*" | sort -V | tail -1)
             BUILD_DIR="build/Qt_6_10_1_for_Android_arm64_v8a_$BUILD_TYPE"
             
             # Android SDK/NDK detection

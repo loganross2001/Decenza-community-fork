@@ -17,10 +17,10 @@ Tests are **auto-enabled in Debug builds** (single-config generators like Ninja/
 
 ```bash
 # Debug build — tests included automatically
-cmake -G Ninja -DCMAKE_PREFIX_PATH=~/Qt/6.11.1/macos -DCMAKE_BUILD_TYPE=Debug ..
+cmake -G Ninja -DCMAKE_PREFIX_PATH=~/Qt/6.11.2/macos -DCMAKE_BUILD_TYPE=Debug ..
 
 # Release build — tests off by default, opt-in with:
-cmake -DBUILD_TESTS=ON -G Ninja -DCMAKE_PREFIX_PATH=~/Qt/6.11.1/macos -DCMAKE_BUILD_TYPE=Release ..
+cmake -DBUILD_TESTS=ON -G Ninja -DCMAKE_PREFIX_PATH=~/Qt/6.11.2/macos -DCMAKE_BUILD_TYPE=Release ..
 
 # Run all tests — in parallel (the suite is parallel-safe; see below)
 ctest --output-on-failure -j$(nproc) --repeat until-pass:3   # macOS: -j$(sysctl -n hw.ncpu)
@@ -51,7 +51,7 @@ Debug builds instrument automatically (see below). To run an explicit instrument
 ```bash
 # Separate build dir — sanitized objects don't mix with your normal build
 mkdir build-ubsan && cd build-ubsan
-cmake -G Ninja -DCMAKE_PREFIX_PATH=~/Qt/6.11.1/macos -DCMAKE_BUILD_TYPE=Release \
+cmake -G Ninja -DCMAKE_PREFIX_PATH=~/Qt/6.11.2/macos -DCMAKE_BUILD_TYPE=Release \
       -DBUILD_TESTS=ON -DENABLE_UBSAN=ON ..
 ninja
 
@@ -72,7 +72,7 @@ $ ASAN_OPTIONS=detect_leaks=1 ./tests/tst_mcptools_write
 
 The runtime refuses the option; there is no flag that turns it on. On macOS, ASan covers use-after-free, heap-buffer-overflow, stack-use-after-return and double-free — a leak is invisible to it. So "84/84 passed under ASan" on a Mac means *no memory errors*, never *no leaks*.
 
-The nightly Linux ASan job (`ASAN_OPTIONS=detect_leaks=1`) is the only place leaks are caught. Its first run found two that the local suite had been passing over: `tst_decentscalewifi` (131,068 bytes / 1,372 allocations) and `tst_mcptools_write` (6,540 bytes / 70 allocations), byte-identical across all three retry attempts.
+The nightly Linux ASan job (`ASAN_OPTIONS=detect_leaks=1`) is the only place leaks are caught. Its first run found two that the local suite had been passing over: `tst_decentscalewifi` (131,068 bytes / 1,372 allocations) and `tst_mcptools_write` (6,540 bytes / 70 allocations), byte-identical across all three retry attempts. It also carries leak suppressions, in `tests/lsan-suppressions.txt`, which states the evidence each entry must carry, what it costs, and when it comes out.
 
 To chase a leak on macOS, use the platform tools instead: `leaks <pid>`, or `MallocStackLogging=1` for allocation stacks.
 

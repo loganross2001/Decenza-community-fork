@@ -31,7 +31,10 @@ name: Nightly sanitizers
 #
 # Expect the first ASan runs to surface leaks at exit; LeakSanitizer is on by
 # default on Linux and Qt/QML exit paths are noisy. Those are findings to fix or
-# file, never to silence for a green night.
+# file, never to silence for a green night. The one exception on record, and the
+# bar it had to clear, live in tests/lsan-suppressions.txt -- that file carries
+# the evidence, the cost and the removal criterion, and this comment carries no
+# copy of them so the two cannot drift apart.
 
 on:
   schedule:
@@ -126,7 +129,7 @@ jobs:
       - name: Install Qt
         uses: jurplel/install-qt-action@v4
         with:
-          version: '6.11.1'
+          version: '6.11.2'
           target: 'desktop'
           arch: 'linux_gcc_64'
           modules: 'qtquick3d qtshadertools qtgraphs qtconnectivity qtmultimedia qtpositioning qtspeech qtwebsockets qtserialport qtimageformats qtcanvaspainter'
@@ -298,23 +301,45 @@ jobs:
         with:
           key: ${{ env.CACHE_KEY }}
           use_cache: ${{ steps.cachefit.outputs.use_cache }}
-          # 600M kept this permanently at 100% full (measured 2026-07-29: 0.6/0.6 GB,
-          # 869 cacheable calls, only 56.62% hit rate) — too small for ~870 sanitizer-
-          # instrumented compilation units, which run well past normal object size.
+          # Sized to hold ONE full build, with the ceiling set by this job's own
+          # yield threshold above (CACHE_HEADROOM_MIN_GB=2), not by the 10 GB cap.
           #
-          # 800M per leg (ASan + UBSan can't share — see the matrix comment above),
-          # not more: this job's OWN yield threshold above (CACHE_HEADROOM_MIN_GB=2)
-          # is the real constraint, not the 10 GB cap. Measured 2026-07-30: repo at
-          # 7.15/10 GB with the two sanitizer entries at their old ~0.6G each
-          # (1.07G combined) — so non-sanitizer usage is ~6.1G, leaving only ~1.9G of
-          # headroom above the 2G yield floor for BOTH legs combined. At 1.5G/leg
-          # (2.8G combined) or even 1G/leg (2.0G combined) that headroom goes
-          # negative and the very first night both caches fill up, the yield fires,
-          # and it deletes what it's holding to hand the space back — self-defeating.
-          # 800M/leg (1.6G combined) leaves ~300M of real margin instead. Re-check
-          # this arithmetic if CACHE_HEADROOM_MIN_GB or the other caches' baseline
-          # footprint changes.
-          max-size: 800M
+          # History, because the number has moved twice and each move had a
+          # different cause. 600M kept this permanently full (2026-07-29: 0.6/0.6
+          # GB, 56.62% hit rate). 800M was then chosen against a repo sitting at
+          # 7.15/10 GB, which left only ~1.9G above the yield floor for both legs.
+          #
+          # 800M was sized while a PCH was still on, when only ~10% of compiles
+          # were cacheable at all. #1829 turned the PCH off and the cacheable pool
+          # went 84/875 to 878/878, so the working set roughly decupled and 800M
+          # stopped fitting a single build: run 32185501571 ended at 0.8/0.8 GB
+          # (100.4% — it evicted DURING the run) with 502 hits / 376 misses.
+          #
+          # 1.2G/leg, measured 2026-08-18 after deleting a stale
+          # gradle-android-qt6.11.1 entry the 6.11.2 upgrade orphaned (0.36 GB,
+          # unreachable — the workflow keys on a qt6.11.2- prefix):
+          #
+          #   repo total 6.26/10 GB, so 3.74 GB free, 1.74 GB above the floor
+          #   the two sanitizer entries are 1.48 GB of that (0.74 GB each: an
+          #     0.8 GB ccache dir stores as a 0.74 GB entry, since ccache already
+          #     compresses and the archive barely shrinks)
+          #   at 1.2G/leg they become ~2.23 GB -> 7.01 GB total, 2.99 GB free,
+          #     ~1.0 GB still above the floor
+          #
+          # A full build is ~878 objects at ~1.08 MB each (run 32176361096 stored
+          # 742 objects to fill 0.8 GB), so ~0.95 GB — 1.2G fits it with ~26% to
+          # spare. 1.5G/leg would also clear the floor now (2.43 GB free) but is
+          # not taken: the margin is shared with every other cached leg, and the
+          # macOS ccache alone is already 1.21 GB and subject to the same
+          # PCH-off growth this job just went through.
+          #
+          # This does NOT eliminate eviction across many commits, which is normal
+          # and what LRU is for. It removes the pathological case where a single
+          # build cannot fit in its own cache.
+          #
+          # Re-check if CACHE_HEADROOM_MIN_GB changes, if another leg's cache
+          # grows, or if the object count moves materially.
+          max-size: 1200M
 
       # Hash on file CONTENT rather than mtime, so a fresh checkout (every run
       # here) still hits. Mirrors linux-release.yml.
@@ -327,8 +352,18 @@ jobs:
         run: |
           mkdir -p build
           cd build
+          # PCH off: a compile that consumes a PCH is uncacheable, so leaving it
+          # on made ccache miss ~90% of this leg's compiles. See PR #1738.
+          #
+          # This leg was omitted when #1738 turned the PCH off on the four legs
+          # that carry a warm ccache, because it predates that change (#1560).
+          # The cost was invisible: the cache restored and reported a healthy
+          # 83% hit rate, on the 9.6% of calls that were cacheable at all --
+          # measured on run 31996391080, where Build was 1792 s of a 1913 s job
+          # while the tests it exists to run took 59 s.
           $QT_ROOT_DIR/bin/qt-cmake .. -G Ninja \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DDECENZA_ENABLE_PCH=OFF \
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
@@ -360,11 +395,6 @@ jobs:
           cd build
           ninja -j$(nproc) build_tests
 
-      # Both option sets are exported unconditionally; each sanitizer reads only
-      # its own variable, so the inactive one is inert. halt_on_error matters:
-      # UBSan's default is report-and-continue, so without it a run can print
-      # undefined behaviour and still exit 0. (-fno-sanitize-recover=all in
-      # CMakeLists.txt already forces this; the variable is belt-and-braces.)
       # Prove the compiler cache was actually WIRED UP, not merely installed.
       #
       # This exists because it silently was not. The ccache step was added, went
@@ -429,18 +459,59 @@ jobs:
             echo "::error::qmllint_check target absent — qmllint was not found next to Qt's bin/ at configure time, so the QML diagnostics gate did NOT run."
             exit 1
           fi
-          # QMLLINT_SKIP_UNLINTABLE defaults ON, which is what CI needs: released
-          # qmllint 6.11.1 is OOM-killed on qml/components/layout/items/CustomItem.qml
-          # after ~10 minutes at a 313 GB footprint. The script prints what it skipped
-          # and refuses to update the baseline from a partial run.
+          # One mode, whole tree. The released qmllint used to be OOM-killed on
+          # qml/components/layout/items/CustomItem.qml, so CI ran with a skip flag and
+          # checked 221 of 222 files; Qt 6.11.2 fixes that (Gerrit 757430) and the skip
+          # mechanism was deleted with the upgrade. The gate prints the analysed count
+          # on the same line as its verdict — read it.
           ninja qmllint_check
 
       - name: Run tests under sanitizer
         env:
+          # All three option sets are exported unconditionally; each sanitizer
+          # reads only its own variables, so the inactive ones are inert.
+          # halt_on_error matters: UBSan's default is report-and-continue, so
+          # without it a run can print undefined behaviour and still exit 0.
+          # (-fno-sanitize-recover=all in CMakeLists.txt already forces this;
+          # the variable is belt-and-braces.)
           QT_QPA_PLATFORM: offscreen
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
           ASAN_OPTIONS: print_stacktrace=1:detect_leaks=1
+          # Leak suppressions live in LSAN_OPTIONS, not ASAN_OPTIONS -- putting
+          # `suppressions=` on the latter silently does nothing for leaks.
+          #
+          # print_suppressions=1 is explicit rather than functional: it already
+          # defaults to true in sanitizer_common. It does NOT by itself make a
+          # matched suppression visible here, because `ctest --output-on-failure`
+          # below prints a test's output only when that test FAILS -- and a
+          # successfully suppressed leak is exactly the case where it passes. The
+          # Summarise step reads Testing/Temporary/LastTest.log for that reason;
+          # ctest writes every test's output there regardless. Do NOT reach for
+          # log_path= instead: it redirects ALL sanitizer output and would move
+          # the ERROR: lines out from under the finding greps below.
+          LSAN_OPTIONS: suppressions=${{ github.workspace }}/tests/lsan-suppressions.txt:print_suppressions=1
         run: |
+          # A mechanism that cannot assert its own effect is the failure mode
+          # this workflow exists to avoid -- see the ccache and qmllint_check
+          # gates above.
+          #
+          # This check is load-bearing, not belt-and-braces. LSan reads the
+          # suppressions file LAZILY -- only when it has a leak to check -- so a
+          # wrong path is SILENT on every clean night and only speaks up on the
+          # rare night a leak occurs, where it reads as the suppression having
+          # failed rather than as a bad path. Measured on ASan/glibc 2.39:
+          #
+          #   leaking binary,     bad path -> "failed to read suppressions
+          #                                    file '<path>'", exit 1
+          #   non-leaking binary, bad path -> no output, exit 0
+          #
+          # An earlier version of this comment claimed LSan Die()s at startup so
+          # a bad path could not go unnoticed. That is wrong, and it is exactly
+          # the assumption that would have justified deleting this check.
+          test -f "$GITHUB_WORKSPACE/tests/lsan-suppressions.txt" || {
+            echo "::error::LSan suppressions file missing at the path LSAN_OPTIONS names"
+            exit 1
+          }
           cd build
           set -o pipefail
           # --repeat until-pass:3 absorbs the rare timing flake in the two
@@ -476,6 +547,18 @@ jobs:
               echo '```'
             else
               echo "No sanitizer findings."
+            fi
+            # A used suppression is a subtraction from this night's signal, so
+            # say so rather than letting it pass as an unqualified clean run. Not
+            # a failure: the entry is there on purpose. LastTest.log, not $LOG --
+            # see the LSAN_OPTIONS comment for why ctest.log cannot carry this.
+            SUPP=build/Testing/Temporary/LastTest.log
+            if [ -f "$SUPP" ] && grep -q "Suppressions used:" "$SUPP"; then
+              echo ""
+              echo "**Leak suppression(s) matched** (see tests/lsan-suppressions.txt):"
+              echo '```'
+              grep -A3 "Suppressions used:" "$SUPP" | grep -vE '^--$' | sort -u | head -20
+              echo '```'
             fi
             grep -E "^[0-9]+% tests passed" "$LOG" 2>/dev/null || true
           } >> "$GITHUB_STEP_SUMMARY"

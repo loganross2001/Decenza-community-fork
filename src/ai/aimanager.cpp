@@ -2243,6 +2243,37 @@ void AIManager::requestCoachPhrasebook(const QString& requestToken, const QStrin
     provider->analyze(systemPrompt, contextBlock);
 }
 
+// [barista-fork] Step 6: cross-session rolling summary. A separate one-shot call at session close; best-effort,
+// silently skipped if a turn is in flight (never queued behind, never blocks re-engagement more than momentarily).
+void AIManager::requestSessionSummary(const QString& userToken, const QString& conversationText)
+{
+    if (m_analyzing || conversationText.trimmed().isEmpty())
+        return;   // best-effort: don't fight a live turn, don't summarize nothing
+    AIProvider* provider = currentProvider();
+    if (!provider || !isConfigured())
+        return;
+
+    const QString systemPrompt = QStringLiteral(
+        "You summarize a conversation between a user and their friendly espresso barista, to remember useful "
+        "context for NEXT time. In ONE or TWO short sentences, capture only DURABLE, non-obvious things worth "
+        "remembering: the user's stated preferences, tastes, plans, or personal context (e.g. 'prefers less "
+        "fruity coffees', 'hosting a dinner Saturday', 'still learning the LRv3 profile'). Do NOT include shot "
+        "numbers, grind settings, ratios, or dial-in data — those are stored separately. Write it as a plain note "
+        "to yourself, no preamble. If there is nothing durable worth remembering, reply with exactly: NONE");
+
+    m_analyzing = true;
+    m_isConversationRequest = false;
+    m_isBagExtractionRequest = false;
+    m_isCoachPhrasebookRequest = false;
+    m_isSessionSummaryRequest = true;
+    m_sessionSummaryUser = userToken;
+    emit analyzingChanged();
+    m_lastSystemPrompt = systemPrompt;
+    m_lastUserPrompt = QStringLiteral("[session summary]");
+    logPrompt(selectedProvider(), systemPrompt, m_lastUserPrompt);
+    provider->analyze(systemPrompt, conversationText);
+}
+
 void AIManager::extractCoffeeBagDetails(const QString& requestToken, const QString& pageText,
                                         const QString& kind)
 {
@@ -2472,6 +2503,7 @@ void AIManager::analyzeConversation(const QString& systemPrompt, const QJsonArra
     m_isConversationRequest = true;
     m_isBagExtractionRequest = false;
     m_isCoachPhrasebookRequest = false;   // [barista-fork]
+    m_isSessionSummaryRequest = false;    // [barista-fork] Step 6
     // [barista-fork] Closed-loop safety net (issue #1053 regression): clear any stale tool-applied structuredNext
     // at the single choke point every conversation turn passes through, so a prior turn's apply_dial_change capture
     // (e.g. one whose turn failed, or that was superseded) can NEVER leak into this turn's finalization. Unconditional
@@ -2538,7 +2570,12 @@ void AIManager::onAnalysisComplete(const QString& response)
     emit analyzingChanged();
 
     // Emit to the appropriate listener based on request type
-    if (m_isCoachPhrasebookRequest) {   // [barista-fork]
+    if (m_isSessionSummaryRequest) {   // [barista-fork] Step 6
+        m_isSessionSummaryRequest = false;
+        const QString user = m_sessionSummaryUser;
+        m_sessionSummaryUser.clear();
+        emit sessionSummaryReady(user, response);
+    } else if (m_isCoachPhrasebookRequest) {   // [barista-fork]
         m_isCoachPhrasebookRequest = false;
         const QString token = m_coachPhrasebookToken;
         m_coachPhrasebookToken.clear();
@@ -2580,7 +2617,10 @@ void AIManager::onAnalysisFailed(const QString& error)
     emit analyzingChanged();
 
     // Emit to the appropriate listener based on request type
-    if (m_isCoachPhrasebookRequest) {   // [barista-fork]
+    if (m_isSessionSummaryRequest) {   // [barista-fork] Step 6 — a failed summary is best-effort; drop silently.
+        m_isSessionSummaryRequest = false;
+        m_sessionSummaryUser.clear();
+    } else if (m_isCoachPhrasebookRequest) {   // [barista-fork]
         m_isCoachPhrasebookRequest = false;
         const QString token = m_coachPhrasebookToken;
         m_coachPhrasebookToken.clear();

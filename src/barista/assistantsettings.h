@@ -189,6 +189,10 @@ public:
     void setCameraFacing(const QString& facing);
     bool bagCameraPausesMic() const;              // [barista-fork] pause the mic while the bag camera is open (default off)
     void setBagCameraPausesMic(bool on);
+    // [barista-fork] Step 6: the rolling cross-session summary (1-2 sentences of durable context), keyed per user
+    // so a multi-user home doesn't mix them. Seeded into next session's context; regenerated at each session close.
+    Q_INVOKABLE QString sessionSummary(const QString& user) const;
+    Q_INVOKABLE void setSessionSummary(const QString& user, const QString& text);
 
     bool voiceIdProbe() const;                    // opt-in concurrent-capture test (default off)
     void setVoiceIdProbe(bool on);

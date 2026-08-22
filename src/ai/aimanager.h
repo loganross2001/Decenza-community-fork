@@ -326,6 +326,11 @@ public:
     // per cue id + a pre-shot gameplan (the live coaches' no-canned-strings rule). Own token + signals — never
     // routed to the advisor/conversation. See CoachPhrasebook.
     Q_INVOKABLE void requestCoachPhrasebook(const QString& requestToken, const QString& contextBlock);
+    // [barista-fork] Cross-session rolling summary (turn-cost architecture, Step 6). At session close the barista
+    // asks the model for 1-2 sentences of DURABLE context worth remembering next time (preferences/plans, NOT
+    // shot data). Runs as a separate one-shot call (own flag/token, never the conversation path); the result
+    // returns via sessionSummaryReady and QML persists it per user. Own token = the active user to key it by.
+    Q_INVOKABLE void requestSessionSummary(const QString& userToken, const QString& conversationText);
     // Response JSON -> whitelisted blob-vocabulary fields (coffee: origin,
     // region, farm, producer, variety, elevation, process, harvest,
     // roastLevel, tastingNotes; tea adds teaType, garden, cultivar, flush,
@@ -451,6 +456,7 @@ signals:
     void bagDetailsExtractionFailed(const QString& requestToken, const QString& error);
     // [barista-fork] Coach-phrasebook results (own signals; never the advisor path).
     void phrasebookReady(const QString& requestToken, const QString& json);
+    void sessionSummaryReady(const QString& userToken, const QString& summary);   // [barista-fork] Step 6
     void phrasebookFailed(const QString& requestToken, const QString& error);
     void testResultChanged();
     void ollamaModelsChanged();
@@ -599,6 +605,8 @@ private:
     QString m_bagExtractionToken;
     bool m_isCoachPhrasebookRequest = false;   // [barista-fork]
     QString m_coachPhrasebookToken;            // [barista-fork]
+    bool m_isSessionSummaryRequest = false;    // [barista-fork] Step 6 rolling summary
+    QString m_sessionSummaryUser;              // [barista-fork] the user this summary is keyed to
     // [barista-fork] Image staged for the NEXT conversation turn (add-a-bean-from-a-photo). Consumed+cleared in
     // analyzeConversation, so it rides exactly one turn and never enters the persisted message history.
     QByteArray m_pendingImageData;

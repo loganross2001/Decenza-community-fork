@@ -641,6 +641,14 @@ Item {
         if (root._voice) root._voice.stop()
         silenceTimer.stop()
         root._cancelSlowOpWatch()   // [barista-fork] Part B: session torn down → stop the 5s cue timer + clear cue
+        // [barista-fork] Step 6 rolling summary: on close, ask the model for 1-2 sentences of durable context
+        // (preferences/plans, not shot data) so the next session seeds from it. BEFORE the state clears below so
+        // the history is intact. Best-effort + async — the session is ending, so there's no latency to the user;
+        // only for a session with real back-and-forth (skips a greeting-and-goodbye). AIManager skips if busy.
+        if (root._sessionBegun && root._conv && root._conv.messageCount >= 4
+                && typeof MainController !== "undefined" && MainController.aiManager
+                && typeof MainController.aiManager.requestSessionSummary === "function")
+            MainController.aiManager.requestSessionSummary(root._activeUserName || "", root._conv.getConversationText())
         root._spokeThisTurn = false
         root._pendingNext = null
         root._awaitConfirm = false
@@ -1365,8 +1373,14 @@ Item {
         // question never loses its context; query_shots stays as the escape hatch if a casual-looking turn needed
         // data. The camera/web modules stay gated as before. See _scopedSystemPrompt (wired at onTurnRequested).
         var _beanName = ((root._sessBrand || "") + " " + (root._sessType || "")).trim()
+        // [barista-fork] Step 6: seed durable cross-session context (preferences/plans from last time). It's COLOR
+        // to weave in naturally, never current data — the live setup + dial-in data below are the truth.
+        var _priorSummary = (typeof Barista !== "undefined" && Barista.settings)
+                            ? Barista.settings.sessionSummary(root._activeUserName || "") : ""
         var _anchor = "currentSetup:\n  bean: " + (_beanName.length ? _beanName : "not set")
                     + "\n  profile: " + (root._sessProf && root._sessProf.length ? root._sessProf : "not set")
+                    + (_priorSummary.length ? "\n  fromLastTime (context to remember, weave in only when natural —"
+                        + " NOT current data): " + _priorSummary : "")
                     + "\n  (When the question is about a shot, taste, grind or the plan, the full recent-shot data"
                     + " and tasting history are included below; if they're not and you need a number, call"
                     + " query_shots — never invent one.)\n"
@@ -1671,6 +1685,18 @@ Item {
                     + (includeDialin ? "dialin " : "") + (active.profiles ? "profiles " : "")
                     + (active.camera ? "camera " : "") + (active.web ? "web" : ""))
         return out
+    }
+
+    // [barista-fork] Step 6: persist the rolling summary the model produced at session close, keyed per user.
+    // "NONE" (or empty) = nothing durable this session — leave the prior summary in place rather than wiping it.
+    Connections {
+        target: (typeof MainController !== "undefined" && MainController.aiManager) ? MainController.aiManager : null
+        ignoreUnknownSignals: true
+        function onSessionSummaryReady(user, summary) {
+            var s = (summary || "").trim()
+            if (s.length > 0 && s.toUpperCase() !== "NONE" && typeof Barista !== "undefined" && Barista.settings)
+                Barista.settings.setSessionSummary(user, s)
+        }
     }
 
     Connections {

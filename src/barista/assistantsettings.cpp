@@ -642,6 +642,23 @@ void AssistantSettings::setBagCameraPausesMic(bool on) {
     emit bagCameraPausesMicChanged();
 }
 
+// [barista-fork] Step 6 rolling summary — keyed per user. Sanitize the name into a flat key (a "/" would nest a
+// QSettings group); empty user → a shared "_" slot. Non-reactive (read at session start, written at close).
+static QString sessionSummaryKey(const QString& user) {
+    QString u = user.trimmed();
+    u.replace(QRegularExpression(QStringLiteral("[^A-Za-z0-9]+")), QStringLiteral("_"));
+    if (u.isEmpty()) u = QStringLiteral("_");
+    return QStringLiteral("barista/sessionSummary/") + u;
+}
+
+QString AssistantSettings::sessionSummary(const QString& user) const {
+    return m_settings.value(sessionSummaryKey(user)).toString();
+}
+
+void AssistantSettings::setSessionSummary(const QString& user, const QString& text) {
+    m_settings.setValue(sessionSummaryKey(user), text.trimmed());
+}
+
 // [barista-fork] Voice-ID Increment 1: opt-in concurrent-capture test. Default OFF so normal users are never
 // affected; when ON, the overlay fires one short parallel capture per turn and logs whether it worked.
 bool AssistantSettings::voiceIdProbe() const {

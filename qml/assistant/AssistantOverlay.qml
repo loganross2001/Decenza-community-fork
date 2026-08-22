@@ -997,7 +997,7 @@ Item {
         // substrate under the DIALING FRAMEWORK above: the user talks in human terms, these tools do the science,
         // and you speak the answer back plainly. The user does not want technicalities — they want to make good
         // coffee — so the jargon and citations stay YOUR scaffolding, not the conversation.
-        persona += "\nCOFFEE BRAIN (grounded reasoning tools) — you have a coffee-science knowledge base built from "
+        _mods.coffeebrain = "COFFEE BRAIN (grounded reasoning tools) — you have a coffee-science knowledge base built from "
             + "peer-reviewed research and trusted authorities. Reach for it whenever the coffee itself is the topic, "
             + "and PREFER its grounded answer over recall:\n"
             + "  • When the user reports how a shot tasted and wants it better, call recommend_next_shot. It "
@@ -1053,7 +1053,7 @@ Item {
             + "evidence, you may name the source briefly — otherwise keep it to yourself.\n"
 
         // [barista-fork] RECIPES 2.0 (Fable design spec §7 — semantic rules; all user-facing phrasing stays yours).
-        persona += "\nRECIPES: A recipe is a complete drink — a profile, a bean, grind, dose, yield, temperature, and "
+        _mods.recipes = "RECIPES: A recipe is a complete drink — a profile, a bean, grind, dose, yield, temperature, and "
             + "sometimes milk or hot water — activated as ONE unit; it is not a dial-in tweak. The context block's "
             + "[Recipes] section lists the active recipe and recent ones with their ids; only ever reference recipes by "
             + "an id you were given there or from list_recipes/get_active_recipe — never invent or guess one. To USE a "
@@ -1219,7 +1219,7 @@ Item {
         // (tool-capable providers only), so it's never limited to the recent summary in the data block.
         var toolsOn = _supportsTools
         if (toolsOn)
-            persona += "\nYou can look up the user's espresso shots from their FULL history at any time using the "
+            _mods.queryshots = "You can look up the user's espresso shots from their FULL history at any time using the "
                 + "query_shots tool — well beyond the recent summary in the data block. Use it whenever they ask "
                 + "about a specific shot, a total count, or a bean/date range (e.g. \"my best shot on this bean\", "
                 + "\"how many shots did I pull in June\", \"my very first shot\"). Reach for real data instead of "
@@ -1657,6 +1657,12 @@ Item {
         var includeDialin = !!mods.dialin && !casual.test(String(utterance || "").trim().toLowerCase())
         var out = root._coreSystemPrompt.length ? root._coreSystemPrompt : root._primedSystemPrompt
         if (includeDialin) out += "\n" + mods.dialin
+        // Coffee-brain reasoning tools + full-history query instructions ride the same coffee/dialing turns the
+        // dial-in data does; a greeting or a recipe-switch doesn't need them. Recipe semantics ride a
+        // profile/recipe turn. All still declared as tools regardless — only the guidance text is gated.
+        if (includeDialin && mods.coffeebrain) out += "\n" + mods.coffeebrain
+        if (includeDialin && mods.queryshots) out += "\n" + mods.queryshots
+        if (active.profiles && mods.recipes) out += "\n" + mods.recipes
         if (active.profiles && mods.profiles) out += "\n" + mods.profiles
         if (active.camera && mods.camera) out += "\n" + mods.camera
         if (active.web && mods.web) out += "\n" + mods.web

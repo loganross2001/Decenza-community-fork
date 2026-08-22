@@ -357,6 +357,13 @@ Item {
     // [barista-fork] User-initiated model: the context is PRIMED (system prompt assembled) but the Claude
     // session is NOT begun until the user's first real utterance. No synthetic kickoff, no machine-first turn.
     property string _primedSystemPrompt: ""   // the assembled persona+data block, waiting for the first turn
+    // [barista-fork] Per-question request scoping. _coreSystemPrompt = the always-on part (persona + session
+    // context + data block); _promptModules = conditional instruction blocks keyed by name (camera, web) built
+    // once per session; _activeModules = the sticky set switched on by keyword intent this session. A turn sends
+    // CORE + only the active modules, so a greeting doesn't carry camera/web instructions it never needs.
+    property string _coreSystemPrompt: ""
+    property var _promptModules: ({})
+    property var _activeModules: ({})
     property bool _primed: false              // context ready → the first _send() begins the session
     property bool _sessionBegun: false        // beginSession() has fired for this activation (else followUp)
     property string _queuedFirstUtterance: "" // tap-chat-and-talk: words spoken BEFORE context finished
@@ -841,6 +848,11 @@ Item {
                + "NOT emit the block to acknowledge, to restate CURRENT settings unchanged, or in casual chat — only "
                + "when you're proposing a real change.\n")
 
+        // [barista-fork] Per-question scoping: conditional instruction modules (camera, web) are captured here
+        // instead of appended to the always-on persona, then included per turn only when the question calls for
+        // them (see _scopedSystemPrompt). Keeps a "good morning" from carrying camera/web instructions it never
+        // needs. Tools stay declared regardless — only the guidance text is gated — so nothing loses capability.
+        var _mods = {}
         var persona = "You are " + who + ", " + (name.length ? name + "'s" : "the user's")
             + " friend behind the counter of their home espresso bar — a warm, curious person who happens to be a "
             + "great barista.\n"
@@ -1141,7 +1153,7 @@ Item {
         // — open_bag_camera is a client tool and the photo is only useful if the model can actually read images.
         if (_supportsTools && typeof MainController !== "undefined" && MainController.aiManager
                 && MainController.aiManager.currentProviderSupportsVision())
-            persona += "\nYou can READ A COFFEE BAG FROM A PHOTO — YOU open the camera yourself. When the user wants "
+            _mods.camera = "You can READ A COFFEE BAG FROM A PHOTO — YOU open the camera yourself. When the user wants "
                 + "to add a new coffee they have in hand, or asks you to take/scan a photo of a bag ('add this new "
                 + "coffee', 'I got a new bag', 'take a photo of this', 'scan this', 'can you look at this bag') — "
                 + "IMMEDIATELY call open_bag_camera to bring up the camera. Say a quick 'opening the camera…' and "
@@ -1158,7 +1170,7 @@ Item {
         // (_supportsWebSearch); a tool-capable provider WITHOUT it (Gemini) still gets the three fast tools.
         var webOn = !!(root._settings && root._settings.webSearchEnabled) && _supportsTools
         if (_supportsWebSearch && webOn)
-            persona += "\nYou have live web search. AUTOMATICALLY use it for any real-time or factual question "
+            _mods.web = "You have live web search. AUTOMATICALLY use it for any real-time or factual question "
                 + "you don't already know — current events, 'what is X', 'who is Y', a bean or roaster's tasting "
                 + "notes, roast dates, brewing guides, gear — instead of guessing or saying you can't check. Do "
                 + "NOT ask permission first ('want me to look that up?'); just search, then answer briefly from "
@@ -1187,7 +1199,7 @@ Item {
         else if (webOn)
             // Tool-capable provider without general web search (e.g. Gemini): it still has the three FAST keyless
             // tools, but NOT general web search — say so honestly so it never claims to have looked something up.
-            persona += "\nFor three common real-time questions you have FAST, dedicated tools — use them when the "
+            _mods.web = "For three common real-time questions you have FAST, dedicated tools — use them when the "
                 + "user asks: get_weather for the CURRENT WEATHER of a city (extract the city; omit it for 'weather "
                 + "around here' and it uses the saved home location), get_stock_quote for a STOCK/ETF PRICE (you "
                 + "supply the ticker symbol — map a company name yourself), and get_local_news for NEWS / HEADLINES "
@@ -1345,7 +1357,14 @@ Item {
         // PRIME AND WAIT: assemble the full system prompt but DO NOT begin the Claude session. The user
         // speaks first — the first _send() calls beginSession(primed, userText). No synthetic kickoff, no
         // machine-first turn. The barista is present-but-quiet until talked to.
-        root._primedSystemPrompt = persona + "\n\n" + sessionCtx + "\n" + block
+        // [barista-fork] Per-question scoping: keep the always-on CORE (persona + session context + data block)
+        // separate from the conditional modules, so each turn sends CORE + only the modules the question needs
+        // (see _scopedSystemPrompt, wired at onTurnRequested). _primedSystemPrompt stays = CORE as the base/first
+        // turn; the dispatch overrides it per turn. Modules reset per session (fresh sticky set).
+        root._coreSystemPrompt = persona + "\n\n" + sessionCtx + "\n" + block
+        root._promptModules = _mods
+        root._activeModules = ({})
+        root._primedSystemPrompt = root._coreSystemPrompt
         root._primed = true
         root._sessionBegun = false
         root._thinking = false   // nothing is thinking — we're waiting on the user, not the model
@@ -1582,6 +1601,30 @@ Item {
     // [barista-fork] The controller's OUTPUT seams: it emits these; the overlay drives the (unchanged) AI
     // dispatch + context build + collapse in response. This keeps AI plumbing in QML for the migration while the
     // controller owns the state machine (the buggy part). Later phases move dispatch into C++ too.
+    // [barista-fork] Build this turn's system prompt: the always-on CORE plus only the conditional modules the
+    // question calls for (camera when adding a bean by photo, web for a real-time lookup). Sticky within a
+    // session — once a module switches on it stays on, so a follow-up ("now update it") keeps its context, and a
+    // provider never sees history that references a capability the prompt dropped. Keyword-routed on the utterance;
+    // the underlying tools stay declared regardless, so a missed keyword degrades emphasis, never capability.
+    function _scopedSystemPrompt(utterance) {
+        var mods = root._promptModules || ({})
+        var active = root._activeModules || ({})
+        var u = " " + String(utterance || "").toLowerCase() + " "
+        if (mods.camera && /\b(add|adding|new|got|have|scan|scann|photo|picture|pic|snap|log)\b/.test(u)
+                        && /\b(coffee|bean|beans|bag|roast|this)\b/.test(u))
+            active.camera = true
+        if (mods.web && /\b(weather|forecast|rain|snow|temperature|degrees|news|headline|headlines|stock|shares?|ticker|price|market|who\s+is|what\s+is|current|latest|today'?s|look\s*up|search|google)\b/.test(u))
+            active.web = true
+        root._activeModules = active
+        var out = root._coreSystemPrompt.length ? root._coreSystemPrompt : root._primedSystemPrompt
+        if (active.camera && mods.camera) out += "\n" + mods.camera
+        if (active.web && mods.web) out += "\n" + mods.web
+        console.log("[barista] scoped prompt chars=" + out.length
+                    + " (core=" + root._coreSystemPrompt.length + ") active="
+                    + (active.camera ? "camera " : "") + (active.web ? "web" : ""))
+        return out
+    }
+
     Connections {
         target: (typeof Barista !== "undefined") ? Barista.conversation : null
         ignoreUnknownSignals: true
@@ -1590,8 +1633,11 @@ Item {
         }
         function onTurnRequested(utterance) {   // Listening→Thinking produced a user turn → dispatch it
             if (!root._nc || !root._conv) return
-            if (!root._sessionBegun) { root._conv.beginSession(root._primedSystemPrompt, utterance); root._sessionBegun = true }
-            else root._conv.followUp(utterance)
+            // Scope THIS turn's prompt to the question (see _scopedSystemPrompt). setSessionSystemPrompt updates
+            // the prompt without wiping history; beginSession takes it directly on the first turn.
+            var sp = root._scopedSystemPrompt(utterance)
+            if (!root._sessionBegun) { root._conv.beginSession(sp, utterance); root._sessionBegun = true }
+            else { root._conv.setSessionSystemPrompt(sp); root._conv.followUp(utterance) }
         }
         function onContinuationRequested() {   // model stalled ("let me check…") with no answer → nudge it to actually answer
             if (!root._nc || !root._conv || !root._sessionBegun) return

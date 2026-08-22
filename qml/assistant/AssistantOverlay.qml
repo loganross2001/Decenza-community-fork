@@ -1371,6 +1371,21 @@ Item {
                     + " and tasting history are included below; if they're not and you need a number, call"
                     + " query_shots — never invent one.)\n"
         _mods.dialin = block
+        // [barista-fork] turn-cost / tool-round minimization: on a profile/recipe turn, make the app's profile
+        // titles RESIDENT so the model resolves a spoken name ("Gentle and sweet") itself and goes straight to
+        // update_recipe/activate_recipe — instead of spending round-trips on list_profiles (which Gemini also
+        // re-called redundantly, blowing the tool-round budget). Gated by profile/recipe intent (see
+        // _scopedSystemPrompt), so it costs nothing on other turns.
+        if (typeof ProfileManager !== "undefined" && ProfileManager.installedProfileTitles) {
+            var _titles = ProfileManager.installedProfileTitles
+            if (_titles && _titles.length > 0) {
+                var _shown = _titles.slice(0, 40).join(", ")
+                _mods.profiles = "availableProfiles (the EXACT profile titles the app has installed — resolve a "
+                    + "spoken name to one of these yourself and pass it straight to the recipe/profile tools; you do "
+                    + "NOT need to call list_profiles to discover them): " + _shown
+                    + (_titles.length > 40 ? " …and " + (_titles.length - 40) + " more (call list_profiles for the rest)." : ".")
+            }
+        }
         root._coreSystemPrompt = persona + "\n\n" + sessionCtx + "\n" + _anchor
         root._promptModules = _mods
         root._activeModules = ({})
@@ -1628,6 +1643,11 @@ Item {
             active.camera = true
         if (mods.web && /\b(weather|forecast|rain|snow|temperature|degrees|news|headline|headlines|stock|shares?|ticker|price|market|who\s+is|what\s+is|current|latest|today'?s|look\s*up|search|google)\b/.test(u))
             active.web = true
+        // Profile/recipe turn → make the installed profile titles resident so the model skips list_profiles.
+        // Sticky (a switch is a multi-turn "yes please" flow). Kept broad: any mention of a profile/recipe or a
+        // switch/change of what's running.
+        if (mods.profiles && /\b(profile|profiles|recipe|recipes|switch|activate|change (to|the|it|profile|recipe)|which (profile|recipe|one)|use (the|a|profile)|run the)\b/.test(u))
+            active.profiles = true
         root._activeModules = active
         // The ~20k dial-in data block rides EVERY turn except a clearly-casual one — a whole-utterance
         // pleasantry (greeting / thanks / bye / "how are you" / "cool") needs no shot history. Conservative and
@@ -1637,11 +1657,13 @@ Item {
         var includeDialin = !!mods.dialin && !casual.test(String(utterance || "").trim().toLowerCase())
         var out = root._coreSystemPrompt.length ? root._coreSystemPrompt : root._primedSystemPrompt
         if (includeDialin) out += "\n" + mods.dialin
+        if (active.profiles && mods.profiles) out += "\n" + mods.profiles
         if (active.camera && mods.camera) out += "\n" + mods.camera
         if (active.web && mods.web) out += "\n" + mods.web
         console.log("[barista] scoped prompt chars=" + out.length
                     + " (core=" + root._coreSystemPrompt.length + ") active="
-                    + (includeDialin ? "dialin " : "") + (active.camera ? "camera " : "") + (active.web ? "web" : ""))
+                    + (includeDialin ? "dialin " : "") + (active.profiles ? "profiles " : "")
+                    + (active.camera ? "camera " : "") + (active.web ? "web" : ""))
         return out
     }
 

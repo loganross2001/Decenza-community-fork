@@ -18,6 +18,7 @@
 #include <QPair>
 
 #include "mcp/mcpserver.h"
+#include "mcp/mcpratewindow.h"
 #include "version.h"
 #include "mcp/mcpsession.h"
 #include "mcp/mcptoolregistry.h"
@@ -66,7 +67,7 @@ private:
     struct HttpResponse {
         int statusCode = 0;
         QJsonObject jsonBody;        // empty when body isn't JSON or is missing
-        QJsonArray jsonArrayBody;    // populated instead when the body is a JSON array (batch)
+        QJsonArray jsonArrayBody;    // populated instead when the response body is a JSON array
         QString rawBody;
         QString sessionId;
         QString protocolVersion;     // value of MCP-Protocol-Version response header
@@ -75,34 +76,46 @@ private:
 
     // Fire one HTTP request at the server. Extra request headers (Origin,
     // MCP-Protocol-Version, etc.) are appended raw — caller controls casing.
-    static HttpResponse sendHttp(McpServer& server,
-                                 const QByteArray& method,
-                                 const QByteArray& body,
-                                 const QString& sessionId = QString(),
-                                 const QList<QPair<QByteArray, QByteArray>>& extraHeaders = {})
+    // A connection the TEST owns, so it stays open after the request returns.
+    //
+    // sendHttp() keeps its QTcpServer and client socket as stack locals, so the
+    // connection dies the moment it returns. That is fine for a request/response
+    // exchange and useless for a DEFERRED one: an in-app confirmation is
+    // precisely "the client is still waiting on a held response", and with the
+    // socket already gone the server correctly abandons the confirmation before
+    // a test can answer it.
+    //
+    // Nothing needed this until the confirmation gate gained a socket-disconnect
+    // backstop. That the backstop broke five confirmation tests at once is the
+    // harness admitting it had never modelled the connection lifetime those
+    // tests depend on.
+    struct HeldConnection {
+        QTcpServer tcp;
+        QTcpSocket client;
+        QTcpSocket* serverSocket = nullptr;
+
+        bool open()
+        {
+            if (!tcp.listen(QHostAddress::LocalHost)) return false;
+            client.connectToHost(QHostAddress::LocalHost, tcp.serverPort());
+            if (!tcp.waitForNewConnection(1000)) return false;
+            serverSocket = tcp.nextPendingConnection();
+            return serverSocket && client.waitForConnected(1000);
+        }
+
+        void send(McpServer& server, const QByteArray& body, const QString& sessionId = {})
+        {
+            QByteArray headers = "Content-Type: application/json\r\n";
+            if (!sessionId.isEmpty())
+                headers += "Mcp-Session-Id: " + sessionId.toUtf8() + "\r\n";
+            server.handleHttpRequest(serverSocket, "POST", "/mcp", headers, body);
+        }
+    };
+
+    // One parser for both callers — sendHttp and readHeld.
+    static HttpResponse parseHttpResponse(const QByteArray& raw)
     {
         HttpResponse out;
-
-        QTcpServer tcp;
-        tcp.listen(QHostAddress::LocalHost);
-        QTcpSocket client;
-        client.connectToHost(QHostAddress::LocalHost, tcp.serverPort());
-        if (!tcp.waitForNewConnection(1000)) return out;
-        QTcpSocket* serverSocket = tcp.nextPendingConnection();
-        if (!serverSocket) return out;
-        if (!client.waitForConnected(1000)) return out;
-
-        QByteArray headers = "Content-Type: application/json\r\n";
-        if (!sessionId.isEmpty())
-            headers += "Mcp-Session-Id: " + sessionId.toUtf8() + "\r\n";
-        for (const auto& kv : extraHeaders)
-            headers += kv.first + ": " + kv.second + "\r\n";
-
-        server.handleHttpRequest(serverSocket, method, "/mcp", headers, body);
-
-        client.waitForReadyRead(1000);
-        const QByteArray raw = client.readAll();
-
         const qsizetype firstLineEnd = raw.indexOf("\r\n");
         if (firstLineEnd > 0) {
             const QByteArray statusLine = raw.left(firstLineEnd);
@@ -135,6 +148,48 @@ private:
                 out.jsonArrayBody = doc.array();
         }
 
+        return out;
+    }
+
+    // Read whatever a held connection has been sent so far. Parsing is the same
+    // as sendHttp's, so it lives in parseHttpResponse() and neither copy is free
+    // to drift.
+    static HttpResponse readHeld(HeldConnection& conn)
+    {
+        conn.client.waitForReadyRead(1000);
+        return parseHttpResponse(conn.client.readAll());
+    }
+
+    static HttpResponse sendHttp(McpServer& server,
+                                 const QByteArray& method,
+                                 const QByteArray& body,
+                                 const QString& sessionId = QString(),
+                                 const QList<QPair<QByteArray, QByteArray>>& extraHeaders = {},
+                                 const QString& callerLabel = QString())
+    {
+        HttpResponse out;
+
+        QTcpServer tcp;
+        tcp.listen(QHostAddress::LocalHost);
+        QTcpSocket client;
+        client.connectToHost(QHostAddress::LocalHost, tcp.serverPort());
+        if (!tcp.waitForNewConnection(1000)) return out;
+        QTcpSocket* serverSocket = tcp.nextPendingConnection();
+        if (!serverSocket) return out;
+        if (!client.waitForConnected(1000)) return out;
+
+        QByteArray headers = "Content-Type: application/json\r\n";
+        if (!sessionId.isEmpty())
+            headers += "Mcp-Session-Id: " + sessionId.toUtf8() + "\r\n";
+        for (const auto& kv : extraHeaders)
+            headers += kv.first + ": " + kv.second + "\r\n";
+
+        server.handleHttpRequest(serverSocket, method, "/mcp", headers, body,
+                                 /*remote=*/!callerLabel.isEmpty(), callerLabel);
+
+        client.waitForReadyRead(1000);
+        out = parseHttpResponse(client.readAll());
+
         serverSocket->close();
         client.close();
         return out;
@@ -147,6 +202,35 @@ private:
         QJsonObject req;
         req["jsonrpc"] = "2.0";
         req["id"] = id;
+        req["method"] = method;
+        req["params"] = params;
+        return QJsonDocument(req).toJson(QJsonDocument::Compact);
+    }
+
+    // A MODERN-era request body. The discriminator is
+    // `_meta["io.modelcontextprotocol/protocolVersion"]`, which the 2026-07-28
+    // schema makes required on every request and which no legacy revision
+    // defines — `clientCapabilities` is required too, so it is always sent.
+    // `withId = false` builds a notification.
+    static QByteArray modernBody(const QString& method,
+                                 const QJsonObject& args = {},
+                                 int id = 1,
+                                 const QString& version = QStringLiteral("2026-07-28"),
+                                 bool withId = true)
+    {
+        QJsonObject meta;
+        meta["io.modelcontextprotocol/protocolVersion"] = version;
+        meta["io.modelcontextprotocol/clientCapabilities"] = QJsonObject{};
+        meta["io.modelcontextprotocol/clientInfo"] =
+            QJsonObject{{"name", "tst-modern"}, {"version", "1"}};
+
+        QJsonObject params = args;
+        params["_meta"] = meta;
+
+        QJsonObject req;
+        req["jsonrpc"] = "2.0";
+        if (withId)
+            req["id"] = id;
         req["method"] = method;
         req["params"] = params;
         return QJsonDocument(req).toJson(QJsonDocument::Compact);
@@ -185,8 +269,11 @@ private slots:
         QTest::addColumn<QString>("expected");
         QTest::newRow("current")   << "2025-11-25" << "2025-11-25";
         QTest::newRow("prior")     << "2025-06-18" << "2025-06-18";
-        QTest::newRow("twoBack")   << "2025-03-26" << "2025-03-26";
-        QTest::newRow("legacy")    << "2024-11-05" << "2024-11-05";
+        // Dropped revisions take the same path as any other unsupported one:
+        // the server answers with its preferred version. Kept as rows rather
+        // than deleted, so the drop stays asserted rather than merely absent.
+        QTest::newRow("dropped26")  << "2025-03-26" << "2025-11-25";
+        QTest::newRow("dropped24")  << "2024-11-05" << "2025-11-25";
         // Unsupported → server returns its preferred version (first in list).
         QTest::newRow("ancient")   << "2023-01-01" << "2025-11-25";
     }
@@ -195,6 +282,17 @@ private slots:
     {
         QFETCH(QString, requested);
         QFETCH(QString, expected);
+
+        // An unsupported request is answered with the preferred version AND
+        // logged at WARN — that line is what explains a "my client stopped
+        // working after the update" report, and init()'s failOnWarning() would
+        // otherwise fail the test for the server doing the right thing.
+        // `requested != expected` is exactly the unsupported case.
+        if (requested != expected) {
+            QTest::ignoreMessage(QtWarningMsg,
+                                 QRegularExpression("Client requested unsupported protocol "
+                                                    + QRegularExpression::escape(requested)));
+        }
 
         McpServer server;
         QJsonObject params{
@@ -234,52 +332,53 @@ private slots:
         QVERIFY2(info["version"].toString() != info["appVersion"].toString()
                      || QString::fromLatin1(McpSurfaceVersion) == QString(VERSION_STRING),
                  "surface version and app version are separate facts");
+        // The build, which appVersion does NOT carry: v2.0.4 shipped as 3552, 3553 and
+        // 3554. Without this a client cannot tell which code it is talking to, and a
+        // field diagnosis cannot establish whether the fix under investigation is even
+        // present -- which is exactly what happened before this field existed.
+        QCOMPARE(info["buildNumber"].toInt(), versionCode());
+        QVERIFY2(info["buildNumber"].toInt() > 0, "buildNumber must be a real build");
     }
 
-    // The server-level `instructions` field (#1162) was introduced in MCP
-    // revision 2025-03-26. It must be present once the negotiated version is
-    // >= 2025-03-26 and absent for strict 2024-11-05 clients, which reject
-    // initialize responses carrying unknown fields (same gating discipline
-    // as structuredContent / resource_link in buildToolCallResponse).
-    void initializeInstructionsGatedByVersion_data()
+    // The server-level `instructions` field (#1162) is emitted unconditionally,
+    // and was never version-sensitive: `schema/2024-11-05/schema.ts` already
+    // declares `instructions?: string;` on `InitializeResult`. The gate this
+    // once had rested on a false premise, and the data table that replaced it
+    // claimed to catch "a revision re-added below the floor" — which it could
+    // not, since no row requested the only revision that argument was about.
+    //
+    // Collapsed to a single test asserting the field is present and carries the
+    // shot-citation rule. Renamed, because the old name described gating this
+    // no longer does.
+    void initializeCarriesShotCitationInstructions()
     {
-        QTest::addColumn<QString>("requested");
-        QTest::addColumn<bool>("expectInstructions");
-        QTest::newRow("current")  << "2025-11-25" << true;
-        QTest::newRow("prior")    << "2025-06-18" << true;
-        QTest::newRow("twoBack")  << "2025-03-26" << true;   // revision that introduced `instructions`
-        QTest::newRow("legacy")   << "2024-11-05" << false;  // pre-2025-03-26 → field omitted
-        QTest::newRow("ancient")  << "2023-01-01" << true;   // unsupported → negotiates 2025-11-25
-    }
-
-    void initializeInstructionsGatedByVersion()
-    {
-        QFETCH(QString, requested);
-        QFETCH(bool, expectInstructions);
-
         McpServer server;
         QJsonObject params{
-            {"protocolVersion", requested},
+            {"protocolVersion", "2025-11-25"},
             {"capabilities", QJsonObject{}},
             {"clientInfo", QJsonObject{{"name", "tst"}, {"version", "1"}}}};
         auto resp = sendHttp(server, "POST", rpcBody("initialize", params));
 
         QCOMPARE(resp.statusCode, 200);
         const QJsonObject result = resp.jsonBody["result"].toObject();
-        QCOMPARE(result.contains("instructions"), expectInstructions);
-        if (expectInstructions) {
-            const QString instr = result["instructions"].toString();
-            QVERIFY2(!instr.isEmpty(),
-                     "instructions must be a non-empty string when emitted");
-            QVERIFY2(instr.contains(QStringLiteral("date and time")),
-                     "instructions must carry the shot date/time citation rule (#1162)");
-        }
+        QVERIFY(result.contains("instructions"));
+        const QString instr = result["instructions"].toString();
+        QVERIFY2(!instr.isEmpty(),
+                 "instructions must be a non-empty string when emitted");
+        QVERIFY2(instr.contains(QStringLiteral("date and time")),
+                 "instructions must carry the shot date/time citation rule (#1162)");
     }
 
     // ─── MCP-Protocol-Version request header validation ────────────────────
 
-    void protocolVersionHeaderMismatchReturns400()
+    void protocolVersionHeaderUnsupportedReturns400()
     {
+        // 400 is licensed for exactly one case: "If the server receives a request
+        // with an invalid or unsupported MCP-Protocol-Version, it MUST respond
+        // with 400 Bad Request" (2025-06-18 basic/transports, Protocol Version
+        // Header). 2026-07-28 is a real revision we do not yet negotiate, and is
+        // the value real clients are already sending — see the sibling test for
+        // what must NOT be 400'd.
         McpServer server;
         const QString sid = openSession(server, "2025-11-25");
         QVERIFY(!sid.isEmpty());
@@ -289,13 +388,66 @@ private slots:
         // here rather than tolerated — init()'s failOnWarning() would otherwise
         // fail this test for the server doing exactly what it should.
         QTest::ignoreMessage(QtWarningMsg,
-                             "[MCP][Server] Protocol version mismatch — header 2024-11-05, "
+                             "[MCP][Server] Unsupported protocol version — header 2026-07-28, "
                              "session 2025-11-25");
         auto resp = sendHttp(server, "POST", rpcBody("tools/list", {}, 99), sid,
-                             {{"MCP-Protocol-Version", "2024-11-05"}});
+                             {{"MCP-Protocol-Version", "2026-07-28"}});
 
         QCOMPARE(resp.statusCode, 400);
-        QVERIFY(resp.rawBody.contains("Protocol version mismatch"));
+        QVERIFY(resp.rawBody.contains("Unsupported MCP-Protocol-Version"));
+    }
+
+    void protocolVersionHeaderSupportedButNotNegotiatedIsServed()
+    {
+        // This test replaces one that asserted the opposite, and the old
+        // assertion was our bug rather than the spec's rule. Matching the
+        // negotiated version is a CLIENT SHOULD — "the protocol version sent by
+        // the client SHOULD be the one negotiated during initialization" — and a
+        // client SHOULD is not a server gate. 2024-11-05 is in
+        // supportedProtocolVersions(), so refusing it was refusing a version we
+        // plainly serve.
+        //
+        // Found by the official conformance suite: its
+        // server-accepts-multiple-post-streams scenario negotiates 2025-11-25 and
+        // then sends concurrent POSTs carrying `MCP-Protocol-Version:
+        // 2025-03-26`. All three were answered 400.
+        McpServer server;
+        // One inline tool so tools/list has something whose shape can be read.
+        // A bare server registers nothing, and an empty array would let this pass
+        // for either behaviour.
+        server.toolRegistry()->registerTool(
+            "shots_get_detail",
+            "Test tool",
+            QJsonObject{{"type", "object"}, {"properties", QJsonObject{}}},
+            [](const QJsonObject&) -> QJsonObject { return QJsonObject{}; },
+            "read");
+
+        const QString sid = openSession(server, "2025-11-25");
+        QVERIFY(!sid.isEmpty());
+
+        auto resp = sendHttp(server, "POST", rpcBody("tools/list", {}, 99), sid,
+                             {{"MCP-Protocol-Version", "2025-06-18"}});
+
+        QCOMPARE(resp.statusCode, 200);
+        QVERIFY(resp.jsonBody.contains("result"));
+
+        // Served under the HEADER's version, not the session's. With only two
+        // negotiable revisions the ONLY field separating them is the 2025-11-25
+        // `$schema` dialect, so its absence distinguishes "answered under the
+        // header" from "answered 200 under the negotiated 2025-11-25 with the
+        // header ignored".
+        //
+        // This keyed on `title` at 2024-11-05 when written. Both premises moved
+        // underneath it: that revision is no longer supported (it would now take
+        // the 400 branch, testing something else entirely), and `title` became
+        // unconditional once the floor rose to the revision that introduced it.
+        // The response header is the protocol's OWN statement of which version
+        // served this request. Keying on the absence of a version-gated field
+        // instead — `$schema` here, `title` before that — is a proxy that has
+        // already rotted twice in this file: when the proxy stops
+        // discriminating, such a test does not go red, it goes permanently
+        // green.
+        QCOMPARE(resp.protocolVersion, QString("2025-06-18"));
     }
 
     void protocolVersionHeaderMatchAccepted()
@@ -309,10 +461,84 @@ private slots:
         QVERIFY(resp.jsonBody.contains("result"));
     }
 
+    // `2025-03-26` is accepted even though that revision is no longer
+    // negotiable, and treated as if absent. Dropping it from
+    // supportedProtocolVersions() without this turned the ecosystem's own
+    // fallback into a 400. Caught by the official conformance suite, whose
+    // server-accepts-multiple-post-streams scenario negotiates 2025-11-25 and
+    // then sends concurrent POSTs carrying exactly this header.
+    void compatSentinelHeaderIsAcceptedNotRejected()
+    {
+        McpServer server;
+        server.toolRegistry()->registerTool(
+            "shots_get_detail",
+            "Test tool",
+            QJsonObject{{"type", "object"}, {"properties", QJsonObject{}}},
+            [](const QJsonObject&) -> QJsonObject { return QJsonObject{}; },
+            "read");
+
+        const QString sid = openSession(server, "2025-11-25");
+        QVERIFY(!sid.isEmpty());
+
+        auto resp = sendHttp(server, "POST", rpcBody("tools/list", {}, 99), sid,
+                             {{"MCP-Protocol-Version", "2025-03-26"}});
+
+        QCOMPARE(resp.statusCode, 200);
+
+        // Treated as absent, so the SESSION's version governs. This is the line
+        // that separates the sentinel from a supported header: a supported one
+        // is honoured AS a version (see the sibling test below), the sentinel
+        // selects nothing. `$schema` is a 2025-11-25 field, so serving under
+        // either 2025-03-26 or the floor would drop it and still return 200.
+        const QJsonArray tools = resp.jsonBody["result"].toObject()["tools"].toArray();
+        QCOMPARE(tools.size(), 1);
+        QVERIFY2(tools.first().toObject()["inputSchema"].toObject().contains("$schema"),
+                 "the sentinel must not downgrade the session's negotiated version");
+    }
+
+    void supportedHeaderDoesNotReVersionTheSession()
+    {
+        // Honouring a supported header answers ONE request; it must not write
+        // back to the session. Otherwise a single stray header from a confused
+        // client silently downgrades every later request, including those that
+        // send no header at all — a failure that would look like the server
+        // spontaneously forgetting what it negotiated.
+        McpServer server;
+        server.toolRegistry()->registerTool(
+            "shots_get_detail",
+            "Test tool",
+            QJsonObject{{"type", "object"}, {"properties", QJsonObject{}}},
+            [](const QJsonObject&) -> QJsonObject { return QJsonObject{}; },
+            "read");
+
+        const QString sid = openSession(server, "2025-11-25");
+        QVERIFY(!sid.isEmpty());
+
+        // One request under the older supported header. `$schema` is the only
+        // field distinguishing the two negotiable revisions, so its absence is
+        // what proves the header was honoured.
+        auto older = sendHttp(server, "POST", rpcBody("tools/list", {}, 1), sid,
+                              {{"MCP-Protocol-Version", "2025-06-18"}});
+        QCOMPARE(older.statusCode, 200);
+        QVERIFY2(!older.jsonBody["result"].toObject()["tools"].toArray()
+                      .first().toObject()["inputSchema"].toObject().contains("$schema"),
+                 "answered under the header version");
+
+        // The next request carries no header at all, so it falls back to the
+        // session — which must still be what initialize negotiated.
+        auto after = sendHttp(server, "POST", rpcBody("tools/list", {}, 2), sid);
+        QCOMPARE(after.statusCode, 200);
+        QVERIFY2(after.jsonBody["result"].toObject()["tools"].toArray()
+                     .first().toObject()["inputSchema"].toObject().contains("$schema"),
+                 "the session must not have been re-versioned by the earlier header");
+    }
+
     void protocolVersionHeaderAbsentAccepted()
     {
-        // Spec says clients pre-dating the requirement may omit the header;
-        // server defaults the session to 2025-03-26 in that window.
+        // Clients pre-dating the header requirement may omit it. The session
+        // then carries the lowest supported revision — see
+        // McpSession::protocolVersion() for why that is no longer the
+        // 2025-03-26 the spec names.
         McpServer server;
         const QString sid = openSession(server, "2025-11-25");
         auto resp = sendHttp(server, "POST", rpcBody("tools/list", {}, 99), sid);
@@ -323,7 +549,7 @@ private slots:
     {
         // Regression for the lockout where a stale Mcp-Session-Id forced the
         // server to auto-create a new session, which kept the default
-        // 2025-03-26 protocol version. The very next protocol-version-mismatch
+        // (lowest supported) protocol version. The very next version-mismatch
         // check then 400'd a client whose previous session had negotiated
         // 2025-11-25 — defeating the auto-recovery the comment claims to
         // provide. Auto-recovery must adopt the header.
@@ -551,8 +777,8 @@ private slots:
         QCOMPARE(structured["answer"].toInt(), 42);
         QCOMPARE(structured["label"].toString(), QString("ok"));
 
-        // Backward-compat: text content block always present for 2025-03-26
-        // clients that don't read structuredContent.
+        // `content` is required on a tool result at every revision, so the text
+        // block is always present — not a concession to old clients.
         const QJsonArray content = result["content"].toArray();
         QVERIFY2(!content.isEmpty(), "content[] must always be present");
         bool hasText = false;
@@ -631,18 +857,21 @@ private slots:
     // the envelope, tool failures shipped as unmarked successes (the sole
     // exception being the confirmation denial, which marked its envelope by hand).
 
-    // Run at every negotiated version, not just the newest. The marking reads the
-    // RAW payload, three lines below `if (emitStructured) structuredContent = …`,
-    // and the tempting "simplification" is to test structuredContent for the key
-    // instead. That key exists only at >= 2025-06-18, so such a refactor would
-    // drop isError for 2024-11-05 and 2025-03-26 clients — with the whole suite
-    // green, because isError has been in CallToolResult since 2024-11-05 and no
-    // other test calls a FAILING tool at a legacy version.
+    // Run at every negotiated version, not just the newest.
+    //
+    // The trap this originally guarded is gone with the pre-2025-06-18
+    // revisions: the marking reads the RAW payload rather than
+    // structuredContent, and testing structuredContent instead would once have
+    // silently dropped isError for clients whose revision has no such key. Both
+    // surviving revisions emit it, so that particular refactor is no longer
+    // dangerous. Said plainly rather than left as a stale warning.
+    //
+    // The table stays because what it asserts now is still worth asserting and
+    // still breakable: isError must not become conditional on the negotiated
+    // version. Two rows cost microseconds.
     void toolsCallMarksErrorPayloadAsFailed_data()
     {
         QTest::addColumn<QString>("protocolVersion");
-        QTest::newRow("2024-11-05") << "2024-11-05";
-        QTest::newRow("2025-03-26") << "2025-03-26";
         QTest::newRow("2025-06-18") << "2025-06-18";
         QTest::newRow("2025-11-25") << "2025-11-25";
     }
@@ -795,15 +1024,821 @@ private slots:
         QCOMPARE(resp.jsonBody["error"].toObject()["code"].toInt(), -32602);
     }
 
-    // ─── Spec-version gating: 2024-11-05 clients see only legacy fields ───
+    // `ttlMs` / `cacheScope` are 2026-07-28 fields and must not leak to a client
+    // that negotiated anything older — they are additive fields a strict earlier
+    // client has no schema for.
     //
-    // Strict 2024-11-05 validators reject responses carrying fields introduced
-    // in newer specs. The server must omit those fields when the negotiated
-    // protocol version pre-dates their introduction. Each test below pins the
-    // exact field contract for the legacy version so a future spec bump can't
-    // silently re-leak a newer field.
+    // The absence half. Its positive twin landed with the modern path
+    // (modernResultCarriesResultTypeAndServerInfo / modernReadResultIsNotCacheable),
+    // so removing the version gate in applyCacheHints now reddens both — this
+    // was written when only the absence half existed and said so.
+    void cacheHintsDoNotLeakToLegacyRevisions()
+    {
+        McpServer server;
+        server.toolRegistry()->registerTool(
+            "shots_get_detail", "Test tool",
+            QJsonObject{{"type", "object"}, {"properties", QJsonObject{}}},
+            [](const QJsonObject&) -> QJsonObject { return QJsonObject{}; }, "read");
+        server.resourceRegistry()->registerResource(
+            "decenza://shots/42", "Shot 42", "A test shot", "application/json",
+            []() -> QJsonObject { return QJsonObject{{"id", 42}}; });
 
-    void toolsListAt2024_11_05OmitsNewerSpecFields()
+        for (const QString& version : {QStringLiteral("2025-06-18"),
+                                       QStringLiteral("2025-11-25")}) {
+            const QString sid = openSession(server, version);
+            QVERIFY(!sid.isEmpty());
+
+            for (const char* method : {"tools/list", "resources/list"}) {
+                auto resp = sendHttp(server, "POST",
+                                     rpcBody(QString::fromLatin1(method), {}, 2), sid);
+                QCOMPARE(resp.statusCode, 200);
+                const QJsonObject result = resp.jsonBody["result"].toObject();
+                QVERIFY2(!result.contains("ttlMs"),
+                         qPrintable(QStringLiteral("%1 at %2 must omit ttlMs")
+                                        .arg(QString::fromLatin1(method), version)));
+                QVERIFY2(!result.contains("cacheScope"),
+                         qPrintable(QStringLiteral("%1 at %2 must omit cacheScope")
+                                        .arg(QString::fromLatin1(method), version)));
+            }
+
+            QJsonObject readParams;
+            readParams["uri"] = "decenza://shots/42";
+            auto read = sendHttp(server, "POST", rpcBody("resources/read", readParams, 3), sid);
+            QCOMPARE(read.statusCode, 200);
+            QVERIFY(!read.jsonBody["result"].toObject().contains("ttlMs"));
+        }
+    }
+
+    // `resources/list` must not emit in QHash order. Qt randomizes the hash seed
+    // per process, so an unsorted listing is stable within a run and different
+    // across restarts — which is exactly the shape that defeats a client cache
+    // while looking fine in any single run. 2026-07-28 makes deterministic order
+    // an explicit SHOULD.
+    //
+    // Asserting ascending URI order rather than comparing two runs, because two
+    // registries in ONE process share the seed and would agree even unsorted —
+    // a same-process comparison cannot fail. Removing the sort therefore reddens
+    // this with probability 1 - 1/n!, which at eight resources is 1 - 1/40320.
+    // Not a certainty, and said out loud rather than implied.
+    void resourcesListIsOrderedByUriNotHashOrder()
+    {
+        McpServer server;
+        // Registered in deliberately non-alphabetical order.
+        const QStringList uris{
+            "decenza://shots/recent", "decenza://machine/state", "decenza://profiles/active",
+            "decenza://tools/steam", "decenza://beans/current", "decenza://water/vessel",
+            "decenza://equipment/grinder", "decenza://ai/knowledge"};
+        for (const QString& uri : uris) {
+            server.resourceRegistry()->registerResource(
+                uri, "N", "D", "application/json",
+                []() -> QJsonObject { return QJsonObject{}; });
+        }
+
+        const QString sid = openSession(server, "2025-11-25");
+        auto resp = sendHttp(server, "POST", rpcBody("resources/list", {}, 2), sid);
+        QCOMPARE(resp.statusCode, 200);
+
+        const QJsonArray resources = resp.jsonBody["result"].toObject()["resources"].toArray();
+        QCOMPARE(resources.size(), uris.size());
+
+        QStringList got;
+        for (const QJsonValue& v : resources)
+            got << v.toObject()["uri"].toString();
+
+        QStringList expected = uris;
+        expected.sort();
+        QCOMPARE(got, expected);
+    }
+
+    // ─── Modern era (2026-07-28): detection, envelope, refusals ────────────
+
+    // Every legacy shape must still take the legacy path. This is the assertion
+    // the whole change rests on, and it is asymmetric on purpose: mis-routing a
+    // legacy request to modern breaks a working client with no recovery, while
+    // mis-routing modern to legacy produces the error a modern client's own
+    // detection is specified to fall back from.
+    void legacyShapesStillRouteToLegacy()
+    {
+        McpServer server;
+        server.toolRegistry()->registerTool(
+            "shots_get_detail", "Test tool",
+            QJsonObject{{"type", "object"}, {"properties", QJsonObject{}}},
+            [](const QJsonObject&) -> QJsonObject { return QJsonObject{}; }, "read");
+
+        // initialize — creates a session and answers a negotiated version.
+        const QString sid = openSession(server, "2025-11-25");
+        QVERIFY(!sid.isEmpty());
+        QCOMPARE(server.activeSessionCount(), 1);
+
+        // A post-handshake call, no _meta anywhere.
+        auto call = sendHttp(server, "POST", rpcBody("tools/list", {}, 2), sid);
+        QCOMPARE(call.statusCode, 200);
+        QVERIFY(call.jsonBody.contains("result"));
+        QVERIFY2(!call.jsonBody["result"].toObject().contains("resultType"),
+                 "a legacy result must not carry modern framing");
+
+        // A notification.
+        QCOMPARE(sendHttp(server, "POST", notifyBody("notifications/initialized"), sid).statusCode,
+                 202);
+
+        // NOT asserted here: a bare GET for SSE. Era detection runs only in the
+        // POST branch, so a GET cannot reach it and "routes to legacy" is not a
+        // property that test would establish. Opening a live SSE stream from a
+        // test also hangs the run — the server holds it open, by design.
+
+        // `params` present but carrying no modern `_meta` must still read legacy —
+        // this is the shape a careless discriminator gets wrong.
+        auto withParams = sendHttp(server, "POST",
+                                   rpcBody("tools/list", QJsonObject{{"cursor", "x"}}, 3), sid);
+        QCOMPARE(withParams.statusCode, 200);
+        QVERIFY(!withParams.jsonBody["result"].toObject().contains("resultType"));
+    }
+
+    // A modern request creates NO session, which is the whole point of the era.
+    void modernRequestCreatesNoSession()
+    {
+        McpServer server;
+        server.toolRegistry()->registerTool(
+            "shots_get_detail", "Test tool",
+            QJsonObject{{"type", "object"}, {"properties", QJsonObject{}}},
+            [](const QJsonObject&) -> QJsonObject { return QJsonObject{}; }, "read");
+
+        QCOMPARE(server.activeSessionCount(), 0);
+        auto resp = sendHttp(server, "POST", modernBody("tools/list", {}, 1));
+        QCOMPARE(resp.statusCode, 200);
+        QCOMPARE(server.activeSessionCount(), 0);
+        QVERIFY2(resp.sessionId.isEmpty(),
+                 "a stateless request must not be answered with a session id");
+    }
+
+    // Required on every modern result, plus the server identity a stateless
+    // caller has no handshake to learn from.
+    void modernResultCarriesResultTypeAndServerInfo()
+    {
+        McpServer server;
+        server.toolRegistry()->registerTool(
+            "shots_get_detail", "Test tool",
+            QJsonObject{{"type", "object"}, {"properties", QJsonObject{}}},
+            [](const QJsonObject&) -> QJsonObject { return QJsonObject{}; }, "read");
+
+        auto resp = sendHttp(server, "POST", modernBody("tools/list", {}, 7));
+        QCOMPARE(resp.statusCode, 200);
+
+        const QJsonObject result = resp.jsonBody["result"].toObject();
+        QCOMPARE(result["resultType"].toString(), QString("complete"));
+
+        const QJsonObject meta = result["_meta"].toObject();
+        const QJsonObject info = meta["io.modelcontextprotocol/serverInfo"].toObject();
+        QCOMPARE(info["name"].toString(), QString("Decenza MCP Server"));
+        QCOMPARE(info["version"].toString(), QString::fromLatin1(McpSurfaceVersion));
+
+        // The positive half of the cache-hint contract, which could not be
+        // written until a modern version was servable: list results carry both
+        // fields, and the scope is private because tools/list is access-filtered.
+        QCOMPARE(result["cacheScope"].toString(), QString("private"));
+        QVERIFY(result.contains("ttlMs"));
+        QVERIFY2(result["ttlMs"].toInt() > 0, "a list result is fixed for the process lifetime");
+    }
+
+    // A read result is LIVE data — machine telemetry — so its TTL must be zero,
+    // not merely shorter than a list's. A cached machine state is wrong, not stale.
+    void modernReadResultIsNotCacheable()
+    {
+        McpServer server;
+        server.resourceRegistry()->registerResource(
+            "decenza://shots/42", "Shot 42", "A test shot", "application/json",
+            []() -> QJsonObject { return QJsonObject{{"id", 42}}; });
+
+        auto resp = sendHttp(server, "POST",
+                             modernBody("resources/read",
+                                        QJsonObject{{"uri", "decenza://shots/42"}}, 8));
+        QCOMPARE(resp.statusCode, 200);
+        const QJsonObject result = resp.jsonBody["result"].toObject();
+        QVERIFY2(result.contains("ttlMs"), "an absent ttlMs also reads 0");
+        QCOMPARE(result["ttlMs"].toInt(), 0);
+        QCOMPARE(result["cacheScope"].toString(), QString("private"));
+    }
+
+    // A version we cannot serve gets UnsupportedProtocolVersionError carrying the
+    // list to retry from — the recovery path for a client that invoked a method
+    // directly instead of calling server/discover first.
+    void modernUnsupportedVersionReturnsSupportedList()
+    {
+        McpServer server;
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression("Refusing modern tools/list"));
+        auto resp = sendHttp(server, "POST",
+                             modernBody("tools/list", {}, 9, QStringLiteral("2099-01-01")));
+
+        const QJsonObject error = resp.jsonBody["error"].toObject();
+        QCOMPARE(error["code"].toInt(), -32022);
+        const QJsonObject data = error["data"].toObject();
+        QCOMPARE(data["requested"].toString(), QString("2099-01-01"));
+
+        const QJsonArray supported = data["supported"].toArray();
+        QVERIFY2(!supported.isEmpty(), "the client needs a list to retry from");
+        bool hasModern = false;
+        for (const QJsonValue& v : supported)
+            if (v.toString() == QStringLiteral("2026-07-28")) hasModern = true;
+        QVERIFY2(hasModern, "the advertised list must contain what we actually serve");
+    }
+
+    // "For the HTTP transport, this value MUST match the MCP-Protocol-Version
+    // header; otherwise the server MUST return a 400 Bad Request."
+    void modernHeaderBodyVersionMismatchIsRejected()
+    {
+        McpServer server;
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression("Refusing modern tools/list"));
+        auto resp = sendHttp(server, "POST", modernBody("tools/list", {}, 10), QString(),
+                             {{"MCP-Protocol-Version", "2025-11-25"}});
+        QCOMPARE(resp.jsonBody["error"].toObject()["code"].toInt(), -32020);
+        // The spec MUST this test's own comment quotes. It was quoted and then
+        // not asserted: the entire modern status mapping had no coverage, so
+        // replacing modernHttpStatusForError's body with `return 200;` — exactly
+        // the defect conformance found — left the suite green.
+        QCOMPARE(resp.statusCode, 400);
+    }
+
+    // Removed by 2026-07-28, or replaced by subscriptions/listen — but all still
+    // correct for legacy, which is why they are refused by era rather than by
+    // deleting the handler.
+    void modernEraRefusesRemovedMethods_data()
+    {
+        QTest::addColumn<QString>("method");
+        QTest::newRow("ping")        << "ping";
+        QTest::newRow("setLevel")    << "logging/setLevel";
+        QTest::newRow("subscribe")   << "resources/subscribe";
+        QTest::newRow("unsubscribe") << "resources/unsubscribe";
+        QTest::newRow("initialize")  << "initialize";
+    }
+
+    void modernEraRefusesRemovedMethods()
+    {
+        QFETCH(QString, method);
+        McpServer server;
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression("Refusing modern "));
+        auto resp = sendHttp(server, "POST", modernBody(method, {}, 11));
+        QCOMPARE(resp.jsonBody["error"].toObject()["code"].toInt(), -32601);
+        QCOMPARE(resp.statusCode, 404);
+    }
+
+    // `ping` must keep working for a LEGACY caller — the refusal above is scoped
+    // to the era, not a deletion. Without this the previous test would pass just
+    // as well if someone removed the handler outright.
+    void legacyEraStillServesPing()
+    {
+        McpServer server;
+        const QString sid = openSession(server, "2025-11-25");
+        auto resp = sendHttp(server, "POST", rpcBody("ping", {}, 12), sid);
+        QCOMPARE(resp.statusCode, 200);
+        QVERIFY(resp.jsonBody.contains("result"));
+    }
+
+    // Control tools ARE reachable in the modern era now that a
+    // session-independent limiter exists to charge them against — and they are
+    // charged, which is the half that matters. A read verb must not spend the
+    // control budget.
+    void modernEraServesControlToolsAndChargesThem()
+    {
+        McpServer server;
+        // Control tools need an access level that permits them; without Settings
+        // the level is 0 (Monitor) and the call is denied before the limiter is
+        // ever consulted, which would make this test green for the wrong reason.
+        Settings settings;
+        settings.mcp()->setMcpAccessLevel(2);
+        settings.mcp()->setMcpConfirmationLevel(0);
+        server.setSettings(&settings);
+
+        auto ran = std::make_shared<int>(0);
+        server.toolRegistry()->registerTool(
+            "machine_wake", "A control tool",
+            QJsonObject{{"type", "object"}, {"properties", QJsonObject{}}},
+            [ran](const QJsonObject&) -> QJsonObject { ++*ran; return QJsonObject{}; },
+            "control");
+
+        QJsonObject params;
+        params["name"] = "machine_wake";
+        params["arguments"] = QJsonObject{};
+
+        auto resp = sendHttp(server, "POST", modernBody("tools/call", params, 13));
+        QCOMPARE(resp.statusCode, 200);
+        QVERIFY2(!resp.jsonBody.contains("error"), "a control tool is no longer refused");
+        QCOMPARE(*ran, 1);
+        // Served as MODERN, not merely served. Legacy auto-creates a session and
+        // runs the same tool with the same observable result, so without this the
+        // test passes with era detection stubbed to `return false`.
+        QCOMPARE(resp.jsonBody["result"].toObject()["resultType"].toString(),
+                 QString("complete"));
+    }
+
+    // Over the budget, the caller is refused — and the tool does not run. A
+    // limiter that refuses after dispatch is not a limiter.
+    void modernControlCallsAreRateLimitedPerCaller()
+    {
+        McpServer server;
+        // Control tools need an access level that permits them; without Settings
+        // the level is 0 (Monitor) and the call is denied before the limiter is
+        // ever consulted, which would make this test green for the wrong reason.
+        Settings settings;
+        settings.mcp()->setMcpAccessLevel(2);
+        settings.mcp()->setMcpConfirmationLevel(0);
+        server.setSettings(&settings);
+
+        auto ran = std::make_shared<int>(0);
+        server.toolRegistry()->registerTool(
+            "machine_wake", "A control tool",
+            QJsonObject{{"type", "object"}, {"properties", QJsonObject{}}},
+            [ran](const QJsonObject&) -> QJsonObject { ++*ran; return QJsonObject{}; },
+            "control");
+
+        QJsonObject params;
+        params["name"] = "machine_wake";
+        params["arguments"] = QJsonObject{};
+
+        QTest::ignoreMessage(QtWarningMsg,
+                             QRegularExpression("Rate limit exceeded .* refusing control calls"));
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression("Refusing modern tools/call"));
+
+        bool sawRefusal = false;
+        for (int i = 0; i < McpServer::RateLimitPerMinute + 5; ++i) {
+            auto resp = sendHttp(server, "POST", modernBody("tools/call", params, 100 + i));
+            if (resp.jsonBody.contains("error")) {
+                QCOMPARE(resp.jsonBody["error"].toObject()["code"].toInt(), -32000);
+                sawRefusal = true;
+                break;
+            }
+        }
+        QVERIFY2(sawRefusal, "an unbounded control surface is the thing this exists to prevent");
+        QVERIFY2(*ran <= McpServer::RateLimitPerMinute,
+                 "a refused call must not have run");
+    }
+
+    // The refusal must name the caller the connector gave us, not the loopback
+    // address a tunnel-proxied request arrives on. Every public client shares
+    // that address, so a line reporting it reads to the next person as the
+    // user's own on-device traffic — the exact misreading that let an overnight
+    // scan look like self-inflicted noise.
+    void modernRateLimitReportsTheConnectorSuppliedCaller()
+    {
+        McpServer server;
+        Settings settings;
+        settings.mcp()->setMcpAccessLevel(2);
+        settings.mcp()->setMcpConfirmationLevel(0);
+        server.setSettings(&settings);
+
+        server.toolRegistry()->registerTool(
+            "machine_wake", "A control tool",
+            QJsonObject{{"type", "object"}, {"properties", QJsonObject{}}},
+            [](const QJsonObject&) -> QJsonObject { return QJsonObject{}; }, "control");
+
+        QJsonObject params;
+        params["name"] = "machine_wake";
+        params["arguments"] = QJsonObject{};
+        const QString label = QStringLiteral("Funnel (public internet)");
+
+        QTest::ignoreMessage(QtWarningMsg,
+            QRegularExpression("Rate limit exceeded .* for Funnel \\(public internet\\)"));
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression("Refusing modern tools/call"));
+
+        bool sawRefusal = false;
+        for (int i = 0; i < McpServer::RateLimitPerMinute + 5; ++i) {
+            auto resp = sendHttp(server, "POST", modernBody("tools/call", params, 300 + i),
+                                 QString(), {}, label);
+            if (resp.jsonBody.contains("error")) {
+                sawRefusal = true;
+                break;
+            }
+        }
+        QVERIFY(sawRefusal);
+    }
+
+    // A read verb must not spend the control budget. Without this the limiter
+    // would look correct while throttling harmless calls.
+    void modernReadToolsDoNotSpendTheControlBudget()
+    {
+        McpServer server;
+        server.toolRegistry()->registerTool(
+            "shots_get_detail", "A read tool",
+            QJsonObject{{"type", "object"}, {"properties", QJsonObject{}}},
+            [](const QJsonObject&) -> QJsonObject { return QJsonObject{}; }, "read");
+
+        QJsonObject params;
+        params["name"] = "shots_get_detail";
+        params["arguments"] = QJsonObject{};
+
+        for (int i = 0; i < McpServer::RateLimitPerMinute + 5; ++i) {
+            auto resp = sendHttp(server, "POST", modernBody("tools/call", params, 200 + i));
+            QVERIFY2(!resp.jsonBody.contains("error"),
+                     "a read verb must not be charged against the control budget");
+            // As above: legacy does not rate-limit reads either, so the era has
+            // to be asserted or this passes under legacy routing.
+            QCOMPARE(resp.jsonBody["result"].toObject()["resultType"].toString(),
+                     QString("complete"));
+        }
+    }
+
+    // A modern notification gets 202 with no body, same as legacy.
+    void modernNotificationAnswersWith202()
+    {
+        McpServer server;
+        auto resp = sendHttp(server, "POST",
+                             modernBody("notifications/initialized", {}, 0,
+                                        QStringLiteral("2026-07-28"), /*withId=*/false));
+        QCOMPARE(resp.statusCode, 202);
+        QVERIFY(resp.rawBody.isEmpty());
+    }
+
+    // `initialize` must never offer a modern revision: that era has no handshake,
+    // so a client reaching that code cannot speak one, and the fallback for an
+    // unsupported request must stay a legacy revision.
+    void initializeNeverNegotiatesAModernRevision()
+    {
+        McpServer server;
+        QTest::ignoreMessage(QtWarningMsg,
+                             QRegularExpression("Client requested unsupported protocol"));
+        QJsonObject params{
+            {"protocolVersion", "2026-07-28"},
+            {"capabilities", QJsonObject{}},
+            {"clientInfo", QJsonObject{{"name", "tst"}, {"version", "1"}}}};
+        auto resp = sendHttp(server, "POST", rpcBody("initialize", params));
+
+        const QString got = resp.jsonBody["result"].toObject()["protocolVersion"].toString();
+        QCOMPARE(got, QString("2025-11-25"));
+        QVERIFY2(!McpServer::isModernProtocolVersion(got),
+                 "initialize must answer with a handshake-based revision");
+    }
+
+    // A server MUST implement server/discover. Both fields it requires, plus the
+    // cache hints DiscoverResult inherits from CacheableResult — which the
+    // change's own proposal missed until the schema was read.
+    void serverDiscoverAdvertisesVersionsAndCapabilities()
+    {
+        McpServer server;
+        auto resp = sendHttp(server, "POST", modernBody("server/discover", {}, 20));
+        QCOMPARE(resp.statusCode, 200);
+
+        const QJsonObject result = resp.jsonBody["result"].toObject();
+        const QJsonArray versions = result["supportedVersions"].toArray();
+        QVERIFY(!versions.isEmpty());
+
+        QVERIFY(result["capabilities"].toObject().contains("tools"));
+        QVERIFY(result["capabilities"].toObject().contains("resources"));
+
+        // Modern framing applies here too — discover is a modern method.
+        QCOMPARE(result["resultType"].toString(), QString("complete"));
+        QVERIFY(result.contains("ttlMs"));
+        // "public", unlike every other result. Discover's payload is the
+        // server's identity, version list and instructions — identical for every
+        // caller and filtered by nothing — which is why the spec's own example
+        // marks it public. Everything a caller can influence stays private.
+        QCOMPARE(result["cacheScope"].toString(), QString("public"));
+
+        // A modern client never handshakes, so this is its only carrier for the
+        // shot-citation rule every legacy client is told at initialize.
+        QVERIFY(result["instructions"].toString().contains("date and time"));
+    }
+
+    // The advertised list is a PROMISE. Every version named must actually be
+    // served, and no LEGACY version may appear — a client is told to pick from
+    // this list for subsequent requests, and every subsequent request it makes
+    // will be modern-shaped.
+    void serverDiscoverAdvertisesOnlyServableModernVersions()
+    {
+        McpServer server;
+        auto resp = sendHttp(server, "POST", modernBody("server/discover", {}, 21));
+        const QJsonArray versions =
+            resp.jsonBody["result"].toObject()["supportedVersions"].toArray();
+
+        QVERIFY(!versions.isEmpty());
+        for (const QJsonValue& v : versions) {
+            const QString version = v.toString();
+            QVERIFY2(McpServer::isModernProtocolVersion(version),
+                     qPrintable(QStringLiteral("advertised a legacy version: %1").arg(version)));
+
+            // Served, not merely listed: the same request under that version
+            // must not come back as unsupported.
+            auto probe = sendHttp(server, "POST", modernBody("server/discover", {}, 22, version));
+            QVERIFY2(!probe.jsonBody.contains("error"),
+                     qPrintable(QStringLiteral("advertised but not served: %1").arg(version)));
+        }
+    }
+
+    // The route a client written against another server actually takes: invoke a
+    // method directly, get UnsupportedProtocolVersionError, retry from the list
+    // it carries. Testing only the up-front discovery path would leave the
+    // likelier one uncovered.
+    void unsupportedVersionErrorCarriesAListThatWorksOnRetry()
+    {
+        McpServer server;
+        server.toolRegistry()->registerTool(
+            "shots_get_detail", "Test tool",
+            QJsonObject{{"type", "object"}, {"properties", QJsonObject{}}},
+            [](const QJsonObject&) -> QJsonObject { return QJsonObject{}; }, "read");
+
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression("Refusing modern tools/list"));
+        auto refused = sendHttp(server, "POST",
+                                modernBody("tools/list", {}, 23, QStringLiteral("2030-01-01")));
+        const QJsonObject error = refused.jsonBody["error"].toObject();
+        QCOMPARE(error["code"].toInt(), -32022);
+        QCOMPARE(refused.statusCode, 400);
+
+        const QJsonArray supported = error["data"].toObject()["supported"].toArray();
+        QVERIFY(!supported.isEmpty());
+
+        // Retry with the first offering, exactly as a client would.
+        auto retried = sendHttp(server, "POST",
+                                modernBody("tools/list", {}, 24, supported.first().toString()));
+        QCOMPARE(retried.statusCode, 200);
+        QVERIFY2(retried.jsonBody.contains("result"),
+                 "the list a client is told to retry from must actually work");
+    }
+
+    // A modern-shaped request naming a LEGACY version is incoherent: that
+    // revision has no per-request _meta, no server/discover, and a handshake
+    // this request never performed. Serving it would invent semantics no
+    // revision defines.
+    void modernRequestNamingALegacyVersionIsRefused()
+    {
+        McpServer server;
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression("Refusing modern tools/list"));
+        auto resp = sendHttp(server, "POST",
+                             modernBody("tools/list", {}, 25, QStringLiteral("2025-11-25")));
+        QCOMPARE(resp.jsonBody["error"].toObject()["code"].toInt(), -32022);
+        QCOMPARE(resp.statusCode, 400);
+    }
+
+    // server/discover does not exist for a legacy client — `initialize` is that
+    // era's answer to the same question.
+    void legacyEraHasNoServerDiscover()
+    {
+        McpServer server;
+        const QString sid = openSession(server, "2025-11-25");
+        auto resp = sendHttp(server, "POST", rpcBody("server/discover", {}, 26), sid);
+        QCOMPARE(resp.jsonBody["error"].toObject()["code"].toInt(), -32601);
+    }
+
+    // `subscriptions/listen` is opt-in, and strictly: "the server MUST NOT send
+    // notification types the client has not explicitly requested". The request
+    // shape here matches the spec's own example payload
+    // (schema/2026-07-28/examples/SubscriptionsListenRequest).
+    void subscriptionsListenDeliversOnlyOptedInResources()
+    {
+        McpServer server;
+        server.resourceRegistry()->registerResource(
+            "decenza://machine/state", "State", "d", "application/json",
+            []() -> QJsonObject { return QJsonObject{}; });
+
+        HeldConnection conn;
+        QVERIFY(conn.open());
+
+        QJsonObject filter;
+        filter["resourceSubscriptions"] = QJsonArray{"decenza://machine/state"};
+        QJsonObject args;
+        args["notifications"] = filter;
+        conn.send(server, modernBody("subscriptions/listen", args, 40));
+
+        // The stream answers text/event-stream and does NOT complete — the
+        // JSON-RPC response comes only on a graceful teardown.
+        // Read until BOTH markers arrive. The headers and the ack are two
+        // separate write()+flush() pairs, so a single waitForReadyRead can
+        // return with only the first — a latent flake that would have surfaced
+        // as "listen must open a stream" or a missing ack, neither naming the
+        // real cause.
+        QByteArray opened;
+        for (int i = 0; i < 20 && !(opened.contains("text/event-stream")
+                                    && opened.contains("acknowledged")); ++i) {
+            if (conn.client.waitForReadyRead(100))
+                opened += conn.client.readAll();
+        }
+        QVERIFY2(opened.contains("text/event-stream"), "listen must open a stream");
+        QVERIFY2(!opened.contains("\"result\""),
+                 "a listen request is not answered while the stream is live");
+
+        // The acknowledgment MUST be the FIRST message, and nothing may precede
+        // it. Without it a client cannot tell an established subscription from a
+        // silent one, and the suite reads zero frames.
+        // FIRST, not merely present — the spec says the server MUST NOT send
+        // anything on the stream before it. `contains` alone would pass a server
+        // that emitted a resource notification ahead of the ack.
+        const qsizetype ackAt = opened.indexOf("notifications/subscriptions/acknowledged");
+        QVERIFY2(ackAt >= 0, "the ack must be sent");
+        const qsizetype firstData = opened.indexOf("data: ");
+        QVERIFY2(firstData >= 0 && ackAt < firstData + 200,
+                 "the ack must be the FIRST frame, not merely somewhere on the stream");
+        QVERIFY2(opened.contains("io.modelcontextprotocol/subscriptionId"),
+                 "the ack carries the subscription id like every frame after it");
+
+        // It reports what was AGREED, not what was asked. listChanged types are
+        // omitted because this server can never send them — tools and resources
+        // are registered once at startup — so promising them would leave a
+        // client waiting forever.
+        QVERIFY2(opened.contains("resourceSubscriptions"), "the honoured type is reported");
+        QVERIFY2(!opened.contains("toolsListChanged"),
+                 "a type the server cannot send must be omitted from the ack");
+
+        // An opted-in resource arrives, tagged with the subscription id.
+        server.notifyResourceChanged("decenza://machine/state");
+        conn.client.waitForReadyRead(1000);
+        const QByteArray event = conn.client.readAll();
+        QVERIFY2(event.contains("notifications/resources/updated"), "opted-in URI must arrive");
+        QVERIFY2(event.contains("io.modelcontextprotocol/subscriptionId"),
+                 "every notification on a listen stream must carry its subscription id");
+        // Parsed, not substring-matched: `contains("40")` would pass on any
+        // two-digit coincidence anywhere in the frame.
+        const qsizetype dataAt = event.indexOf("data: ");
+        QVERIFY(dataAt >= 0);
+        const QByteArray json = event.mid(dataAt + 6, event.indexOf("\n\n", dataAt) - dataAt - 6);
+        const QJsonObject notif = QJsonDocument::fromJson(json).object();
+        QCOMPARE(notif["params"].toObject()["_meta"].toObject()
+                     ["io.modelcontextprotocol/subscriptionId"].toInt(), 40);
+
+        // A resource NOT opted into must not arrive at all.
+        server.notifyResourceChanged("decenza://profiles/active");
+        conn.client.waitForReadyRead(200);
+        QVERIFY2(!conn.client.readAll().contains("profiles/active"),
+                 "the server MUST NOT send what the client did not ask for");
+    }
+
+    // The legacy GET stream and the two subscribe verbs are untouched — this era
+    // reaches the same notifications the way it always did.
+    void legacyEraHasNoSubscriptionsListen()
+    {
+        McpServer server;
+        const QString sid = openSession(server, "2025-11-25");
+        auto resp = sendHttp(server, "POST", rpcBody("subscriptions/listen", {}, 41), sid);
+        QCOMPARE(resp.jsonBody["error"].toObject()["code"].toInt(), -32601);
+    }
+
+    // Resource-not-found is era-dependent from 2026-07-28: -32602 (Invalid
+    // Params) there, -32002 for legacy. Both correct for the revision they are
+    // sent under, which is why this is a fork rather than a change.
+    void resourceNotFoundCodeIsEraDependent()
+    {
+        McpServer server;
+
+        const QString sid = openSession(server, "2025-11-25");
+        auto legacy = sendHttp(server, "POST",
+                               rpcBody("resources/read",
+                                       QJsonObject{{"uri", "decenza://nope"}}, 50), sid);
+        QCOMPARE(legacy.jsonBody["error"].toObject()["code"].toInt(), -32002);
+
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression("Refusing modern resources/read"));
+        auto modern = sendHttp(server, "POST",
+                               modernBody("resources/read",
+                                          QJsonObject{{"uri", "decenza://nope"}}, 51));
+        QCOMPARE(modern.jsonBody["error"].toObject()["code"].toInt(), -32602);
+        QCOMPARE(modern.statusCode, 400);
+
+        // The URI stays in `data` in both eras — it is what makes the error
+        // actionable, and only the code moved.
+        QCOMPARE(modern.jsonBody["error"].toObject()["data"].toObject()["uri"].toString(),
+                 QString("decenza://nope"));
+    }
+
+    // `_meta` validation had no coverage at all, and could not have had any:
+    // modernBody() always writes every required field, so none of the three
+    // -32602 branches had ever executed under test. Conformance found them; the
+    // commit that fixed them added no test, which is the same blindness twice.
+    void modernMetaValidation_data()
+    {
+        QTest::addColumn<QJsonObject>("params");
+        QTest::addColumn<bool>("expectRefusal");
+
+        const QString v = QStringLiteral("2026-07-28");
+
+        // No _meta at all. Reached because a modern-ONLY method is proof of era,
+        // which is exactly why it must be validated rather than assumed.
+        QTest::newRow("no _meta") << QJsonObject{} << true;
+
+        QTest::newRow("no protocolVersion")
+            << QJsonObject{{"_meta", QJsonObject{
+                   {"io.modelcontextprotocol/clientCapabilities", QJsonObject{}}}}}
+            << true;
+
+        QTest::newRow("no clientCapabilities")
+            << QJsonObject{{"_meta", QJsonObject{
+                   {"io.modelcontextprotocol/protocolVersion", v}}}}
+            << true;
+
+        // clientInfo absent is VALID — spec PR #3002 demoted it to a SHOULD.
+        // This is the negative case that most needs pinning: making it required
+        // would break every conforming client and pass everything else.
+        QTest::newRow("no clientInfo (legal)")
+            << QJsonObject{{"_meta", QJsonObject{
+                   {"io.modelcontextprotocol/protocolVersion", v},
+                   {"io.modelcontextprotocol/clientCapabilities", QJsonObject{}}}}}
+            << false;
+    }
+
+    void modernMetaValidation()
+    {
+        QFETCH(QJsonObject, params);
+        QFETCH(bool, expectRefusal);
+
+        McpServer server;
+        QJsonObject req{{"jsonrpc", "2.0"}, {"id", 60},
+                        {"method", "server/discover"}, {"params", params}};
+
+        if (expectRefusal) {
+            QTest::ignoreMessage(QtWarningMsg,
+                                 QRegularExpression("Refusing modern server/discover"));
+        }
+        auto resp = sendHttp(server, "POST",
+                             QJsonDocument(req).toJson(QJsonDocument::Compact));
+
+        if (expectRefusal) {
+            QCOMPARE(resp.jsonBody["error"].toObject()["code"].toInt(), -32602);
+            QCOMPARE(resp.statusCode, 400);
+        } else {
+            QCOMPARE(resp.statusCode, 200);
+            QVERIFY2(resp.jsonBody.contains("result"),
+                     "clientInfo is a SHOULD; requiring it would break conforming clients");
+        }
+    }
+
+    // The era-detection rule itself, as opposed to its exception. A modern-only
+    // method with NO session and NO _meta must be validated as modern (-32602),
+    // not answered "method not found" — the exception (a live legacy session
+    // gets -32601) is covered by legacyEraHasNoServerDiscover.
+    void modernOnlyMethodWithoutSessionIsValidatedAsModern()
+    {
+        McpServer server;
+        QTest::ignoreMessage(QtWarningMsg,
+                             QRegularExpression("Refusing modern subscriptions/listen"));
+        QJsonObject req{{"jsonrpc", "2.0"}, {"id", 61},
+                        {"method", "subscriptions/listen"}, {"params", QJsonObject{}}};
+        auto resp = sendHttp(server, "POST",
+                             QJsonDocument(req).toJson(QJsonDocument::Compact));
+
+        QCOMPARE(resp.jsonBody["error"].toObject()["code"].toInt(), -32602);
+        QCOMPARE(resp.statusCode, 400);
+    }
+
+    // A deferred response must carry modern framing too. handleModernRequest
+    // stamps only what it answers synchronously, and its comment claimed
+    // otherwise — 22 async tools and every confirmation outcome went around it,
+    // returning results the schema does not permit.
+    void deferredModernResponseIsStillFramedAsModern()
+    {
+        McpServer server;
+        server.toolRegistry()->registerAsyncTool(
+            "shots_list", "An async tool",
+            QJsonObject{{"type", "object"}, {"properties", QJsonObject{}}},
+            [](const QJsonObject&, std::function<void(QJsonObject)> respond) {
+                respond(QJsonObject{{"ok", true}});
+            },
+            "read");
+
+        QJsonObject params;
+        params["name"] = "shots_list";
+        params["arguments"] = QJsonObject{};
+        auto resp = sendHttp(server, "POST", modernBody("tools/call", params, 62));
+
+        QCOMPARE(resp.statusCode, 200);
+        const QJsonObject result = resp.jsonBody["result"].toObject();
+        QCOMPARE(result["resultType"].toString(), QString("complete"));
+        QVERIFY2(result["_meta"].toObject().contains("io.modelcontextprotocol/serverInfo"),
+                 "a deferred result is still a modern result");
+    }
+
+    // A rate-limit window must not outlive its usefulness. Pruning happens on
+    // record, which bounds the map only while traffic CONTINUES — after a token
+    // spray stops, nothing records again and every key seen at the last attempt
+    // would stay resident for the process lifetime. That property was lost when
+    // McpRemoteAccess's reaper loop was folded into the shared window, and this
+    // pins the pruneNow() that restores it.
+    void rateWindowForgetsKeysOnceTheirWindowCannotMatter()
+    {
+        McpRateWindow window;
+        QVERIFY(!window.recordAndCheckOverLimit(QStringLiteral("10.0.0.1"), 5));
+        QVERIFY(!window.recordAndCheckOverLimit(QStringLiteral("10.0.0.2"), 5));
+        QCOMPARE(window.trackedKeyCount(), 2);
+
+        // Nothing is stale yet, so a prune must not discard live budgets —
+        // otherwise a caller could reset its own limit by going quiet briefly.
+        window.pruneNow();
+        QCOMPARE(window.trackedKeyCount(), 2);
+
+        // And the budget still applies: six events against a limit of five.
+        for (int i = 0; i < 4; ++i)
+            window.recordAndCheckOverLimit(QStringLiteral("10.0.0.1"), 5);
+        QVERIFY2(window.recordAndCheckOverLimit(QStringLiteral("10.0.0.1"), 5),
+                 "a surviving window must still enforce its limit");
+    }
+
+    // ─── Spec-version gating: the floor revision sees only its own fields ───
+    //
+    // A strict validator rejects a response carrying fields introduced after the
+    // revision it negotiated. The server must omit those when the negotiated
+    // version pre-dates their introduction. The tests below pin the contract at
+    // the LOWEST supported revision, which is where a leak would show, so a
+    // future spec bump cannot silently push a newer field down to it.
+    //
+    // The floor was 2024-11-05 until those revisions were dropped; it is now
+    // 2025-06-18. Only the `icons` and `$schema` assertions below are gates —
+    // `title` is emitted at every negotiable revision, so its presence proves
+    // nothing about version handling and is no longer asserted here.
+
+    void toolsListAtFloorRevisionOmitsNewerSpecFields()
     {
         McpServer server;
         server.toolRegistry()->registerTool(
@@ -813,7 +1848,7 @@ private slots:
             [](const QJsonObject&) -> QJsonObject { return QJsonObject{}; },
             "read");
 
-        const QString sid = openSession(server, "2024-11-05");
+        const QString sid = openSession(server, "2025-06-18");
         auto resp = sendHttp(server, "POST", rpcBody("tools/list", {}, 2), sid);
         QCOMPARE(resp.statusCode, 200);
 
@@ -821,12 +1856,13 @@ private slots:
         QCOMPARE(tools.size(), 1);
         const QJsonObject t = tools[0].toObject();
 
-        // 2025-06-18 fields must NOT appear.
-        QVERIFY2(!t.contains("title"), "tools/list at 2024-11-05 must omit title");
+        // `title` is unconditional now — asserted here only so the record shows
+        // it survives at the floor. Its exact value is pinned by
+        // toolsListCarriesTitleAndSchemaButNoIcons; this is not a gate.
         // 2025-11-25 fields must NOT appear.
-        QVERIFY2(!t.contains("icons"), "tools/list at 2024-11-05 must omit icons");
+        QVERIFY2(!t.contains("icons"), "tools/list at 2025-06-18 must omit icons");
         QVERIFY2(!t["inputSchema"].toObject().contains("$schema"),
-                 "tools/list at 2024-11-05 must omit $schema dialect");
+                 "tools/list at 2025-06-18 must omit $schema dialect");
 
         // Universal fields must still be present.
         QCOMPARE(t["name"].toString(), QString("shots_get_detail"));
@@ -834,14 +1870,14 @@ private slots:
         QVERIFY(t["inputSchema"].toObject().contains("type"));
     }
 
-    void resourcesListAt2024_11_05OmitsNewerSpecFields()
+    void resourcesListAtFloorRevisionOmitsNewerSpecFields()
     {
         McpServer server;
         server.resourceRegistry()->registerResource(
             "decenza://shots/42", "Shot 42", "A test shot", "application/json",
             []() -> QJsonObject { return QJsonObject{{"id", 42}}; });
 
-        const QString sid = openSession(server, "2024-11-05");
+        const QString sid = openSession(server, "2025-06-18");
         auto resp = sendHttp(server, "POST", rpcBody("resources/list", {}, 2), sid);
         QCOMPARE(resp.statusCode, 200);
 
@@ -849,50 +1885,10 @@ private slots:
         QCOMPARE(resources.size(), 1);
         const QJsonObject r = resources[0].toObject();
 
-        QVERIFY2(!r.contains("title"), "resources/list at 2024-11-05 must omit title");
-        QVERIFY2(!r.contains("icons"), "resources/list at 2024-11-05 must omit icons");
+        // `title` unconditional — see the tools/list sibling above.
+        QVERIFY2(!r.contains("icons"), "resources/list at 2025-06-18 must omit icons");
         QCOMPARE(r["name"].toString(), QString("Shot 42"));
         QCOMPARE(r["uri"].toString(), QString("decenza://shots/42"));
-    }
-
-    void toolsCallAt2024_11_05OmitsStructuredContentAndResourceLinks()
-    {
-        McpServer server;
-        server.toolRegistry()->registerTool(
-            "stub_listy_tool",
-            "Returns _resourceLinks side-channel",
-            QJsonObject{{"type", "object"}, {"properties", QJsonObject{}}},
-            [](const QJsonObject&) -> QJsonObject {
-                QJsonObject link{{"uri", "decenza://shots/42"}, {"title", "#42"}};
-                return QJsonObject{{"items", QJsonArray{42}},
-                                   {"_resourceLinks", QJsonArray{link}}};
-            },
-            "read");
-
-        const QString sid = openSession(server, "2024-11-05");
-        QJsonObject params;
-        params["name"] = "stub_listy_tool";
-        params["arguments"] = QJsonObject{};
-        auto resp = sendHttp(server, "POST", rpcBody("tools/call", params, 2), sid);
-        QCOMPARE(resp.statusCode, 200);
-
-        const QJsonObject result = resp.jsonBody["result"].toObject();
-
-        // 2025-06-18 fields must NOT appear at 2024-11-05.
-        QVERIFY2(!result.contains("structuredContent"),
-                 "tools/call at 2024-11-05 must omit structuredContent");
-
-        // content[] must still carry the text block, but no resource_link blocks.
-        const QJsonArray content = result["content"].toArray();
-        QVERIFY2(!content.isEmpty(), "content[] must always be present");
-        bool hasText = false;
-        for (const QJsonValue& v : content) {
-            const QString type = v.toObject()["type"].toString();
-            QVERIFY2(type != "resource_link",
-                     "tools/call at 2024-11-05 must not emit resource_link blocks");
-            if (type == "text") hasText = true;
-        }
-        QVERIFY(hasText);
     }
 
     // Symmetric presence at 2025-06-18: structuredContent and resource_link
@@ -1004,8 +2000,6 @@ private slots:
     void resourcesReadOmitsStructuredContent_data()
     {
         QTest::addColumn<QString>("version");
-        QTest::newRow("2024-11-05") << "2024-11-05";
-        QTest::newRow("2025-03-26") << "2025-03-26";
         QTest::newRow("2025-06-18") << "2025-06-18";
         QTest::newRow("2025-11-25") << "2025-11-25";
     }
@@ -1042,66 +2036,110 @@ private slots:
 
     // ─── Spec conformance: batches, terminated sessions, error codes, SSE ──
 
-    void batchOfTwoRequestsReturnsArrayOfResponses()
+    // Batching is defined by exactly one revision, 2025-03-26, which this server
+    // no longer serves; the dispatch for it is gone. An array parses fine, so
+    // without an explicit refusal it would fall through to `doc.object()` and be
+    // answered "method not found" — true of the empty object it became, and
+    // useless to whoever sent the batch.
+    void batchedRequestIsRefusedExplicitly()
     {
         McpServer server;
         const QString sid = openSession(server, "2025-11-25");
+
+        // A side-effect-recording tool, because "refused" and "refused after
+        // running anyway" are indistinguishable from a batch of ping and
+        // tools/list. That distinction is not academic: the batch path once
+        // deleted a shot and then told the client the call had been refused.
+        auto dispatched = std::make_shared<bool>(false);
+        server.toolRegistry()->registerTool(
+            "stub_side_effect",
+            "Records that it ran",
+            QJsonObject{{"type", "object"}, {"properties", QJsonObject{}}},
+            [dispatched](const QJsonObject&) -> QJsonObject {
+                *dispatched = true;
+                return QJsonObject{{"ok", true}};
+            },
+            "read");
+
+        QJsonObject callParams;
+        callParams["name"] = "stub_side_effect";
+        callParams["arguments"] = QJsonObject{};
 
         QJsonArray batch;
         batch.append(QJsonDocument::fromJson(rpcBody("ping", {}, 11)).object());
-        batch.append(QJsonDocument::fromJson(rpcBody("tools/list", {}, 12)).object());
+        batch.append(QJsonDocument::fromJson(rpcBody("tools/call", callParams, 12)).object());
 
+        QTest::ignoreMessage(QtWarningMsg,
+                             QRegularExpression("Refused a JSON-RPC batch of 2 "
+                                                "\\(ping, tools/call\\)"));
         auto resp = sendHttp(server, "POST",
                              QJsonDocument(batch).toJson(QJsonDocument::Compact), sid);
+
         QCOMPARE(resp.statusCode, 200);
-        QCOMPARE(resp.jsonArrayBody.size(), 2);
-        QCOMPARE(resp.jsonArrayBody[0].toObject()["id"].toInt(), 11);
-        QCOMPARE(resp.jsonArrayBody[1].toObject()["id"].toInt(), 12);
-        QVERIFY(resp.jsonArrayBody[1].toObject().contains("result"));
+        QCOMPARE(resp.jsonBody["error"].toObject()["code"].toInt(), -32600);
+        QVERIFY(resp.jsonBody["error"].toObject()["message"].toString()
+                    .contains("not supported"));
+        // Null id per JSON-RPC 2.0: no single id can be attributed to a batch.
+        QVERIFY(resp.jsonBody["id"].isNull());
+
+        // The assertion that makes this test worth its build time: the refusal
+        // happens BEFORE dispatch. Move the isArray() check after a dispatch
+        // loop and only this line reddens.
+        QVERIFY2(!*dispatched,
+                 "a batched tool must not run — refusing it after it has already "
+                 "taken effect is not refusing it");
+
+        // Exactly one HTTP response on the socket. A second complete body
+        // desyncs a keep-alive connection rather than merely confusing a parse.
+        QVERIFY2(!resp.rawBody.contains("HTTP/1.1"),
+                 "a second complete HTTP response was written into the body");
     }
 
-    // A notification carries no `id` and so gets no array slot. A batch of
-    // nothing but notifications therefore has no response at all, which is 202 —
-    // the same answer a single notification gets.
-    void batchOfNotificationsOnlyReturns202()
+    // 202-with-no-body for a notification is live production code exercised by
+    // every openSession() in this file, but the response was never asserted —
+    // the only test that pinned the shape was a batch test, deleted with
+    // batching. A regression to 200-with-body or 204 would pass everything else.
+    void notificationAnswersWith202AndNoBody()
     {
         McpServer server;
         const QString sid = openSession(server, "2025-11-25");
 
-        QJsonArray batch;
-        batch.append(QJsonDocument::fromJson(notifyBody("notifications/initialized")).object());
-        batch.append(QJsonDocument::fromJson(notifyBody("notifications/initialized")).object());
-
-        auto resp = sendHttp(server, "POST",
-                             QJsonDocument(batch).toJson(QJsonDocument::Compact), sid);
+        auto resp = sendHttp(server, "POST", notifyBody("notifications/initialized"), sid);
         QCOMPARE(resp.statusCode, 202);
         QVERIFY(resp.rawBody.isEmpty());
     }
 
-    void batchMixedRequestAndNotificationAnswersOnlyTheRequest()
+    // The default McpSession protocol version, which nothing observed. Its
+    // comment argues a deliberate spec deviation justified by a safety property
+    // — that such a session is under-served rather than over-served — and that
+    // property had no assertion: setting the default to 2025-11-25 passed the
+    // whole suite while silently sending 2025-11-25 fields to a session that
+    // never negotiated.
+    //
+    // Driven through auto-create with NO version header, so the adoption branch
+    // cannot fire and the default is what remains.
+    void autoCreatedSessionWithoutHeaderUsesTheFloorRevision()
     {
         McpServer server;
-        const QString sid = openSession(server, "2025-11-25");
+        server.toolRegistry()->registerTool(
+            "shots_get_detail",
+            "Test tool",
+            QJsonObject{{"type", "object"}, {"properties", QJsonObject{}}},
+            [](const QJsonObject&) -> QJsonObject { return QJsonObject{}; },
+            "read");
 
-        QJsonArray batch;
-        batch.append(QJsonDocument::fromJson(notifyBody("notifications/initialized")).object());
-        batch.append(QJsonDocument::fromJson(rpcBody("ping", {}, 21)).object());
+        // Two live sessions so the "reuse the sole session" branch cannot fire.
+        QVERIFY(!openSession(server, "2025-11-25").isEmpty());
+        QVERIFY(!openSession(server, "2025-11-25").isEmpty());
 
-        auto resp = sendHttp(server, "POST",
-                             QJsonDocument(batch).toJson(QJsonDocument::Compact), sid);
+        auto resp = sendHttp(server, "POST", rpcBody("tools/list", {}, 5),
+                             "00000000-0000-0000-0000-000000000000");
         QCOMPARE(resp.statusCode, 200);
-        QCOMPARE(resp.jsonArrayBody.size(), 1);
-        QCOMPARE(resp.jsonArrayBody[0].toObject()["id"].toInt(), 21);
-    }
 
-    void batchEmptyArrayIsInvalidRequest()
-    {
-        McpServer server;
-        const QString sid = openSession(server, "2025-11-25");
-
-        auto resp = sendHttp(server, "POST", "[]", sid);
-        QCOMPARE(resp.statusCode, 200);
-        QCOMPARE(resp.jsonBody["error"].toObject()["code"].toInt(), -32600);
+        const QJsonArray tools = resp.jsonBody["result"].toObject()["tools"].toArray();
+        QCOMPARE(tools.size(), 1);
+        QVERIFY2(!tools.first().toObject()["inputSchema"].toObject().contains("$schema"),
+                 "a session that never negotiated must not receive 2025-11-25 fields");
     }
 
     void singleObjectPostStillAnswersWithSingleObject()
@@ -1226,84 +2264,7 @@ private slots:
         QCOMPARE(sendHttp(server, "DELETE", "", sid).statusCode, 404);
     }
 
-    // A batched call to a deferring tool must NOT be dispatched. The refusal used
-    // to be read off handleJsonRpc's `_deferred` return — i.e. after the tool had
-    // already run — so the tool took effect and then wrote a second complete HTTP
-    // body onto a socket the batch response had already answered.
-    //
-    // The stub records whether it ran, which is the assertion that distinguishes
-    // "refused" from "refused after doing it anyway".
-    void batchedAsyncToolIsRefusedWithoutBeingDispatched()
-    {
-        McpServer server;
-        auto dispatched = std::make_shared<bool>(false);
-        server.toolRegistry()->registerAsyncTool(
-            "stub_async_side_effect",
-            "Records that it ran",
-            QJsonObject{{"type", "object"}, {"properties", QJsonObject{}}},
-            [dispatched](const QJsonObject&, std::function<void(QJsonObject)> respond) {
-                *dispatched = true;
-                respond(QJsonObject{{"success", true}});
-            },
-            "read");
-
-        const QString sid = openSession(server, "2025-11-25");
-
-        QJsonObject callParams;
-        callParams["name"] = "stub_async_side_effect";
-        callParams["arguments"] = QJsonObject{};
-
-        QJsonArray batch;
-        batch.append(QJsonDocument::fromJson(rpcBody("ping", {}, 61)).object());
-        batch.append(QJsonDocument::fromJson(rpcBody("tools/call", callParams, 62)).object());
-
-        QTest::ignoreMessage(QtWarningMsg,
-            QRegularExpression("Batched tools/call refused before dispatch"));
-
-        auto resp = sendHttp(server, "POST",
-                             QJsonDocument(batch).toJson(QJsonDocument::Compact), sid);
-
-        QCOMPARE(resp.statusCode, 200);
-        QCOMPARE(resp.jsonArrayBody.size(), 2);
-        QVERIFY2(!*dispatched,
-                 "a batched async tool must not run — refusing it after it has already "
-                 "taken effect is not refusing it");
-
-        // Look the slot up by id rather than by index: JSON-RPC 2.0 lets a server
-        // answer a batch in any order, and clients correlate by id.
-        QJsonObject refused;
-        for (const QJsonValue& v : std::as_const(resp.jsonArrayBody))
-            if (v.toObject()["id"].toInt() == 62) refused = v.toObject();
-        QVERIFY(!refused.isEmpty());
-        QCOMPARE(refused["error"].toObject()["code"].toInt(), -32600);
-
-        // Exactly one HTTP response on the socket — a second body would desync a
-        // keep-alive connection rather than merely confuse the parse.
-        QVERIFY2(!resp.rawBody.contains("HTTP/1.1"),
-                 "a second complete HTTP response was written into the body");
-    }
-
-    // JSON-RPC 2.0 §6's "rpc call with invalid Batch": a non-object element gets
-    // its own error slot with a null id. Shortening the array instead would
-    // desync the client's id correlation silently.
-    void batchWithNonObjectElementAnswersItWithNullId()
-    {
-        McpServer server;
-        const QString sid = openSession(server, "2025-11-25");
-
-        QJsonArray batch;
-        batch.append(QJsonDocument::fromJson(rpcBody("ping", {}, 71)).object());
-        batch.append(QJsonValue(7));
-
-        auto resp = sendHttp(server, "POST",
-                             QJsonDocument(batch).toJson(QJsonDocument::Compact), sid);
-        QCOMPARE(resp.jsonArrayBody.size(), 2);
-        const QJsonObject bad = resp.jsonArrayBody[1].toObject();
-        QCOMPARE(bad["error"].toObject()["code"].toInt(), -32600);
-        QVERIFY2(bad["id"].isNull(), "an unidentifiable request answers with a null id");
-    }
-
-    // The empty-array and parse-error paths must answer with `id: null`, not
+    // The array-refusal and parse-error paths must answer with `id: null`, not
     // `id: 0`. QJsonValue::Null is an unscoped enumerator of value 0, so passing
     // it where a QVariant is expected picks QVariant(int) over
     // QVariant(const QJsonValue&) — an integral promotion beats a user-defined
@@ -1314,8 +2275,10 @@ private slots:
         McpServer server;
         const QString sid = openSession(server, "2025-11-25");
 
+        QTest::ignoreMessage(QtWarningMsg,
+                             QRegularExpression("Refused a JSON-RPC batch of 0"));
         auto empty = sendHttp(server, "POST", "[]", sid);
-        QVERIFY2(empty.jsonBody["id"].isNull(), "empty batch must answer id: null");
+        QVERIFY2(empty.jsonBody["id"].isNull(), "refused array must answer id: null");
 
         auto garbage = sendHttp(server, "POST", "{not json}", sid);
         QVERIFY2(garbage.jsonBody["id"].isNull(), "parse error must answer id: null");
@@ -1491,6 +2454,131 @@ private slots:
     // second time in chat. Both halves are one string equality apart from silence:
     // if `needsInAppConfirmation`'s name stops matching the registration, a network
     // client starts the machine with no confirmation of any kind.
+    // The confirmation gate carries its OWN handle, not a session id. That is
+    // what lets a stateless caller hold one: the value was never looked up as a
+    // session, it was only ever echoed back.
+    void confirmationHandleIsNotASessionId()
+    {
+        McpServer server;
+        Settings settings;
+        settings.mcp()->setMcpAccessLevel(2);
+        settings.mcp()->setMcpConfirmationLevel(1);
+        server.setSettings(&settings);
+        server.toolRegistry()->registerTool(
+            "machine_start", "stub",
+            QJsonObject{{"type", "object"}, {"properties", QJsonObject{}}},
+            [](const QJsonObject&) -> QJsonObject { return QJsonObject{{"success", true}}; },
+            "control");
+
+        QSignalSpy spy(&server, &McpServer::confirmationRequested);
+        const QString sid = openSession(server, "2025-11-25");
+        QJsonObject params;
+        params["name"] = "machine_start";
+        params["arguments"] = QJsonObject{{"action", "espresso"}};
+        HeldConnection conn;
+        QVERIFY(conn.open());
+        conn.send(server, rpcBody("tools/call", params, 92), sid);
+
+        QCOMPARE(spy.count(), 1);
+        const QString handle = spy.at(0).at(2).toString();
+        QVERIFY2(!handle.isEmpty(), "the UI needs something to echo back");
+        QVERIFY2(handle != sid,
+                 "the handle must be the confirmation's own identity, not the session's — "
+                 "borrowing the session id is what excluded stateless callers");
+
+        // The confirmation is still pending, and HeldConnection's destructor
+        // closes the socket at scope exit — inside this test function — so the
+        // backstop fires here. Expected rather than suppressed: it is the
+        // behaviour under test in the sibling case.
+        QTest::ignoreMessage(QtWarningMsg,
+                             QRegularExpression("Pending confirmation for machine_start "
+                                                "abandoned — its connection closed"));
+    }
+
+    // A MODERN caller can hold a confirmation, which is the point of giving the
+    // gate its own handle. Previously refused outright.
+    void modernCallerCanHoldAConfirmation()
+    {
+        McpServer server;
+        Settings settings;
+        settings.mcp()->setMcpAccessLevel(2);
+        settings.mcp()->setMcpConfirmationLevel(1);
+        server.setSettings(&settings);
+        auto ran = std::make_shared<bool>(false);
+        server.toolRegistry()->registerTool(
+            "machine_start", "stub",
+            QJsonObject{{"type", "object"}, {"properties", QJsonObject{}}},
+            [ran](const QJsonObject&) -> QJsonObject {
+                *ran = true;
+                return QJsonObject{{"success", true}};
+            },
+            "control");
+
+        QSignalSpy spy(&server, &McpServer::confirmationRequested);
+        QJsonObject params;
+        params["name"] = "machine_start";
+        params["arguments"] = QJsonObject{{"action", "espresso"}};
+
+        // Held open: a confirmation is a client still waiting on a deferred
+        // response, and the server abandons one whose connection has gone.
+        HeldConnection conn;
+        QVERIFY(conn.open());
+        conn.send(server, modernBody("tools/call", params, 93));
+
+        QCOMPARE(spy.count(), 1);
+        QVERIFY2(!*ran, "the tool must wait for the answer, not run and then ask");
+
+        // Answering with the handle runs it — the round trip a stateless caller
+        // could not previously complete.
+        server.confirmationResolved(spy.at(0).at(2).toString(), true);
+        QVERIFY2(*ran, "a confirmed modern call must actually dispatch");
+    }
+
+    // A confirmation whose requester has gone cannot be meaningfully answered.
+    // This is the ONLY backstop the modern era can have — no session, so no idle
+    // reaper will ever come for it — and for legacy it replaces "noticed up to
+    // thirty minutes later" with "noticed immediately".
+    void confirmationIsAbandonedWhenTheConnectionDrops()
+    {
+        McpServer server;
+        Settings settings;
+        settings.mcp()->setMcpAccessLevel(2);
+        settings.mcp()->setMcpConfirmationLevel(1);
+        server.setSettings(&settings);
+        auto ran = std::make_shared<bool>(false);
+        server.toolRegistry()->registerTool(
+            "machine_start", "stub",
+            QJsonObject{{"type", "object"}, {"properties", QJsonObject{}}},
+            [ran](const QJsonObject&) -> QJsonObject {
+                *ran = true;
+                return QJsonObject{{"success", true}};
+            },
+            "control");
+
+        QSignalSpy spy(&server, &McpServer::confirmationRequested);
+        QJsonObject params;
+        params["name"] = "machine_start";
+        params["arguments"] = QJsonObject{{"action", "espresso"}};
+        // Expected BEFORE the send: sendHttp closes its socket on return, so the
+        // backstop fires inside that call, not after it.
+        QTest::ignoreMessage(QtWarningMsg,
+                             QRegularExpression("Pending confirmation for machine_start "
+                                                "abandoned — its connection closed"));
+
+        // sendHttp deliberately, NOT HeldConnection: its socket dies on return,
+        // which is the very condition under test.
+        sendHttp(server, "POST", modernBody("tools/call", params, 94));
+        QCOMPARE(spy.count(), 1);
+
+        // Answering a confirmation that is already gone must do nothing at all.
+        QTest::ignoreMessage(QtWarningMsg,
+                             QRegularExpression("confirmationResolved for .* but nothing is "
+                                                "pending"));
+        server.confirmationResolved(spy.at(0).at(2).toString(), true);
+        QVERIFY2(!*ran,
+                 "a confirmation whose requester is gone must not still be answerable");
+    }
+
     void machineStartConfirmsInAppAndNotInChat()
     {
         McpServer server;
@@ -1509,11 +2597,26 @@ private slots:
         QJsonObject params;
         params["name"] = "machine_start";
         params["arguments"] = QJsonObject{{"action", "espresso"}};
-        auto resp = sendHttp(server, "POST", rpcBody("tools/call", params, 91), sid);
+        // Held open — see HeldConnection. Previously this used sendHttp, whose
+        // socket dies on return; that was invisible until the gate gained a
+        // socket-disconnect backstop, at which point this test was asserting
+        // against a confirmation the server had already abandoned.
+        HeldConnection conn;
+        QVERIFY(conn.open());
+        conn.send(server, rpcBody("tools/call", params, 91), sid);
+        auto resp = readHeld(conn);
 
         QCOMPARE(spy.count(), 1);
         QVERIFY2(!confirmationPayloadText(resp).contains("needs_confirmation"),
                  "the in-app dialog owns this tool; a chat prompt as well is a double prompt");
+
+        // The confirmation is still pending, and HeldConnection's destructor
+        // closes the socket at scope exit — inside this test function — so the
+        // backstop fires here. Expected rather than suppressed: it is the
+        // behaviour under test in the sibling case.
+        QTest::ignoreMessage(QtWarningMsg,
+                             QRegularExpression("Pending confirmation for machine_start "
+                                                "abandoned — its connection closed"));
     }
 
     // ─── Pure helpers ──────────────────────────────────────────────────────

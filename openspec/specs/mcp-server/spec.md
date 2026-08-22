@@ -2,18 +2,31 @@
 
 ## Purpose
 Decenza's MCP server: protocol version negotiation and the `MCP-Protocol-Version` header, `Origin` validation, structured tool output, resource-link content blocks, tool/resource titles and icons, and JSON Schema 2020-12 input schemas, plus the domain tool surface for scale connection-priority mode and diagnostics, equipment package (grinder/basket/puck-prep) reads and writes, and bag bean-detail fields.
+
 ## Requirements
+
 ### Requirement: Latest Protocol Version Support
 
-The MCP server SHALL declare `2025-11-25` as its preferred protocol version and SHALL also accept `2025-06-18`, `2025-03-26`, and `2024-11-05` for backward compatibility. During `initialize`, the server SHALL respond with the client-requested version when it is in the supported set, otherwise SHALL respond with the preferred version.
+The MCP server SHALL declare `2025-11-25` as its preferred protocol version and
+SHALL also accept `2025-06-18`. It SHALL NOT accept `2025-03-26` or
+`2024-11-05`, which no observed client requests and for which the protocol's own
+conformance suite has no scenarios. During `initialize`, the server SHALL respond
+with the client-requested version when it is in the supported set, otherwise
+SHALL respond with the preferred version.
+
+The server SHALL NOT advertise a revision it does not serve.
 
 #### Scenario: Client requests current version
 - **WHEN** a client sends `initialize` with `protocolVersion: "2025-11-25"`
 - **THEN** the server responds with `protocolVersion: "2025-11-25"`
 
 #### Scenario: Client requests prior version
+- **WHEN** a client sends `initialize` with `protocolVersion: "2025-06-18"`
+- **THEN** the server responds with `protocolVersion: "2025-06-18"` and SHALL serve subsequent requests under that version
+
+#### Scenario: Client requests a dropped version
 - **WHEN** a client sends `initialize` with `protocolVersion: "2025-03-26"`
-- **THEN** the server responds with `protocolVersion: "2025-03-26"` and SHALL serve subsequent requests under that version
+- **THEN** the server responds with `protocolVersion: "2025-11-25"` (its preferred version), the same as for any other version it does not support
 
 #### Scenario: Client requests unsupported version
 - **WHEN** a client sends `initialize` with `protocolVersion: "2023-01-01"`
@@ -21,19 +34,70 @@ The MCP server SHALL declare `2025-11-25` as its preferred protocol version and 
 
 ### Requirement: MCP-Protocol-Version Request Header
 
-For every HTTP request other than `initialize`, the server SHALL accept the `MCP-Protocol-Version` request header. When present, the value MUST equal the version negotiated at `initialize` for the session; mismatches SHALL be rejected with HTTP 400. When absent, the server SHALL assume `2025-03-26` per the spec's compatibility rule.
+For every HTTP request other than `initialize`, the server SHALL accept the
+`MCP-Protocol-Version` request header.
+
+A request naming a version the server does not support SHALL be rejected with
+HTTP 400. A request naming a version the server DOES support SHALL be served,
+whether or not it matches the version negotiated for the session, and SHALL be
+answered under the version the header names.
+
+This narrows a previous requirement that rejected any header differing from the
+negotiated version. The protocol licenses 400 for an "invalid or unsupported"
+version only, and makes matching the negotiated one a client-side SHOULD; the
+old rule refused versions the server plainly serves, which the official
+conformance suite fails on.
+
+Honouring the header SHALL NOT alter the session's negotiated version: it
+answers one request, it does not re-version a live session.
+
+A request naming `2025-03-26` is neither of those cases: it SHALL be accepted
+and treated as an ABSENT header, selecting nothing, so the session's version
+stands. That value and a supported version SHALL NOT be handled alike — the
+former selects nothing, the latter selects itself. Honouring `2025-03-26` as a
+version would claim semantics the server does not implement.
+
+When the header is absent, the server SHALL assume the lowest revision it
+supports.
 
 #### Scenario: Header matches negotiated version
+
 - **WHEN** a client POSTs `tools/call` with `MCP-Protocol-Version: 2025-11-25` after negotiating `2025-11-25`
 - **THEN** the server processes the request normally
 
 #### Scenario: Header mismatch
+
 - **WHEN** a client POSTs `tools/call` with `MCP-Protocol-Version: 2024-11-05` after negotiating `2025-11-25`
-- **THEN** the server returns HTTP 400 with body indicating protocol version mismatch
+- **THEN** the request is served, and the response carries only the fields the header's version defines
+
+Note the outcome reverses the previous version of this scenario, which required
+HTTP 400 here. The name is kept so the change is visible as a reversal rather
+than as one scenario disappearing and an unrelated one appearing.
+
+#### Scenario: Header names an unsupported version
+
+- **WHEN** a client POSTs `tools/call` with an `MCP-Protocol-Version` the server does not support
+- **THEN** the server returns HTTP 400 naming the unsupported version
+
+#### Scenario: A supported header does not re-version the session
+
+- **WHEN** a client sends one request under a supported header differing from its negotiated version, then a further request with no header
+- **THEN** the second request is answered under the originally negotiated version
+
+#### Scenario: Compatibility sentinel in the header
+
+- **WHEN** a client that negotiated a newer revision POSTs with `MCP-Protocol-Version: 2025-03-26`
+- **THEN** the request is served under the negotiated version — neither rejected nor answered under the header
+
+#### Scenario: The sentinel does not make the revision negotiable
+
+- **WHEN** a client sends `initialize` with `protocolVersion: "2025-03-26"`
+- **THEN** the server still answers with its preferred version, as for any unsupported revision
 
 #### Scenario: Header absent on legacy client
-- **WHEN** a client negotiates `2025-03-26` and POSTs subsequent requests without an `MCP-Protocol-Version` header
-- **THEN** the server processes the request normally, assuming `2025-03-26`
+
+- **WHEN** a client negotiates a supported revision and POSTs subsequent requests without an `MCP-Protocol-Version` header
+- **THEN** the server processes the request normally, under the version that session negotiated
 
 ### Requirement: Origin Header Validation
 
@@ -57,15 +121,22 @@ The server SHALL validate the `Origin` request header on every `/mcp` HTTP reque
 
 ### Requirement: Structured Tool Output
 
-Every successful `tools/call` response SHALL include a `structuredContent` field carrying the tool's result payload as a JSON object. The existing `content` array with text content blocks SHALL be retained for backward compatibility with clients negotiating `2025-03-26` or earlier.
+Every successful `tools/call` response SHALL include a `structuredContent` field carrying the tool's result payload as a JSON object. This SHALL NOT be conditional on the negotiated version: the field is defined at the lowest revision the server serves, so no negotiable revision lacks it.
+
+The `content` array with a text content block SHALL also be emitted, for two independent reasons that both hold: `content` is required on a tool result at every revision, and the protocol separately states that a tool returning structured content SHOULD also return the serialized JSON in a text block for backwards compatibility. Either reason alone would leave the current behaviour under-specified.
 
 #### Scenario: Tool returns structured payload
 - **WHEN** a client calls a tool that returns a JSON payload
 - **THEN** the response includes both `content[]` (with at least one text block) and `structuredContent` (the same payload as a JSON object)
 
 #### Scenario: Legacy client receives identical text
-- **WHEN** a client negotiating `2025-03-26` calls the same tool
-- **THEN** the response still includes the text content block matching the pre-upgrade behavior
+- **WHEN** a client negotiating the lowest supported revision calls the same tool
+- **THEN** the response still includes the text content block
+
+This scenario previously named `2025-03-26`, a revision no longer served. Its
+point is unchanged and was never about that revision: the text block is emitted
+at every revision because `content` is required on a tool result, not as a
+concession to old clients.
 
 ### Requirement: Resource Link Content Blocks
 
@@ -346,9 +417,33 @@ When remote MCP is enabled, the remote surface SHALL authorize
 requests solely by an unguessable capability token carried as a URL
 path segment (`/mcp/<token>`), where the token is a 128-bit
 cryptographically random value generated on-device. Token comparison
-SHALL be constant-time. Requests with a missing or non-matching token
-SHALL receive a bare HTTP `404` that does not reveal that an MCP
-server exists.
+SHALL be constant-time.
+
+A request that does not carry the current token — wrong token, missing
+token, or malformed framing on a request line that names neither —
+SHALL be refused without revealing that an MCP server exists. Behind an
+embedded tunnel the refusal SHALL be no response at all, with the
+connection closed; on a bring-your-own-proxy listener it SHALL be a
+bare HTTP `404`, because there the response goes to the user's own
+reverse proxy, where a silent drop reads as a broken backend.
+
+Whether the caller holds the token SHALL be decided from the request
+line, which arrives before the header block terminates. A framing
+failure is therefore NOT by itself grounds for silence: a request line
+carrying the current token SHALL receive the `404` in either mode,
+since a silent drop is indistinguishable from a network failure and
+would leave a legitimate client retrying forever, while a caller who
+already knows the token learns nothing from the reply.
+
+Silence here SHALL NOT be described as making the endpoint invisible.
+The tunnel edge terminates TLS and serves its own error for a backend
+that hangs up, so the hostname remains visibly configured; what the
+silence withholds is any confirmation from this application.
+
+A request that DOES carry the current token SHALL receive the bare
+`404` in either mode when its method or path is not served — its
+caller has already proved it knows the token, so silence would buy
+nothing but a confused client.
 
 #### Scenario: Valid token
 - **WHEN** a client POSTs a JSON-RPC request to `/mcp/<token>` with the current token
@@ -356,11 +451,31 @@ server exists.
 
 #### Scenario: Wrong token
 - **WHEN** a client POSTs to `/mcp/<other>` where `<other>` is not the current token
-- **THEN** the server returns `404` with no MCP-identifying headers or body
+- **THEN** the request is refused without any MCP-identifying headers or body — closed unanswered behind a tunnel, `404` otherwise
 
 #### Scenario: Missing token
 - **WHEN** a client POSTs to `/mcp` on the remote surface
-- **THEN** the server returns `404`
+- **THEN** the request is refused the same way — closed unanswered behind a tunnel, `404` otherwise
+
+#### Scenario: Wrong token behind a tunnel
+- **WHEN** a client POSTs to `/mcp/<other>` on a tunnel-proxied listener, where `<other>` is not the current token
+- **THEN** the connection is closed with no bytes written
+
+#### Scenario: Wrong token on a bring-your-own-proxy listener
+- **WHEN** a client POSTs to `/mcp/<other>` on a listener fronted by the user's own reverse proxy
+- **THEN** the server returns `404` with no MCP-identifying headers or body
+
+#### Scenario: Malformed framing from a stranger
+- **WHEN** a request whose request line does not carry the current token arrives with headers that never terminate, a body over the cap, or a non-numeric `Content-Length`
+- **THEN** the refusal is the same as for a wrong token — no reply behind a tunnel, `404` otherwise
+
+#### Scenario: Malformed framing from a token holder
+- **WHEN** the same framing failure arrives on a request line that DOES carry the current token
+- **THEN** the server returns `404` in either mode, because a silent drop is indistinguishable from a dropped network and would leave a legitimate client retrying a request that can never succeed
+
+#### Scenario: Valid token, unserved method
+- **WHEN** a client sends a method other than `POST`, `GET` or `DELETE` to `/mcp/<token>` with the current token
+- **THEN** the server returns `404` in either mode
 
 ### Requirement: Token Rotation as Revocation
 
@@ -700,52 +815,6 @@ The app debug log's session-boundary index (used by `debug_get_log`'s `sessions=
 - **WHEN** the persisted log file's size/modification time can be read but the file itself cannot be opened for reading
 - **THEN** a warning is logged naming the file and the reason, so the condition is diagnosable from the log rather than indistinguishable from a genuinely empty log
 
-### Requirement: JSON-RPC Batch Requests Are Accepted
-
-The server SHALL accept a POST body containing a JSON array of JSON-RPC messages
-and process each element, at every negotiated protocol version. The response
-SHALL be a JSON array holding one response per element that carried an `id`,
-preserving each element's `id`. A batch consisting solely of notifications SHALL
-receive HTTP 202 with no body, matching the single-notification case.
-
-An element whose handling would be deferred — a tool requiring in-app
-confirmation, or an async tool or resource — SHALL receive a JSON-RPC error in
-its array slot rather than a deferred response, because a deferred response is
-written to the socket as a complete HTTP body and cannot be folded into the
-array. That determination SHALL be made BEFORE the element is dispatched, so
-that the refused element does not run: an element refused after dispatch has
-already taken its effect, and the client is told otherwise.
-
-The session serving a batch SHALL be resolved once for the whole request, before
-any element is handled. Resolving per element allows an unrecognized session
-header to create one session per element, and allows a request-level outcome
-discovered at element N to discard the results of elements already executed.
-
-#### Scenario: Batch of two requests
-
-- **WHEN** a client POSTs `[{"jsonrpc":"2.0","id":1,"method":"ping"},{"jsonrpc":"2.0","id":2,"method":"tools/list"}]`
-- **THEN** the server responds with a JSON array of two responses carrying `id` 1 and 2
-
-#### Scenario: Batch of only notifications
-
-- **WHEN** a client POSTs an array containing only messages without an `id`
-- **THEN** the server responds HTTP 202 with no body
-
-#### Scenario: Batch containing a deferring tool
-
-- **WHEN** a batch element calls a tool that requires in-app confirmation
-- **THEN** that element's array slot carries a JSON-RPC error stating the call cannot be batched, the tool is not dispatched, and the other elements are answered normally
-
-#### Scenario: Batch carrying an unrecognized session header
-
-- **WHEN** a batch of several elements arrives with a session ID the server does not recognize
-- **THEN** at most one session is created for the whole request
-
-#### Scenario: Single message is unaffected
-
-- **WHEN** a client POSTs a single JSON-RPC object rather than an array
-- **THEN** the server responds with a single JSON-RPC object, unchanged from prior behaviour
-
 ### Requirement: A Terminated Session Is Rejected With HTTP 404
 
 When a client ends a session with an explicit `DELETE`, the server SHALL
@@ -870,3 +939,155 @@ resource named in any notification it missed.
 
 - **WHEN** a client reconnects sending a `Last-Event-ID` header
 - **THEN** the server opens a fresh stream and is not required to replay events sent after that ID
+
+### Requirement: The Server Conforms To Every Protocol Revision It Advertises
+
+Advertising a protocol revision is a claim to implement it. The server SHALL
+conform to every revision it advertises, legacy revisions included.
+
+Where the protocol's own conformance suite covers a revision, conformance SHALL
+be verified against it rather than against this project's tests alone. Where it
+does not — the suite does not cover every revision this server advertises — a
+green run SHALL NOT be reported as evidence about the revisions it did not
+exercise.
+
+Where the server deviates from a revision it advertises, the deviation SHALL be
+deliberate, SHALL be recorded at the point in the code where it occurs, and
+SHALL state what it protects. A deviation that exists to keep a real client
+working is permitted; an unexamined one is not.
+
+A revision the server cannot conform to SHALL NOT be advertised.
+
+#### Scenario: An advertised revision is exercised
+
+- **WHEN** the conformance suite is run against the server for a revision the suite covers
+- **THEN** every requirement of that revision either passes, or fails at a point the code documents as a deliberate deviation
+
+#### Scenario: An advertised revision the suite does not cover
+
+- **WHEN** the server advertises a revision the conformance suite has no scenarios for
+- **THEN** its conformance is reported as unverified rather than implied by the other revisions' results
+
+#### Scenario: A deviation protects a client the spec would break
+
+- **WHEN** conformance requires behaviour that would leave a known real client unable to recover
+- **THEN** the deviation is kept, and the code records which client it protects and why
+
+#### Scenario: A revision that cannot be served
+
+- **WHEN** the server cannot conform to a revision
+- **THEN** that revision is absent from the list of versions the server advertises
+
+### Requirement: Session Requirements Govern The Legacy Era Only
+
+Every requirement in this capability concerning sessions — how a session
+becomes stateful, the concurrency limit, the total pool bound, the reaping of
+ephemeral sessions, and the rejection of a terminated session — SHALL be read
+as governing the legacy era, in which sessions exist.
+
+The modern era has no sessions for those requirements to govern. Their absence
+there is not a gap in conformance.
+
+#### Scenario: A modern request and the session limits
+
+- **WHEN** the server is serving modern requests
+- **THEN** no session is created for them, and they are not counted against any session limit
+
+#### Scenario: Legacy sessions are still bounded
+
+- **WHEN** legacy clients connect
+- **THEN** every session limit in this capability applies to them exactly as before
+
+### Requirement: List Results Are Returned In A Deterministic Order
+
+`tools/list` and `resources/list` SHALL each return their entries in an order
+that is stable across process restarts for an unchanged set of entries, so that
+a client may cache the result and so that a repeated listing does not defeat
+prompt caching.
+
+The order SHALL NOT depend on the iteration order of an unordered container.
+
+#### Scenario: Two runs return the same order
+
+- **WHEN** a client lists tools, the server restarts with the same tools registered, and the client lists tools again
+- **THEN** the two responses carry the tools in the same order
+
+#### Scenario: Two runs return the same resource order
+
+- **WHEN** a client lists resources, the server restarts with the same resources registered, and the client lists resources again
+- **THEN** the two responses carry the resources in the same order
+
+#### Scenario: Order is independent of registration order
+
+- **WHEN** the order in which tools are registered changes but the set of tools does not
+- **THEN** the listing order is unchanged
+
+### Requirement: List And Read Results Carry Cache Guidance
+
+`tools/list`, `resources/list` and `resources/read` SHALL carry a freshness
+hint stating how long the result may be reused, and a scope stating whether
+the result may be cached beyond the requesting caller.
+
+In the modern era these SHALL be present on every such result; they are not
+optional there.
+
+A result whose content depends on the caller's access level SHALL NOT be
+marked cacheable beyond that caller.
+
+#### Scenario: A client caches a tool listing
+
+- **WHEN** a client lists tools
+- **THEN** the response states how long the listing may be reused
+
+#### Scenario: Access-dependent results are not shared
+
+- **WHEN** a listing reflects the caller's access level
+- **THEN** its cache scope does not permit reuse for another caller
+
+### Requirement: A Remote Caller Is Named By Something A Proxy Cannot Collapse
+
+Where the remote listener is one an embedded tunnel proxies into, every
+client reaches it from loopback and the peer address identifies nobody.
+Log lines and rate-limiter keys for such a caller SHALL use a label that
+says the request came from the public internet, never the proxied
+loopback address. That label SHALL be produced once, by the listener
+that knows its own exposure, and supplied to any other component that
+keys or reports on the caller — a second derivation is free to drift
+from the first, and the two would then disagree about who was refused.
+
+A listener that is NOT tunnel-proxied SHALL keep the peer address,
+where it is a genuine peer.
+
+#### Scenario: Rejection behind a tunnel
+- **WHEN** an unauthorized request arrives on a tunnel-proxied listener
+- **THEN** the log line names it as coming from the public internet rather than from `127.0.0.1`
+
+#### Scenario: Rate-limit refusal behind a tunnel
+- **WHEN** a tunnel-proxied caller exceeds the stateless era's control-call budget
+- **THEN** the refusal line names the same caller the connector logs, not the loopback address
+
+### Requirement: An Unauthenticated Caller Cannot Fill The Debug Log
+
+The debug log is a fixed-size buffer shared by every subsystem, and the
+remote surface is reachable by anyone who finds the public URL. The
+number of log lines a caller that fails authorization can cause SHALL
+be bounded well below one per request.
+
+The per-source failed-token budget SHALL be small enough to reflect
+that nothing is learned from repetition: a client holding a valid token
+never fails the check, and a person who pasted a truncated URL retries
+once or twice. Beyond the budget, the connection SHALL be dropped
+rather than answered.
+
+Bounding SHALL NOT mean going silent about scale. After the
+per-request lines stop, the system SHALL still record the running
+count at increasing intervals, so a submitted log distinguishes a
+single stray probe from sustained hammering.
+
+#### Scenario: Sustained rejection
+- **WHEN** one source sends many more unauthorized requests than the budget within a minute
+- **THEN** the number of warnings emitted is fewer than the number of requests
+
+#### Scenario: Scale is still recorded
+- **WHEN** unauthorized requests from one source continue past the point where per-request logging stops
+- **THEN** the log still receives lines carrying the running count for that minute

@@ -6,7 +6,7 @@ Add an MCP (Model Context Protocol) server to Decenza so AI assistants (Claude D
 
 ## Architecture
 
-### Transport: Streamable HTTP (MCP 2025-03-26 spec)
+### Transport: Streamable HTTP
 
 - **POST /mcp** — JSON-RPC 2.0 requests (initialize, tools/call, resources/read, etc.)
 - **GET /mcp** — SSE stream for server-initiated notifications (resource changes)
@@ -353,7 +353,7 @@ the `refresh()` / `rotateToken()` invokables.
 | Tool | Description | Category |
 |------|-------------|----------|
 | `machine_get_state` | Phase, connection, readiness, heating status, water level (ml + mm), firmware version, active profile name. Platform/OS info has moved to `app_get_info` (#988) to keep tight polling responses small. | read |
-| `app_get_info` | App and device info: appVersion, qtVersion, OS, kernel, architecture, deviceModel, screen size/DPI, devicePixelRatio. Diagnostics-grade — call once per session. | read |
+| `app_get_info` | App and device info: appVersion, **buildNumber**, qtVersion, OS, kernel, architecture, deviceModel, screen size/DPI, devicePixelRatio. Diagnostics-grade — call once per session. `buildNumber` (`versionCode()`) is what identifies a build: one `appVersion` can ship many, since pre-releases are re-cut against a rolling version — v2.0.4 shipped as 3552, 3553 and 3554. Ask for it before concluding whether a fix is present in a field report. | read |
 | `machine_get_telemetry` | Live pressure, flow, temp, weight, goal values. During a shot, also returns the current shot's time-series data so far (not just the latest sample) so the AI can detect channeling or stalling mid-shot. | read |
 | `steam_get_health` | Detailed steam-system health: baseline + current pressure/temperature, flow-restriction progress toward warn thresholds, status, and recommendation. Used for steam-wand cleaning / descaling guidance. | read |
 
@@ -568,7 +568,7 @@ MCP tool responses are consumed by LLMs (Claude, ChatGPT, etc.) which cannot rel
 - **Scales in field names**: Bounded values indicate their range — `enjoyment0to100` (0-100 rating)
 - **Human-readable enums**: Machine phases, editor types, and states are returned as strings (`"idle"`, `"pouring"`, `"dflow"`), not numeric codes
 - **`stoppedBy` marks whether a yield is a real outcome** (#1161): shots in `dialing_get_context` (`dialInSessions[].shots[]`, `bestRecentShot`) and `shots_list` carry a sparse `stoppedBy` ∈ `"weight"` (stop-at-weight) / `"volume"` (stop-at-volume) / `"manual"` (user tapped Stop). It is **omitted** when the profile ran to completion or the DE1's own button was used (the BLE protocol can't distinguish those) — the AI then falls back to `yieldG` vs `targetWeightG`. A `"manual"` shot's yield/ratio/duration are user-chosen, not extraction outcomes, so the shared `shotAnalysisSystemPrompt` instructs the AI not to diagnose grind/ratio from them; an absent `stoppedBy` with `yieldG` well below `targetWeightG` is treated the same. Classified in `MainController::onShotEnded` (SAW/SAV C++ state is ground truth; QML's resolved `stopReason` supplies "manual" via `reportShotStopReason`), persisted in `shots.stopped_by` (migration 17).
-- **Shot identity in prose is date/time, never the numeric `id`** (#1162): the per-shot `id` is an internal DB primary key with no user-facing counterpart — Shot History and every user surface key shots by date/time. The AI must cite shots to the user by their local `timestamp` ("your May 10, 9:04 AM shot"), using `id` only as an opaque argument to other tools. This rule is delivered to MCP clients via the server-level `instructions` string in the `initialize` result (retained for the whole session, beverage-agnostic, zero per-call cost) and reinforced in the shared `shotAnalysisSystemPrompt` (`## How to Read Structured Fields`). Two carriers because the full system prompt only reaches MCP clients that call `ai_advisor_invoke` (always carries it) or `dialing_get_context` with `includeFullKnowledge: true` (opt-in since #1164); for a client that does neither, the handshake `instructions` is the only carrier. The `instructions` field is gated on `negotiatedVersion >= "2025-03-26"` (the revision that introduced it) so strict `2024-11-05` clients don't reject the `initialize` response — same discipline as the `structuredContent` / `resource_link` gates in `buildToolCallResponse()`.
+- **Shot identity in prose is date/time, never the numeric `id`** (#1162): the per-shot `id` is an internal DB primary key with no user-facing counterpart — Shot History and every user surface key shots by date/time. The AI must cite shots to the user by their local `timestamp` ("your May 10, 9:04 AM shot"), using `id` only as an opaque argument to other tools. This rule is delivered to MCP clients via the server-level `instructions` string in the `initialize` result (retained for the whole session, beverage-agnostic, zero per-call cost) and reinforced in the shared `shotAnalysisSystemPrompt` (`## How to Read Structured Fields`). Two carriers because the full system prompt only reaches MCP clients that call `ai_advisor_invoke` (always carries it) or `dialing_get_context` with `includeFullKnowledge: true` (opt-in since #1164); for a client that does neither, the handshake `instructions` is the only carrier. The `instructions` field is emitted unconditionally, and the gate it used to carry rested on a false premise: `schema/2024-11-05/schema.ts` already declares `instructions?: string;` on `InitializeResult`, with the same docblock as every later revision. It was optional and present from the first revision, so it was never version-sensitive.
 
 When adding new MCP tool responses, never return raw numbers that require domain knowledge to interpret. An AI seeing `"pressure": 9.0` doesn't know if that's bar, PSI, or kPa. Use `"pressureBar": 9.0` instead.
 
@@ -643,21 +643,142 @@ setters build their response *before* the setters run, so a clamp or rejection
 cannot reach it — real, but with no identified failing key, and the fix is a
 90-setter refactor. Left alone deliberately.
 
+### Two protocol eras, one endpoint
+
+The server is **dual-era**: it speaks the handshake-based revisions (`2025-06-18`,
+`2025-11-25`) and the handshake-less `2026-07-28` on the same endpoint, with the
+era chosen per request.
+
+**Which era a request gets, and how.** The discriminator is
+`params._meta["io.modelcontextprotocol/protocolVersion"]`. The 2026-07-28 schema
+makes it REQUIRED on every modern request and no legacy revision defines it, so
+its presence is decisive on its own. It is deliberately NOT the `Mcp-Method` /
+`Mcp-Name` headers, which are also required of a modern POST: requiring those
+here would reject a modern request whose proxy stripped them. And it is NOT
+`MCP-Protocol-Version`, which legacy has sent since 2025-06-18.
+
+**An ambiguous request is served as legacy**, and that is not a neutral default.
+Mis-routing a legacy request to the modern path breaks a client that works today
+and gives it no recovery — the handshake that would have negotiated a fallback is
+the thing 2026-07-28 removed. Mis-routing a modern request to legacy produces the
+error a modern client's own detection is specified to fall back from.
+
+**Version sets are accessors, never inline filters.** `supportedProtocolVersions()`
+is everything servable; `legacyProtocolVersions()` and `modernProtocolVersions()`
+are the two halves. Use them:
+
+| Question | Accessor |
+|---|---|
+| What may `initialize` negotiate, or fall back to? | `legacyProtocolVersions()` |
+| What may a legacy request's `MCP-Protocol-Version` header name? | `legacyProtocolVersions()` |
+| What may a modern request's `_meta` name? | `modernProtocolVersions()` |
+| What does `server/discover` advertise? | `modernProtocolVersions()` |
+
+Treating "supported" as one set produced the same bug **four times** during this
+work: a legacy request honouring a modern header; a modern request accepted under
+a legacy version; `server/discover` advertising legacy versions to clients that
+could not use them; and a modern subscription stream receiving legacy's
+"everything" broadcast. Each was a hand-rolled filter that drifted from its
+sibling. Hence accessors.
+
+**`2025-03-26` is accepted as a header value** though not negotiable — it is what
+the spec tells a client to send when it cannot identify the version. Treated as an
+absent header: it selects nothing and the session's version stands. A supported
+header selects *itself*. Do not collapse those two cases.
+
+### Adding a tool so it works in both eras
+
+Most tools need nothing — dispatch below `handleJsonRpc` is shared, and only the
+envelope forks. Four things do differ:
+
+1. **Category decides modern reachability.** `control` and `settings` tools are
+   rate-limited per peer address in the modern era (`McpRateWindow`), because a
+   stateless request has no session to count against. Read tools are not charged.
+2. **Confirmation-gated tools work in both eras.** The gate carries its own
+   `confirmationId`, not a session id. If you add one, do not reintroduce a
+   session dependency.
+3. **A method the modern era removed must be refused BY ERA, not deleted** —
+   `ping`, `logging/setLevel`, `resources/subscribe`, `resources/unsubscribe` and
+   `initialize` are all still correct for legacy.
+4. **Modern results are framed centrally.** `resultType` and `serverInfo` are
+   stamped where every modern result passes through, so a handler cannot forget
+   them. Do not add them per handler.
+
+**Error codes are era-dependent where the revision changed them.**
+Resource-not-found is `-32602` for a modern caller and `-32002` for a legacy one —
+both correct for the revision they are sent under.
+
+### The session machinery is NOT deleted by dual-era support
+
+Sessions, the reapers, the ceilings, the tombstone set and the auto-recovery
+branch all remain, because **legacy needs every one of them**. The simplification
+the modern era offers is only realised the day legacy is dropped.
+
+Stated here so it is not re-litigated each time that code annoys someone: a
+modern request creates no session and passes `nullptr`, and that is the whole of
+its interaction with the pool.
+
+**When does legacy get dropped?** When no client needs it. The revision's own
+feature-lifecycle policy sets a twelve-month minimum deprecation window, and the
+clients this server actually sees — `claude-code`, the claude.ai connector,
+`codex-mcp-client` — are all legacy today. Not soon, and not a decision to take
+because the session code is inconvenient.
+
+### Supported protocol revisions
+
+`supportedProtocolVersions()` (`src/mcp/mcpserver.cpp`) lists **`2025-11-25`
+(preferred) and `2025-06-18`**, newest first. A client requesting anything else
+is answered with the preferred version at `initialize`.
+
+`2024-11-05` and `2025-03-26` were dropped. Measured from the device log across
+50 handshakes — every real client this server has — nothing had ever requested
+either: `claude-code` and the claude.ai connector negotiate `2025-11-25`,
+`codex-mcp-client` negotiates `2025-06-18`. The protocol's own conformance suite
+agrees: it rejects `2024-11-05` as an unknown spec version and has zero scenarios
+for `2025-03-26`.
+
+`2025-06-18` stays because Codex is on it. It is the one revision behind current
+that a real client here actually uses.
+
+Two consequences worth knowing before touching version-gated code:
+
+- **`2025-03-26` is still ACCEPTED as a header value**, though it is not
+  negotiable, and this is a **deliberate deviation from a MUST** — the transport
+  spec says an unsupported `MCP-Protocol-Version` MUST get a 400. We accept it
+  because it is the value the spec tells a *server* to assume when no header
+  arrives, and clients emit it for the same reason; the conformance suite sends
+  it on concurrent POSTs after negotiating 2025-11-25. Refusing it turns the
+  ecosystem's own fallback into a hard 400. Note the spec defines no
+  client-sent sentinel — that reading is ours, inferred from client behaviour.
+  Accepting the header does not grant that revision's semantics, batching
+  included, and it is logged at DEBUG rather than passing silently.
+- **The header-absent assumption is `2025-06-18`, not the `2025-03-26` the spec
+  names.** A version we refuse cannot be assumed. This is a deliberate deviation
+  from a SHOULD and the safe direction — the floor emits strictly fewer optional
+  fields, so a header-less client is under-served rather than sent fields its
+  revision does not define. See `McpSession::protocolVersion()`.
+- **`title`, `instructions`, `structuredContent` and `resource_link` are no
+  longer gated.** All four are defined at or below the floor, so no negotiable
+  revision lacks them. Only `$schema` dialect and `icons` (both 2025-11-25) are
+  still gated — they are the *only* fields that distinguish the two surviving
+  revisions. An earlier version of this section claimed `structuredContent` /
+  `resource_link` distinguished them too; both are `>= 2025-06-18`, which is the
+  floor, so they never did.
+
 ### Wire conformance: what the MCP spec requires that is easy to miss
 
 Departures from the spec produce no symptom until a stricter client arrives, so
 they accumulate silently. Six were found in one audit and fixed together;
 `tests/tst_mcpserver_protocol.cpp` pins each.
 
-- **A POST body may be a JSON array.** Batch support is required by the
-  **2025-03-26** base protocol — exactly one of the four revisions negotiated.
-  Batching does not exist in 2024-11-05 and was *removed* in 2025-06-18, so it is
-  accepted unconditionally rather than version-gated: one branch, and a
-  2025-03-26 client may still send one.
-  Elements with an `id` get one response each in a returned array; an
-  all-notification batch gets 202. An element whose response would be *deferred*
-  (in-app confirmation, async tool) is refused in its slot — a deferred response
-  is written as a complete HTTP body and cannot be folded into an array.
+- **A POST body that is a JSON array is REFUSED.** Batching is defined by the
+  **2025-03-26** base protocol and by no other revision: it does not exist in
+  2024-11-05, was removed in 2025-06-18, stays absent from 2025-11-25, and is
+  absent again in 2026-07-28. Since 2025-03-26 is no longer served, no supported
+  revision defines the shape and the dispatch for it has been deleted.
+  An array is refused explicitly rather than ignored: it parses fine, so it would
+  otherwise fall through and be answered "method not found", which tells the
+  sender nothing true.
 - **A session the server ended answers 404**, on every verb — POST, GET and
   DELETE. That is what tells a client to re-initialize, and the `GET` case is the
   one that matters most: an SSE stream opened on a dead session never carries an

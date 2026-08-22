@@ -177,6 +177,10 @@ void McpRemoteAccess::refresh()
 
 void McpRemoteAccess::startListener(bool bindLoopbackOnly)
 {
+    // Recorded before the already-serving early return below, so a rebind that
+    // changes mode cannot leave the previous mode's answer behind.
+    m_tunnelProxiedListener = bindLoopbackOnly;
+
     const quint16 port = m_settings ? static_cast<quint16>(m_settings->remoteMcpPort()) : 8890;
     const QHostAddress bindAddr = bindLoopbackOnly ? QHostAddress(QHostAddress::LocalHost)
                                                    : QHostAddress(QHostAddress::Any);
@@ -519,7 +523,7 @@ void McpRemoteAccess::readFromSocket(QTcpSocket* socket)
     pending.buffer.append(socket->readAll());
 
     if (pending.buffer.size() > MaxHeaderSize + MaxBodySize) {
-        sendBare404(socket);
+        refuseRequest(socket, bufferedRequestCarriesToken(pending.buffer));
         socket->close();
         return;
     }
@@ -541,7 +545,7 @@ void McpRemoteAccess::processBuffer(QTcpSocket* socket)
                 // body so a client that never terminates the headers can't buffer
                 // unbounded data on one connection.
                 if (pending.buffer.size() > MaxHeaderSize) {
-                    sendBare404(socket);
+                    refuseRequest(socket, bufferedRequestCarriesToken(pending.buffer));
                     socket->close();
                     return;
                 }
@@ -564,7 +568,7 @@ void McpRemoteAccess::processBuffer(QTcpSocket* socket)
                 }
             }
             if (pending.contentLength < 0 || pending.contentLength > MaxBodySize) {
-                sendBare404(socket);
+                refuseRequest(socket, bufferedRequestCarriesToken(pending.buffer));
                 socket->close();
                 return;
             }
@@ -605,43 +609,57 @@ void McpRemoteAccess::processBuffer(QTcpSocket* socket)
     }
 }
 
+namespace {
+// Counts at which a suppressed run of unauthorized requests still writes one
+// line. Decimal rather than every-Nth so the cost is bounded no matter how hard
+// the surface is hit: three extra lines a minute buys the difference between
+// "somebody probed once" and "somebody is at ten thousand a minute", which is
+// the only thing about a rejected request that a reader can act on.
+bool isUnauthorizedLogMilestone(int count)
+{
+    return count == 100 || count == 1000 || count == 10000;
+}
+}  // namespace
+
 void McpRemoteAccess::routeRequest(QTcpSocket* socket, const QString& method,
                                    const QString& path, const QByteArray& headerBlock,
                                    const QByteArray& body)
 {
-    const QString source = socket->peerAddress().toString();
+    const QString source = describeSource(socket);
 
-    // Strip any query string, then require an exact `/mcp/<token>` path with no
-    // trailing segments.
-    QString cleanPath = path;
-    const qsizetype q = cleanPath.indexOf('?');
-    if (q >= 0)
-        cleanPath = cleanPath.left(q);
-
-    bool authorized = false;
-    if (cleanPath.startsWith(QStringLiteral("/mcp/"))) {
-        const QString candidate = cleanPath.mid(5);
-        if (!candidate.isEmpty() && !candidate.contains('/'))
-            authorized = tokenMatches(candidate.toUtf8());
-    }
+    const bool authorized = pathCarriesToken(path);
 
     if (!authorized) {
+        const bool overLimit = failedTokenOverLimit(source);
+        const int seen = m_failedAttempts.countInWindow(source);
+
         // Never echo the attempted path; just note the source and count it.
-        if (!failedTokenOverLimit(source)) {
+        //
+        // The line budget matters as much as the request budget: this surface is
+        // reachable by anyone who finds the public URL, the debug log is a
+        // fixed-size buffer, and one line per rejected request lets an
+        // unauthenticated caller evict every other subsystem's evidence from it.
+        // So log each of the first MaxFailedPerMinute, one transition line, and
+        // after that only decimal milestones — at most seven lines a minute, and
+        // each milestone carries the running count so a submitted log still
+        // distinguishes a stray probe from sustained hammering.
+        if (!overLimit) {
             MCP_WARN_TAGGED("RemoteAccess",
                             QStringLiteral("rejected unauthorized request from %1").arg(source));
-            sendBare404(socket);
+            refuseRequest(socket, /*callerHoldsToken=*/false);
         } else {
             // Over the failed-attempt budget for this source this minute. Drop the
             // keep-alive connection so a scanner must reconnect (bounded by
             // MaxConnections) instead of pipelining guesses on one socket, and log
             // the transition exactly once per window rather than going silent.
-            FailWindow& window = m_failedAttempts[source];
-            if (!window.suppressionLogged) {
-                window.suppressionLogged = true;
+            if (m_failedAttempts.takeSuppressionLogSlot(source)) {
                 MCP_WARN_TAGGED("RemoteAccess",
                                 QStringLiteral("further unauthorized requests from %1 will be "
                                                "dropped for the rest of this minute").arg(source));
+            } else if (isUnauthorizedLogMilestone(seen)) {
+                MCP_WARN_TAGGED("RemoteAccess",
+                                QStringLiteral("%1 unauthorized requests from %2 this minute — "
+                                               "still being dropped").arg(seen).arg(source));
             }
             socket->close();
         }
@@ -662,9 +680,103 @@ void McpRemoteAccess::routeRequest(QTcpSocket* socket, const QString& method,
     }
 
     // Forward in-process. Path is rewritten to the canonical `/mcp` the LAN path
-    // uses (McpServer ignores the path); the session is flagged remote.
+    // uses (McpServer ignores the path); the session is flagged remote. `source`
+    // travels with it so the stateless era's rate limiter buckets and reports
+    // this caller by the same name this file logs it under — McpServer cannot
+    // work it out, since only the listener knows whether it is tunnel-proxied.
     m_mcpServer->handleHttpRequest(socket, method, QStringLiteral("/mcp"),
-                                   headerBlock, body, /*remote=*/true);
+                                   headerBlock, body, /*remote=*/true, source);
+}
+
+void McpRemoteAccess::refuseRequest(QTcpSocket* socket, bool callerHoldsToken)
+{
+    // Behind an embedded tunnel, answer a STRANGER nothing at all. A bare 404 is
+    // still a reply, and a reply confirms that the URL fronts a live service
+    // worth guessing at; a dropped connection tells a scanner nothing. The
+    // socket is closed rather than left silently open, which would hold one of
+    // MaxConnections until the idle reaper for a caller owed nothing.
+    //
+    // This does NOT make the endpoint invisible, and must not be sold as if it
+    // did: the Funnel edge terminates TLS and serves its own error for a backend
+    // that hangs up, so the hostname stays visibly configured. What stops is US
+    // confirming anything about what is behind it.
+    //
+    // `callerHoldsToken` is why the framing refusals pass a flag rather than
+    // inheriting the silence: those checks fire BEFORE any token is parsed, so
+    // without it a legitimate client that trips the body cap gets a closed
+    // socket — indistinguishable from a dropped network, and therefore retried
+    // forever on a request that can never succeed. Someone who already knows the
+    // token learns nothing from a 404, so there is no reason to withhold it.
+    //
+    // Mode C keeps the 404 and the keep-alive either way: there the reply goes
+    // to the user's own reverse proxy, where a silent drop reads as a broken
+    // backend.
+    //
+    // One function because four sites refuse a request — unterminated headers,
+    // oversized request, malformed Content-Length, bad token — and a policy
+    // about whether we answer strangers must not be free to drift between them.
+    if (m_tunnelProxiedListener && !callerHoldsToken)
+        socket->close();
+    else
+        sendBare404(socket);
+}
+
+bool McpRemoteAccess::pathCarriesToken(const QString& path) const
+{
+    // Strip any query string, then require an exact `/mcp/<token>` path with no
+    // trailing segments.
+    QString cleanPath = path;
+    const qsizetype q = cleanPath.indexOf('?');
+    if (q >= 0)
+        cleanPath = cleanPath.left(q);
+
+    if (!cleanPath.startsWith(QStringLiteral("/mcp/")))
+        return false;
+    const QString candidate = cleanPath.mid(5);
+    if (candidate.isEmpty() || candidate.contains('/'))
+        return false;
+    return tokenMatches(candidate.toUtf8());
+}
+
+bool McpRemoteAccess::bufferedRequestCarriesToken(const QByteArray& buffer) const
+{
+    // The request line is the FIRST line, so it is readable long before the
+    // header block terminates — which is what lets even the unterminated-header
+    // refusal tell a token holder from a stranger. No complete line yet means no
+    // claim to the token: the conservative answer, and the one that keeps a
+    // scanner from buying a reply by sending a fragment.
+    const qsizetype lineEnd = buffer.indexOf("\r\n");
+    if (lineEnd < 0)
+        return false;
+
+    const QList<QByteArray> parts = buffer.left(lineEnd).split(' ');
+    if (parts.size() < 2)
+        return false;
+    return pathCarriesToken(QString::fromLatin1(parts[1]));
+}
+
+QString McpRemoteAccess::describeSource(const QTcpSocket* socket) const
+{
+    const QHostAddress peer = socket->peerAddress();
+
+    // Mode A puts the listener on loopback and lets the embedded tsnet node
+    // proxy the public Funnel into it, so EVERY remote client arrives as
+    // 127.0.0.1 and the peer address says nothing about who called. Logged
+    // untagged it says something worse than nothing: a reader — or the field
+    // AIs that read these logs — takes a loopback address for "this is me on
+    // the tablet" and files a real scan as self-inflicted noise. That reading
+    // is why an overnight burst on this line was nearly dismissed.
+    //
+    // The tag is a claim about the LISTENER's exposure, not about the individual
+    // peer: an on-device process could also reach a loopback-bound listener, and
+    // nothing at the socket layer separates the two. Treating anything that
+    // reaches a publicly-proxied listener as public is the safe direction to be
+    // wrong in. Mode C keeps the raw address, where it is a genuine peer (the
+    // user's own reverse proxy, or the client itself).
+    if (m_tunnelProxiedListener && peer.isLoopback())
+        return QStringLiteral("Funnel (public internet)");
+
+    return peer.toString();
 }
 
 bool McpRemoteAccess::tokenMatches(const QByteArray& candidate) const
@@ -684,15 +796,7 @@ bool McpRemoteAccess::tokenMatches(const QByteArray& candidate) const
 
 bool McpRemoteAccess::failedTokenOverLimit(const QString& source)
 {
-    const QDateTime now = QDateTime::currentDateTimeUtc();
-    FailWindow& window = m_failedAttempts[source];
-    if (!window.windowStart.isValid() || window.windowStart.secsTo(now) >= 60) {
-        window.windowStart = now;
-        window.count = 0;
-        window.suppressionLogged = false;
-    }
-    window.count++;
-    return window.count > MaxFailedPerMinute;
+    return m_failedAttempts.recordAndCheckOverLimit(source, MaxFailedPerMinute);
 }
 
 void McpRemoteAccess::sendBare404(QTcpSocket* socket)
@@ -764,14 +868,12 @@ void McpRemoteAccess::onReaperTick()
             socket->close();
     }
 
-    // Prune expired failed-attempt windows so the per-source map can't grow
-    // unbounded from many distinct (or spoofed) source addresses over uptime.
-    for (auto it = m_failedAttempts.begin(); it != m_failedAttempts.end();) {
-        if (!it.value().windowStart.isValid() || it.value().windowStart.secsTo(now) >= 60)
-            it = m_failedAttempts.erase(it);
-        else
-            ++it;
-    }
+    // Expired failed-attempt windows. McpRateWindow prunes on every record, but
+    // that only bounds the map while traffic CONTINUES — after a token spray
+    // stops, whatever keys were live at the last attempt would stay resident for
+    // the process lifetime. The reaper tick is what empties it, which is what the
+    // hand-rolled loop here used to do before the mechanism was shared.
+    m_failedAttempts.pruneNow();
 
     // Recover from a dropped listener (e.g. interface flap) while still enabled,
     // rebinding with the correct interface for the active mode.

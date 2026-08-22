@@ -93,4 +93,37 @@ bool looksLikeStall(const QString& raw)
     return re.match(t).hasMatch();
 }
 
+// [barista-fork] "Go / take it now" matcher for voice-driven bag-photo capture. Fires the shutter only while the
+// camera is open awaiting a shot (BaristaConversation::m_awaitingBagCapture), where the user was just told "say
+// ready when it's framed" — so within that narrow window it can be generous with go-words. But a LEADING
+// negation or hold must win outright ("no wait", "not yet", "hold on", "don't"), leaving the shutter untouched
+// rather than snapping a photo the user was trying to stop. Mirrors looksLikeClose's prefix-peel shape.
+bool looksLikeAffirmative(const QString& raw)
+{
+    QString t = raw.trimmed().toLower();
+    if (t.isEmpty() || t.length() > 40)
+        return false;
+    t = t.replace(QLatin1Char(','), QLatin1Char(' ')).simplified();
+    t.remove(QRegularExpression(QStringLiteral("[.!?]+$")));
+    t = t.trimmed();
+    // A leading negation / hold cancels the go-reading before any prefix peel, so "no go", "not yet", "hold on",
+    // "don't" never reach the affirmative set.
+    static const QRegularExpression negate(
+        QStringLiteral("^(no|not|nope|nah|never ?mind|wait|hold|hang|don'?t|cancel|stop)\\b"));
+    if (negate.match(t).hasMatch())
+        return false;
+    // Peel one leading filler so the go-word anchors ("ok ready", "alright go", "um yeah").
+    t.remove(QRegularExpression(QStringLiteral("^(ok(ay)?|alright|all right|right|so|well|um+|uh+|and|now)[.!\\s]+")));
+    t = t.trimmed();
+    static const QRegularExpression re(QStringLiteral(
+        "^("
+        "ready( to go| now| when you are)?|i'?m ready|all set|set|"
+        "go( ahead| for it)?|"
+        "yes|yeah|yep|yup|sure|okay|ok|"
+        "take (it|the (photo|picture|shot|pic))|"
+        "snap( it)?|capture( it)?|shoot( it)?|do it|now"
+        ")$"));
+    return re.match(t).hasMatch();
+}
+
 }  // namespace barista

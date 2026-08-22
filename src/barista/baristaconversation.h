@@ -51,6 +51,16 @@ public:
     Q_INVOKABLE void tap();
     Q_INVOKABLE void dismiss();
 
+    // [barista-fork] Voice-driven bag-photo capture (shared seam). While the camera overlay is open awaiting a
+    // shot, QML arms this; a spoken affirmative ("ready") then fires captureBagPhotoRequested() instead of a model
+    // turn. QML sets it true when the camera opens and false when it closes (or after it fires).
+    Q_INVOKABLE void setAwaitingBagCapture(bool on);
+    // [barista-fork] Mic-pause toggle for the bag camera (the design (a)/(b) divergence). When on, the arbiter
+    // holds the mic OFF regardless of state — used to keep the recogniser off the audio hardware while the camera
+    // preview is live (mitigates the Android camera/STT contention). Default off = design (a), mic stays live so
+    // "ready" can be heard with the viewfinder up. QML sets it around the camera open/close.
+    Q_INVOKABLE void setMicSuppressed(bool on);
+
 signals:
     void stateChanged();
     void micLiveChanged();
@@ -67,6 +77,12 @@ signals:
     // [barista-fork] The model ended its turn with only a stall ("let me check on that") and no answer;
     // ask the module to send one continuation turn so the real answer actually arrives (bounded per user turn).
     void continuationRequested();
+    // [barista-fork] A spoken affirmative arrived while the bag camera was open awaiting a shot → fire the
+    // shutter. QML (AssistantOverlay) connects this to BagCameraCapture.capture(). The image then rides the
+    // existing captured()→followUpWithImage pipeline exactly as a manual shutter tap does.
+    // [fork-index] entry=BaristaConversation::captureBagPhotoRequested | domain=voice | change=-
+    //   what: voice-driven bag-photo shutter — "ready" while camera open → capture, no model turn
+    void captureBagPhotoRequested();
 
 public slots:
     // Actuator inputs (wired by BaristaModule). These are the events of the transition table.
@@ -108,6 +124,8 @@ private:
     int m_autoContinues = 0;                      // stall→continuation retries used THIS user turn (bounded)
     QString m_lastSpokenText;                     // last TTS string — the self-echo text backstop
     qint64 m_micHotSinceMs = 0;                   // when micLive last went true (self-echo window)
+    bool m_awaitingBagCapture = false;            // [barista-fork] bag camera open → "ready" fires the shutter
+    bool m_micSuppressed = false;                 // [barista-fork] force the mic off (bag-camera pause toggle)
 
     // View mirrors.
     bool m_micLive = false;

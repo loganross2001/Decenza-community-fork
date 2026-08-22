@@ -15,4 +15,9 @@ bool looksLikeClose(const QString& raw);
 // with no actual answer — the cue to speak it as a lead-in and auto-fetch the real answer.
 bool looksLikeStall(const QString& raw);
 
+// True when a short utterance is a "go / take it now" signal ("ready", "yes", "go", "take it", "snap"). Used
+// ONLY while the bag-photo camera is open awaiting a shot, to trigger the shutter by voice. Deliberately
+// rejects a hesitation or cancel ("no", "not yet", "wait", "hold on") so those never fire the shutter.
+bool looksLikeAffirmative(const QString& raw);
+
 }  // namespace barista

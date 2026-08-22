@@ -61,6 +61,10 @@ class AssistantSettings : public QObject {
     // mounted tablet faces the user, who holds the bag toward it) or "back". Picked in Settings + flippable in the
     // viewfinder.
     Q_PROPERTY(QString cameraFacing READ cameraFacing WRITE setCameraFacing NOTIFY cameraFacingChanged)
+    // [barista-fork] When on, hold the mic OFF while the bag-photo camera preview is live (mitigates the Android
+    // camera/STT contention). Default off = design (a): the mic stays live so a spoken "ready" fires the shutter
+    // with the viewfinder up. Flip on to fall back to manual-tap capture with no recogniser contention.
+    Q_PROPERTY(bool bagCameraPausesMic READ bagCameraPausesMic WRITE setBagCameraPausesMic NOTIFY bagCameraPausesMicChanged)
     // [barista-fork] Voice-ID Increment 1: opt-in "capture test" — fire a short parallel QAudioSource capture
     // during a live turn and log whether it works alongside STT. Off by default; validation aid only.
     Q_PROPERTY(bool voiceIdProbe READ voiceIdProbe WRITE setVoiceIdProbe NOTIFY voiceIdProbeChanged)
@@ -183,6 +187,8 @@ public:
     void setWebSearchEnabled(bool e);
     QString cameraFacing() const;                 // [barista-fork] "front" (default) | "back"
     void setCameraFacing(const QString& facing);
+    bool bagCameraPausesMic() const;              // [barista-fork] pause the mic while the bag camera is open (default off)
+    void setBagCameraPausesMic(bool on);
 
     bool voiceIdProbe() const;                    // opt-in concurrent-capture test (default off)
     void setVoiceIdProbe(bool on);
@@ -260,6 +266,7 @@ signals:
     void coachingVoiceVolumeChanged();
     void webSearchEnabledChanged();
     void cameraFacingChanged();   // [barista-fork] add-a-bean-from-a-photo camera choice
+    void bagCameraPausesMicChanged();   // [barista-fork] bag-camera mic-pause toggle
     void voiceIdProbeChanged();
     void voiceIdEngageTestChanged();
     void voiceIdEnabledChanged();

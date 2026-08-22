@@ -2812,9 +2812,28 @@ Item {
         sourceComponent: BagCameraCapture {
             onCaptured: function(imageUrl) { root._addBeanFromImage(imageUrl) }
             onGalleryRequested: bagPhotoDialog.open()
-            onClosed: bagCameraLoader.active = false   // destroy the camera pipeline → mic is free again
+            // Destroy the camera pipeline (frees the mic) AND disarm the voice shutter / lift any mic-pause.
+            onClosed: { bagCameraLoader.active = false; root._setBagCaptureArmed(false) }
         }
         onLoaded: item.open()
+    }
+    // [barista-fork] Voice-driven shutter: a spoken "ready" while the camera is open reaches the conversation
+    // state machine (onFinalText → captureBagPhotoRequested) and fires the shutter here — the SAME path as the
+    // manual button, so both funnel through BagCameraCapture.capture() → captured() → followUpWithImage.
+    Connections {
+        target: (typeof Barista !== "undefined") ? Barista.conversation : null
+        function onCaptureBagPhotoRequested() {
+            if (bagCameraLoader.item) bagCameraLoader.item.capture()
+        }
+    }
+    // Arm/disarm the voice shutter on the conversation, and apply the optional mic-pause-during-camera toggle
+    // (design (b)/contention mitigation; default off → mic stays live so "ready" is heard with the viewfinder up).
+    function _setBagCaptureArmed(on) {
+        if (typeof Barista === "undefined" || !Barista.conversation)
+            return
+        Barista.conversation.setAwaitingBagCapture(on)
+        var pause = (typeof Barista.settings !== "undefined" && Barista.settings && Barista.settings.bagCameraPausesMic)
+        Barista.conversation.setMicSuppressed(on && pause)
     }
     function _openBagCamera() {
         if (bagCameraLoader.active) {
@@ -2822,5 +2841,6 @@ Item {
         } else {
             bagCameraLoader.active = true   // onLoaded → item.open()
         }
+        _setBagCaptureArmed(true)   // arm the voice shutter the moment the camera opens
     }
 }

@@ -4,6 +4,7 @@
 
 using barista::looksLikeClose;
 using barista::looksLikeStall;
+using barista::looksLikeAffirmative;
 
 // [barista-fork] Locks the two voice-conversation intent matchers. Both have regressed on the owner more than
 // once (a polite farewell not closing; a "let me check" stall dropping to Listening), and both are pure string
@@ -19,6 +20,8 @@ private slots:
     void close();
     void stall_data();
     void stall();
+    void affirmative_data();
+    void affirmative();
 
     void closeIsCaseAndPunctuationInsensitive();
     void stallNeverMatchesARealAnswer();
@@ -101,6 +104,49 @@ void tst_CloseIntent::stall()
     QFETCH(QString, reply);
     QFETCH(bool, expected);
     QCOMPARE(looksLikeStall(reply), expected);
+}
+
+void tst_CloseIntent::affirmative_data()
+{
+    QTest::addColumn<QString>("utterance");
+    QTest::addColumn<bool>("expected");
+
+    // --- Must fire the shutter: "ready" and clear go-words the user says with the bag framed ---
+    QTest::newRow("ready")                  << "ready"                 << true;
+    QTest::newRow("I'm ready")              << "I'm ready"             << true;
+    QTest::newRow("ready now")              << "ready now"             << true;
+    QTest::newRow("ok ready")               << "ok ready"              << true;
+    QTest::newRow("okay, ready")            << "okay, ready"           << true;
+    QTest::newRow("all set")                << "all set"               << true;
+    QTest::newRow("go")                     << "go"                    << true;
+    QTest::newRow("go ahead")               << "go ahead"              << true;
+    QTest::newRow("yes")                    << "yes"                   << true;
+    QTest::newRow("yep")                    << "yep"                   << true;
+    QTest::newRow("sure")                   << "sure"                  << true;
+    QTest::newRow("take it")                << "take it"               << true;
+    QTest::newRow("take the photo")         << "take the photo"        << true;
+    QTest::newRow("snap it")                << "snap it"               << true;
+    QTest::newRow("do it")                  << "do it"                 << true;
+    QTest::newRow("caps + punctuation")     << "Ready!"                << true;
+
+    // --- Must NOT fire: a hesitation, a cancel, or ordinary speech (a false shutter snaps a bad photo) ---
+    QTest::newRow("no")                     << "no"                    << false;
+    QTest::newRow("not yet")                << "not yet"               << false;
+    QTest::newRow("no wait")                << "no wait"               << false;
+    QTest::newRow("wait")                   << "wait"                  << false;
+    QTest::newRow("hold on")                << "hold on"               << false;
+    QTest::newRow("don't")                  << "don't take it yet"     << false;
+    QTest::newRow("cancel")                 << "cancel"                << false;
+    QTest::newRow("a question")             << "which way should I hold it" << false;
+    QTest::newRow("describing the bag")     << "it's a light roast from Ethiopia" << false;
+    QTest::newRow("empty")                  << ""                      << false;
+}
+
+void tst_CloseIntent::affirmative()
+{
+    QFETCH(QString, utterance);
+    QFETCH(bool, expected);
+    QCOMPARE(looksLikeAffirmative(utterance), expected);
 }
 
 void tst_CloseIntent::closeIsCaseAndPunctuationInsensitive()

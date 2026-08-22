@@ -207,7 +207,9 @@ void BaristaConversation::updateThinkingTone()
 
 void BaristaConversation::updateMicLive()
 {
-    const bool want = (m_state == State::Listening) && m_gate && m_gate->quiet();
+    // [barista-fork] m_micSuppressed is a third arbiter input on top of the two-input rule: while the bag camera
+    // pauses the mic (design (b) / contention mitigation), the recogniser stays off regardless of state or gate.
+    const bool want = (m_state == State::Listening) && m_gate && m_gate->quiet() && !m_micSuppressed;
     if (want == m_micLive)
         return;
     m_micLive = want;
@@ -250,6 +252,26 @@ void BaristaConversation::dismiss()
     setState(State::Idle);   // Idle entry does the full teardown
 }
 
+// [barista-fork] Arm/disarm the voice-driven bag-photo shutter. QML sets it true when the camera opens and false
+// when it closes; onFinalText reads it to decide whether an affirmative fires the shutter or is a normal turn.
+void BaristaConversation::setAwaitingBagCapture(bool on)
+{
+    if (m_awaitingBagCapture == on)
+        return;
+    m_awaitingBagCapture = on;
+    diag(QStringLiteral("awaiting_bag_capture"), on ? QStringLiteral("on") : QStringLiteral("off"));
+}
+
+// [barista-fork] Force the mic off (bag-camera pause toggle). Re-runs the arbiter so the change takes effect now.
+void BaristaConversation::setMicSuppressed(bool on)
+{
+    if (m_micSuppressed == on)
+        return;
+    m_micSuppressed = on;
+    diag(QStringLiteral("mic_suppressed"), on ? QStringLiteral("on") : QStringLiteral("off"));
+    updateMicLive();
+}
+
 // ---- Actuator inputs (transition table) ----------------------------------
 
 void BaristaConversation::onContextReady()
@@ -262,6 +284,24 @@ void BaristaConversation::onFinalText(const QString& text)
 {
     if (m_state != State::Listening)
         return;   // logged-and-ignored elsewhere; the mic shouldn't be hot outside Listening anyway
+    // [barista-fork] Voice-driven bag-photo capture: while the camera is open awaiting a shot, a spoken
+    // affirmative ("ready" / "go" / "take it") is a deterministic SHUTTER signal, not a question for the model.
+    // Fire the capture locally and stay in Listening — behaviourally identical to a manual shutter tap: the
+    // shutter → captured() → followUpWithImage path then dispatches the vision turn that reads the label and
+    // calls add_bag. This bypasses the model, so it neither consumes a turn nor touches the one-turn-image window.
+    //
+    // Checked BEFORE the self-echo backstop ON PURPOSE. The camera prompt asks the user to "say ready", so the
+    // barista's own last line CONTAINS the trigger word — a one-word "ready" scores 1.0 against it and the echo
+    // guard would drop the user's genuine "ready", making the feature look dead (indistinguishable from an STT
+    // failure). SpeakerGate.quiet() already holds the mic off while that prompt is spoken, so the live word is
+    // never heard; the only residual is a brief acoustic tail, and an over-eager snap there is recoverable (retake)
+    // whereas a dropped "ready" is not. So within the awaiting-capture window the affirmative wins over self-echo.
+    if (m_awaitingBagCapture && barista::looksLikeAffirmative(text)) {
+        diag(QStringLiteral("bag_capture_affirm"), text.left(40));
+        m_awaitingBagCapture = false;
+        emit captureBagPhotoRequested();
+        return;   // stay Listening; the capture pipeline (followUpWithImage) drives the next model turn
+    }
     // Self-echo backstop (belt-and-suspenders to the acoustic gate): a first result within 2s of the mic going
     // hot that mostly repeats the barista's last line is its own acoustic tail — discard it, keep listening.
     if (m_micHotSinceMs != 0

@@ -629,6 +629,19 @@ void AssistantSettings::setCameraFacing(const QString& facing) {
     emit cameraFacingChanged();
 }
 
+bool AssistantSettings::bagCameraPausesMic() const {
+    // Default off = design (a): the mic stays live while the camera preview is up so a spoken "ready" fires the
+    // shutter. Flip on if the recogniser can't run alongside the camera on a given device (manual-tap fallback).
+    return m_settings.value(QStringLiteral("barista/bagCameraPausesMic"), false).toBool();
+}
+
+void AssistantSettings::setBagCameraPausesMic(bool on) {
+    if (bagCameraPausesMic() == on)
+        return;
+    m_settings.setValue(QStringLiteral("barista/bagCameraPausesMic"), on);
+    emit bagCameraPausesMicChanged();
+}
+
 // [barista-fork] Voice-ID Increment 1: opt-in concurrent-capture test. Default OFF so normal users are never
 // affected; when ON, the overlay fires one short parallel capture per turn and logs whether it worked.
 bool AssistantSettings::voiceIdProbe() const {

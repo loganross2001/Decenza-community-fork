@@ -507,9 +507,10 @@ QJsonArray BaristaTools::toolDefinitions()
         "Open the camera so the user can take a photo of a coffee bag, which you then read to add the bean. Call "
         "this when the user wants to add a NEW coffee/bean they physically have and it makes sense to read it off "
         "the bag — e.g. \"add this new coffee\", \"I've got a new bag\", \"can you scan this\", \"take a photo of "
-        "this bag\". Tell them you're opening the camera in your reply, then call this in the same turn. After they "
-        "snap the photo it comes back to you automatically and you read the label and call add_bag. Only for a bean "
-        "the user has in hand — if they'd rather just tell you the details, use add_bag directly instead.");
+        "this bag\". In the SAME turn, call this and tell them the camera is up — ask them to hold the bag in view "
+        "and say \"ready\" when it's framed (or tap the shutter). Saying \"ready\" takes the photo for them; it then "
+        "comes back to you automatically to read the label and call add_bag. Only for a bean the user has in hand — "
+        "if they'd rather just tell you the details, use add_bag directly instead.");
     QJsonObject obcSchema;
     obcSchema["type"] = QString("object");
     obcSchema["properties"] = QJsonObject{};

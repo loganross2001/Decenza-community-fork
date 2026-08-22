@@ -54,6 +54,12 @@ Rectangle {
             Barista.settings.cameraFacing = (cam._facing === "front") ? "back" : "front"
         // _facing rebinds → camera.cameraDevice rebinds → the viewfinder switches.
     }
+    // [barista-fork] Fire the shutter. Public so a VOICE affirmative ("ready") can trigger it exactly like the
+    // manual shutter button — both funnel through here → captureToFile() → imageSaved → captured(). No-op unless
+    // the viewfinder is live, so a stray call before the camera is active can't throw.
+    function capture() {
+        if (camera.active) shot.captureToFile()
+    }
 
     MediaDevices { id: mediaDevices }
 
@@ -154,7 +160,7 @@ Rectangle {
             enabled: camera.active
             text: TranslationManager.translate("barista.camera.shutter", "Take photo")
             accessibleName: TranslationManager.translate("barista.camera.shutter", "Take photo")
-            onClicked: if (camera.active) shot.captureToFile()
+            onClicked: cam.capture()
         }
     }
 }

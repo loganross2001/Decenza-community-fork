@@ -43,6 +43,13 @@ public:
         // to the CURRENT (last user) message only; non-vision providers ignore it (gate on supportsVision()).
         QByteArray imageData;          // raw JPEG/PNG bytes; empty ⇒ no image this turn
         QString imageMediaType;        // e.g. "image/jpeg" or "image/png"; empty with data ⇒ defaults to image/jpeg
+        // [barista-fork] Anthropic prompt-cache breakpoint. When the per-question tailoring appends varying
+        // modules onto a STABLE core, the whole system prompt changes each turn → Anthropic can't reuse the cache.
+        // This is the length (chars) of the stable core prefix: the Anthropic provider puts the cache_control
+        // breakpoint THERE, so the core is cached and reused every turn and only the small varying suffix is
+        // reprocessed. -1 ⇒ no split (cache the whole prompt, the pre-tailoring behaviour). Anthropic-only;
+        // other providers ignore it (Gemini gets the same benefit from its own implicit prefix caching).
+        int cachePrefixLen = -1;
     };
 
     explicit AIProvider(QNetworkAccessManager* networkManager, QObject* parent = nullptr);
@@ -378,7 +385,9 @@ private slots:
 
 private:
     void sendRequest(const QJsonObject& requestBody);
-    static QJsonArray buildCachedSystemPrompt(const QString& systemPrompt);
+    // cachePrefixLen ≥ 0 and < systemPrompt length ⇒ two blocks: a cached stable-core prefix + an uncached
+    // varying suffix (see RequestOptions::cachePrefixLen). Default -1 ⇒ one cached block (whole prompt).
+    static QJsonArray buildCachedSystemPrompt(const QString& systemPrompt, int cachePrefixLen = -1);
 
     // [barista-fork] server-side web search continuation state. When the model pauses mid-turn to run a
     // search (stop_reason "pause_turn"), we re-POST the accumulated turn until it completes (bounded).

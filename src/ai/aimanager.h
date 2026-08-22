@@ -103,6 +103,9 @@ public:
     // [barista-fork] Stage an image (already normalized JPEG/PNG bytes) to ride the NEXT conversation turn's
     // RequestOptions. Consumed and cleared inside analyzeConversation — one turn only, never persisted.
     void stagePendingImage(const QByteArray& data, const QString& mediaType);
+    // [barista-fork] Stage the stable-core prefix length for the NEXT turn (Anthropic cache breakpoint). QML sets
+    // this to the tailored prompt's core length just before dispatching the turn. One turn only (cleared below).
+    Q_INVOKABLE void stageCachePrefixLen(int coreLen) { m_pendingCachePrefixLen = coreLen; }
     // Running-cost estimate (see AIProvider::costHintFor). Pass a modelId to
     // price a specific model, or leave it empty for the provider's current
     // selection. Depends on the model, so re-read it when the selection changes
@@ -600,6 +603,10 @@ private:
     // analyzeConversation, so it rides exactly one turn and never enters the persisted message history.
     QByteArray m_pendingImageData;
     QString m_pendingImageMediaType;
+    // [barista-fork] Length (chars) of the stable core prefix of the NEXT turn's system prompt, so Anthropic can
+    // cache the core across the per-question tailoring's varying suffix. -1 ⇒ cache the whole prompt (untailored).
+    // Consumed+cleared in analyzeConversation → rides exactly one turn.
+    int m_pendingCachePrefixLen = -1;
 
 #ifdef DECENZA_TESTING
     friend class tst_AIManager;

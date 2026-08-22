@@ -1684,6 +1684,11 @@ Item {
             // Scope THIS turn's prompt to the question (see _scopedSystemPrompt). setSessionSystemPrompt updates
             // the prompt without wiping history; beginSession takes it directly on the first turn.
             var sp = root._scopedSystemPrompt(utterance)
+            // Tell the provider where the stable core ends so Anthropic caches it across the varying module suffix
+            // (no-op on Gemini/others; harmless when the whole prompt is the core, e.g. a casual turn).
+            if (typeof MainController !== "undefined" && MainController.aiManager
+                    && typeof MainController.aiManager.stageCachePrefixLen === "function")
+                MainController.aiManager.stageCachePrefixLen(root._coreSystemPrompt.length)
             if (!root._sessionBegun) { root._conv.beginSession(sp, utterance); root._sessionBegun = true }
             else { root._conv.setSessionSystemPrompt(sp); root._conv.followUp(utterance) }
         }

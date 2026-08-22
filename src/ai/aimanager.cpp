@@ -2507,11 +2507,15 @@ void AIManager::analyzeConversation(const QString& systemPrompt, const QJsonArra
         turnImage.clear();
         turnImageType.clear();
     }
+    // [barista-fork] Consume the stable-core prefix length staged for this turn (Anthropic cache breakpoint).
+    const int turnCachePrefixLen = m_pendingCachePrefixLen;
+    m_pendingCachePrefixLen = -1;
     provider->analyzeConversation(systemPrompt, apiMessages,
                                   // [barista-fork] {webSearch, clientTools, timeoutMs, forceRespond, imageData,
-                                  // imageMediaType} — imageData set only on a photo turn (else empty = normal text turn).
+                                  // imageMediaType, cachePrefixLen} — imageData set only on a photo turn; cachePrefixLen
+                                  // ≥0 only on a tailored barista turn (else -1 = cache the whole prompt).
                                   AIProvider::RequestOptions{webSearch, clientTools, 30000, clientTools,
-                                                             turnImage, turnImageType});
+                                                             turnImage, turnImageType, turnCachePrefixLen});
 }
 
 void AIManager::refreshOllamaModels()

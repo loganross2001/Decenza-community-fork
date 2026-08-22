@@ -937,7 +937,9 @@ void AnthropicProvider::analyzeConversation(const QString& systemPrompt, const Q
     // eating that cap. A truncated turn still shows its partial (ShowPartial above).
     requestBody["max_tokens"] = MAX_OUTPUT_TOKENS;
     disableAnthropicThinking(requestBody);
-    requestBody["system"] = buildCachedSystemPrompt(systemPrompt);
+    // [barista-fork] Cache the stable core prefix (options.cachePrefixLen) so the per-question tailoring's varying
+    // module suffix doesn't cost a full cache miss every turn. -1 (advisor/coach, or untailored) = whole prompt.
+    requestBody["system"] = buildCachedSystemPrompt(systemPrompt, options.cachePrefixLen);
     // [barista-fork] Cache-wrap the first user message, then (for a vision turn) attach the image to the LAST
     // user message. Order matters: the cache wrap turns the first message's content into an array, and when the
     // conversation is a single message (first == last) messagesWithImageOnLastUser then appends the image block
@@ -1094,7 +1096,7 @@ QJsonArray AnthropicProvider::messagesWithImageOnLastUser(const QJsonArray& mess
     return out;
 }
 
-QJsonArray AnthropicProvider::buildCachedSystemPrompt(const QString& systemPrompt)
+QJsonArray AnthropicProvider::buildCachedSystemPrompt(const QString& systemPrompt, int cachePrefixLen)
 {
     // Cache the system prompt with the 1-hour extended TTL. Anthropic
     // caches give ~90% off input cost on hits; a 1-hour TTL covers most
@@ -1106,12 +1108,29 @@ QJsonArray AnthropicProvider::buildCachedSystemPrompt(const QString& systemPromp
     cacheControl["type"] = QString("ephemeral");
     cacheControl["ttl"] = QString("1h");  // Anthropic API: Literal["5m", "1h"]
 
+    QJsonArray systemArray;
+
+    // [barista-fork] Per-question tailoring appends a VARYING module suffix onto a STABLE core. Put the cache
+    // breakpoint at the core boundary so the (unchanged) core is cached and reused every turn while only the
+    // small suffix is reprocessed — without a breakpoint there, the whole prompt differs each turn and Anthropic
+    // gets a cache MISS on every turn. Only split on a real, in-range boundary; otherwise cache the whole prompt.
+    if (cachePrefixLen > 0 && cachePrefixLen < systemPrompt.size()) {
+        QJsonObject core;
+        core["type"] = QString("text");
+        core["text"] = systemPrompt.left(cachePrefixLen);
+        core["cache_control"] = cacheControl;   // cache_control caches the cumulative prefix up to here
+        systemArray.append(core);
+        QJsonObject suffix;
+        suffix["type"] = QString("text");
+        suffix["text"] = systemPrompt.mid(cachePrefixLen);   // varying modules — not cached
+        systemArray.append(suffix);
+        return systemArray;
+    }
+
     QJsonObject block;
     block["type"] = QString("text");
     block["text"] = systemPrompt;
     block["cache_control"] = cacheControl;
-
-    QJsonArray systemArray;
     systemArray.append(block);
     return systemArray;
 }

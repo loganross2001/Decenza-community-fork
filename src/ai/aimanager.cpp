@@ -1766,7 +1766,9 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
                 return;
 
             // Same shared helpers the advisor ships (openspec add-dialing-blocks-to-advisor).
-            dialInSessions = DialingBlocks::buildDialInSessionsBlock(db, shot.profileKbId, anchorId, 5);
+            // [barista-fork] turn-cost: 5→3 recent sessions. The last three shots carry the dialing trend the
+            // barista reasons on; the 4th/5th were pure token weight. query_shots reaches deeper history on demand.
+            dialInSessions = DialingBlocks::buildDialInSessionsBlock(db, shot.profileKbId, anchorId, 3);
             bestRecentShot = DialingBlocks::buildBestRecentShotBlock(db, shot.profileKbId, anchorId, shot);
             beanBestShot = DialingBlocks::buildBeanBestShotBlock(
                 db, shot.profileKbId, shot.beanBrand, shot.beanType, shot.barista, anchorId, shot);
@@ -1776,7 +1778,9 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
                 db, shot.grinderModel, shot.grinderBurrs, shot.beverageType, anchorId);
             if (!shot.profileKbId.isEmpty()) {
                 const QString convKey = AIManager::conversationKey(shot.beanBrand, shot.beanType, shot.profileName);
-                const auto turns = AIConversation::loadRecentAssistantTurnsForKey(convKey, 3);
+                // [barista-fork] turn-cost: 3→2 prior advice turns — the most recent one or two carry "did my
+                // last suggestion work"; older advice is usually stale and re-derivable from the shot trend.
+                const auto turns = AIConversation::loadRecentAssistantTurnsForKey(convKey, 2);
                 if (!turns.isEmpty()) {
                     DialingBlocks::RecentAdviceInputs in;
                     in.turns = turns;
@@ -1801,8 +1805,10 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
                     }
                 }
                 QSqlQuery bq(db);
+                // [barista-fork] turn-cost: 12→6 bean aggregates. This is "you have a whole history" awareness
+                // padding, not dialing data; the top few beans convey it. query_shots covers the rest on demand.
                 if (bq.exec("SELECT bean_brand, bean_type, COUNT(*) c, MIN(timestamp) mn, MAX(timestamp) mx "
-                            "FROM shots GROUP BY bean_brand, bean_type ORDER BY c DESC LIMIT 12")) {
+                            "FROM shots GROUP BY bean_brand, bean_type ORDER BY c DESC LIMIT 6")) {
                     QJsonArray beans;
                     while (bq.next()) {
                         QJsonObject b;
@@ -1921,9 +1927,11 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
 
                 // [barista-fork] KNOWN FACTS — durable basic facts the user told the barista (remember_fact),
                 // scoped to the active user (+ unattributed). Read UNCONDITIONALLY like dueItems (shot-independent)
-                // and capped at 30 so the injected prompt can't grow without bound. Injected as background
+                // and capped at 15 so the injected prompt can't grow without bound. Injected as background
                 // continuity the barista already knows — it should weave them in, not recite or re-ask them.
-                for (const QVariant& r : TasksStorage::fetchUserFactsStatic(db, activeUser, 30)) {
+                // [barista-fork] turn-cost: 30→15 saved facts. Background continuity padding, not dialing data;
+                // 15 most-recent facts keep the personal touch without the injected prompt growing unbounded.
+                for (const QVariant& r : TasksStorage::fetchUserFactsStatic(db, activeUser, 15)) {
                     const QVariantMap m = r.toMap();
                     QJsonObject o;
                     o[QStringLiteral("fact")] = m.value(QStringLiteral("fact")).toString();

@@ -20,4 +20,10 @@ bool looksLikeStall(const QString& raw);
 // rejects a hesitation or cancel ("no", "not yet", "wait", "hold on") so those never fire the shutter.
 bool looksLikeAffirmative(const QString& raw);
 
+// Answer a PURE espresso ratio/dose/yield math question locally, returning the spoken answer — or "" when the
+// utterance isn't a clean, whole-utterance arithmetic query (so anything conversational falls through to the
+// model). Lets the barista answer "1:2.5 off 19 grams" or "ratio of 18 in 40 out" instantly with no LLM
+// round-trip, and never gets the arithmetic wrong. Deliberately narrow to avoid firing on a real discussion.
+QString tryQuickMath(const QString& raw);
+
 }  // namespace barista

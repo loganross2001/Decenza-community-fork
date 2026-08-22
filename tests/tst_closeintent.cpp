@@ -5,6 +5,7 @@
 using barista::looksLikeClose;
 using barista::looksLikeStall;
 using barista::looksLikeAffirmative;
+using barista::tryQuickMath;
 
 // [barista-fork] Locks the two voice-conversation intent matchers. Both have regressed on the owner more than
 // once (a polite farewell not closing; a "let me check" stall dropping to Listening), and both are pure string
@@ -22,6 +23,8 @@ private slots:
     void stall();
     void affirmative_data();
     void affirmative();
+    void quickMath_data();
+    void quickMath();
 
     void closeIsCaseAndPunctuationInsensitive();
     void stallNeverMatchesARealAnswer();
@@ -147,6 +150,43 @@ void tst_CloseIntent::affirmative()
     QFETCH(QString, utterance);
     QFETCH(bool, expected);
     QCOMPARE(looksLikeAffirmative(utterance), expected);
+}
+
+void tst_CloseIntent::quickMath_data()
+{
+    QTest::addColumn<QString>("utterance");
+    QTest::addColumn<QString>("expectedContains");   // "" = must NOT match (falls through to the model)
+
+    // --- Yield from ratio + dose ---
+    QTest::newRow("1:2.5 off 19")        << "1:2.5 off 19 grams"        << "47.5 grams out";
+    QTest::newRow("1:2 with 18g")        << "1:2 with 18g"             << "36 grams out";
+    QTest::newRow("whats 1:2.5 of 19")   << "what's 1:2.5 of 19 grams"  << "47.5 grams out";
+    QTest::newRow("1 to 2 on 20")        << "1 to 2 on 20 grams"        << "40 grams out";
+    // --- Ratio from dose + yield ---
+    QTest::newRow("ratio 18 in 40 out")  << "ratio of 18 in 40 out"     << "1:2.22";
+    QTest::newRow("whats ratio 18 to 36")<< "what's the ratio 18 to 36" << "1:2";
+    QTest::newRow("ratio for 20 and 50") << "ratio for 20 and 50"       << "1:2.5";
+
+    // --- Must NOT fire (conversational / out of range / not math) → fall through to the model ---
+    QTest::newRow("discussion not math") << "let's do 1:2.5 off 19 and see how it tastes" << "";
+    QTest::newRow("greeting")            << "good morning"              << "";
+    QTest::newRow("advice question")     << "should I go finer"         << "";
+    QTest::newRow("bare numbers no ratio word") << "18 40"              << "";
+    QTest::newRow("out of range dose")   << "1:2 off 500 grams"         << "";
+    QTest::newRow("taste question")      << "why is it sour"            << "";
+    QTest::newRow("empty")               << ""                          << "";
+}
+
+void tst_CloseIntent::quickMath()
+{
+    QFETCH(QString, utterance);
+    QFETCH(QString, expectedContains);
+    const QString got = tryQuickMath(utterance);
+    if (expectedContains.isEmpty())
+        QVERIFY2(got.isEmpty(), qPrintable(QStringLiteral("expected no match, got: ") + got));
+    else
+        QVERIFY2(got.contains(expectedContains),
+                 qPrintable(QStringLiteral("expected to contain '%1', got: '%2'").arg(expectedContains, got)));
 }
 
 void tst_CloseIntent::closeIsCaseAndPunctuationInsensitive()

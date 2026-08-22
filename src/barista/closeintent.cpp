@@ -126,4 +126,58 @@ bool looksLikeAffirmative(const QString& raw)
     return re.match(t).hasMatch();
 }
 
+// Format a number for speech: drop a trailing ".0" / ".x0" so 47.50 → "47.5" and 40.00 → "40".
+static QString fmtNum(double v)
+{
+    QString s = QString::number(v, 'f', 2);
+    if (s.contains(QLatin1Char('.'))) {
+        while (s.endsWith(QLatin1Char('0'))) s.chop(1);
+        if (s.endsWith(QLatin1Char('.'))) s.chop(1);
+    }
+    return s;
+}
+
+// [barista-fork] Pure espresso arithmetic, answered locally with no LLM round-trip (and never gotten wrong).
+// DELIBERATELY NARROW: only fires when the WHOLE utterance is a clean ratio/dose/yield question, so a real
+// discussion ("let's do 1:2.5 off 19 and see how it tastes") falls through to the model. Range-guarded so a
+// nonsense parse can't produce a confident wrong answer — out-of-range returns "" and the model handles it.
+QString tryQuickMath(const QString& raw)
+{
+    QString t = raw.trimmed().toLower();
+    if (t.isEmpty() || t.length() > 80)
+        return QString();
+    t = t.replace(QLatin1Char(','), QLatin1Char(' ')).simplified();
+    t.remove(QRegularExpression(QStringLiteral("[?.!]+$")));
+    t = t.trimmed();
+
+    // (A) Yield from ratio + dose: "1:2.5 off 19", "1 to 2.5 with 18 g", "what's 1:2 of 18 grams".
+    static const QRegularExpression reYield(QStringLiteral(
+        "^(?:what'?s |what is |whats )?(?:a |the )?1\\s*(?::|to|-)\\s*([0-9]+(?:\\.[0-9]+)?)\\s+"
+        "(?:ratio\\s+)?(?:off|from|on|with|for|of|at)\\s+([0-9]+(?:\\.[0-9]+)?)\\s*"
+        "(?:g|gram|grams|grammes)?(?:\\s+(?:in|dose))?$"));
+    if (const auto m = reYield.match(t); m.hasMatch()) {
+        const double ratio = m.captured(1).toDouble();
+        const double dose = m.captured(2).toDouble();
+        if (ratio >= 1.0 && ratio <= 20.0 && dose >= 3.0 && dose <= 60.0)
+            return QStringLiteral("A 1:%1 ratio off %2 grams is about %3 grams out.")
+                .arg(fmtNum(ratio), fmtNum(dose), fmtNum(dose * ratio));
+    }
+
+    // (B) Ratio from dose + yield: "ratio of 18 in 40 out", "what's the ratio 18 to 40", "ratio for 18 and 40".
+    // Requires the word "ratio" so a bare "18 40" never triggers.
+    static const QRegularExpression reRatio(QStringLiteral(
+        "^(?:what'?s |what is |whats )?(?:the )?ratio (?:of |for )?([0-9]+(?:\\.[0-9]+)?)\\s*"
+        "(?:g|grams?)?\\s+(?:in|to|and|:|out of|/|vs)\\s+([0-9]+(?:\\.[0-9]+)?)\\s*"
+        "(?:g|grams?)?(?:\\s+out)?$"));
+    if (const auto m = reRatio.match(t); m.hasMatch()) {
+        const double dose = m.captured(1).toDouble();
+        const double yield = m.captured(2).toDouble();
+        if (dose >= 3.0 && dose <= 60.0 && yield > dose && yield <= 300.0)
+            return QStringLiteral("%1 in, %2 out is about 1:%3.")
+                .arg(fmtNum(dose), fmtNum(yield), fmtNum(yield / dose));
+    }
+
+    return QString();
+}
+
 }  // namespace barista

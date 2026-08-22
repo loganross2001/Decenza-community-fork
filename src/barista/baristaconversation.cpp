@@ -312,6 +312,20 @@ void BaristaConversation::onFinalText(const QString& text)
     }
     m_softErrors = 0; m_hardErrors = 0;
     m_autoContinues = 0;   // fresh stall-retry budget for this user turn
+    // [barista-fork] Quick math short-circuit: a pure ratio/dose/yield question ("1:2.5 off 19 grams",
+    // "ratio of 18 in 40 out") is answered locally and SPOKEN, skipping the model turn entirely — no round-trip,
+    // and the arithmetic is never wrong. tryQuickMath returns "" for anything conversational, so a real
+    // discussion still goes to the model. Speak via the same path onModelFinal uses (Speaking → onVoiceSpeaking-
+    // Changed drains back to Listening); turnInFlight stays false since no turn was dispatched.
+    const QString quickMath = barista::tryQuickMath(text);
+    if (!quickMath.isEmpty()) {
+        diag(QStringLiteral("quick_math"), text.left(40));
+        setDisplay(quickMath);
+        m_lastSpokenText = quickMath;
+        setState(State::Speaking);
+        if (m_voice) m_voice->speak(quickMath);
+        return;
+    }
     if (barista::looksLikeClose(text)) {
         m_closingArmed = true;
         diag(QStringLiteral("close_intent_local"));

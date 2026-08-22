@@ -1,0 +1,15 @@
+# Internal build/tooling scripts. Style rules that fight the
+# job these scripts do are off; bug-finding rules stay on.
+[lint]
+ignore = [
+  "UP031",   # %-format is fine in scripts
+  "EXE001",  # shebang without +x — harmless here
+  "SIM115",  # short-lived opens in one-shot scripts
+  "BLE001",  # broad except is often correct in tooling
+  "PLW1510", # subprocess check= — returncode handled explicitly
+  "PIE810",  # startswith tuple — cosmetic
+  "SIM102",  # nested ifs — often clearer as-is
+  "SIM103",
+  "ISC004",
+  "C408",
+]

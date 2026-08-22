@@ -1338,7 +1338,7 @@ void AnthropicProvider::onAnalysisReply(QNetworkReply* reply)
     // client tools; analyzeUrl reaches the terminal via pause_turn and must fall through to the
     // failure path below, not speak "shot history" prose for a URL extraction).
     if (text.trimmed().isEmpty() && stopReason == QLatin1String("tool_use")) {
-        emit analysisComplete(QStringLiteral("I dug through your shot history but couldn't quite finish that — ask me again?"));
+        emit analysisComplete(QStringLiteral("I got partway through that but ran out of steps before I finished — ask me to pick it back up?"));
         return;
     }
     if (text.isEmpty() || unfinished) {
@@ -1995,7 +1995,7 @@ void GeminiProvider::onAnalysisReply(QNetworkReply* reply)
     // enables client tools; analyzeUrl never sets functionCalls/m_toolRounds, so it falls through to the
     // truncation/empty dispatch below rather than speaking "shot history" prose for a URL extraction).
     if (text.trimmed().isEmpty() && (!functionCalls.isEmpty() || m_toolRounds > 0)) {
-        emit analysisComplete(QStringLiteral("I dug through your shot history but couldn't quite finish that — ask me again?"));
+        emit analysisComplete(QStringLiteral("I got partway through that but ran out of steps before I finished — ask me to pick it back up?"));
         return;
     }
     if (text.isEmpty() || truncated) {

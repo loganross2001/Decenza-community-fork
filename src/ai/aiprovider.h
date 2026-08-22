@@ -395,7 +395,10 @@ private:
     QJsonArray m_webToolDefs;      // [barista-fork] fast-path web-tool JSON defs, appended when RequestOptions.webSearch is on
     std::function<void(const QString&, const QJsonObject&, std::function<void(QJsonValue)>)> m_toolExecutor;
     int m_toolRounds = 0;
-    static constexpr int MAX_TOOL_ROUNDS = 4;
+    static constexpr int MAX_TOOL_ROUNDS = 8;   // [barista-fork] 4→8: recipe/profile workflows chain several
+                                                 // tools (list_profiles → get_active_recipe → update_recipe →
+                                                 // activate_recipe); 4 bailed mid-task with the fallback below.
+                                                 // Still bounded against a runaway loop.
     bool m_forceRespond = false;  // [barista-fork] this turn used tool_choice:"any" + the `respond` tool (see RequestOptions)
     int m_currentTimeoutMs = 0;   // [barista-fork] this turn's transfer timeout (RequestOptions.timeoutMs; 0 → default)
     qint64 m_requestSentMs = 0;   // [barista-fork] request-sent stamp for reply-latency instrumentation
@@ -522,7 +525,10 @@ private:
     QString m_accumulatedText;         // prose accumulated across tool rounds, prepended to the final answer
     int m_toolRounds = 0;              // reset per turn in the options-aware analyzeConversation
     int m_currentTimeoutMs = 0;        // this turn's transfer timeout (RequestOptions.timeoutMs; 0 → default)
-    static constexpr int MAX_TOOL_ROUNDS = 4;
+    static constexpr int MAX_TOOL_ROUNDS = 8;   // [barista-fork] 4→8: recipe/profile workflows chain several
+                                                 // tools (list_profiles → get_active_recipe → update_recipe →
+                                                 // activate_recipe); 4 bailed mid-task with the fallback below.
+                                                 // Still bounded against a runaway loop.
 };
 
 // OpenRouter provider (multiple models via OpenAI-compatible API)

@@ -1357,11 +1357,21 @@ Item {
         // PRIME AND WAIT: assemble the full system prompt but DO NOT begin the Claude session. The user
         // speaks first — the first _send() calls beginSession(primed, userText). No synthetic kickoff, no
         // machine-first turn. The barista is present-but-quiet until talked to.
-        // [barista-fork] Per-question scoping: keep the always-on CORE (persona + session context + data block)
-        // separate from the conditional modules, so each turn sends CORE + only the modules the question needs
-        // (see _scopedSystemPrompt, wired at onTurnRequested). _primedSystemPrompt stays = CORE as the base/first
-        // turn; the dispatch overrides it per turn. Modules reset per session (fresh sticky set).
-        root._coreSystemPrompt = persona + "\n\n" + sessionCtx + "\n" + block
+        // [barista-fork] Per-question scoping (turn-cost architecture, Layer separation). The always-on CORE =
+        // persona + session context + a COMPACT SETUP ANCHOR (current bean + profile only). The heavy dial-in
+        // data block (~20k tokens: recent shots, tasting feedback, saved facts) becomes an on-demand module,
+        // included only when the turn is about coffee — a "good morning" or "thanks" no longer carries the whole
+        // shot history. Conservative: the block rides EVERY turn except a clearly-casual one, so a real dialing
+        // question never loses its context; query_shots stays as the escape hatch if a casual-looking turn needed
+        // data. The camera/web modules stay gated as before. See _scopedSystemPrompt (wired at onTurnRequested).
+        var _beanName = ((root._sessBrand || "") + " " + (root._sessType || "")).trim()
+        var _anchor = "currentSetup:\n  bean: " + (_beanName.length ? _beanName : "not set")
+                    + "\n  profile: " + (root._sessProf && root._sessProf.length ? root._sessProf : "not set")
+                    + "\n  (When the question is about a shot, taste, grind or the plan, the full recent-shot data"
+                    + " and tasting history are included below; if they're not and you need a number, call"
+                    + " query_shots — never invent one.)\n"
+        _mods.dialin = block
+        root._coreSystemPrompt = persona + "\n\n" + sessionCtx + "\n" + _anchor
         root._promptModules = _mods
         root._activeModules = ({})
         root._primedSystemPrompt = root._coreSystemPrompt
@@ -1610,18 +1620,28 @@ Item {
         var mods = root._promptModules || ({})
         var active = root._activeModules || ({})
         var u = " " + String(utterance || "").toLowerCase() + " "
+        // Camera / web are sticky within a session (once adding a bean or asking about weather, keep the context
+        // for the follow-ups). Dial-in data is decided PER TURN (below) — it must be free to drop on a casual
+        // aside even mid-dialing.
         if (mods.camera && /\b(add|adding|new|got|have|scan|scann|photo|picture|pic|snap|log)\b/.test(u)
                         && /\b(coffee|bean|beans|bag|roast|this)\b/.test(u))
             active.camera = true
         if (mods.web && /\b(weather|forecast|rain|snow|temperature|degrees|news|headline|headlines|stock|shares?|ticker|price|market|who\s+is|what\s+is|current|latest|today'?s|look\s*up|search|google)\b/.test(u))
             active.web = true
         root._activeModules = active
+        // The ~20k dial-in data block rides EVERY turn except a clearly-casual one — a whole-utterance
+        // pleasantry (greeting / thanks / bye / "how are you" / "cool") needs no shot history. Conservative and
+        // per-turn (not sticky): anything with real content keeps the data, so a dialing question never loses
+        // its context; only pure small talk drops it. query_shots is the escape hatch on a mis-read.
+        var casual = /^((hi|hey|hello|yo|good\s*(morning|afternoon|evening|night)|morning|evening|thanks|thank\s*you|cheers|ok|okay|cool|nice|great|awesome|perfect|lovely|got\s*it|sounds?\s*good|will\s*do|appreciate\s*it|no\s*(thanks|thank\s*you)|bye|goodbye|good\s*night|see\s*(ya|you)(\s*later)?|have\s*a\s*good\s*(one|day|night)|how\s*(are\s*you|are\s*ya|is\s*it\s*going|goes\s*it)|how'?s\s*it\s*going|what'?s\s*up|nothing|never\s*mind|yeah|yep|yes|no|nope)[\s.,!?]*)+$/
+        var includeDialin = !!mods.dialin && !casual.test(String(utterance || "").trim().toLowerCase())
         var out = root._coreSystemPrompt.length ? root._coreSystemPrompt : root._primedSystemPrompt
+        if (includeDialin) out += "\n" + mods.dialin
         if (active.camera && mods.camera) out += "\n" + mods.camera
         if (active.web && mods.web) out += "\n" + mods.web
         console.log("[barista] scoped prompt chars=" + out.length
                     + " (core=" + root._coreSystemPrompt.length + ") active="
-                    + (active.camera ? "camera " : "") + (active.web ? "web" : ""))
+                    + (includeDialin ? "dialin " : "") + (active.camera ? "camera " : "") + (active.web ? "web" : ""))
         return out
     }
 

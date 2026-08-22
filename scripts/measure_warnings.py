@@ -39,7 +39,12 @@ Usage:
 Args: <compdb.json> <parallel-jobs> <output-file> [extra warning flags...]
 Exit: 0 if every TU compiled, 1 if any failed (counts are then incomplete).
 """
-import json, re, shlex, subprocess, sys, collections
+import collections
+import json
+import re
+import shlex
+import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
 
 CDB = sys.argv[1]
@@ -113,7 +118,7 @@ def probe(flag):
     try:
         r = subprocess.run(cmd, capture_output=True, text=True,
                            cwd=e["directory"], timeout=300)
-    except Exception:  # noqa: BLE001 - measurement script
+    except Exception:
         return False
     # The TU may legitimately warn under `flag`, which -Werror turns into a
     # failure. Only an unknown/unsupported *option* disqualifies it.
@@ -146,7 +151,7 @@ def run(e):
     try:
         r = subprocess.run(cmd, capture_output=True, text=True,
                            cwd=e["directory"], timeout=300)
-    except Exception as ex:  # noqa: BLE001 - measurement script
+    except Exception as ex:
         return e["file"], "", f"sweep error: {ex}"
     # -fsyntax-only exits 0 on a TU that merely warns, so a non-zero code here
     # means the TU did not compile and contributed no warnings to any count.
@@ -157,7 +162,7 @@ def run(e):
     return e["file"], r.stderr, None
 
 
-classes = collections.Counter()
+classes: collections.Counter[str] = collections.Counter()
 per_file = collections.defaultdict(set)
 lines, failures = [], []
 with ThreadPoolExecutor(max_workers=JOBS) as ex:

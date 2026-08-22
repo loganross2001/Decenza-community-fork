@@ -47,8 +47,8 @@ import argparse
 import json
 import re
 import subprocess
-import tempfile
 import sys
+import tempfile
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -198,7 +198,7 @@ def relative_to_repo(path: str) -> str:
     # REPO.as_posix(), not str(REPO): `path` above has already been normalised to
     # forward slashes, so a backslashed prefix would never strip on Windows.
     prefix = REPO.as_posix() + "/"
-    return path[len(prefix):] if path.startswith(prefix) else path
+    return path.removeprefix(prefix)
 
 
 def find_qmllint() -> str:
@@ -261,7 +261,8 @@ def split_response(rsp: Path) -> tuple[list[str], list[str]]:
     The flags have to be reused verbatim — they are what makes the run match how the module is
     really compiled — but the file list has to be splittable, for the reason in run().
     """
-    flags, files = [], []
+    flags: list[str] = []
+    files: list[str] = []
     for line in rsp.read_text().split("\n"):
         entry = line.strip()
         if not entry:
@@ -583,10 +584,10 @@ def check_registry_fresh(import_path: str) -> None:
         text = header.read_text(errors="replace")
         if "QML_SINGLETON" not in text:
             continue
-        parts = re.split(r"^[ \t]*(?:class|struct)\s+(\w+)", text, flags=re.M)
+        parts = re.split(r"^[ \t]*(?:class|struct)\s+(\w+)", text, flags=re.MULTILINE)
         # re.split with one group yields [pre, name1, body1, name2, body2, ...].
         for cls, block in zip(parts[1::2], parts[2::2]):
-            if not re.search(r"^\s*QML_SINGLETON\s*$", block, flags=re.M):
+            if not re.search(r"^\s*QML_SINGLETON\s*$", block, flags=re.MULTILINE):
                 continue
             named = re.search(r"QML_NAMED_ELEMENT\(\s*(\w+)\s*\)", block)
             foreign = re.search(r"QML_FOREIGN\(\s*(\w+)\s*\)", block)
@@ -876,7 +877,6 @@ def main() -> int:
             # make every comparison below vacuous and the write unconditional, which is a guard
             # that silently declines to run: the exact shape this whole change argues against.
             old = prev["ceilings"]
-            was_clean = set(prev["clean"])
             for f, n in state["ceilings"].items():
                 was = old.get(f)
                 if was is None:

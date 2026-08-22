@@ -55,7 +55,7 @@ LIB_RE = re.compile(r"^\s*add_library\(\s*(\w+)\s+(?:STATIC|OBJECT|SHARED)\b")
 # set(FOO_SOURCES ...) bundles, expanded into whichever block uses ${FOO_SOURCES}.
 SETVAR_RE = re.compile(r"^\s*set\(\s*(\w+)\s*$")
 VARUSE_RE = re.compile(r"\$\{(\w+)\}")
-LINK_RE = re.compile(r"^\s*target_link_libraries\(\s*(\w+)\s+\w+\s+(.*)", re.S)
+LINK_RE = re.compile(r"^\s*target_link_libraries\(\s*(\w+)\s+\w+\s+(.*)", re.DOTALL)
 
 
 def parse(text: str):
@@ -92,7 +92,7 @@ def parse(text: str):
             i = j + 1
             continue
 
-        if kind is None:
+        if kind is None or name is None:
             i += 1
             continue
 
@@ -154,7 +154,7 @@ def main() -> int:
     # success. This guard exists because that happened: recognising OBJECT
     # libraries made single-line add_library() calls swallow the block after
     # them, and the only visible symptom was the target count dropping by one.
-    naive = len(re.findall(r"^add_decenza_test\(", text, re.M))
+    naive = len(re.findall(r"^add_decenza_test\(", text, re.MULTILINE))
     if not target_sources:
         print(f"check_test_source_duplication: FAILED to parse any target from "
               f"{CMAKE}. Refusing to pass — a check that silently analyses "

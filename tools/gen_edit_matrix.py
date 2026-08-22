@@ -25,7 +25,6 @@ Usage:  python3 tools/gen_edit_matrix.py <de1plus-dir>
 """
 
 import os
-import re
 import subprocess
 import sys
 

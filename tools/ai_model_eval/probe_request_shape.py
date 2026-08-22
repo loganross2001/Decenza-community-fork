@@ -26,6 +26,7 @@ import json
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 
 ANTHROPIC_MODELS = ["claude-sonnet-4-6", "claude-sonnet-5"]     # aiprovider.cpp catalog
@@ -43,9 +44,13 @@ def setting(key: str) -> str:
 
 
 def post(url: str, headers: dict, body: dict):
+    # urlopen also honours file:// and ftp:// (bandit B310); this is the single
+    # entry point every caller's URL passes through, so reject non-http(s) here.
+    if urllib.parse.urlsplit(url).scheme not in ("http", "https"):
+        raise ValueError(f"refusing non-http(s) URL: {url!r}")
     req = urllib.request.Request(url, data=json.dumps(body).encode(), headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=90) as r:
+        with urllib.request.urlopen(req, timeout=90) as r:  # nosec B310 - scheme checked above
             return r.status, json.loads(r.read())
     except urllib.error.HTTPError as e:
         raw = e.read().decode(errors="replace")
@@ -53,7 +58,7 @@ def post(url: str, headers: dict, body: dict):
             return e.code, json.loads(raw)
         except json.JSONDecodeError:
             return e.code, {"raw": raw[:300]}
-    except Exception as e:                                  # noqa: BLE001
+    except Exception as e:
         return 0, {"raw": f"{type(e).__name__}: {e}"}
 
 

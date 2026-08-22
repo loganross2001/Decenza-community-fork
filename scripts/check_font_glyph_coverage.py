@@ -1,4 +1,10 @@
-import struct, re, sys, glob, os, unicodedata
+import glob
+import os
+import re
+import struct
+import sys
+import unicodedata
+
 
 def cmap_of(path):
     d=open(path,"rb").read(); n=struct.unpack(">H",d[4:6])[0]; co=None
@@ -39,7 +45,7 @@ def is_emoji(cp):
             or 0x2B00 <= cp <= 0x2BFF)
 
 STRING = re.compile(r'"((?:[^"\\]|\\.)*)"')
-hits = {}
+hits: dict[str, list[str]] = {}
 files = glob.glob("qml/**/*.qml", recursive=True)
 for path in files:
     for ln, line in enumerate(open(path, encoding="utf-8"), 1):

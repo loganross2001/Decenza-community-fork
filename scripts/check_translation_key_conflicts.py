@@ -18,7 +18,10 @@ Two ways to fix a report from this script:
   * The difference is real (short label vs spoken name) -- give the accessible one its own
     key, suffixed `.accessible`, the convention set by changebeans.form.url.accessible.
 """
-import collections, glob, io, re, sys
+import collections
+import glob
+import re
+import sys
 
 # Mirror the THREE patterns scanAllStrings() uses, including its nearest-fallback-within-200-
 # characters pairing. An earlier version of this script only matched labelKey/translationKey on
@@ -30,10 +33,10 @@ KEY_ANY = re.compile(r'\b(?:labelKey|translationKey|key)\s*:\s*"([^"]+)"')
 FB_ANY = re.compile(r'\b(?:labelFallback|translationFallback|fallback)\s*:\s*"((?:[^"\\]|\\.)*)"')
 
 def main() -> int:
-    seen = collections.defaultdict(lambda: collections.defaultdict(list))
+    seen: dict[str, dict[str, list[str]]] = collections.defaultdict(lambda: collections.defaultdict(list))
     for path in sorted(glob.glob("qml/**/*.qml", recursive=True)):
-        text = io.open(path, encoding="utf-8").read()
-        line_of = lambda pos: text.count("\n", 0, pos) + 1
+        text = open(path, encoding="utf-8").read()
+        line_of = lambda pos, text=text: text.count("\n", 0, pos) + 1
 
         for m in DIRECT.finditer(text):
             seen[m.group(1)][m.group(2)].append(f"{path}:{line_of(m.start())}")

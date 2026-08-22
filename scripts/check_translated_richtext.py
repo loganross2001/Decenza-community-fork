@@ -16,15 +16,17 @@ Safe patterns, all already used in the tree:
     the third argument allowMarkup is true, which callers pass only for HTML they built
     themselves out of already-escaped pieces
 """
-import glob, io, re, sys
+import glob
+import re
+import sys
 
 RICH = re.compile(r'textFormat\s*:\s*Text\.(StyledText|RichText)')
-TEXT_BINDING = re.compile(r'\btext\s*:\s*(.+?)(?:\n\s*[a-zA-Z_.]+\s*:|\n\s*\})', re.S)
+TEXT_BINDING = re.compile(r'\btext\s*:\s*(.+?)(?:\n\s*[a-zA-Z_.]+\s*:|\n\s*\})', re.DOTALL)
 
 def main() -> int:
     findings = []
     for path in sorted(glob.glob("qml/**/*.qml", recursive=True)):
-        lines = io.open(path, encoding="utf-8").read().split("\n")
+        lines = open(path, encoding="utf-8").read().split("\n")
         for i, line in enumerate(lines):
             if not RICH.search(line):
                 continue
@@ -41,7 +43,7 @@ def main() -> int:
                 continue
             findings.append((path, i + 1, expr[:160]))
 
-    print(f"Checked QML for translated strings bound to StyledText/RichText.")
+    print("Checked QML for translated strings bound to StyledText/RichText.")
     if not findings:
         print("None reach a rich-text renderer unescaped.")
         return 0

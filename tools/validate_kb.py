@@ -63,10 +63,10 @@ def validate(kb_path: Path):
     if not isinstance(profiles, list) or not profiles:
         return errors + ["'profiles' must be a non-empty array"], []
 
-    ids = {}
-    alias_to_id = {}          # normalized lookup key -> id (collision = fatal)
-    recipe_aliases = {}       # normalized recipe alias -> id (#1198 prefix anchors)
-    editor_default_count = {}
+    ids: dict[str, str] = {}
+    alias_to_id: dict[str, str | None] = {}   # normalized lookup key -> id (collision = fatal)
+    recipe_aliases: dict[str, str | None] = {}  # normalized recipe alias -> id (#1198 prefix anchors)
+    editor_default_count: dict[str, int] = {}
 
     def norm(s):
         # MUST match shotsummarizer_kb.cpp normalizeProfileKey EXACTLY, or the
@@ -277,7 +277,7 @@ def _validate_band(pid, eb, prose, kb_path, errors, warnings):
         if bound is None:
             continue
         b = f"{bound:g}"
-        if re.search(rf"\b{re.escape(b)}\s*(bar|ml/s|ml per second)", prose, re.I):
+        if re.search(rf"\b{re.escape(b)}\s*(bar|ml/s|ml per second)", prose, re.IGNORECASE):
             any_fired = True
             if not ack:
                 warnings.append(

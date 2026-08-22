@@ -69,7 +69,7 @@ REGISTRATION = re.compile(
     # server reported 66, and the biggest description in the app — 7024 characters,
     # 9% of the whole payload — was invisible to the check meant to bound it.
     r'register(?:Async|Action)?Tool\(\s*\n?\s*"([a-z_0-9]+)",\s*((?:"(?:[^"\\]|\\.)*"\s*)+)(,|\+\s*\w+)',
-    re.S,
+    re.DOTALL,
 )
 PROPERTY_DESCRIPTION = re.compile(r'\{"description", ((?:"(?:[^"\\]|\\.)*"\s*)+)\}')
 # A merged tool's verbs: syncAction("name", "category", … / asyncAction(same).
@@ -90,7 +90,7 @@ SURFACE_FINGERPRINT = re.compile(r'McpSurfaceFingerprint\s*=\s*"([^"]+)"')
 # Which QVector<McpToolAction> belongs to which tool, so the fingerprint is keyed by
 # the tool NAME rather than by a local variable a rename would churn.
 ACTION_TOOL_BINDING = re.compile(
-    r'registerActionTool\(\s*\n?\s*"([a-z_0-9]+)",.*?\n\s*(\w+)\)?[,;]', re.S)
+    r'registerActionTool\(\s*\n?\s*"([a-z_0-9]+)",.*?\n\s*(\w+)\)?[,;]', re.DOTALL)
 # McpServer's name-keyed confirmation list, for the tools that are not merged. A name
 # left here after its tool became a verb of a merged tool is dead text that reads like
 # a live rule — and the next reader trusts it.
@@ -160,7 +160,7 @@ def surface_fingerprint(tools, actions, bindings) -> str:
     the descriptions: prose is edited constantly and a client's cached LIST is what
     goes stale, not its wording.
     """
-    by_tool = {}
+    by_tool: dict[str, set[str]] = {}
     for family, action, _category, _path, _line in actions:
         by_tool.setdefault(bindings.get(family, family), set()).add(action)
     lines = sorted(name for name, _d, _p, _l, _c in tools)

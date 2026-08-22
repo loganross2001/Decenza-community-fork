@@ -167,8 +167,8 @@ def verify(path: Path) -> int:
                             pp = prev.split(".")
                             if len(pp) != len(parts):
                                 continue
-                            diff = [i for i in range(len(pp)) if pp[i] != parts[i]]
-                            if len(diff) == 1 and diff[0] > 0:
+                            differing = [i for i in range(len(pp)) if pp[i] != parts[i]]
+                            if len(differing) == 1 and differing[0] > 0:
                                 print(f"  MID-CHAIN SUBST: {prev.strip()} -> {chain}",
                                       file=sys.stderr)
                                 bad += 1

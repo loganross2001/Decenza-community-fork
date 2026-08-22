@@ -188,7 +188,8 @@ def call(key: str, model: str, effort: str, system: str, user: str):
     # refusal with a null content must degrade to a recorded per-call error,
     # never abort the run.
     try:
-        with urllib.request.urlopen(req, timeout=300) as r:
+        # B310: the URL above is a constant https literal, so a scheme guard here would be dead code.
+        with urllib.request.urlopen(req, timeout=300) as r:  # nosec B310 - constant https endpoint
             payload = json.loads(r.read())
         choice = payload["choices"][0]
         content = choice["message"]["content"]
@@ -197,7 +198,7 @@ def call(key: str, model: str, effort: str, system: str, user: str):
         return content, None, payload.get("usage", {}), choice.get("finish_reason")
     except urllib.error.HTTPError as e:
         return None, f"HTTP {e.code}: {e.read().decode(errors='replace')[:300]}", {}, None
-    except Exception as e:                       # noqa: BLE001 — see above
+    except Exception as e:
         return None, f"{type(e).__name__}: {str(e)[:200]}", {}, None
 
 
@@ -264,8 +265,10 @@ def run(args) -> None:
     outdir = os.path.join(RESULTS, args.mode)
     os.makedirs(outdir, exist_ok=True)
 
-    rng = random.Random(args.seed)
-    keymap, results, total = {}, {}, 0.0
+    # nosec B311 - seeded PRNG for REPRODUCIBLE label shuffling in an eval replay; not security.
+    rng = random.Random(args.seed)  # nosec B311
+    keymap: dict[str, dict] = {}
+    results, total = {}, 0.0
 
     for scen in scenarios:
         with open(os.path.join(CAPTURED, scen["key"] + ".json")) as f:

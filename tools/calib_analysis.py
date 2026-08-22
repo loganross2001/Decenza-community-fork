@@ -24,7 +24,12 @@ Usage:
 The KB resolution (alias map, recipe-prefix, UGS lookup) mirrors
 src/ai/shotsummarizer_kb.cpp so grouping matches the C++ exactly.
 """
-import argparse, itertools, json, sqlite3, statistics, sys
+import argparse
+import itertools
+import json
+import sqlite3
+import statistics
+import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -48,7 +53,7 @@ def load_kb(kb_path):
                          name=p.get("displayName", pid))
         is_editor = p.get("defaultForEditorType", "") in ("dflow", "aflow")
 
-        def reg(raw, recipe_anchor):
+        def reg(raw, recipe_anchor, pid=pid):
             k = norm(raw)
             first = k not in alias_to_id
             alias_to_id.setdefault(k, pid)

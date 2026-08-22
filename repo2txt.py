@@ -1,15 +1,14 @@
 #!/usr/bin/env python
-# -*- coding: utf-8 -*-
 """
 repo2txt  —  flatten a source-code tree into one text file for AI analysis.
 Public-domain / CC0.
 """
 from __future__ import annotations
+
 import argparse
 import sys
-from pathlib import Path
-from typing import List
 import traceback  # For detailed error printing
+from pathlib import Path
 
 # ─────────────── Configuration ──────────────────────────────────────────
 # Tailor these settings to your project to get the most relevant context.
@@ -141,7 +140,7 @@ def read_file(path: Path) -> str:
     except OSError as e:
         return f"[repo2txt: OSError reading file {path.name}: {e}]\n"
 
-def build_tree(root: Path) -> List[str]:
+def build_tree(root: Path) -> list[str]:
     """Build a visual tree of the relevant directory structure."""
     lines = ["└── ./"]
 
@@ -196,7 +195,7 @@ def dump_repo(root: Path, out_stream):
 
 # ─────────────── Main Execution ───────────────────────────────────────────
 
-def main(argv: List[str] | None = None):
+def main(argv: list[str] | None = None):
     """Main function to parse arguments and run the script."""
     ap = argparse.ArgumentParser(
         description="Flatten a source-code tree into one text file, configured for AI analysis.",

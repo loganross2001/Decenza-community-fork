@@ -27,7 +27,10 @@ fonts it prints "0 records would change" — which looks like success but proves
 
 Requires fonttools (pip install fonttools). Re-run after any font update.
 """
-import glob, os, sys
+import glob
+import os
+import sys
+
 from fontTools.ttLib import TTFont
 
 OLD, NEW = "Roboto", "Decenza Sans"

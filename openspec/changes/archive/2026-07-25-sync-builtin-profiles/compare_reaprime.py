@@ -20,7 +20,11 @@ pump does not drive is ignored (the DE1 ignores it too), a zero-value limiter
 equals an absent one, and numbers compare numerically. A structural diff instead
 reports 55 of 63 differing and buries the real findings under encoding noise.
 """
-import json, glob, os, sys, collections
+import collections
+import glob
+import json
+import os
+import sys
 
 # de1app profile types whose frames are DERIVED from scalars, not read from the
 # stored advanced_shot array. de1app's save_profile writes that array out of the

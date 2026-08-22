@@ -13,14 +13,15 @@ Default: the ~750 emoji the app's own content references.
 Outputs to resources/emoji/ and generates resources/emoji.qrc.
 """
 
-import sys
+import io
+import json
 import os
 import re
-import json
-import urllib.request
-import urllib.error
+import sys
 import time
-import io
+import urllib.error
+import urllib.parse
+import urllib.request
 
 # Fix Windows console encoding for emoji output
 if sys.platform == "win32":
@@ -203,11 +204,24 @@ def codepoints_to_filename(cps: list[str]) -> str:
 
 # --- Download logic ---
 
+def _urlopen_checked(req, timeout):
+    """urlopen restricted to http(s), shared by every fetch below.
+
+    urlopen also honours file:// and ftp:// (bandit B310), so a source URL that
+    was mis-built could read a local file instead of fetching an emoji. Reject
+    any non-http(s) scheme first. Centralised so the one nosec sits next to the
+    guard that earns it rather than being copied to all three call sites.
+    """
+    if urllib.parse.urlsplit(req.full_url).scheme not in ("http", "https"):
+        raise ValueError(f"refusing non-http(s) URL: {req.full_url!r}")
+    return urllib.request.urlopen(req, timeout=timeout)  # nosec B310 - scheme checked above
+
+
 def download_svg(url: str) -> bytes | None:
     """Download SVG from URL, return bytes or None on failure."""
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Decenza-EmojiDownloader/1.0"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with _urlopen_checked(req, 15) as resp:
             data = resp.read()
             if b"<svg" in data.lower():
                 return data
@@ -255,7 +269,7 @@ def check_for_update(source) -> int:
     req = urllib.request.Request(url, headers={"User-Agent": "Decenza-EmojiDownloader/1.0",
                                                "Accept": "application/vnd.github+json"})
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with _urlopen_checked(req, 30) as resp:
             latest = json.load(resp).get("tag_name", "")
     except Exception as e:
         # Offline, rate-limited, DNS down: say so and move on. Not an error.
@@ -271,12 +285,12 @@ def check_for_update(source) -> int:
 
     if parts(latest) > parts(source.tag):
         print()
-        print(f"  emoji assets are OUT OF DATE")
+        print("  emoji assets are OUT OF DATE")
         print(f"    pinned: {source.tag}    latest: {latest}  ({source.repo})")
         print(f"    to update: edit {os.path.basename(__file__)} (Twemoji.tag), then")
         print(f"      python scripts/download_emoji.py {source.name} --all")
-        print(f"    and commit resources/emoji/ + resources/emoji.qrc.")
-        print(f"    Emoji from a newer Unicode revision are stripped until you do.")
+        print("    and commit resources/emoji/ + resources/emoji.qrc.")
+        print("    Emoji from a newer Unicode revision are stripped until you do.")
         print()
         return 2
 
@@ -306,7 +320,7 @@ def download_full_set(source, emoji_dir: str) -> list[str]:
 
     req = urllib.request.Request(url, headers={"User-Agent": "Decenza-EmojiDownloader/1.0"})
     try:
-        with urllib.request.urlopen(req, timeout=180) as resp:
+        with _urlopen_checked(req, 180) as resp:
             blob = resp.read()
     except OSError as e:
         # OSError covers URLError AND the bare TimeoutError a socket read timeout raises
@@ -359,9 +373,9 @@ def download_full_set(source, emoji_dir: str) -> list[str]:
         print(f"  note: skipped {skipped} unreadable member(s)")
 
     # Only now is it safe to replace what is already committed.
-    for f in os.listdir(emoji_dir):
-        if f.endswith(".svg"):
-            os.remove(os.path.join(emoji_dir, f))
+    for existing in os.listdir(emoji_dir):
+        if existing.endswith(".svg"):
+            os.remove(os.path.join(emoji_dir, existing))
     for fname, data in staged.items():
         with open(os.path.join(emoji_dir, fname), "wb") as out:
             out.write(data)
@@ -490,7 +504,7 @@ def main():
     # Calculate total size
     total_size = sum(os.path.getsize(os.path.join(EMOJI_DIR, fn)) for fn in unique_filenames)
     print(f"Total size: {total_size / 1024:.0f} KB ({total_size / 1024 / 1024:.1f} MB)")
-    print(f"\nRemember to add emoji.qrc to CMakeLists.txt and attribute:")
+    print("\nRemember to add emoji.qrc to CMakeLists.txt and attribute:")
     print(f"  {source.license_info}")
 
     # Write a mapping JSON for the QML helper to use at dev-time verification

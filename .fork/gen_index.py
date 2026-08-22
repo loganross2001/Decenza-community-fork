@@ -24,8 +24,8 @@ Usage:
 
 READ-ONLY over the source tree. Scans only fork-owned paths (FORK_GLOBS); never upstream files.
 """
-import sys
 import re
+import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent

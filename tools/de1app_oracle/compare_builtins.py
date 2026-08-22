@@ -85,7 +85,7 @@ def compare(theirs, ours, src):
     # settings_to_advanced_list does not derive the count, so for advanced
     # profiles de1app uses the literal from the file.
     if not count_start:
-        m = re.search(r"^final_desired_shot_volume_advanced_count_start (\S+)", src, re.M)
+        m = re.search(r"^final_desired_shot_volume_advanced_count_start (\S+)", src, re.MULTILINE)
         count_start = m.group(1) if m else "0"
     if num(count_start) != num(ours.get("number_of_preinfuse_frames", "0")):
         shot.append("preinfuse count: de1app=%s ours=%s"
@@ -112,7 +112,7 @@ def compare(theirs, ours, src):
         # ProfileFrame::knownTclKeys() exists to prevent — would read as
         # identical. An absent value is treated as 0.0, which is what both
         # formats mean by it; anything else present on one side only is drift.
-        def cmp_num(raw_a, raw_b, label, bucket):
+        def cmp_num(raw_a, raw_b, label, bucket, i=i):
             x, y = num(raw_a), num(raw_b)
             if x is None and y is None:
                 return
@@ -180,7 +180,7 @@ def main():
         path = os.path.join(CORPUS, tcl)
         with open(path, encoding="utf-8", errors="replace") as fh:
             src = fh.read()
-        m = re.search(r"^profile_title \{?([^}\n]*)", src, re.M)
+        m = re.search(r"^profile_title \{?([^}\n]*)", src, re.MULTILINE)
         title = m.group(1).strip() if m else ""
         jp = os.path.join(BUILTINS, title_to_filename(title) + ".json")
         if not os.path.exists(jp):

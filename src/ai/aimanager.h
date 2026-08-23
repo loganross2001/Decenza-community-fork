@@ -265,6 +265,21 @@ public:
         m_pendingToolStructuredNext = QJsonObject{};
         return out;
     }
+    // Null until wired (and in tests that never wire it) — callers must check.
+    // True while a metadata write THIS class started is awaiting its outcome.
+    //
+    // main.qml uses it to suppress ShotHistoryStorage's generic "please try
+    // again" toast, which is emitted immediately before shotMetadataCaptureFailed
+    // and would otherwise be ANNOUNCED in full to a screen-reader user before the
+    // advisor-specific message replaced it on screen. Retrying cannot help when
+    // the shot does not exist, so the generic advice is worse than silence.
+    //
+    // Approximate by design: errorOccurred carries no shot id, so a different
+    // subsystem's failure arriving while one of ours is in flight is suppressed
+    // too. The window is one queued block wide.
+    Q_INVOKABLE bool hasPendingShotMetadataWrite() const { return !m_pendingMetadataWrites.isEmpty(); }
+
+    ShotHistoryStorage* shotHistoryStorage() const { return m_shotHistory; }
 
     // Inject the TranslationManager so user-visible error strings localize.
     // Forwards to every owned provider and the conversation. Wired directly in
@@ -458,6 +473,12 @@ signals:
     void phrasebookReady(const QString& requestToken, const QString& json);
     void sessionSummaryReady(const QString& userToken, const QString& summary);   // [barista-fork] Step 6
     void phrasebookFailed(const QString& requestToken, const QString& error);
+    // A metadata write this class made — capturing something the user told the
+    // advisor — landed on a shot id that does not exist, so the value was
+    // discarded. Emitted so the failure is addressable instead of vanishing
+    // into a log line. What to DO about it (re-ask, retry, tell the user) is
+    // deliberately not decided here.
+    void shotMetadataCaptureFailed(qint64 shotId);
     void testResultChanged();
     void ollamaModelsChanged();
     void conversationIndexChanged();
@@ -518,6 +539,11 @@ private:
     std::function<void(const QString&, const QVariantMap&, std::function<void(QJsonObject)>)> m_bagOpHandler;
     std::function<QJsonArray(const QString&)> m_listProfilesHandler;
     std::function<void(const QString&)> m_setActiveUserHandler;   // [barista-fork] Phase 1 set_active_user seam
+    // Shot ids this class has a metadata write in flight for, REFCOUNTED: one
+    // reply can drive two writes for the same shot, and shotMetadataUpdated
+    // carries every subsystem's writes, so without this we would report other
+    // people's failures as ours. See setShotHistoryStorage.
+    QHash<qint64, int> m_pendingMetadataWrites;
     ProfileManager* m_profileManager = nullptr;
 
     // Providers

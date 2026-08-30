@@ -11,6 +11,8 @@
 #include <QQmlContext>
 #include <QQmlExpression>
 #include <QDir>
+
+#include "core/settings_calibration.h"
 #include <QDirIterator>
 #include <QRegularExpression>
 #include <QTemporaryDir>
@@ -1491,7 +1493,29 @@ private slots:
         QCOMPARE(result["targetTemperatureC"].toDouble(), 91.5);
     }
 
-    // === MCP tool: debug_get_log ===
+    // === MCP tools: debug_get_fds / debug_get_log ===
+
+    void debugGetFds_returnsExplicitDescriptorCensus() {
+        McpTestFixture f;
+        registerDebugTools(&f.registry, nullptr);
+
+        const QJsonObject result = f.callTool("debug_get_fds", QJsonObject{});
+        QVERIFY(result.contains("supported"));
+        if (!result.value("supported").toBool()) {
+            QVERIFY(!result.value("error").toString().isEmpty());
+            return;
+        }
+
+        QVERIFY(result.value("openFdCount").toInt() > 0);
+        QVERIFY(result.value("descriptorKinds").isObject());
+        QVERIFY(result.value("descriptors").isArray());
+        const QJsonArray descriptors = result.value("descriptors").toArray();
+        QVERIFY(!descriptors.isEmpty());
+        const QJsonObject descriptor = descriptors.first().toObject();
+        QVERIFY(descriptor.contains("fd"));
+        QVERIFY(descriptor.contains("kind"));
+        QVERIFY(descriptor.contains("target"));
+    }
 
     static void writeLogFile(const QString& path, const QString& content) {
         QFile f(path);
@@ -2260,6 +2284,48 @@ private slots:
     // mid-pour (clearBrewOverrides) dropped a live 45 g target to the
     // profile's 36 g and cut the shot short — observed on a real pour, not
     // hypothetical. Every arm below is one of those paths.
+    // add-shot-flow-calibration: the shot record stores the flow calibration
+    // multiplier the shot POURED under, and it must survive a write that lands
+    // after the pour started. That is not hypothetical ordering paranoia:
+    // MainController::onShotEnded() calls computeAutoFlowCalibration() BEFORE
+    // it builds the shot metadata and saves, so on any shot that completes a
+    // 5-shot batch the stored multiplier changes between pour and save. A
+    // save-time read would record the value the shot PRODUCED, on exactly the
+    // shots where it differs — silently, and only there.
+    //
+    // The end-to-end ordering can't be driven from a test (no harness
+    // constructs MainController), so this asserts the property the fix rests
+    // on: once latched, the value is immune to later writes.
+    void shotLatchFreezesFlowCalibrationAgainstLateWrites() {
+        McpTestFixture f;
+        loadDFlowProfile(f, "Test", 36.0);
+
+        f.settings.calibration()->setFlowCalibrationMultiplier(1.35);
+        f.profileManager.latchForShot();
+        QCOMPARE(f.profileManager.latchedFlowCalibration(), 1.35);
+
+        // What auto calibration does at shot end, before the save.
+        f.settings.calibration()->setFlowCalibrationMultiplier(1.22);
+        QCOMPARE(f.profileManager.latchedFlowCalibration(), 1.35);
+
+        // Consuming it is what makes the value belong to exactly one shot: a
+        // later shot that never latched (a missed espressoCycleStarted, e.g.
+        // the "machine skipped preheating" case machinestate.cpp guards) must
+        // read 0 and record NULL rather than inheriting this shot's 1.35.
+        QCOMPARE(f.profileManager.takeFlowCalibrationLatch(), 1.35);
+        QCOMPARE(f.profileManager.latchedFlowCalibration(), 0.0);
+
+        // The NEXT shot re-resolves — the latch freezes one shot, not forever.
+        // Compared against effectiveFlowCalibration() rather than a literal so
+        // the assertion holds whichever key wins for this fixture's profile
+        // (per-profile when one is stored and auto-cal is on, else global).
+        f.profileManager.latchForShot();
+        QCOMPARE(f.profileManager.latchedFlowCalibration(),
+                 f.settings.calibration()->effectiveFlowCalibration(
+                     f.profileManager.baseProfileName()));
+        QCOMPARE(f.profileManager.latchedFlowCalibration(), 1.22);
+    }
+
     void shotLatchFreezesTargetAgainstEveryLateWrite() {
         McpTestFixture f;
         loadDFlowProfile(f, "Test", 36.0);
@@ -2367,6 +2433,16 @@ private slots:
 
         QSignalSpy cycleEnded(&f.machineState, &MachineState::espressoCycleEnded);
 
+        // The phase AS IT STANDS INSIDE the emission, which a spy cannot see. The
+        // pre-shot-zero clear in main.cpp hangs off this signal and is guarded on
+        // Phase::Disconnected precisely to tell this exit from the normal one, where
+        // clearing early would step the drip-settle samples. Assigning m_phase after
+        // the emit instead of before would leave that guard reading Pouring and
+        // silently stop it firing, with nothing else here failing.
+        MachineState::Phase phaseAtEmit = MachineState::Phase::Idle;
+        QObject::connect(&f.machineState, &MachineState::espressoCycleEnded,
+                         [&f, &phaseAtEmit]() { phaseAtEmit = f.machineState.phase(); });
+
         f.device.m_state = DE1::State::Espresso;
         f.device.m_subState = DE1::SubState::Pouring;
         f.machineState.updatePhase();
@@ -2387,6 +2463,7 @@ private slots:
 
         QCOMPARE(f.machineState.phase(), MachineState::Phase::Disconnected);
         QCOMPARE(cycleEnded.count(), 1);
+        QCOMPARE(phaseAtEmit, MachineState::Phase::Disconnected);
 
         // Idempotent: further disconnected updates must not re-fire it.
         f.machineState.updatePhase();

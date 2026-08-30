@@ -408,35 +408,11 @@ QJsonArray ShotServer::serializeAIConversations() const
     if (!m_aiManager)
         return QJsonArray();
 
+    // One producer, shared with the archive writer and matched field-for-field
+    // by the importer. It reads the same `ai/conversations/index` AIManager
+    // holds in memory, and AIManager persists that index on every change.
     AppSettings settings;
-    QJsonArray result;
-
-    for (const auto& entry : m_aiManager->conversationIndex()) {
-        QString prefix = "ai/conversations/" + entry.key + "/";
-
-        QJsonObject conv;
-        conv["key"] = entry.key;
-        conv["beanBrand"] = entry.beanBrand;
-        conv["beanType"] = entry.beanType;
-        conv["profileName"] = entry.profileName;
-        conv["timestamp"] = settings.value(prefix + "timestamp").toString();
-        conv["systemPrompt"] = settings.value(prefix + "systemPrompt").toString();
-        conv["contextLabel"] = settings.value(prefix + "contextLabel").toString();
-        conv["indexTimestamp"] = entry.timestamp;
-
-        QByteArray messagesJson = settings.value(prefix + "messages").toByteArray();
-        if (!messagesJson.isEmpty()) {
-            QJsonDocument msgDoc = QJsonDocument::fromJson(messagesJson);
-            if (msgDoc.isArray()) conv["messages"] = msgDoc.array();
-            else conv["messages"] = QJsonArray();
-        } else {
-            conv["messages"] = QJsonArray();
-        }
-
-        result.append(conv);
-    }
-
-    return result;
+    return AIConversation::exportConversationsStatic(settings);
 }
 
 void ShotServer::handleBackupAIConversations(QTcpSocket* socket)
@@ -843,6 +819,10 @@ QString ShotServer::generateRestorePage() const
                         if (r.mediaImported > 0) parts.push(r.mediaImported + " media imported");
                         if (r.mediaSkipped > 0) parts.push(r.mediaSkipped + " media already existed");
                         if (r.aiConversationsImported > 0) parts.push(r.aiConversationsImported + " AI conversations imported");
+                        // What the restore REFUSED. Without it the page shows
+                        // only the survivors, so a run that dropped most of the
+                        // threads reads as a clean success.
+                        if (r.aiConversationsNote) parts.push(r.aiConversationsNote);
                         if (parts.length === 0) parts.push("Nothing to restore");
                         // A refused or failed shot import is an ERROR banner, not
                         // a line inside a green "Restore complete". Reporting it
@@ -972,6 +952,9 @@ void ShotServer::handleBackupRestore(QTcpSocket* socket, const QString& tempFile
     int mediaImported = 0;
     int mediaSkipped = 0;
     int aiConversationsImported = 0;
+    // Empty when the conversation import refused nothing; see
+    // AIConversation::importRefusalNote.
+    QString aiConversationsNote;
     // Held back from the entry loop until the shot import has produced its id
     // map — see the ai_conversations.json case below.
     QJsonArray pendingConversations;
@@ -1178,6 +1161,13 @@ void ShotServer::handleBackupRestore(QTcpSocket* socket, const QString& tempFile
                                               settingsRestored, profilesImported, profilesSkipped,
                                               mediaImported, mediaSkipped, aiConversationsImported,
                                               pendingConversations]() mutable {
+                // Named differently from the outer `aiConversationsNote` on
+                // purpose. Semantically it could reuse the name — this lambda has
+                // no capture-default, so the outer one is not in scope — and
+                // Clang accepts that, which is why macOS, iOS and Windows all
+                // compiled it. GCC's -Wshadow flags the DECLARATION regardless of
+                // capture, so both Linux builds failed the release on it.
+                QString restoreNote;
                 if (*destroyed) {
                     // Nothing to rescue here, and an attempt to rescue was
                     // removed: it wrote the stashed conversations with a NULL id
@@ -1219,6 +1209,15 @@ void ShotServer::handleBackupRestore(QTcpSocket* socket, const QString& tempFile
                     // upload the archive again — and importing now with every id
                     // cleared makes that retry useless, because the keys would
                     // already exist and the retry skips them as duplicates.
+                    //
+                    // Reported, not only logged: the page otherwise says the shots
+                    // were refused and nothing at all about the conversations held
+                    // back with them.
+                    // nullptr: this page is English throughout — every other
+                    // line it renders ("Settings restored", "Shots merged") is a
+                    // literal, and ShotServer holds no TranslationManager.
+                    restoreNote = AIConversation::importHeldBackNote(
+                        pendingConversations.size(), nullptr);
                     qWarning() << "ShotServer: shot import was refused, so AI conversations were"
                                << "NOT imported — restore again rather than lose their shot links";
                 } else if (!pendingConversations.isEmpty() && m_aiManager) {
@@ -1226,8 +1225,13 @@ void ShotServer::handleBackupRestore(QTcpSocket* socket, const QString& tempFile
                     const AIConversation::ImportTally tally =
                         AIConversation::importConversationsStatic(
                             settings, pendingConversations,
-                            success ? shotImport.idMapOrNull() : nullptr);
+                            success ? shotImport.idMapOrNull() : nullptr,
+                            success ? shotImport.equipmentIdMapOrNull() : nullptr);
                     aiConversationsImported += tally.conversationsImported;
+                    // What was refused travels with the count. Reporting only
+                    // the survivors is what let a restore that dropped most of
+                    // the threads render as an unqualified success.
+                    restoreNote = AIConversation::importRefusalNote(tally, /*tm=*/nullptr);
                     if (tally.conversationsImported > 0) {
                         settings.sync();
                         m_aiManager->reloadConversations();
@@ -1268,6 +1272,10 @@ void ShotServer::handleBackupRestore(QTcpSocket* socket, const QString& tempFile
                     result["mediaImported"] = mediaImported;
                     result["mediaSkipped"] = mediaSkipped;
                     result["aiConversationsImported"] = aiConversationsImported;
+                    // The JSON KEY stays as it was — the page reads
+                    // r.aiConversationsNote; only the local was renamed.
+                    if (!restoreNote.isEmpty())
+                        result["aiConversationsNote"] = restoreNote;
                     sendJson(socketGuard, QJsonDocument(result).toJson(QJsonDocument::Compact));
                 } else {
                     qDebug() << "ShotServer: Restore response dropped (socket disconnected)";
@@ -1283,11 +1291,15 @@ void ShotServer::handleBackupRestore(QTcpSocket* socket, const QString& tempFile
     // No shots.db in this archive, so the async path above never ran and there
     // is no id map. Every stored shotId is cleared: those ids name the source
     // device's database, and the shots they point at did not come with them.
+    // The equipment packages live in that same file, so nothing can be re-keyed
+    // either — an archive without shots imports only the unpackaged threads.
     if (!pendingConversations.isEmpty() && m_aiManager) {
         AppSettings settings;
         const AIConversation::ImportTally tally =
-            AIConversation::importConversationsStatic(settings, pendingConversations, nullptr);
+            AIConversation::importConversationsStatic(settings, pendingConversations,
+                                                      nullptr, nullptr);
         aiConversationsImported += tally.conversationsImported;
+        aiConversationsNote = AIConversation::importRefusalNote(tally, /*tm=*/nullptr);
         if (tally.conversationsImported > 0) {
             settings.sync();
             m_aiManager->reloadConversations();
@@ -1326,6 +1338,8 @@ void ShotServer::handleBackupRestore(QTcpSocket* socket, const QString& tempFile
     result["mediaImported"] = mediaImported;
     result["mediaSkipped"] = mediaSkipped;
     result["aiConversationsImported"] = aiConversationsImported;
+    if (!aiConversationsNote.isEmpty())
+        result["aiConversationsNote"] = aiConversationsNote;
 
     sendJson(socket, QJsonDocument(result).toJson(QJsonDocument::Compact));
     cleanupTempFile();

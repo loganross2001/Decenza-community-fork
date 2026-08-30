@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(Decenza VERSION 2.0.4 LANGUAGES CXX)
+project(Decenza VERSION 2.0.5 LANGUAGES CXX)
 
 message(STATUS "Developer note: executable target is now 'Decenza'. If Qt Creator shows 'No executable specified', re-run CMake and select the 'Decenza' Run configuration.")
 
@@ -704,12 +704,16 @@ set(SOURCES
     src/widget/machinestatussnapshot.cpp
     src/core/batterymanager.cpp
     src/core/memorymonitor.cpp
+    src/core/fddiagnostics.cpp
     src/core/accessibilitymanager.cpp
     src/core/autowakemanager.cpp
     src/core/crashhandler.cpp
     src/core/profilestorage.cpp
     src/core/translationmanager.cpp
     src/core/updatechecker.cpp
+    src/core/githubreleaseclient.cpp
+    src/core/hdsfirmwarecatalog.cpp
+    src/core/hdsfirmwareupdatecontroller.cpp
     src/core/firmwareassetcache.cpp
     src/core/fileshare.cpp
     src/ble/protocol/binarycodec.cpp
@@ -767,6 +771,7 @@ set(SOURCES
     src/controllers/profilemanager.cpp
     src/controllers/steamheaterpolicy.cpp
     src/controllers/shottimingcontroller.cpp
+    src/controllers/sensorcalibrationcontroller.cpp
     src/controllers/firmwareupdater.cpp
     src/screensaver/screensavervideomanager.cpp
     src/screensaver/strangeattractorrenderer.cpp
@@ -939,6 +944,7 @@ set(HEADERS
     src/core/widgetlibrary.h
     src/core/batterymanager.h
     src/core/memorymonitor.h
+    src/core/fddiagnostics.h
     src/core/logcollapse.h
     src/core/logpaths.h
     src/core/sanitizers.h
@@ -948,6 +954,9 @@ set(HEADERS
     src/core/profilestorage.h
     src/core/translationmanager.h
     src/core/updatechecker.h
+    src/core/githubreleaseclient.h
+    src/core/hdsfirmwarecatalog.h
+    src/core/hdsfirmwareupdatecontroller.h
     src/ble/protocol/binarycodec.h
     src/ble/protocol/de1characteristics.h
     src/ble/protocol/decentscaleprotocol.h
@@ -1011,6 +1020,7 @@ set(HEADERS
     src/network/beanbaseclient.h
     src/network/beanbase_blob.h
     src/ai/aimanager.h
+    src/ai/conversationkey.h
     src/ai/aiprovider.h
     src/ai/airequestshape.h
     src/ai/conductance.h
@@ -1027,7 +1037,9 @@ set(HEADERS
     src/history/recipestorage.h
     src/history/recipepromotion.h
     src/history/unifiedbeansearchmodel.h
+    src/history/equipmentjoin.h
     src/history/shotprojection.h
+    src/history/shotscope.h
     src/history/shotdebuglogger.h
     src/history/shotfileparser.h
     src/history/shotimporter.h
@@ -1318,6 +1330,7 @@ set(QML_FILES
     qml/pages/ProfileSelectorPage.qml
     qml/pages/DescalingPage.qml
     qml/pages/TransportPage.qml
+    qml/pages/SensorCalibrationPage.qml
     qml/pages/ScreensaverPage.qml
     qml/pages/FlushPage.qml
     qml/pages/VisualizerBrowserPage.qml
@@ -1487,6 +1500,7 @@ set(QML_FILES
     qml/components/RecipeSearch.js
     qml/components/SettingsSearchIndex.js
     qml/components/SettingsTabs.qml
+    qml/components/SettingsActionRow.qml
 
     qml/components/layout/LayoutItemDelegate.qml
     qml/components/layout/LayoutBarZone.qml

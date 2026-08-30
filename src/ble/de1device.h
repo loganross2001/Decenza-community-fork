@@ -10,6 +10,7 @@
 #include <QEvent>
 #include <QHash>
 #include <QList>
+#include <QElapsedTimer>
 #include <QString>
 #include <QTimer>
 
@@ -90,9 +91,21 @@ class DE1Device : public QObject {
     Q_PROPERTY(bool usbChargerOn READ usbChargerOn NOTIFY usbChargerOnChanged)
     Q_PROPERTY(bool isHeadless READ isHeadless NOTIFY isHeadlessChanged)
     Q_PROPERTY(int refillKitDetected READ refillKitDetected NOTIFY refillKitDetectedChanged)
+    // Descale progress. The DE1 reports no percentage and no expected duration, so
+    // these are derived from the firmware's fixed step schedule (see kDescaleSchedule
+    // in the .cpp) resynced at every substate boundary. 0/absent when not descaling.
+    Q_PROPERTY(double descaleProgress READ descaleProgress NOTIFY descaleProgressChanged)
+    Q_PROPERTY(int descaleStepIndex READ descaleStepIndex NOTIFY descaleProgressChanged)
+    Q_PROPERTY(int descaleStepCount READ descaleStepCount CONSTANT)
+    Q_PROPERTY(int descaleSecondsRemaining READ descaleSecondsRemaining NOTIFY descaleProgressChanged)
+    Q_PROPERTY(int descaleCycle READ descaleCycle NOTIFY descaleProgressChanged)
     Q_PROPERTY(QString connectionType READ connectionType NOTIFY connectedChanged)
     Q_PROPERTY(int machineModel READ machineModel NOTIFY firmwareVersionChanged)
     Q_PROPERTY(int heaterVoltage READ heaterVoltage NOTIFY heaterVoltageChanged)
+    Q_PROPERTY(int nominalHeaterVoltage READ nominalHeaterVoltage NOTIFY heaterVoltageChanged)
+    // Bumped whenever any stored/factory calibration value changes, so QML can
+    // re-read the per-target accessors above. One signal rather than eight
+    // properties: the wizard reads one target and re-reads on any change.
 
 public:
     explicit DE1Device(QObject* parent = nullptr);
@@ -137,11 +150,22 @@ public:
     QString firmwareVersion() const { return m_firmwareVersion; }
     bool usbChargerOn() const { return m_usbChargerOn; }
     bool isHeadless() const { return m_isHeadless; }
+
+    double descaleProgress() const { return m_descaleProgress; }
+    int descaleStepIndex() const { return m_descaleStepIndex; }
+    int descaleStepCount() const;
+    int descaleSecondsRemaining() const { return m_descaleSecondsRemaining; }
+    int descaleCycle() const { return m_descaleCycle; }
     Q_INVOKABLE void setIsHeadless(bool headless);  // Debug toggle
     int refillKitDetected() const { return m_refillKitDetected; }  // -1=unknown, 0=not detected, 1=detected
     int machineModel() const { return m_machineModel; }  // 0=unknown, 1=DE1, 2=DE1+, 3=PRO, 4=XL, 5=CAFE, 6=XXL, 7=XXXL
     int firmwareBuildNumber() const { return m_firmwareBuildNumber; }  // 0 = unknown, otherwise build number (e.g. 1347)
     int heaterVoltage() const { return m_heaterVoltage; }  // 0=unknown, otherwise volts (e.g. 110, 220)
+    // The raw readback bucketed to 120 / 230 / 0=unknown, which is what a UI
+    // offering a two-way choice needs. Kept beside the raw value rather than
+    // replacing it: the raw number still carries whether the machine measured
+    // the voltage or was told it.
+    int nominalHeaterVoltage() const { return bucketHeaterVoltage(m_heaterVoltage); }
 
     // Transport abstraction
     void setTransport(DE1Transport* transport);
@@ -288,6 +312,45 @@ public slots:
     void setRefillKitPresent(int value);
     void requestRefillKitStatus();
 
+    // ---- Sensor calibration (BLE A012) ------------------------------------
+    //
+    // The correction lives in the machine: nothing here is persisted, backed up,
+    // or re-applied on connect.
+    //
+    // `reported` must be the MACHINE's reading. Passing a profile target instead
+    // is the defect this whole feature exists to avoid — the pair is assembled
+    // only in SensorCalibrationController::applyCorrection.
+    //
+    // False means the request was refused and NOTHING reached the machine; a
+    // caller that reports success anyway sends the user off to re-run against a
+    // machine that never changed.
+    [[nodiscard]] bool sendCalibration(DE1::Calibration::Target target,
+                                       DE1::Calibration::Command command,
+                                       double reported,
+                                       double measured);
+    Q_INVOKABLE bool readCalibration(int target);
+    // No restore-to-factory, and no factory value shown. Measured on hardware
+    // (2026-08-29): CalCommand 3 returns the CURRENT stored value, not a
+    // distinct factory one — both read +0.89 before a write and +0.91 after. So
+    // there is nothing to restore to. tst_de1device_mmrreads asserts that
+    // Command::ResetFactory is never sent.
+
+    // The stored offset as last reported by the machine, per target. `has` is
+    // false until a read is answered — a caller must not substitute 0, which
+    // reads as "no correction" and is the one wrong answer that looks plausible.
+    Q_INVOKABLE double storedCalibration(int target) const;
+    Q_INVOKABLE bool hasStoredCalibration(int target) const;
+
+    // Nominal heater voltage (MMR 0x803834). Accepts 120 or 230 only; any other
+    // value is refused and logged rather than written, because a wrong nominal
+    // voltage runs the heater at the wrong duty.
+    Q_INVOKABLE void setHeaterVoltage(int volts);
+
+    // Buckets a raw HEATER_VOLTAGE readback to 120, 230, or 0 for "unclassified".
+    // Rationale and sourcing live at the definition — one copy, not two that can
+    // drift.
+    static int bucketHeaterVoltage(int raw);
+
     // ---- Firmware update (BLE A009 / A006) --------------------------------
     // These three writers talk directly to the transport and deliberately
     // bypass the per-register MMR dedupe cache (m_lastMMRValues): firmware
@@ -343,7 +406,12 @@ signals:
     void usbChargerOnChanged();
     void isHeadlessChanged();
     void refillKitDetectedChanged();
+    // One signal for every descale progress property — they are all recomputed
+    // together from the same tick, so separate notifies would only fan out the
+    // same instant to four bindings.
+    void descaleProgressChanged();
     void heaterVoltageChanged();
+    void calibrationChanged();
 
     // Firmware-update response from the DE1 (A009 notification). Carries
     // the parsed WindowIncrement, fwToErase/fwToMap flags and the 3-byte
@@ -403,6 +471,7 @@ private:
     void parseWaterLevel(const QByteArray& data);
     void parseVersion(const QByteArray& data);
     void parseMMRResponse(const QByteArray& data);
+    void parseCalibration(const QByteArray& data);
     void rebuildVersionLine3();
 
     // Generic one-shot MMR read with timeout + bounded retry, covering the
@@ -454,12 +523,49 @@ private:
     // or it is already at the DE1 frame cap. Sets m_lastShotPrimedFirstFrame.
     Profile profileForUpload(const Profile& profile) const;
 
+    // Descale progress, recomputed from the fixed step schedule plus the elapsed
+    // time in the current step. Emits descaleProgressChanged() when a value moved.
+    void updateDescaleProgress();
+    // Maintenance states (descale/clean/air purge) that the machine refused while
+    // cold, deferred until it reports that it has left preheat. See requestMaintenanceState().
+    void requestMaintenanceState(DE1::State state);
+    bool applyColdMaintenanceWorkaround(DE1::State state);
+    bool isMachineHeating() const;
+    void flushPendingMaintenanceState();
+
     // Owned when created internally via connectToDevice(); set externally via setTransport() for USB
     DE1Transport* m_transport = nullptr;
     bool m_ownsTransport = false;  // True when DE1Device created the transport (connectToDevice)
 
     DE1::State m_state = DE1::State::Sleep;
     DE1::SubState m_subState = DE1::SubState::Ready;
+
+    // Descale step timing. The firmware reports no progress figure and no expected
+    // duration, so the descale page's progress bar has to be built from measured
+    // step weights — and the substates it would weight (DescaleInit .. DescaleSteam)
+    // were never logged, so no submitted log contained a single step boundary.
+    // Started when the machine enters Descale, read at each substate change.
+    QElapsedTimer m_descaleTimer;
+    qint64 m_descaleStepStartMs = 0;
+    // Recomputes the progress properties once a second so the bar and the
+    // remaining-time readout advance between substate boundaries, which can be
+    // seven minutes apart. Periodic UI refresh, not a guard.
+    QTimer* m_descaleTicker = nullptr;
+    double m_descaleProgress = 0.0;
+    int m_descaleStepIndex = 0;
+    int m_descaleSecondsRemaining = 0;
+    // Firmware runs the five steps more than once per descale, so a step alone does
+    // not say how far along the machine is — the same "Descaling steam system" is
+    // both a third of the way in and nearly done. Counted from the substate walking
+    // BACKWARD (DescaleSteam back to a group step), which is the only signal the
+    // firmware gives that a cycle restarted.
+    int m_descaleCycle = 0;
+
+    // Set when a maintenance request was held back because the machine was cold on
+    // firmware that drops those requests (see applyColdMaintenanceWorkaround). Cleared
+    // by the state packet that shows the machine has left preheat — an event, not a
+    // timer, so a slow machine waits as long as it needs to.
+    DE1::State m_pendingMaintenanceState = DE1::State::NoRequest;
     double m_pressure = 0.0;
     double m_flow = 0.0;
     double m_mixTemp = 0.0;
@@ -592,6 +698,39 @@ private:
     int m_firmwareBuildNumber = 0;
     int m_machineModel = 0;
     int m_heaterVoltage = 0;  // 0=unknown, read from MMR HEATER_VOLTAGE
+
+    // Stored and factory calibration per target, absent until the machine
+    // answers a read. Indexed by DE1::Calibration::Target; the flow slot exists
+    // because the target enum has three values, not because flow is offered.
+    static constexpr int kCalibrationTargets = 3;
+    std::optional<double> m_storedCalibration[kCalibrationTargets];
+    // Absence has to be RE-established, not just established: these are facts
+    // about one machine, and the same app can be pointed at another. Cleared in
+    // the same reset block as m_lastMMRValues.
+    void clearCalibrationCache();
+
+    // Simulation only: the values a simulated machine holds, distinct from the
+    // read-back cache above. Without these the wizard is untestable off
+    // hardware — the reads go nowhere and both rows sit on "Not read yet"
+    // forever. de1app does the same thing for the same reason, feeding its
+    // Calibrate page synthetic replies when no machine is present
+    // (de1plus/gui.tcl:2525-2529).
+    double m_simStoredCalibration[kCalibrationTargets] = {0.0, 0.0, 0.0};
+    // The machine applies a TENTH of each requested correction. Measured on
+    // hardware: a +0.2 entry moved the stored offset +0.02, a +0.4 entry moved
+    // it +0.04. That damping is why the vendor instruction is "retest until the
+    // two agree" — convergence takes several passes by design.
+    static constexpr double kFirmwareCorrectionFraction = 0.1;
+    // Answers a calibration request locally by feeding parseCalibration() a
+    // packed reply, so the simulated path exercises the same parse and the same
+    // WriteKey == 0 rule the machine will drive.
+    void simulateCalibrationReply(DE1::Calibration::Target target,
+                                  DE1::Calibration::Command command,
+                                  double reported, double measured);
+    // So a bad index from QML cannot walk off the arrays above.
+    static bool isCalibrationTarget(int target) {
+        return target >= 0 && target < kCalibrationTargets;
+    }
     uint32_t m_cpuBoardModel = 0;
 
     bool m_connecting = false;
@@ -665,6 +804,7 @@ private:
     friend class tst_DE1DeviceFirmware;
     friend class tst_ShotSampleDecode;
     friend class tst_DE1DeviceMMRReads;
+    friend class tst_SensorCalibration;
     friend class tst_DE1DeviceHeadless;
 #endif
 };

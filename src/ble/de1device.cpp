@@ -2,6 +2,7 @@
 #include "bledeviceid.h"
 #include "de1logging.h"
 #include "machine/sawlogging.h"
+#include "../controllers/calibrationlogging.h"
 #include "de1transport.h"
 #include "bletransport.h"
 #include "protocol/binarycodec.h"
@@ -15,6 +16,7 @@
 #include <QBluetoothAddress>
 #include <QDateTime>
 #include <cmath>
+#include <iterator>
 #include <QDebug>
 
 // Alias the shared DE1 helpers (src/ble/de1logging.h) — never copy a body.
@@ -56,6 +58,7 @@
 #define FW_WARN(msg)            DE1_WARN_TAGGED("Firmware", msg)
 #define PHASE_LOG(msg)          DE1_LOG_STDERR_TAGGED("Phase", msg)
 #define WATER_LOG(msg)          DE1_LOG_STDERR_TAGGED("WaterLevel", msg)
+#define DESCALE_LOG(msg)        DE1_LOG_STDERR_TAGGED("Descale", msg)
 #define SHOTSETTINGS_LOG(msg)   DE1_LOG_STDERR_TAGGED("ShotSettings", msg)
 #include <QStringList>
 #include <chrono>
@@ -273,6 +276,11 @@ void DE1Device::onTransportDisconnected() {
     // than trusting cached values from the previous session (the DE1 may have
     // power-cycled or had its firmware state reset between sessions).
     m_lastMMRValues.clear();
+    // Calibration offsets are facts about ONE machine. Keeping them across a
+    // reconnect means connecting to a second DE1 and showing the first's values
+    // — and the wizard's Apply gate is exactly "has this machine answered", so a
+    // stale true opens a write against a baseline this machine never reported.
+    clearCalibrationCache();
     // Stop chasing reads for a connection that no longer exists — a reconnect
     // re-issues them fresh via sendInitialSettings().
     m_pendingMMRReads.clear();
@@ -339,6 +347,8 @@ void DE1Device::onTransportDataReceived(const QBluetoothUuid& uuid, const QByteA
         parseVersion(data);
     } else if (uuid == DE1::Characteristic::READ_FROM_MMR) {
         parseMMRResponse(data);
+    } else if (uuid == DE1::Characteristic::CALIBRATION) {
+        parseCalibration(data);
     } else if (uuid == DE1::Characteristic::FW_MAP_REQUEST) {
         FW_LOG(QStringLiteral("A009 notify: %1").arg(QString::fromLatin1(data.toHex(' '))));
         auto parsed = DE1::Firmware::parseFWMapNotification(data);
@@ -455,6 +465,14 @@ void DE1Device::setSimulationMode(bool enabled) {
         m_waterLevelMm = 31.25;
         m_waterLevelMl = 872;
         m_firmwareVersion = QStringLiteral("BLE v4.0.0, API v4\nFW v10.5.0, API v250\npcb=1.3, model=DE1PRO, firmware=v1342");
+        // A simulated machine reports a nominal heater voltage, like a real one.
+        // Without it the Heater Calibration popup shows "your machine has not
+        // reported one" forever off hardware, which is indistinguishable from
+        // the readback being broken — the same hole the calibration reads had.
+        // 120 rather than 1120: the simulated machine MEASURED it, it was not
+        // told (see bucketHeaterVoltage for what the >1000 forms mean).
+        m_heaterVoltage = 120;
+        emit heaterVoltageChanged();
         emit stateChanged();
         emit subStateChanged();
         emit waterLevelChanged();
@@ -581,6 +599,13 @@ void DE1Device::disconnect() {
     m_sawStopWritePending = false;
     m_lastSawTriggerMs = 0;
     m_lastSawWriteMs = 0;
+    // Also cleared in onTransportDisconnected(), which this function deliberately
+    // prevents from running (it drops the transport's signals just below to avoid
+    // double-emitting). Both teardown paths have to clear it: this one is the
+    // BLE<->USB transport switch (main.cpp:2254) and the Android BLE-recovery
+    // reconnect (main.cpp:1844), after which a stale "this machine has answered"
+    // opens a write against a baseline the new machine never reported.
+    clearCalibrationCache();
 
     if (m_transport) {
         // Disconnect signals FIRST to prevent re-entrant emissions
@@ -602,6 +627,64 @@ void DE1Device::disconnect() {
     emit connectedChanged();
     emit guiEnabledChanged();
 }
+
+namespace {
+
+// The DE1 runs each descale step for a FIXED time. Measured on firmware 1358 over
+// two full descales, which agreed to the tenth of a second (720.1 s and 720.2 s
+// total), with each step landing on a round number:
+//
+//     DescaleInit       30 s     DescaleGroup   120 s
+//     DescaleFillGroup  30 s     DescaleSteam   420 s
+//     DescaleReturn    120 s     ------------------------
+//                               total          720 s
+//
+// So descale progress is not an estimate — it is a schedule, and the substate
+// boundary resyncs it. Water hardness and tank temperature do not change these
+// numbers; the two runs were on different days from different starting levels.
+//
+// If a machine ever disagrees, the boundaries are logged ([DE1][Descale]) on every
+// run, so a submitted log says so directly rather than requiring a repro.
+struct DescaleStep {
+    DE1::SubState subState;
+    int seconds;
+};
+constexpr DescaleStep kDescaleSchedule[] = {
+    {DE1::SubState::DescaleInit,      30},
+    {DE1::SubState::DescaleFillGroup, 30},
+    {DE1::SubState::DescaleReturn,   120},
+    {DE1::SubState::DescaleGroup,    120},
+    {DE1::SubState::DescaleSteam,    420},
+};
+constexpr int kDescaleStepCount = static_cast<int>(std::size(kDescaleSchedule));
+
+// Seconds of the schedule completed before the step at `index` (0-based) begins.
+constexpr int descaleSecondsBefore(int index) {
+    int total = 0;
+    for (int i = 0; i < index && i < kDescaleStepCount; ++i) {
+        total += kDescaleSchedule[i].seconds;
+    }
+    return total;
+}
+constexpr int kDescaleTotalSeconds = descaleSecondsBefore(kDescaleStepCount);
+
+// 0-based position of a substate in the schedule, or -1 if it is not a descale step.
+int descaleStepPosition(DE1::SubState subState) {
+    for (int i = 0; i < kDescaleStepCount; ++i) {
+        if (kDescaleSchedule[i].subState == subState) return i;
+    }
+    return -1;
+}
+
+// First firmware build that honours a cold maintenance request (descale / clean /
+// air purge) on a machine with a GHC. Below it the firmware silently DROPS the
+// request while the machine is still heating, so the button appears to do nothing.
+// Matches Decaid's _kColdMaintenancePromotionMinFwBuild and de1app's onestep_cold
+// workaround (machine.tcl:702-706, "the first (cold) Descale request is sometimes
+// refused").
+constexpr int kColdMaintenanceMinFirmwareBuild = 1356;
+
+}  // namespace
 
 // -- Parse methods --
 
@@ -626,14 +709,122 @@ void DE1Device::parseStateInfo(const QByteArray& data) {
                       .arg(m_waterLevelMl));
     }
 
+    // Descale step boundaries. The DE1 exposes no progress percentage and no
+    // expected duration for a descale, so the only way to weight the five steps
+    // (DescaleInit 8 .. DescaleSteam 12) is to measure them. Each boundary carries
+    // the time in that step and the time since the descale began, which is what a
+    // weight table is derived from; water level is carried too because the group
+    // steps consume tank water and the steam step does not, so it separates them
+    // when a boundary is missed.
+    if (newState == DE1::State::Descale) {
+        if (stateChanged) {
+            m_descaleTimer.start();
+            m_descaleStepStartMs = 0;
+            m_descaleCycle = 1;
+            if (!m_descaleTicker) {
+                m_descaleTicker = new QTimer(this);
+                m_descaleTicker->setInterval(1000);
+                connect(m_descaleTicker, &QTimer::timeout, this, &DE1Device::updateDescaleProgress);
+            }
+            m_descaleTicker->start();
+            DESCALE_LOG(QStringLiteral("start: cycle 1 %1 (water %2 ml)")
+                            .arg(DE1::subStateToString(newSubState))
+                            .arg(m_waterLevelMl));
+        } else if (subStateChanged && m_descaleTimer.isValid()) {
+            const qint64 nowMs = m_descaleTimer.elapsed();
+            // A step number that does not increase means the firmware went back to an
+            // earlier step, i.e. started another cycle. DescaleInit is not re-entered,
+            // so the wrap is typically DescaleSteam back to DescaleFillGroup.
+            const uint8_t from = static_cast<uint8_t>(m_subState);
+            const uint8_t to = static_cast<uint8_t>(newSubState);
+            const bool bothDescaleSteps = from >= static_cast<uint8_t>(DE1::SubState::DescaleInit)
+                                          && from <= static_cast<uint8_t>(DE1::SubState::DescaleSteam)
+                                          && to >= static_cast<uint8_t>(DE1::SubState::DescaleInit)
+                                          && to <= static_cast<uint8_t>(DE1::SubState::DescaleSteam);
+            // Only a step-to-step move counts. The machine drops to Ready between the
+            // last cycle and leaving Descale, and that is an ending, not a restart.
+            const bool wrapped = bothDescaleSteps && to <= from;
+            if (wrapped) {
+                ++m_descaleCycle;
+            }
+            DESCALE_LOG(QStringLiteral("cycle %1 %2 → %3 after %4 s (t=%5 s, water %6 ml)%7")
+                            .arg(m_descaleCycle)
+                            .arg(DE1::subStateToString(m_subState))
+                            .arg(DE1::subStateToString(newSubState))
+                            .arg((nowMs - m_descaleStepStartMs) / 1000.0, 0, 'f', 1)
+                            .arg(nowMs / 1000.0, 0, 'f', 1)
+                            .arg(m_waterLevelMl)
+                            .arg(wrapped ? QStringLiteral(" [new cycle]") : QString()));
+            m_descaleStepStartMs = nowMs;
+        }
+    } else if (stateChanged && m_state == DE1::State::Descale && m_descaleTimer.isValid()) {
+        if (m_descaleTicker) m_descaleTicker->stop();
+        DESCALE_LOG(QStringLiteral("end: %1 cycles, last step %2 after %3 s, total %4 s (water %5 ml)")
+                        .arg(m_descaleCycle)
+                        .arg(DE1::subStateToString(m_subState))
+                        .arg((m_descaleTimer.elapsed() - m_descaleStepStartMs) / 1000.0, 0, 'f', 1)
+                        .arg(m_descaleTimer.elapsed() / 1000.0, 0, 'f', 1)
+                        .arg(m_waterLevelMl));
+        m_descaleTimer.invalidate();
+    }
+
     m_state = newState;
     m_subState = newSubState;
+
+    // After the new substate is committed, so the progress reflects the step the
+    // machine is in now rather than the one it just left.
+    if (stateChanged || subStateChanged) {
+        updateDescaleProgress();
+    }
+
+    // A maintenance request held back because the machine was cold goes out as soon
+    // as the machine reports it is no longer heating.
+    if (m_pendingMaintenanceState != DE1::State::NoRequest && (stateChanged || subStateChanged)) {
+        flushPendingMaintenanceState();
+    }
 
     if (stateChanged) {
         emit this->stateChanged();
     }
     if (subStateChanged) {
         emit this->subStateChanged();
+    }
+}
+
+int DE1Device::descaleStepCount() const {
+    return kDescaleStepCount;
+}
+
+void DE1Device::updateDescaleProgress() {
+    const double oldProgress = m_descaleProgress;
+    const int oldStep = m_descaleStepIndex;
+    const int oldRemaining = m_descaleSecondsRemaining;
+
+    const int position = (m_state == DE1::State::Descale) ? descaleStepPosition(m_subState) : -1;
+    if (position < 0 || !m_descaleTimer.isValid()) {
+        // Not in a descale step: Descale/Ready at the very start or the very end, or
+        // not descaling at all. Report no progress rather than a stale figure.
+        m_descaleProgress = 0.0;
+        m_descaleStepIndex = 0;
+        m_descaleSecondsRemaining = 0;
+    } else {
+        const double stepElapsed =
+            qBound(0.0,
+                   (m_descaleTimer.elapsed() - m_descaleStepStartMs) / 1000.0,
+                   static_cast<double>(kDescaleSchedule[position].seconds));
+        const double done = descaleSecondsBefore(position) + stepElapsed;
+        // Never reaches 1.0 from the schedule alone. The bar reads 100% only when
+        // the machine actually leaves Descale, which is the whole defect this
+        // replaces: the old bar showed 100% for the 420 s of the final step.
+        m_descaleProgress = qBound(0.0, done / kDescaleTotalSeconds, 0.999);
+        m_descaleStepIndex = position + 1;
+        m_descaleSecondsRemaining = qMax(0, qRound(kDescaleTotalSeconds - done));
+    }
+
+    if (!qFuzzyCompare(oldProgress + 1.0, m_descaleProgress + 1.0)
+        || oldStep != m_descaleStepIndex
+        || oldRemaining != m_descaleSecondsRemaining) {
+        emit descaleProgressChanged();
     }
 }
 
@@ -1186,15 +1377,103 @@ void DE1Device::startFlush() {
 }
 
 void DE1Device::startDescale() {
-    requestState(DE1::State::Descale);
+    requestMaintenanceState(DE1::State::Descale);
 }
 
 void DE1Device::startClean() {
-    requestState(DE1::State::Clean);
+    requestMaintenanceState(DE1::State::Clean);
+}
+
+// Descale, Clean and AirPurge share one failure: on a GHC machine running firmware
+// below 1356, the firmware DROPS the request while the machine is still heating. The
+// button does nothing, reports nothing, and the user is left tapping it. Route all
+// three through here so the workaround cannot be added to one and forgotten on the
+// others — which is how it stood: three identical one-line bodies, none of them
+// handling it.
+void DE1Device::requestMaintenanceState(DE1::State state) {
+    if (applyColdMaintenanceWorkaround(state)) {
+        return;  // Deferred; goes out when the machine reports it has left preheat.
+    }
+    requestState(state);
+}
+
+// True while the machine is still coming up to temperature — the window in which old
+// firmware discards a maintenance request. Substate carries this during Heating; the
+// Espresso-preheat substate is included because the machine reports it from Idle too.
+bool DE1Device::isMachineHeating() const {
+    return m_state == DE1::State::Busy
+           || m_subState == DE1::SubState::Heating
+           || m_subState == DE1::SubState::FinalHeating
+           || m_subState == DE1::SubState::Stabilising;
+}
+
+// Returns true when the request was DEFERRED. Mirrors de1app's onestep_cold
+// (machine.tcl:702-706) and Decaid's _prepareColdMaintenanceWorkaround: load a
+// profile whose group target is 1°C and whose tank target is 0, which makes the
+// machine stop preheating, then send the state once it has.
+//
+// de1app and Decaid both then wait a fixed second. We wait for the machine to SAY it
+// left preheat instead — same intent, no timer, and a slow machine is not raced.
+bool DE1Device::applyColdMaintenanceWorkaround(DE1::State state) {
+    // firmwareBuildNumber() is 0 until the MMR identity read returns (MMR::FIRMWARE_VERSION
+    // in parseMMRRead) — a few seconds after connect, or never on a machine whose MMR reads
+    // fail. Unknown counts as OLD, matching Decaid and de1app.
+    //
+    // Not a coin flip: a machine new enough to honour a cold maintenance request is new
+    // enough to REPORT its build, so a missing build number is itself evidence of an old
+    // or unhealthy machine. Applying the workaround is the safe direction.
+    //
+    // The costs agree. Assuming new when the machine is old drops the request silently —
+    // the button does nothing, with no error, which is the defect this function exists to
+    // remove. Assuming old when the machine is new uploads a throwaway 1C profile and waits
+    // for preheat to end; the descale still runs, and DescalingPage re-uploads the real
+    // profile on exit.
+    const int build = firmwareBuildNumber();
+    const bool firmwareDropsColdRequests = build < kColdMaintenanceMinFirmwareBuild;
+    const bool ghcPresent = !isHeadless();
+    if (!firmwareDropsColdRequests || !ghcPresent || !isMachineHeating()) {
+        return false;
+    }
+
+    DEVICE_INFO(QStringLiteral("Cold maintenance (%1) on GHC machine, firmware build %2 < %3: "
+                               "loading 1C profile and deferring the request until preheat ends")
+                    .arg(DE1::stateToString(state))
+                    .arg(build == 0 ? QStringLiteral("unknown") : QString::number(build))
+                    .arg(kColdMaintenanceMinFirmwareBuild));
+
+    Profile coldProfile;
+    coldProfile.setTitle(QStringLiteral("Decenza cold maintenance"));
+    coldProfile.setEspressoTemperature(1.0);
+    coldProfile.setTankDesiredWaterTemperature(0.0);
+    ProfileFrame frame;
+    frame.name = QStringLiteral("cold");
+    frame.temperature = 1.0;
+    frame.pump = QStringLiteral("flow");
+    frame.flow = 0.0;
+    frame.seconds = 1.0;
+    coldProfile.setSteps({frame});
+    uploadProfile(coldProfile);
+
+    m_pendingMaintenanceState = state;
+    return true;
+}
+
+// The deferred half of applyColdMaintenanceWorkaround. Called from parseStateInfo on
+// every state/substate change, so the request goes out on the first packet showing
+// the machine is no longer heating.
+void DE1Device::flushPendingMaintenanceState() {
+    if (m_pendingMaintenanceState == DE1::State::NoRequest || isMachineHeating()) {
+        return;
+    }
+    const DE1::State pending = m_pendingMaintenanceState;
+    m_pendingMaintenanceState = DE1::State::NoRequest;
+    DEVICE_INFO(QStringLiteral("Machine left preheat — sending deferred %1 request")
+                    .arg(DE1::stateToString(pending)));
+    requestState(pending);
 }
 
 void DE1Device::startAirPurge() {
-    requestState(DE1::State::AirPurge);
+    requestMaintenanceState(DE1::State::AirPurge);
 }
 
 void DE1Device::stopOperation() {
@@ -1923,6 +2202,265 @@ void DE1Device::setRefillKitPresent(int value) {
 void DE1Device::requestRefillKitStatus() {
     if (!m_transport) return;
     issueMMRReadWithRetry(DE1::MMR::REFILL_KIT, QStringLiteral("refill kit status"));
+}
+
+// ---- Sensor calibration (A012) --------------------------------------------
+
+namespace {
+
+// Names for the log line, so a submitted log reads as prose rather than as two
+// integers a reader has to decode against this file.
+QString calibrationTargetName(DE1::Calibration::Target target) {
+    switch (target) {
+        case DE1::Calibration::Target::Flow:        return QStringLiteral("flow");
+        case DE1::Calibration::Target::Pressure:    return QStringLiteral("pressure");
+        case DE1::Calibration::Target::Temperature: return QStringLiteral("temperature");
+    }
+    return QStringLiteral("unknown");
+}
+
+QString calibrationCommandName(DE1::Calibration::Command command) {
+    switch (command) {
+        case DE1::Calibration::Command::ReadCurrent:  return QStringLiteral("read");
+        case DE1::Calibration::Command::Write:        return QStringLiteral("write");
+        case DE1::Calibration::Command::ResetFactory: return QStringLiteral("restore factory");
+        case DE1::Calibration::Command::ReadFactory:  return QStringLiteral("read factory");
+    }
+    return QStringLiteral("unknown");
+}
+
+}  // namespace
+
+bool DE1Device::sendCalibration(DE1::Calibration::Target target,
+                                DE1::Calibration::Command command,
+                                double reported,
+                                double measured) {
+#ifdef DECENZA_SIMULATOR
+    if (m_simulationMode) {
+        simulateCalibrationReply(target, command, reported, measured);
+        return true;
+    }
+#endif
+    if (!m_transport) {
+        // Loud rather than silent. A calibration wizard whose reads go nowhere
+        // sits on "not read yet" with nothing to explain it, and the reader
+        // cannot tell a request that was refused from one never made.
+        CAL_WARN("Sensor") << "cannot" << calibrationCommandName(command)
+                           << calibrationTargetName(target) << "— no transport";
+        return false;
+    }
+    if (dropDeviceWriteIfFirmwareFlash("sendCalibration")) {
+        // dropDeviceWriteIfFirmwareFlash logs on [DE1], not [Calibration]. Say it
+        // again here so one `grep` for this subsystem returns the whole story of
+        // why a correction did not land — the rule CLAUDE.md states about a
+        // subsystem whose lines scatter across markers.
+        CAL_WARN("Sensor") << "cannot" << calibrationCommandName(command)
+                           << calibrationTargetName(target) << "— firmware flash in progress";
+        return false;
+    }
+
+    DE1::Calibration::Record record;
+    // A write needs the firmware's key; a read is sent with 1. Neither is a
+    // magic number here — both are named in de1characteristics.h with their
+    // de1app source lines.
+    record.writeKey = (command == DE1::Calibration::Command::Write)
+                          ? DE1::Calibration::WRITE_KEY
+                          : DE1::Calibration::READ_KEY;
+    record.command  = command;
+    record.target   = target;
+    record.reported = reported;
+    record.measured = measured;
+
+    // INFO, not DEBUG: "why did my pressure calibration change" is a user
+    // question, and the connections views filter to INFO. A write recorded only
+    // at DEBUG is absent from the log a user actually submits.
+    CAL_INFO("Sensor") << calibrationCommandName(command) << calibrationTargetName(target)
+                       << "reported=" << reported << "measured=" << measured;
+
+    m_transport->write(DE1::Characteristic::CALIBRATION, DE1::Calibration::packRecord(record));
+    return true;
+}
+
+bool DE1Device::readCalibration(int target) {
+    if (!isCalibrationTarget(target)) {
+        CAL_WARN("Sensor") << "read refused, target out of range:" << target;
+        return false;
+    }
+    return sendCalibration(static_cast<DE1::Calibration::Target>(target),
+                           DE1::Calibration::Command::ReadCurrent, 0.0, 0.0);
+}
+
+void DE1Device::clearCalibrationCache() {
+    bool had = false;
+    for (int i = 0; i < kCalibrationTargets; ++i) {
+        had = had || m_storedCalibration[i].has_value();
+        m_storedCalibration[i].reset();
+    }
+    if (!had) return;
+    // Worth a line: the wizard's Apply gate is "has the machine answered", so a
+    // reader seeing it go unavailable mid-session should find the reason here.
+    CAL_INFO("Sensor") << "calibration cache cleared — values belong to one machine";
+    emit calibrationChanged();
+}
+
+#ifdef DECENZA_SIMULATOR
+// A simulated machine's answer, enough to exercise the wizard off hardware.
+//
+// The arithmetic is no longer a guess: measured on a real DE1 (2026-08-29), a
+// write moves the stored offset by a TENTH of (measured - reported). Two points,
+// +0.2 -> +0.02 and +0.4 -> +0.04. Reads all return the current stored value,
+// CalCommand 3 included.
+//
+// Still not firmware source, so this remains a MODEL of observed behaviour
+// rather than a statement about the implementation — but it is now a model with
+// data behind it.
+void DE1Device::simulateCalibrationReply(DE1::Calibration::Target target,
+                                         DE1::Calibration::Command command,
+                                         double reported,
+                                         double measured) {
+    const int index = static_cast<int>(target);
+    if (!isCalibrationTarget(index)) return;
+
+    if (command == DE1::Calibration::Command::Write) {
+        // A TENTH of the requested correction, matching the machine. Applying
+        // the whole delta here would make the simulator converge in one pass
+        // while hardware takes several, and anyone testing off-hardware would
+        // conclude the real thing was broken.
+        m_simStoredCalibration[index] += (measured - reported) * kFirmwareCorrectionFraction;
+        CAL_INFO("Sensor") << "simulated machine stored"
+                           << calibrationTargetName(target)
+                           << "calibration =" << m_simStoredCalibration[index];
+    }
+
+    DE1::Calibration::Record reply;
+    // WriteKey 0 marks a reply that carries a real value, exactly as the machine
+    // marks one — so the simulated path goes through the same demux.
+    reply.writeKey = DE1::Calibration::REPLY_VALUE_KEY;
+    reply.command  = command;
+    reply.target   = target;
+    // Every read answers with the current stored offset, including CalCommand 3
+    // — which is what the machine does.
+    reply.measured = m_simStoredCalibration[index];
+    parseCalibration(DE1::Calibration::packRecord(reply));
+}
+#endif
+
+
+double DE1Device::storedCalibration(int target) const {
+    if (!isCalibrationTarget(target)) return 0.0;
+    return m_storedCalibration[target].value_or(0.0);
+}
+
+bool DE1Device::hasStoredCalibration(int target) const {
+    return isCalibrationTarget(target) && m_storedCalibration[target].has_value();
+}
+
+// A012 carries three kinds of traffic: echoes of our reads, echoes of our
+// writes, and the machine's real stored value. Only the last has WriteKey == 0
+// (de1app's calibration_ble_received, de1plus/bluetooth.tcl:3344), and only the
+// last may update anything — an echo of our own write treated as authoritative
+// would make a REFUSED write look like it succeeded.
+void DE1Device::parseCalibration(const QByteArray& data) {
+    const auto record = DE1::Calibration::parseRecord(data);
+    if (!record) {
+        CAL_WARN("Sensor") << "unparseable calibration reply,"
+                           << data.size() << "bytes:" << data.toHex(' ');
+        return;
+    }
+
+    if (!DE1::Calibration::replyCarriesValue(*record)) {
+        // Expected and frequent — every read and write we send comes back this
+        // way. DEBUG because it is mechanics, not an outcome a user needs.
+        CAL_DETAIL("Sensor") << "echo for" << calibrationTargetName(record->target)
+                             << calibrationCommandName(record->command);
+        return;
+    }
+
+    const int index = static_cast<int>(record->target);
+    if (!isCalibrationTarget(index)) return;
+
+    // Every value-carrying reply is the CURRENT stored offset, whatever command
+    // it answers. Measured on hardware: CalCommand 3 ("read factory") returns
+    // the same number as CalCommand 0, and both move together after a write. So
+    // there is one slot per target, not two.
+    auto& slot = m_storedCalibration[index];
+
+    if (slot.has_value() && qFuzzyCompare(*slot + 1.0, record->measured + 1.0)) {
+        // NOT silent. The read-back after a write is this feature's only
+        // confirmation, and a firmware-REFUSED write produces exactly this
+        // branch: the machine answers with the pre-write value and the dedupe
+        // matches. Returning without a word makes that indistinguishable from no
+        // reply at all, which is the same hole one layer out.
+        CAL_DETAIL("Sensor") << "stored" << calibrationTargetName(record->target)
+                             << "confirmed unchanged at" << record->measured;
+        return;
+    }
+
+    slot = record->measured;
+    CAL_INFO("Sensor") << "stored" << calibrationTargetName(record->target)
+                       << "calibration =" << record->measured;
+    emit calibrationChanged();
+}
+
+int DE1Device::bucketHeaterVoltage(int raw) {
+    // Returns 0 when the readback falls in neither band. That is "we could not
+    // classify this", NOT "the machine said it does not know" — what the DE1
+    // actually emits when it has not measured is not established here, and an
+    // earlier version of this comment stated it as fact on decaid's authority.
+    // decaid's sentinel is -1 and is likewise a catch-all, not a firmware claim.
+    //
+    // The bands and the above-1000 subtraction ARE sourced: decaid's
+    // De1HeaterVoltage.fromInt (lib/src/models/device/de1_interface.dart:134),
+    // whose own comment explains >1000 as "already set" — i.e. told rather than
+    // measured.
+    int volts = raw > 1000 ? raw - 1000 : raw;
+    if (volts >= 90 && volts <= 150) return 120;
+    if (volts >= 180 && volts <= 260) return 230;
+    if (raw != 0) {
+        // A nonzero value we cannot place renders identically to "nothing
+        // reported", so name it here or the two are indistinguishable.
+        CAL_WARN("Sensor") << "heater voltage readback" << raw
+                           << "falls in neither band — showing as unknown";
+    }
+    return 0;
+}
+
+void DE1Device::setHeaterVoltage(int volts) {
+    // Refuse anything else rather than clamping to the nearest: the two legal
+    // values are far apart and a caller asking for something between them is
+    // confused, not approximating. Running the heater at the wrong nominal
+    // voltage is the failure this guard exists for.
+    if (volts != 120 && volts != 230) {
+        CAL_WARN("Sensor") << "heater voltage refused, expected 120 or 230, got" << volts;
+        return;
+    }
+    // The INFO goes AFTER the transport check, not before the write. writeMMR
+    // opens with a bare unlogged `if (!m_transport) return;`, so logging first
+    // asserts a completed action for a write that never left the app.
+    if (!m_transport) {
+        CAL_WARN("Sensor") << "heater voltage" << volts << "not sent — no transport";
+        return;
+    }
+#ifdef DECENZA_SIMULATOR
+    if (m_simulationMode) {
+        // The simulated machine accepts it and reports it back, so the selected
+        // button moves — the same loop the real one runs through writeMMR and a
+        // readback.
+        CAL_INFO("Sensor") << "heater voltage =" << volts << "(simulated)";
+        if (m_heaterVoltage != volts) {
+            m_heaterVoltage = volts;
+            emit heaterVoltageChanged();
+        }
+        return;
+    }
+#endif
+    CAL_INFO("Sensor") << "heater voltage =" << volts;
+    writeMMR(DE1::MMR::HEATER_VOLTAGE, static_cast<uint32_t>(volts));
+    // Read back rather than trusting what we sent — HEATER_VOLTAGE is otherwise
+    // only read once at connect, so without this the displayed value and the
+    // selected button stay on the OLD voltage for the rest of the session even
+    // though the write landed. Same contract the calibration path follows.
+    issueMMRReadWithRetry(DE1::MMR::HEATER_VOLTAGE, QStringLiteral("heater voltage"));
 }
 
 void DE1Device::sendInitialSettings() {

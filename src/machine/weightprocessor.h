@@ -8,6 +8,7 @@
 #include <QDateTime>
 #include <functional>
 
+#include "core/logcollapse.h"
 #include "stepexitarbiter.h"
 
 // Runs on a dedicated worker thread. Receives weight samples from the scale,
@@ -63,6 +64,24 @@ public slots:
     // flow never began, which stopExtraction (gated on shotEnded) misses.
     void endShotCycle();
     void resetForRetare();  // Clear LSLR buffer after auto-tare during preheat
+    // Drop this shot's zero correction once the shot has been saved. The offset is a
+    // PER-SHOT number: it belongs to the pour it was measured at flow start, and every
+    // surface that mirrors it (live readout, MQTT, MCP, widget) keeps subtracting it
+    // from the idle scale until something clears it. Nothing did — startExtraction()
+    // was the only reset, so a shot's offset survived into idle, steam and dose
+    // weighing, and a manual tare could not shift it because the scale zeroed while
+    // the app kept subtracting. Restarting the app was the only cure.
+    // Called on shotProcessingReady, which closes the SAW settle window and is what
+    // TRIGGERS the save — the clear lands after the save only because it is queued
+    // onto this worker while onShotEnded runs directly on the main thread. Do not
+    // move it to a direct same-thread site on that signal: it would then run before
+    // the shot has been read. Clearing at espresso-cycle exit instead is no fix
+    // either — that signal is emitted synchronously while shotEnded is queued, so it
+    // precedes the settle window and would jump the drip samples, and with them the
+    // saved finalWeightG, by the offset mid-capture. The one exit that does clear
+    // here is a mid-pour disconnect, which never reaches shotEnded at all (see the
+    // espressoCycleEnded wiring in main.cpp).
+    void clearPreShotZeroOffset();
 
 #ifdef DECENZA_TESTING
 public:
@@ -114,6 +133,9 @@ signals:
 
 private:
     double computeLSLR(int windowMs) const;
+    // Closes the constant-weight liveness run and reports its tally — see
+    // m_constantSampleLog.
+    void flushConstantSampleLog();
     double getExpectedDrip(double currentFlowRate) const;
     // Scale-agnostic stall evaluation, run on the DE1 shot-sample cadence
     // (setCurrentFrame) during extraction / preheat.
@@ -266,9 +288,31 @@ private:
     // Log throttle timestamps — reset each shot so warnings are never suppressed at shot start
     qint64 m_lastTareWarnMs = 0;
     qint64 m_lastLowFlowLogMs = 0;
-    // Throttle for the #1176 constant-weight liveness diagnostic, logged off
-    // the unconditional weightSampleReceived path. 0 = not logged this shot.
-    qint64 m_lastConstantSampleLogMs = 0;
+    // The #1176 constant-weight liveness diagnostic, logged off the
+    // unconditional weightSampleReceived path.
+    //
+    // This replaced a hand-rolled 2 s throttle, which is the same "remember the
+    // last text, count repeats" LogCollapse exists to stop being copied per
+    // caller (CLAUDE.md's centralize rule; logcollapse.h's own history). The
+    // throttle also set the emission rate rather than the information rate: a
+    // 100 s static window produced 50 identical lines, and one submitted log
+    // carried 567 of them.
+    //
+    // Keyed on a CONSTANT, not on the text — the text carries the weight, so
+    // keying on it would file every value under its own run and none of them
+    // would ever close. With one key, a weight that moves is a changed line
+    // that emits at once carrying the previous value's tally, which is exactly
+    // the transition a reader is looking for.
+    //
+    // EPISODIC — a shot ends — so it is flushed in endShotCycle(), the
+    // cycle-exit chokepoint that runs even when flow never started, and in
+    // resetForRetare(), where a new tare ends the window the line describes.
+    //
+    // NOT in startExtraction(). That is where the old throttle was cleared and
+    // it is the wrong place for a flush: the span flush() reports is
+    // nowMs - lastEmitMs, so closing a run at the NEXT run's start dates the
+    // window to the next shot and prints it in that shot's narrative.
+    LogCollapse m_constantSampleLog{LogCollapse::kChangesOnly};
     bool m_flowBecameValidLogged = false;  // Log once when flowShort transitions 0→valid
     bool m_untaredCupSignalled = false;   // Fire untaredCupDetected only once per extraction
     // Count of consecutive samples currently satisfying the sanity check's

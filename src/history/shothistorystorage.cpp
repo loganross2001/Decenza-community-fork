@@ -839,7 +839,7 @@ bool ShotHistoryStorage::runMigrations()
 
     // Migration 9: Add profile_kb_id column for AI knowledge base matching.
     // New shots get this computed at save time. Old shots won't appear in
-    // dial-in history queries (getRecentShotsByKbId), but system prompt
+    // dial-in history queries (loadRecentShotsByKbIdStatic), but system prompt
     // profile matching falls back to fuzzy title/editorType matching.
     if (currentVersion < 9) {
         qDebug() << "ShotHistoryStorage: Running migration to version 9 (profile_kb_id)";
@@ -2248,6 +2248,86 @@ bool ShotHistoryStorage::runMigrations()
         }
     }
 
+    // Migration 41: shots.flow_calibration — the effective flow calibration
+    // multiplier the shot was pulled at. A shot's `flow` curve is a CALIBRATED
+    // quantity, so without the multiplier that produced it the curve cannot be
+    // compared against another shot's or converted back to a raw sensor
+    // reading. Diagnosing Kulitorum/Decenza#1872 needed a debug log beside the
+    // shot data for exactly this reason.
+    //
+    // [barista-fork] Renumbered from upstream's 39 to 41: the fork chain already
+    // reaches 40 (unlink-bags), so upstream's flow_calibration migration has to
+    // stamp ABOVE it or it would carry a version this database has already passed
+    // and never run — leaving every query that names the column to fail.
+    //
+    // Additive, nullable, no backfill: the multiplier a past shot ran at is not
+    // recoverable from any stored field, and stamping today's per-profile value
+    // onto history would assert that every past shot ran at today's number —
+    // false for anyone whose calibration has moved. NULL means "not recorded"
+    // and must never be read as 1.0, which is a legitimate multiplier.
+    if (currentVersion >= 40 && currentVersion < 41) {
+        qDebug() << "ShotHistoryStorage: Running migration to version 41 "
+                    "(shots.flow_calibration)";
+        query.finish();
+        DbWriteTxn txn = DbWriteTxn::begin(m_db, "migration 41 flow calibration column", 1);
+        if (!txn.ok()) {
+            qWarning() << "ShotHistoryStorage: migration 41 could not start a transaction"
+                          " - will retry next launch (shot history cannot load or save"
+                          " until it completes: every query names shots.flow_calibration)";
+        } else {
+            // columnPresent(), not hasColumn(): the latter collapses "the PRAGMA
+            // failed" onto "the column is absent", and here that conflation is
+            // not survivable. On a failed PRAGMA the ALTER would run (and might
+            // succeed), the verdict below would still read false, the version
+            // would never stamp — so no later migration would run either — and
+            // each launch would log a self-contradicting pair: "duplicate column
+            // name" beside "incomplete, will retry".
+            // Not knowing is its own outcome: change nothing and try again.
+            const std::optional<bool> before = columnPresent("shots", "flow_calibration");
+            if (!before.has_value()) {
+                qWarning() << "ShotHistoryStorage: migration 41 could not determine whether"
+                              " shots.flow_calibration exists - leaving the schema untouched"
+                              " and retrying next launch (shot history cannot load or save"
+                              " until it completes: every query names shots.flow_calibration)";
+            } else {
+                if (!*before
+                    && !query.exec("ALTER TABLE shots ADD COLUMN flow_calibration REAL"))
+                    qWarning() << "ShotHistoryStorage: migration 41 add shots.flow_calibration failed -"
+                               << query.lastError().text();
+
+                // Gated on the column being present: it is a schema fact, and
+                // every reader below selects it by name — loadShotRecordStatic
+                // and saveShotStatic both name it unconditionally, so an absent
+                // column does not merely lose this field, it fails every shot
+                // load and every shot save. Both halves of the stamp are checked
+                // — a DELETE that commits without its INSERT leaves
+                // schema_version empty, which is not recoverable.
+                // Not .value_or(false) — that is the conflation this block just
+                // argued against, and re-introducing it here would make a failed
+                // verification indistinguishable from a failed ALTER in the log.
+                const std::optional<bool> after = columnPresent("shots", "flow_calibration");
+                bool ok = false;
+                if (!after.has_value()) {
+                    qWarning() << "ShotHistoryStorage: migration 41 could not verify the column"
+                                  " after adding it - not stamping, will retry next launch";
+                } else {
+                    ok = *after;
+                }
+                if (ok)
+                    ok = query.exec("DELETE FROM schema_version")
+                         && query.exec(QStringLiteral("INSERT INTO schema_version (version) VALUES (41)"));
+                if (ok && txn.commit()) {
+                    currentVersion = 41;
+                    qDebug() << "ShotHistoryStorage: migration 41 complete";
+                } else {
+                    qWarning() << "ShotHistoryStorage: migration 41 incomplete - will retry"
+                                  " next launch (shot history cannot load or save until it"
+                                  " completes: every query names shots.flow_calibration)";
+                }
+            }
+        }
+    }
+
     m_schemaVersion = currentVersion;
     return true;
 }
@@ -2479,6 +2559,7 @@ qint64 ShotHistoryStorage::saveShot(ShotDataModel* shotData,
     data.hotWaterJson = metadata.hotWaterJson;
     data.yieldMode = metadata.yieldMode;
     data.yieldAnchorValue = metadata.yieldAnchorValue;
+    data.flowCalibration = metadata.flowCalibration;
 
     if (profile) {
         // A TITLE resolution only — see KbResolution::persistableId() for why a
@@ -2652,7 +2733,8 @@ qint64 ShotHistoryStorage::saveShotStatic(const QString& dbPath, const ShotSaveD
                     skip_first_frame_detected, pour_truncated_detected,
                     stopped_by, pre_fill_injected, beanbase_json, beanbase_id,
                     bag_id, frozen_date, defrost_date, storage_hint, opened_date,
-                    recipe_id, steam_json, hot_water_json
+                    recipe_id, steam_json, hot_water_json,
+                    flow_calibration
                 ) VALUES (
                     :uuid, :timestamp, :profile_name, :profile_json, :beverage_type,
                     :duration, :final_weight, :dose_weight,
@@ -2667,7 +2749,8 @@ qint64 ShotHistoryStorage::saveShotStatic(const QString& dbPath, const ShotSaveD
                     :skip_first_frame_detected, :pour_truncated_detected,
                     :stopped_by, :pre_fill_injected, :beanbase_json, :beanbase_id,
                     :bag_id, :frozen_date, :defrost_date, :storage_hint, :opened_date,
-                    :recipe_id, :steam_json, :hot_water_json
+                    :recipe_id, :steam_json, :hot_water_json,
+                    :flow_calibration
                 )
             )");
 
@@ -2706,6 +2789,10 @@ qint64 ShotHistoryStorage::saveShotStatic(const QString& dbPath, const ShotSaveD
             query.bindValue(":yield_mode", YieldSpec::normalizedMode(data.yieldMode));
             query.bindValue(":yield_anchor_value",
                             data.yieldAnchorValue > 0 ? QVariant(data.yieldAnchorValue) : QVariant());
+            // NULL, not 0, when nothing was latched: 0 is not a possible
+            // multiplier and 1.0 is, so "unknown" needs its own value.
+            query.bindValue(":flow_calibration",
+                            data.flowCalibration > 0 ? QVariant(data.flowCalibration) : QVariant());
             query.bindValue(":profile_kb_id", data.profileKbId.isEmpty() ? QVariant() : data.profileKbId);
             query.bindValue(":channeling_detected", data.channelingDetected ? 1 : 0);
             query.bindValue(":grind_issue_detected", data.grindIssueDetected ? 1 : 0);
@@ -3570,6 +3657,7 @@ ShotRecord ShotHistoryStorage::loadShotRecordStatic(QSqlDatabase& db, qint64 sho
                s.storage_hint, s.opened_date,
                s.taste_balance, s.taste_body,
                s.yield_mode, s.yield_anchor_value,
+               s.flow_calibration,
                s.pre_fill_injected
         FROM shots s
         LEFT JOIN equipment_items eg ON eg.package_id = s.equipment_id AND eg.kind = 'grinder'
@@ -3676,11 +3764,15 @@ ShotRecord ShotHistoryStorage::loadShotRecordStatic(QSqlDatabase& db, qint64 sho
     // none — the exact relabel migration 34 applies.
     record.yieldMode = YieldSpec::normalizedMode(query.value(54).toString());
     record.yieldAnchorValue = query.value(55).toDouble();
+    // Appended at the END of the SELECT above (index 56) so every existing
+    // positional read keeps its index, the same rule the taste-axis and
+    // yield-anchor columns followed. NULL reads as 0.0 = not recorded.
+    record.flowCalibration = query.value(56).toDouble();
     if (query.value(54).isNull() && record.targetWeight > 0) {
         record.yieldMode = YieldSpec::modeAbsolute();
         record.yieldAnchorValue = record.targetWeight;
     }
-    record.preFillInjected = query.value(56).toInt() != 0;
+    record.preFillInjected = query.value(57).toInt() != 0;
     record.summary.hasVisualizerUpload = !record.visualizerId.isEmpty();
 
     // Snapshot stored badge values before the recompute block overwrites them, so
@@ -4599,6 +4691,11 @@ bool ShotHistoryStorage::importDatabaseStatic(const QString& destDbPath, const Q
                 destDb.rollback();
                 goto cleanup;
             }
+            // Published for the same reason as shotIdMap: an AI conversation is
+            // keyed on the equipment package, so a caller carrying conversations
+            // across this import must re-key them through these ids or the
+            // restored thread is orphaned (see AIConversation::importConversationsStatic).
+            tally.equipmentIdMap = packageIdMap;
 
             // Import the barista roster (pr/barista-identity). Mirrors the bag
             // importer, but shots reference the barista by NAME (not id), so the
@@ -4804,6 +4901,10 @@ bool ShotHistoryStorage::importDatabaseStatic(const QString& destDbPath, const Q
             // with the target as anchor value, else 'none').
             const int idxYieldMode = srcRecord.indexOf("yield_mode");
             const int idxYieldAnchorValue = srcRecord.indexOf("yield_anchor_value");
+            // The multiplier the shot poured under (add-shot-flow-calibration).
+            // Present only on post-migration-39 sources; older ones resolve to
+            // NULL, which reads back as "not recorded" rather than 1.0.
+            const int idxFlowCalibration = srcRecord.indexOf("flow_calibration");
             auto srcValueOrNull = [&srcShots](int idx) {
                 return idx >= 0 ? srcShots.value(idx) : QVariant();
             };
@@ -4838,8 +4939,9 @@ bool ShotHistoryStorage::importDatabaseStatic(const QString& destDbPath, const Q
                         stopped_by, beanbase_json, beanbase_id,
                         bag_id, frozen_date, defrost_date, storage_hint, opened_date,
                         taste_balance, taste_body,
-                        recipe_id, steam_json, hot_water_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        recipe_id, steam_json, hot_water_json,
+                        flow_calibration)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 )");
 
                 // KEEP THE SHOT'S OWN ID wherever it is free.
@@ -4958,6 +5060,7 @@ bool ShotHistoryStorage::importDatabaseStatic(const QString& destDbPath, const Q
                 }
                 insert.addBindValue(srcValueOrNull(idxSteamJson));
                 insert.addBindValue(srcValueOrNull(idxHotWaterJson));
+                insert.addBindValue(srcValueOrNull(idxFlowCalibration));
 
                 if (!insert.exec()) {
                     qWarning() << "ShotHistoryStorage::importDatabaseStatic: Failed to import shot:" << insert.lastError().text();
@@ -5168,8 +5271,10 @@ cleanup:
     // A failed import's map names ids that do not exist. Clearing it here makes
     // every caller correct by construction, whichever way each phrases its own
     // "do we have a map" test. Counts are kept — they are diagnostic and true.
-    if (!result)
+    if (!result) {
         tally.shotIdMap.clear();
+        tally.equipmentIdMap.clear();
+    }
     if (outResult)
         *outResult = tally;
     return result;
@@ -5431,7 +5536,8 @@ qint64 ShotHistoryStorage::importShotRecordStatic(QSqlDatabase& db, const ShotRe
             temperature_override, yield_override, yield_mode, yield_anchor_value,
             profile_kb_id,
             channeling_detected, grind_issue_detected,
-            skip_first_frame_detected, pour_truncated_detected
+            skip_first_frame_detected, pour_truncated_detected,
+            flow_calibration
         ) VALUES (
             :uuid, :timestamp, :profile_name, :profile_json, :beverage_type,
             :duration, :final_weight, :dose_weight,
@@ -5444,7 +5550,8 @@ qint64 ShotHistoryStorage::importShotRecordStatic(QSqlDatabase& db, const ShotRe
             :temperature_override, :yield_override, :yield_mode, :yield_anchor_value,
             :profile_kb_id,
             :channeling_detected, :grind_issue_detected,
-            :skip_first_frame_detected, :pour_truncated_detected
+            :skip_first_frame_detected, :pour_truncated_detected,
+            :flow_calibration
         )
     )");
 
@@ -5495,6 +5602,10 @@ qint64 ShotHistoryStorage::importShotRecordStatic(QSqlDatabase& db, const ShotRe
         }
         query.bindValue(":yield_mode", mode);
         query.bindValue(":yield_anchor_value", anchor > 0 ? QVariant(anchor) : QVariant());
+        // NULL when the source carried no multiplier — an imported shot from a
+        // pre-39 database, or any external format. Never defaulted to 1.0.
+        query.bindValue(":flow_calibration",
+                        record.flowCalibration > 0 ? QVariant(record.flowCalibration) : QVariant());
     }
     query.bindValue(":profile_kb_id", record.profileKbId.isEmpty() ? QVariant() : record.profileKbId);
     query.bindValue(":channeling_detected", record.channelingDetected ? 1 : 0);

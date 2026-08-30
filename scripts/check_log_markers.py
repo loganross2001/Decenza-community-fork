@@ -91,6 +91,12 @@ COVERED_GLOBS = [
     # original sin, and leaving it uncovered means a future bare qDebug there is
     # the one place nobody would think to check.
     "src/network/wifiscalediscovery.cpp",
+    # Wholly about HDS firmware updates: manifest fetch, eligibility, release
+    # notes, and dispatching the start command. Covered because "the Update
+    # button never appeared" is answered only by whether the manifest check ran
+    # and what it said — and it shipped with four hand-typed "[Scale][HDS Update]"
+    # prefixes on bare qWarnings, which no registered marker would have matched.
+    "src/core/hdsfirmwareupdatecontroller.cpp",
     # Wholly about the Android multicast lock: every line in it is that lock's
     # lifecycle or its failure to be taken. Worth covering because whether the
     # lock was held is the FIRST question a "browse ran and found nothing" report
@@ -105,6 +111,11 @@ COVERED_GLOBS = [
     # usually explains the other.
     "src/network/mdnsresolver.cpp",
     "src/core/settings_hardware.cpp",
+    # Wholly about sensor calibration: every line in it is either a refused
+    # correction and why, or a correction being applied with the pair it was
+    # computed from. That is the whole answer to "why can I not apply a
+    # correction", so "use the helper" is always right here.
+    "src/controllers/sensorcalibrationcontroller.cpp",
     # Wholly about the screensaver: every log line in it is a screensaver line.
     "src/screensaver/screensavervideomanager.cpp",
     # Wholly about equipment packages: every log line in it is an [Equipment] line

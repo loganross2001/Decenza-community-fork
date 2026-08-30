@@ -1,4 +1,5 @@
 #include "updatechecker.h"
+#include "githubreleaseclient.h"
 #include "crashhandler.h"
 #include "settings.h"
 #include "settings_app.h"
@@ -30,7 +31,6 @@
 #include <QAtomicInt>
 #include <QThread>
 
-const QString UpdateChecker::GITHUB_API_URL = "https://api.github.com/repos/%1/releases?per_page=10";
 const QString UpdateChecker::GITHUB_REPO = "Kulitorum/Decenza";
 
 // File-scope so background QFile::remove threads can read it without capturing
@@ -211,10 +211,7 @@ UpdateChecker::UpdateChecker(QNetworkAccessManager* networkManager, Settings* se
 }
 
 QString UpdateChecker::tr_(const char* key, const char* fallback) const {
-    if (m_translationManager)
-        return m_translationManager->translateString(QString::fromUtf8(key),
-                                               QString::fromUtf8(fallback));
-    return QString::fromUtf8(fallback);
+    return translateOrFallback(m_translationManager, key, fallback);
 }
 
 UpdateChecker::~UpdateChecker()
@@ -231,22 +228,7 @@ UpdateChecker::~UpdateChecker()
 
 QNetworkRequest UpdateChecker::releaseInfoRequest() const
 {
-    QNetworkRequest request{QUrl(GITHUB_API_URL.arg(GITHUB_REPO))};
-    request.setHeader(QNetworkRequest::UserAgentHeader, "Decenza");
-    request.setRawHeader("Accept", "application/vnd.github.v3+json");
-
-    // Drop the connection as soon as the reply is done instead of parking it in
-    // Qt's connection cache for the default 120 s. We check once an hour and
-    // never reuse it, and GitHub closes the idle connection after ~30 s — at
-    // which point Qt's HTTP/2 closure path (QHttp2ProtocolHandler::
-    // handleConnectionClosure -> QHttp2Connection::handleReadyRead) reads from
-    // the already-closed socket and logs "QIODevice::read (QSslSocket): device
-    // not open". Harmless, but it landed in every user's log once an hour.
-    // Closing it ourselves costs nothing: the next check re-handshakes either
-    // way, since the connection was never going to survive the hour.
-    request.setAttribute(QNetworkRequest::ConnectionCacheExpiryTimeoutSecondsAttribute, 0);
-
-    return request;
+    return GitHubReleaseClient::releasesRequest(GITHUB_REPO);
 }
 
 QString UpdateChecker::currentVersion() const

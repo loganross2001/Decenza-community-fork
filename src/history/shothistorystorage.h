@@ -2,6 +2,7 @@
 
 #include "shothistory_types.h"
 #include "shotprojection.h"
+#include "shotscope.h"
 
 #include <QObject>
 #include <QSqlDatabase>
@@ -136,10 +137,6 @@ public:
     // Async: runs on background thread, emits shotReady()
     Q_INVOKABLE void requestShot(qint64 shotId);
 
-    // Async: runs on background thread, emits recentShotsByKbIdReady()
-    // Returns summary data (not full time-series) for dial-in history queries.
-    Q_INVOKABLE void requestRecentShotsByKbId(const QString& kbId, int limit = 10);
-
     // Bean memory: best rated shot for a bean + profile, surfaced to the UI.
     // Async — runs SQL on a background thread (withTempDb), emits
     // beanRecipeReady(). Barista-scoped with a bean-wide fallback: when
@@ -161,9 +158,19 @@ public:
     Q_INVOKABLE void requestBeanRecipe(const QString& beanBrand, const QString& beanType,
                                        const QString& profileKbId, const QString& barista);
 
-    // Query recent shots by KB ID (summary data, no time-series).
-    // Thread-safe: caller provides their own connection. Shared by MCP and in-app AI.
-    static QVariantList loadRecentShotsByKbIdStatic(QSqlDatabase& db, const QString& kbId, int limit, qint64 excludeShotId = -1);
+    // Dial-in history for one profile family, scoped to one equipment package.
+    // Summary data, no time-series. Thread-safe: the caller provides its own
+    // connection. Shared by MCP and the in-app advisor.
+    // `scope` has no default on purpose: an omittable filter gets omitted.
+    // `ok`, when given, reports whether the query RAN — not whether it matched.
+    // Both are an empty list, and the advisor has to tell them apart: "no shot
+    // matches this equipment package" is a fact worth stating to the model,
+    // while "the query failed" is not, and reporting the second as the first
+    // would assert something the database never said.
+    static QVariantList loadRecentShotsByKbIdStatic(QSqlDatabase& db, const QString& kbId,
+                                                    const AdviceScope& scope, int limit,
+                                                    qint64 excludeShotId = -1,
+                                                    bool* ok = nullptr);
 
     // Async: profiles used with a bean, for the recipe wizard's ranked profile
     // step (add-recipe-wizard-tea). Emits rankedProfilesForBeanReady() with
@@ -234,7 +241,7 @@ public:
     // and phase markers for legacy shots that lack phaseSummariesJson.
     static void computePhaseSummaries(ShotRecord& record);
 
-    // Query observed grinder settings for a grinder model + beverage type.
+    // Query observed grinder settings for one equipment package + beverage type.
     // Thread-safe: caller provides their own connection. Shared by MCP and in-app AI.
     //
     // `beanBrand` (optional, default empty): when non-empty, restrict the
@@ -246,11 +253,15 @@ public:
     //
     // This function is single-shot: it returns ONE filtered list. The
     // two-tier "bean-scoped first, fall back to cross-bean when sparse"
-    // policy is implemented by the *caller* (`mcptools_dialing.cpp` —
-    // the `dialing_get_context` tool calls this twice and surfaces a
-    // separate `allBeansSettings` field). Do not collapse that fallback
-    // into this function — a future caller may want bean-scoped only.
+    // policy is implemented by the *caller* (`buildGrinderContextBlock`,
+    // which calls this twice and surfaces a separate `allBeansSettings`
+    // field). Do not collapse that fallback into this function — a future
+    // caller may want bean-scoped only.
+    //
+    // `scope` bounds the observed axes only. stepSize / rpmStepSize stay
+    // grinder-wide so the advisor's step equals grindStepForGrinder().
     static GrinderContext queryGrinderContext(QSqlDatabase& db, const QString& grinderModel,
+                                              const AdviceScope& scope,
                                               const QString& beverageType,
                                               const QString& beanBrand = QString());
 
@@ -374,8 +385,7 @@ public:
                                                       const QString& beanBrand,
                                                       const QString& beanType,
                                                       const QString& profileName,
-                                                      const QString& grinderBrand,
-                                                      const QString& grinderModel,
+                                                      qint64 equipmentId,
                                                       const QString& grinderSetting,
                                                       double doseBucket = 0.0,
                                                       double targetWeight = 0.0);
@@ -500,6 +510,12 @@ public:
     // "N imported, 0 skipped, 0 failed".
     struct ImportResult {
         QHash<qint64, qint64> shotIdMap;
+        // Source equipment-package ids to the ids those packages received here,
+        // same shape and same rule as shotIdMap. An AI conversation is KEYED on
+        // the package, so a restored conversation has to be re-keyed through
+        // this map; without it the thread exists in the index and no shot on
+        // this device ever opens it.
+        QHash<qint64, qint64> equipmentIdMap;
         // Destination row count before the import. MERGE MODE ONLY — replace
         // mode never reads it, so 0 there means "not measured", not "empty".
         std::optional<int> destShotsBefore;
@@ -526,6 +542,18 @@ public:
         // and skip the conversation import entirely — see the note there.
         const QHash<qint64, qint64>* idMapOrNull() const {
             return shotIdMap.isEmpty() ? nullptr : &shotIdMap;
+        }
+
+        // Same policy for the package map. Empty means no equipment crossed: a
+        // pre-equipment source, an import that failed, or an archive with no
+        // shots in it (that path returns early, before the equipment import).
+        //
+        // The importer then refuses any conversation naming a package rather
+        // than demoting it to bucket 0. Conversations that name NO package
+        // (bucket 0, the unpackaged pool) are unaffected — 0 means the same
+        // thing on both devices and needs no map.
+        const QHash<qint64, qint64>* equipmentIdMapOrNull() const {
+            return equipmentIdMap.isEmpty() ? nullptr : &equipmentIdMap;
         }
     };
 
@@ -581,7 +609,6 @@ signals:
     void shotsFilteredReady(const QVariantList& results, bool isAppend, int totalCount);
     void loadingFilteredChanged();
     void shotReady(qint64 shotId, const ShotProjection& shot);
-    void recentShotsByKbIdReady(const QString& kbId, const QVariantList& shots);
     // Bean memory: result of requestBeanRecipe(). See that method for the map shape.
     void beanRecipeReady(const QVariantMap& recipe);
     void rankedProfilesForBeanReady(const QVariantMap& result);

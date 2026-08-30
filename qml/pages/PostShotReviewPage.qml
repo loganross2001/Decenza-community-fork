@@ -816,75 +816,33 @@ T.Page {
         _committedState = captureEditState()
     }
 
-    // Build a plain-JS clone of editShotData that carries every field the
-    // page still reads after a save. Object.assign({}, editShotData) on the
-    // Q_GADGET wrapper returned by shotReady() only copies own properties —
-    // but Q_PROPERTYs on the wrapper are exposed as accessors on the
-    // prototype, not as own properties of the instance, so Object.assign
-    // silently drops durationSec, pressure/flow/weight/... arrays, dateTime,
-    // profileName, debugLog, phases, badges, and every other read-only
-    // field. That broke the AI Advice / Discuss / Re-Upload button visibility (predicate
-    // `editShotData.durationSec > 0`), the graph, the badges row, the
-    // phase summary, and the bottom-bar context labels the moment the user
-    // made any edit. (The `_profileName`/`_visualizerId` caches in this file
-    // were added in #1241 as targeted band-aids for the same root cause.)
-    // Listing every field by name here works because direct dot access on a
-    // Q_GADGET wrapper is fine — it's only the implicit enumeration in
-    // Object.assign / spread that strips. Subsequent saves see `src` as the
-    // plain-JS clone produced by the previous call, which still has every
-    // key, so the chain holds.
+    // A plain-JS copy of editShotData that carries every field the page still
+    // reads after a save.
+    //
+    // QML cannot make one itself: `Object.assign({}, shot)` and spread copy own
+    // properties, and a Q_GADGET's Q_PROPERTYs are accessors on the PROTOTYPE,
+    // so enumeration silently drops durationSec, the sample arrays, dateTime,
+    // profileName, debugLog, phases, badges and every other read-only field.
+    // That broke the AI Advice / Discuss / Re-Upload button visibility
+    // (predicate `editShotData.durationSec > 0`), the graph, the badges row,
+    // the phase summary and the bottom-bar labels the moment the user made any
+    // edit. (The `_profileName`/`_visualizerId` caches in this file were added
+    // in #1241 as targeted band-aids for the same root cause.)
+    //
+    // This used to be a hand-written whitelist naming ~60 fields — a second
+    // declaration of ShotProjection::toVariantMap's body, in another language,
+    // with nothing to keep the two in step. It fell behind twice: `recipeId`
+    // (the first autosave emptied it, the recipe card vanished and the "no
+    // recipe" prompts took its place) and then the entire equipment package,
+    // which left every conversation opened from this page keyed to the
+    // unpackaged pool while the same shot opened from Shot History keyed to its
+    // real basket. Ask C++ for the field list instead.
+    //
+    // `src` is the gadget wrapper on the first call and the plain clone from
+    // the previous call after that — plain objects hold their fields as own
+    // properties, so there a shallow copy is the whole job.
     function clonePersistedShot(src) {
-        return {
-            id: src.id, uuid: src.uuid, timestamp: src.timestamp,
-            timestampIso: src.timestampIso, dateTime: src.dateTime,
-            profileName: src.profileName, profileKbId: src.profileKbId,
-            profileKbDerivedFrom: src.profileKbDerivedFrom,
-            profileJson: src.profileJson, profileNotes: src.profileNotes,
-            // Read by the recipe card and the steam/water summaries at the top
-            // of this file. Missing from this whitelist until now, so the first
-            // autosave silently emptied them: the recipe card vanished and the
-            // "no recipe" prompts (which gate on recipeId <= 0) took its place.
-            recipeId: src.recipeId,
-            steamJson: src.steamJson, hotWaterJson: src.hotWaterJson,
-            beanNotes: src.beanNotes,
-            temperatureOverrideC: src.temperatureOverrideC,
-            targetWeightG: src.targetWeightG,
-            durationSec: src.durationSec, debugLog: src.debugLog,
-            stoppedBy: src.stoppedBy,
-            visualizerId: src.visualizerId, visualizerUrl: src.visualizerUrl,
-            hasVisualizerUpload: src.hasVisualizerUpload,
-            channelingDetected: src.channelingDetected,
-            grindIssueDetected: src.grindIssueDetected,
-            skipFirstFrameDetected: src.skipFirstFrameDetected,
-            pourTruncatedDetected: src.pourTruncatedDetected,
-            detectorResults: src.detectorResults,
-            summaryLines: src.summaryLines,
-            phases: src.phases, phaseSummaries: src.phaseSummaries,
-            pressure: src.pressure, flow: src.flow,
-            temperature: src.temperature, temperatureMix: src.temperatureMix,
-            resistance: src.resistance, conductance: src.conductance,
-            darcyResistance: src.darcyResistance,
-            conductanceDerivative: src.conductanceDerivative,
-            waterDispensed: src.waterDispensed,
-            pressureGoal: src.pressureGoal, flowGoal: src.flowGoal,
-            temperatureGoal: src.temperatureGoal,
-            temperatureMixGoal: src.temperatureMixGoal,
-            weight: src.weight, weightFlowRate: src.weightFlowRate,
-            // Editable fields — included so a clone that isn't followed by a
-            // saveEditedShot field-override (e.g. onShotBadgesUpdated) still
-            // carries the current persisted values.
-            beanBrand: src.beanBrand, beanType: src.beanType,
-            roastDate: src.roastDate, roastLevel: src.roastLevel,
-            grinderBrand: src.grinderBrand, grinderModel: src.grinderModel,
-            grinderBurrs: src.grinderBurrs, grinderSetting: src.grinderSetting,
-            rpm: src.rpm,
-            barista: src.barista, doseWeightG: src.doseWeightG,
-            finalWeightG: src.finalWeightG, drinkTdsPct: src.drinkTdsPct,
-            drinkEyPct: src.drinkEyPct, enjoyment0to100: src.enjoyment0to100,
-            tasteBalance: src.tasteBalance, tasteBody: src.tasteBody,
-            espressoNotes: src.espressoNotes, beverageType: src.beverageType,
-            beanBaseJson: src.beanBaseJson
-        }
+        return src.toVariantMap ? src.toVariantMap() : Object.assign({}, src)
     }
 
     // Save edited shot back to history
@@ -1469,6 +1427,18 @@ T.Page {
                     property bool refMeasuring: refConnected && Refractometer.measuring
                     // R1 advertises with names starting "DFT_TDJ_*" (see DiFluidR1::isR1Device).
                     property bool isR1: (Settings.savedRefractometerName || "").toLowerCase().indexOf("dft_tdj") === 0
+                    property real tdsValue: postShotReviewPage.editDrinkTds
+                    // Only a plausible reading is worth showing here, against the
+                    // same two constants that gate an incoming one — one definition
+                    // of plausible, not a second. Those constants postdate readings
+                    // already on disk: the R2's 655.09% error sentinel was autosaved
+                    // onto a shot before they existed (see kMaximumPlausibleTds), and
+                    // this button would otherwise be the most prominent place that
+                    // value ever appeared — the only one in basic mode, where the TDS
+                    // input is hidden and cannot correct it. A deliberately typed
+                    // out-of-range value stays visible in that input.
+                    property bool tdsPlausible: tdsValue >= postShotReviewPage.kMinimumPlausibleTds
+                        && tdsValue <= postShotReviewPage.kMaximumPlausibleTds
                     visible: Settings.savedRefractometerAddress !== ""
                     Layout.preferredWidth: Theme.scaled(80)
                     Layout.preferredHeight: Theme.scaled(36)
@@ -1483,16 +1453,27 @@ T.Page {
                     Text {
                         anchors.centerIn: parent
                         text: {
-                            if (!readTdsButton.refConnected) {
-                                return readTdsButton.isR1
-                                    ? TranslationManager.translate("postshotreview.refractometer.r1off", "R1 Off")
-                                    : TranslationManager.translate("postshotreview.refractometer.r2off", "R2 Off")
-                            }
                             // A ×3 run takes ~22s on hardware, so "..." for that long
                             // reads as hung — show which test of how many instead.
                             if (postShotReviewPage.avgTotal > 0)
                                 return postShotReviewPage.avgDone + "/" + postShotReviewPage.avgTotal
                             if (readTdsButton.refMeasuring) return TranslationManager.translate("postshotreview.refractometer.measuring", "...")
+                            // Once this shot has a TDS — read here with this
+                            // button, sent by the device's own Start button, or
+                            // loaded from the saved shot — show the value rather
+                            // than the invitation or the off state, so a reading
+                            // stays readable even if the refractometer link drops
+                            // afterwards. In basic mode the TDS input is hidden,
+                            // so this is the only place the reading is visible.
+                            // Tapping still re-reads (or reconnects); the
+                            // connection state stays in the accessible name.
+                            if (readTdsButton.tdsPlausible)
+                                return readTdsButton.tdsValue.toFixed(2) + "%"
+                            if (!readTdsButton.refConnected) {
+                                return readTdsButton.isR1
+                                    ? TranslationManager.translate("postshotreview.refractometer.r1off", "R1 Off")
+                                    : TranslationManager.translate("postshotreview.refractometer.r2off", "R2 Off")
+                            }
                             return TranslationManager.translate("postshotreview.refractometer.readTds", "Read TDS")
                         }
                         color: Theme.textColor
@@ -1502,9 +1483,18 @@ T.Page {
 
                     AccessibleMouseArea {
                         anchors.fill: parent
-                        accessibleName: readTdsButton.refConnected
-                            ? TranslationManager.translate("postshotreview.readTdsFromRefractometer", "Read TDS from refractometer")
-                            : TranslationManager.translate("postshotreview.reconnectRefractometer", "Reconnect refractometer")
+                        accessibleName: {
+                            var action = readTdsButton.refConnected
+                                ? TranslationManager.translate("postshotreview.readTdsFromRefractometer", "Read TDS from refractometer")
+                                : TranslationManager.translate("postshotreview.reconnectRefractometer", "Reconnect refractometer")
+                            // The label text is Accessible.ignored, so a shown
+                            // reading has to be spoken here or it is inaudible.
+                            if (readTdsButton.tdsPlausible)
+                                return TranslationManager.translate("postshotreview.label.tds", "TDS") + " "
+                                    + readTdsButton.tdsValue.toFixed(2) + " "
+                                    + TranslationManager.translate("postshotreview.unit.percent", "percent") + ". " + action
+                            return action
+                        }
                         accessibleItem: readTdsButton
                         enabled: !readTdsButton.refMeasuring
                         onAccessibleClicked: {
@@ -1563,6 +1553,12 @@ T.Page {
                 profileYield: postShotReviewPage._shotProfileYield
                 targetWeight: (postShotReviewPage.editShotData.targetWeightG || 0) > 0
                     ? postShotReviewPage.editShotData.targetWeightG : (postShotReviewPage.editDrinkWeight || 0)
+                // The shot is poured, so lead the yield segment with what came
+                // out and keep the target behind it ("36.4g (target 36.0g)"). Bound to
+                // the LIVE edit state like the rest of this line, so correcting
+                // the out weight moves it. Collapses to one number on target,
+                // and when targetWeightG is 0 the target above already IS this.
+                actualYield: postShotReviewPage.editDrinkWeight || 0
                 yieldOverridden: (postShotReviewPage.editShotData.targetWeightG || 0) > 0
                     && postShotReviewPage._shotProfileYield > 0
                     && Math.abs(postShotReviewPage.editShotData.targetWeightG - postShotReviewPage._shotProfileYield) > 0.1

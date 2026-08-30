@@ -1535,10 +1535,16 @@ int main(int argc, char *argv[])
                          mainController.profileManager()->latchForShot();
 
                          // Build snapshot of learning data and configuration.
-                         // Per-(profile, scale) lookup falls back to the global pool / scale
-                         // default automatically when the pair has not yet graduated (< 3
-                         // committed batches). The "model:" log line records which source
-                         // is driving this shot's predictions for later accuracy analysis.
+                         // Per-(profile, scale, basket) lookup falls back to the global
+                         // bootstrap / pool / scale default automatically when the triple has
+                         // not yet graduated (fewer than kSawMinMediansForGraduation committed
+                         // batches — 1 today, so one 3-shot batch). The "Model:" log line
+                         // records which source is driving this shot's predictions.
+                         //
+                         // The entries fetched below are the committed (drip, flow) pairs, and
+                         // they go straight into the WeightProcessor snapshot that decides when
+                         // to fire the stop — so a pair that describes no real shot mis-stops
+                         // one. See addSawPerPairEntry's commit step.
                          double targetWeight = machineState.targetWeight();
                          QString scaleType = machineState.activeScaleType();
                          sawScaleKeyForShot = scaleType;  // latched for the learning path
@@ -1625,6 +1631,22 @@ int main(int argc, char *argv[])
                          }, Qt::QueuedConnection);
                      });
 
+    // Retire the shot's zero correction once the shot has been saved. shotProcessingReady
+    // is the right edge: shotEnded fires while drip is still settling, and the settle
+    // samples run through the same correction, so clearing there would step the graph and
+    // the saved finalWeightG by the offset. Queued into the worker, and posted after the
+    // direct-connected onShotEnded above has already read the shot, so the record is safe.
+    // Without this the offset outlived its shot and every surface reading MachineState::
+    // scaleWeight (idle readout, steam, dose weighing, MQTT, MCP, widget) stayed skewed by
+    // it — and a manual tare could not fix it, because the scale zeroed while the app went
+    // on subtracting. Only an app restart cleared it.
+    QObject::connect(&timingController, &ShotTimingController::shotProcessingReady,
+                     [&weightProcessor]() {
+                         QMetaObject::invokeMethod(&weightProcessor, [&weightProcessor]() {
+                             weightProcessor.clearPreShotZeroOffset();
+                         }, Qt::QueuedConnection);
+                     });
+
     // Release the shot latch on espressoCycleEnded, NOT shotEnded: the latch is
     // armed at espressoCycleStarted, and only espressoCycleEnded is that
     // signal's pair. shotEnded is gated on flow having started, so a cycle
@@ -1633,10 +1655,29 @@ int main(int argc, char *argv[])
     // shot's value for the rest of the session while every surface kept
     // showing the live one. The latch outliving the cycle is precisely the
     // failure this latch exists to prevent, so it is released on the broadest
-    // exit rather than the narrowest. Fires after the save path has read the
-    // snapshot (which survives release by design), and is idempotent.
+    // exit rather than the narrowest. Idempotent.
+    //
+    // Ordering — twice written wrong here, so it is sourced. Release runs BEFORE
+    // the save path, on every shot, and what guarantees it is the delivery mode,
+    // not settling: espressoCycleEnded is emitted SYNCHRONOUSLY on the phase
+    // transition (machinestate.cpp:724), while shotEnded — which reaches
+    // onShotEnded via ShotTimingController::endShot() -> shotProcessingReady —
+    // is emitted inside a Qt::QueuedConnection invokeMethod
+    // (machinestate.cpp:772-784). So the release is always at least one event
+    // loop turn ahead.
+    //
+    // Stop-at-weight settling widens that gap to ~1.4 s when it runs, but does
+    // NOT establish it: on a shot with no SAW trigger, endShot() takes the else
+    // branch at shottimingcontroller.cpp:150-155 and emits shotProcessingReady
+    // immediately, with no settling window at all. An earlier version of this
+    // comment claimed settling was the mechanism, which is false for every
+    // manual, volume-stopped, GHC-button and profile-end shot.
+    //
+    // Harmless for the yield snapshot, which deliberately survives release. It
+    // is why ProfileManager's flow-calibration latch, which does NOT survive, is
+    // taken in onShotEnded() rather than cleared here.
     QObject::connect(&machineState, &MachineState::espressoCycleEnded,
-                     [&weightProcessor, &mainController]() {
+                     [&weightProcessor, &mainController, &machineState]() {
                          mainController.profileManager()->releaseShotLatch();
                          // Disarm the SAW worker for the same reason and by the
                          // same asymmetry: startExtraction arms it at cycle
@@ -1647,6 +1688,27 @@ int main(int argc, char *argv[])
                          QMetaObject::invokeMethod(&weightProcessor, [&weightProcessor]() {
                              weightProcessor.endShotCycle();
                          }, Qt::QueuedConnection);
+                         // Same asymmetry, third time: the pre-shot zero is retired on
+                         // shotProcessingReady (above), which is reached only through
+                         // shotEnded. A mid-pour disconnect sets Phase::Disconnected,
+                         // emits THIS signal and returns before the queued shotEnded ever
+                         // fires (MachineState::updateFromDevice), so the offset a flowing
+                         // shot had already adopted would stay applied to the idle scale
+                         // for the rest of the session — the bug this fix exists to remove,
+                         // reached by a different road.
+                         //
+                         // Guarded on Disconnected rather than clearing unconditionally,
+                         // because this signal is emitted SYNCHRONOUSLY on the normal
+                         // Ending -> Idle exit while shotEnded is queued: an unguarded
+                         // clear here would land before the settle window and step the
+                         // drip samples, and so the saved finalWeightG, by the offset.
+                         // A disconnect has no such window — the shot is dead and nothing
+                         // further will be captured from it.
+                         if (machineState.phase() == MachineState::Phase::Disconnected) {
+                             QMetaObject::invokeMethod(&weightProcessor, [&weightProcessor]() {
+                                 weightProcessor.clearPreShotZeroOffset();
+                             }, Qt::QueuedConnection);
+                         }
                      });
 
     // Machine phase → WeightProcessor: extend scale-feed-liveness detection to
@@ -1996,6 +2058,33 @@ int main(int argc, char *argv[])
     });
     autoWakeManager.start();
 
+    // Sensor calibration capture. Declared before `engine` like every other
+    // published singleton, so it outlives the bindings that read it (see the
+    // LIFETIME note in contextsingletons_qml.h).
+    SensorCalibrationController sensorCalibration(&de1Device, &translationManager);
+    {
+        // The two facts the wizard needs about the loaded profile: its FILENAME
+        // (baseProfileName — currentProfileName is a display string that
+        // decorates itself once edited) and its final frame's declared holds.
+        // That last frame is the one the test profiles end on and the one the
+        // user is watching when they read their gauge.
+        ProfileManager* pm = mainController.profileManager();
+        sensorCalibration.setProfileContextProvider(
+            [pm]() -> SensorCalibrationController::ProfileContext {
+                SensorCalibrationController::ProfileContext ctx;
+                if (!pm) return ctx;
+                ctx.filename = pm->baseProfileName();
+                const QList<ProfileFrame>& steps = pm->currentProfile().steps();
+                if (!steps.isEmpty()) {
+                    ctx.holdPressure = steps.last().pressure;
+                    ctx.holdTemperature = steps.last().temperature;
+                }
+                return ctx;
+            });
+        QObject::connect(pm, &ProfileManager::currentProfileChanged,
+                         &sensorCalibration, &SensorCalibrationController::noteProfileChanged);
+    }
+
     // Database backup manager for scheduled daily backups
     DatabaseBackupManager backupManager(&settings, mainController.shotHistory(),
                                        &profileStorage, &screensaverManager);
@@ -2145,6 +2234,7 @@ int main(int argc, char *argv[])
     // re-point the `ScaleDevice` context property now call setTarget() on this.
     ScaleDeviceProxy scaleProxy;
     RefractometerProxy refractometerProxy;
+    mainController.setScaleDeviceProxy(&scaleProxy);
 
     // Hoisted for the same rule, and note it was ALREADY exposed to QML from below the engine —
     // as a context property, which QML drops on destroyed(), so the ordering hazard was papered
@@ -3855,6 +3945,7 @@ int main(int argc, char *argv[])
     // ScreensaverManager: QML's name for ScreensaverVideoManager. See contextsingletons_qml.h.
     ScreensaverManagerForeign::s_singletonInstance = &screensaverManager;
     AutoWakeManagerForeign::s_singletonInstance = &autoWakeManager;
+    SensorCalibrationControllerForeign::s_singletonInstance = &sensorCalibration;
     BatteryManagerForeign::s_singletonInstance = &batteryManager;
     MemoryMonitorForeign::s_singletonInstance = &memoryMonitor;
     memoryMonitor.setEngine(&engine);
@@ -4485,6 +4576,7 @@ int main(int argc, char *argv[])
         else if (state == Qt::ApplicationActive && wasSuspended) {
             qDebug() << "App resumed from suspended state";
             wasSuspended = false;
+            mainController.hdsFirmwareUpdate()->checkForUpdates();
 
 #ifdef Q_OS_ANDROID
             // Re-enable accessibility bridge now that the EGL surface is valid again

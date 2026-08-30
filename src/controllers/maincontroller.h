@@ -7,6 +7,7 @@
 #include "profilemanager.h"
 #include "steamheaterpolicy.h"
 #include "recipeselectionmodel.h"
+#include "core/logcollapse.h"
 #include "core/yieldspec.h"
 #include "../profile/profile.h"
 #include "../network/visualizeruploader.h"
@@ -44,6 +45,7 @@
 // The cost is real but bounded: touching mqttclient.h rebuilds 26 objects.
 #include "../network/mqttclient.h"
 #include "../core/updatechecker.h"
+#include "../core/hdsfirmwareupdatecontroller.h"
 #include "../core/firmwareassetcache.h"
 #include "firmwareupdater.h"
 #include "../core/datamigrationclient.h"
@@ -64,6 +66,7 @@ class ShotDebugLogger;
 class LocationProvider;
 class ShotTimingController;
 class TranslationManager;
+class ScaleDeviceProxy;
 struct ShotSample;
 
 class MainController : public QObject {
@@ -199,6 +202,7 @@ class MainController : public QObject {
     Q_PROPERTY(ShotServer* shotServer READ shotServer CONSTANT FINAL)
     Q_PROPERTY(MqttClient* mqttClient READ mqttClient CONSTANT FINAL)
     Q_PROPERTY(UpdateChecker* updateChecker READ updateChecker CONSTANT FINAL)
+    Q_PROPERTY(HdsFirmwareUpdateController* hdsFirmwareUpdate READ hdsFirmwareUpdate CONSTANT FINAL)
     Q_PROPERTY(FirmwareUpdater* firmwareUpdater READ firmwareUpdater CONSTANT FINAL)
     Q_PROPERTY(ShotReporter* shotReporter READ shotReporter CONSTANT FINAL)
     Q_PROPERTY(DataMigrationClient* dataMigration READ dataMigration CONSTANT FINAL)
@@ -249,14 +253,16 @@ public:
     LiveSteamCoach* liveSteamCoach() const { return m_liveSteamCoach; }
     // Injects the TranslationManager into the components that localize
     // user-visible strings: the live shot & steam coaches (cue i18n), the
-    // Visualizer importer and uploader (error/status messages), and the update
-    // checker (update error messages).
+    // Visualizer importer and uploader (error/status messages), the update
+    // checker (update error messages), and the migration client (what its
+    // AI-conversation step could not do).
     void setTranslationManager(TranslationManager* tm) {
         if (m_liveShotCoach) m_liveShotCoach->setTranslationManager(tm);
         if (m_liveSteamCoach) m_liveSteamCoach->setTranslationManager(tm);
         if (m_visualizerImporter) m_visualizerImporter->setTranslationManager(tm);
         if (m_visualizer) m_visualizer->setTranslationManager(tm);
         if (m_updateChecker) m_updateChecker->setTranslationManager(tm);
+        if (m_dataMigration) m_dataMigration->setTranslationManager(tm);
     }
     void setAiManager(AIManager* aiManager) {
         m_aiManager = aiManager;
@@ -309,6 +315,8 @@ public:
     ShotServer* shotServer() const { return m_shotServer; }
     MqttClient* mqttClient() const { return m_mqttClient; }
     UpdateChecker* updateChecker() const { return m_updateChecker; }
+    HdsFirmwareUpdateController* hdsFirmwareUpdate() const { return m_hdsFirmwareUpdate; }
+    void setScaleDeviceProxy(ScaleDeviceProxy* proxy);
     FirmwareUpdater* firmwareUpdater() const { return m_firmwareUpdater; }
     ShotReporter* shotReporter() const { return m_shotReporter; }
     DataMigrationClient* dataMigration() const { return m_dataMigration; }
@@ -480,6 +488,23 @@ public slots:
     // Apply the transient veto and push the resolved target (sends 0 C).
     Q_INVOKABLE void turnOffSteamHeater();
 
+    // The descale page needs the steam heater off for the whole time it is preparing to
+    // descale, which can be an hour of waiting for the boiler to reach 60 °C. That is far
+    // longer than the page itself is guaranteed to live — auto-sleep replaces it with the
+    // screensaver, and a descale started from the GHC replaces it with a fresh instance —
+    // so the hold and the value to restore live here, not in the page.
+    //
+    // begin is idempotent: a second page instance taking over does not re-capture, so the
+    // original pre-descale value survives. end is the only thing that restores, and is
+    // called when the user actually leaves — never from destruction, which fires for
+    // screensaver and page churn too.
+    void snapshotForDescaleHeaterHold();
+    Q_INVOKABLE void beginDescaleHeaterHold();
+    Q_INVOKABLE void endDescaleHeaterHold();
+    // Drops the hold WITHOUT restoring, for when an explicit steam request has made the
+    // captured value stale. Called from startSteamHeating().
+    void abandonDescaleHeaterHold();
+
     // Flip the heater from whatever it is now. The DIRECTION rule — which of the
     // two calls above matches which resolved state — lived at two QML sites, and
     // a sweep that changed it already missed one of them once.
@@ -634,7 +659,22 @@ private:
     void applyRefillKitOverride();
     void applyHeaterTweaks();
     void applyFlowCalibration();
-    void computeAutoFlowCalibration();
+    /// Record that this shot produced no calibration ideal, and why. Counts
+    /// consecutive rejections per profile so the permanent case (a profile whose
+    /// pours never reach their target flow) can be told apart from the ordinary
+    /// one (not enough shots yet) — from the outside they are identical, and
+    /// only one of them is fixed by pulling more shots.
+    void noteAutoFlowCalRejection(const QString& profileName, const QString& reason);
+
+    /// Compute and accumulate this shot's auto-flow-calibration ideal.
+    /// `pouredMultiplier` is the multiplier the shot actually POURED under,
+    /// from the shot-start latch; pass 0 when the shot never latched and a live
+    /// read is the only option. It matters because the ideal divides the
+    /// reported flow by it, and reported flow carries the multiplier that was
+    /// in effect DURING the pour — a value written mid-shot (the MCP
+    /// flow_calibration tool does exactly this) would otherwise be paired with
+    /// samples recorded under the old one.
+    void computeAutoFlowCalibration(double pouredMultiplier);
     void updateGlobalFromPerProfileMedian();
     double getGroupTemperature() const;
     // `reason` is a caller tag that flows into the [ShotSettings] BLE log.
@@ -681,6 +721,13 @@ private:
     // THE steam-heater target derivation, shared with ProfileManager. Never
     // re-derive a steam temperature at a call site — see steamheaterpolicy.h.
     SteamHeaterPolicy* m_steamHeaterPolicy = nullptr;
+
+    // See beginDescaleHeaterHold(). The captured value is the transient steamDisabled veto
+    // as it stood before the descale page turned the heater off — the only input the hold
+    // disturbs that can legitimately be put back. snapshotForDescaleHeaterHold() records why
+    // event permission and the selected pitcher are deliberately not captured.
+    bool m_descaleHeaterHold = false;
+    bool m_descaleHeaterHoldPrevSteamDisabled = false;
 
     QNetworkAccessManager* m_networkManager = nullptr;
     Settings* m_settings = nullptr;
@@ -740,6 +787,32 @@ private:
     // a wall-clock rate limiter — see CLAUDE.md's "never timers as guards"
     // rule.
     bool m_shotSettingsResendInFlight = false;
+    // Closes a "giving up" episode and reports its tally — see m_driftGiveUpLog.
+    void flushDriftGiveUpLog();
+    // The "giving up after N resend attempts" WARN, collapsed.
+    //
+    // That branch RETURNS without latching anything, so it is re-entered on
+    // every subsequent drifting indication and re-warns each time. Measured on a
+    // submitted log: 60 byte-identical WARN lines in 6.7 seconds, about nine per
+    // second, and they were the single loudest thing in the whole buffer. The
+    // word "giving up" is what makes it wrong rather than merely noisy — the
+    // ladder gives up RESENDING and never gives up warning, so the terminal line
+    // of the narrative repeats forever and trains a reader to skim the one tier
+    // that is supposed to mean "look here". Same cry-wolf pattern
+    // BLEManager::scaleRepeatFailure() exists to prevent, in a file that had no
+    // equivalent.
+    //
+    // kChangesOnly rather than a window: every repeat is the same fact, and the
+    // fact that drift CONTINUED is carried by the tally, which states it better
+    // than sixty lines do. logcollapse.h's "a source gated on a problem wants a
+    // real window" carve-out is about sources whose repeats are evidence — here
+    // the repeats are one exhausted ladder being asked the same question.
+    //
+    // EPISODIC, flushed at all three places the ladder resets: the
+    // device-gone path, the drift-resolved path, and applyAllSettings()'s
+    // reconnect reset. Each already ends with an INFO line, so the tally lands
+    // beside the resolution a reader is looking for.
+    LogCollapse m_driftGiveUpLog{LogCollapse::kChangesOnly};
     double m_lastPressure = 0;       // Last sample pressure (for transition reason inference)
     double m_lastFlow = 0;           // Last sample flow (for transition reason inference)
     // The sample BEFORE m_lastPressure/m_lastFlow. The machine can cross a
@@ -869,6 +942,7 @@ private:
     ShotServer* m_shotServer = nullptr;
     MqttClient* m_mqttClient = nullptr;
     UpdateChecker* m_updateChecker = nullptr;
+    HdsFirmwareUpdateController* m_hdsFirmwareUpdate = nullptr;
     DE1::Firmware::FirmwareAssetCache* m_firmwareAssetCache = nullptr;
     FirmwareUpdater* m_firmwareUpdater = nullptr;
     QTimer* m_firmwareCheckTimer = nullptr;   // weekly recurring check

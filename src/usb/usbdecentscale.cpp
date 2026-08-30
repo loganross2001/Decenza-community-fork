@@ -90,6 +90,39 @@ void UsbDecentScale::sleep()
     emit sleepCompleted();
 }
 
+void UsbDecentScale::startFirmwareUpdate(const QString& targetVersion)
+{
+    if (!supportsFirmwareUpdate()) {
+        USB_SCALE_WARN(DecentScaleProtocol::firmwareUpdateUnknownVersionMessage());
+        return;
+    }
+    // The version is required: a bare command starts the scale's own picker.
+    // See DecentScaleProtocol::buildTargetedFirmwareUpdateCommand.
+    const QByteArray command = DecentScaleProtocol::buildTargetedFirmwareUpdateCommand(targetVersion);
+    if (command.isEmpty()) {
+        USB_SCALE_WARN(DecentScaleProtocol::firmwareUpdateBadTargetMessage(targetVersion));
+        return;
+    }
+    // writeRaw skips the isConnected() check sendCommand opens with, so make it
+    // here rather than logging a start and writing into a closed port.
+    if (!isConnected()) {
+        USB_SCALE_WARN(DecentScaleProtocol::firmwareUpdateNotConnectedMessage());
+        return;
+    }
+    USB_SCALE_INFO(DecentScaleProtocol::firmwareUpdateStartingMessage(targetVersion));
+
+    // Written raw rather than through sendCommand: USB is framed, not
+    // packetised, and a targeted 0x1B is exactly a five-byte frame
+    // (openscale include/decent_protocol_frame.h, decentCommandFrameLength).
+    // sendCommand's padding would leave the pad and checksum to the scale's
+    // text path, which splits a run at the first 0x03 — harmless in practice,
+    // but writing the frame the framer expects needs no such argument.
+    QByteArray frame;
+    frame.append(DecentScaleProtocol::PacketHeader);
+    frame.append(command);
+    writeRaw(frame);
+}
+
 // ===========================================================================
 // USB-specific API
 // ===========================================================================
@@ -169,6 +202,11 @@ void UsbDecentScale::close()
 #endif
 
     m_buffer.clear();
+
+    if (!m_firmwareVersion.isEmpty()) {
+        m_firmwareVersion.clear();
+        emit firmwareVersionChanged();
+    }
 
     if (isConnected()) {
         setConnected(false);
@@ -314,6 +352,15 @@ void UsbDecentScale::processPacket(const QByteArray& packet)
             setCharging(true);
             setBatteryLevel(100);  // Keep "100" reporting so existing UI bindings don't regress
         }
+        const QString version = DecentScaleProtocol::decodeHdsFirmwareVersion(d[5], d[6]);
+        if (m_firmwareVersion != version) {
+            USB_SCALE_LOG(QStringLiteral("Firmware version: %1 (raw 0x%2 0x%3)")
+                              .arg(version)
+                              .arg(d[5], 2, 16, QLatin1Char('0'))
+                              .arg(d[6], 2, 16, QLatin1Char('0')));
+            m_firmwareVersion = version;
+            emit firmwareVersionChanged();
+        }
     } else if (command == 0xAA) {
         // Button press
         int button = d[2];
@@ -351,5 +398,3 @@ void UsbDecentScale::writeRaw(const QByteArray& data)
     }
 #endif
 }
-
-

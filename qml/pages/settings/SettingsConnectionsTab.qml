@@ -17,6 +17,120 @@ Item {
     // USB is not supported on iOS (no USB host mode)
     readonly property bool usbAvailable: Qt.platform.os !== "ios"
 
+    DecenzaDialog {
+        id: hdsFirmwareUpdateDialog
+        parent: Overlay.overlay
+        anchors.centerIn: parent
+        modal: true
+        title: TranslationManager.translate("connections.hdsUpdateTitle", "Update Half Decent Scale")
+        closePolicy: Dialog.CloseOnEscape | Dialog.CloseOnPressOutside
+        width: Math.min((parent ? parent.width : Theme.scaled(460)) * 0.9, Theme.scaled(460))
+        padding: Theme.scaled(20)
+        onOpened: MainController.hdsFirmwareUpdate.loadReleaseNotes()
+
+        contentItem: ColumnLayout {
+            spacing: Theme.scaled(12)
+            // DecenzaDialog is a Popup, so attach the dialog semantics to its Item content.
+            Accessible.role: Accessible.Dialog
+            Accessible.name: hdsFirmwareUpdateDialog.title
+
+            Text {
+                Layout.fillWidth: true
+                text: TranslationManager.translate("connections.hdsUpdateVersions",
+                                                   "Version %1 is available (installed: %2).")
+                    .arg(MainController.hdsFirmwareUpdate.availableVersion)
+                    .arg(MainController.hdsFirmwareUpdate.installedVersion)
+                color: Theme.textColor
+                wrapMode: Text.Wrap
+                Accessible.ignored: true
+            }
+
+            Text {
+                Layout.fillWidth: true
+                visible: !MainController.hdsFirmwareUpdate.updateStarted
+                text: TranslationManager.translate("connections.hdsUpdateExplain",
+                                                   "The scale will install this version on its own. Keep it powered and within WiFi range until it restarts.")
+                color: Theme.textSecondaryColor
+                wrapMode: Text.Wrap
+                Accessible.ignored: true
+            }
+
+            Text {
+                Layout.fillWidth: true
+                visible: MainController.hdsFirmwareUpdate.updateStarted
+                // Says only what a transport can support. Bluetooth and USB carry no
+                // acknowledgement at all, so "the scale accepted this" is not knowable
+                // there however much machinery is added — and a restart is the only
+                // positive evidence any transport offers.
+                text: TranslationManager.translate("connections.hdsUpdateRequested",
+                                                   "Update requested. The scale restarts if it accepts, and shows any problem on its own display.")
+                color: Theme.textSecondaryColor
+                wrapMode: Text.Wrap
+                Accessible.ignored: true
+            }
+
+            Text {
+                Layout.fillWidth: true
+                text: TranslationManager.translate("connections.hdsReleaseNotes", "Release notes")
+                color: Theme.textColor
+                font.bold: true
+                Accessible.ignored: true
+            }
+
+            ScrollView {
+                Layout.fillWidth: true
+                Layout.preferredHeight: Theme.scaled(160)
+                clip: true
+
+                TextArea {
+                    readOnly: true
+                    wrapMode: TextEdit.Wrap
+                    text: MainController.hdsFirmwareUpdate.releaseNotesLoading
+                        ? TranslationManager.translate("connections.hdsReleaseNotesLoading", "Loading release notes…")
+                        : (MainController.hdsFirmwareUpdate.releaseNotes ||
+                           TranslationManager.translate("connections.hdsReleaseNotesUnavailable", "Release notes are unavailable right now."))
+                    color: Theme.textColor
+                    Accessible.role: Accessible.EditableText
+                    Accessible.name: TranslationManager.translate("connections.hdsReleaseNotes", "Release notes")
+                    Accessible.focusable: true
+                }
+            }
+
+            RowLayout {
+                Layout.alignment: Qt.AlignRight
+                spacing: Theme.scaled(8)
+
+                AccessibleButton {
+                    text: MainController.hdsFirmwareUpdate.updateStarted
+                        ? TranslationManager.translate("common.button.close", "Close")
+                        : TranslationManager.translate("common.cancel", "Cancel")
+                    accessibleName: text
+                    subtle: true
+                    onClicked: hdsFirmwareUpdateDialog.close()
+                }
+
+                AccessibleButton {
+                    visible: !MainController.hdsFirmwareUpdate.updateStarted
+                    text: TranslationManager.translate("connections.hdsStartUpdate", "Start update")
+                    accessibleName: TranslationManager.translate("connections.hdsStartUpdate", "Start update")
+                    primary: true
+                    onClicked: MainController.hdsFirmwareUpdate.startUpdate()
+                }
+            }
+        }
+    }
+
+    Connections {
+        target: MainController.hdsFirmwareUpdate
+        function onUpdateAvailableChanged() {
+            if (!MainController.hdsFirmwareUpdate.updateAvailable)
+                hdsFirmwareUpdateDialog.close()
+        }
+        function onActiveScaleChanged() {
+            hdsFirmwareUpdateDialog.close()
+        }
+    }
+
     // Share Log Dialog
     DecenzaDialog {
         id: shareLogDialog
@@ -1425,6 +1539,15 @@ Item {
                                         }
                                     }
                                 }
+                            }
+
+                            AccessibleButton {
+                                visible: MainController.hdsFirmwareUpdate.updateAvailable
+                                text: TranslationManager.translate("connections.hdsUpdate", "Update")
+                                accessibleName: TranslationManager.translate("connections.hdsUpdateScale",
+                                                                             "Update Half Decent Scale")
+                                primary: true
+                                onClicked: hdsFirmwareUpdateDialog.open()
                             }
                         }
 

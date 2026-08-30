@@ -890,7 +890,7 @@ private slots:
             QCOMPARE(q.value(0).toInt(), 0);  // existing rows default to 0
             QVERIFY(q.exec("SELECT version FROM schema_version"));
             QVERIFY(q.next());
-            QCOMPARE(q.value(0).toInt(), 40);  // chain runs on to the latest (mig 40 = canonical-link unlink)
+            QCOMPARE(q.value(0).toInt(), 41);  // chain runs on to the latest (mig 41 = shots.flow_calibration, renumbered above fork mig 40 = canonical-link unlink)
         });
     }
 
@@ -1288,7 +1288,7 @@ private slots:
             QSqlQuery q(db);
             QVERIFY(q.exec("SELECT version FROM schema_version"));
             QVERIFY(q.next());
-            QCOMPARE(q.value(0).toInt(), 40);  // chain runs on to the latest (mig 40 = canonical-link unlink)
+            QCOMPARE(q.value(0).toInt(), 41);  // chain runs on to the latest (mig 41 = shots.flow_calibration, renumbered above fork mig 40 = canonical-link unlink)
         });
     }
 
@@ -1321,7 +1321,7 @@ private slots:
             QSqlQuery q(db);
             QVERIFY(q.exec("SELECT version FROM schema_version"));
             QVERIFY(q.next());
-            QCOMPARE(q.value(0).toInt(), 40);  // chain runs on to the latest (mig 40 = canonical-link unlink)
+            QCOMPARE(q.value(0).toInt(), 41);  // chain runs on to the latest (mig 41 = shots.flow_calibration, renumbered above fork mig 40 = canonical-link unlink)
             // The repaired table is writable — insertRecipeStatic binds
             // rpm_pinned unconditionally, so it would fail wholesale if the
             // ALTER hadn't landed.
@@ -1366,7 +1366,7 @@ private slots:
             QSqlQuery q(db);
             QVERIFY(q.exec("SELECT version FROM schema_version"));
             QVERIFY(q.next());
-            QCOMPARE(q.value(0).toInt(), 40);  // full chain runs to the latest (fork mig 40 = canonical-link unlink)
+            QCOMPARE(q.value(0).toInt(), 41);  // full chain runs to the latest (mig 41 = shots.flow_calibration, above fork mig 40 = canonical-link unlink)
         });
     }
 

@@ -3,11 +3,23 @@
 #include "../protocol/de1characteristics.h"
 #include "../protocol/decentscaleprotocol.h"
 #include <algorithm>
+#include <QDateTime>
 #include <QTimer>
 
 #define DECENT_LOG(msg)  SCALE_LOG("DecentScale", msg)
 #define DECENT_INFO(msg) SCALE_INFO("DecentScale", msg)
 #define DECENT_WARN(msg) SCALE_WARN("DecentScale", msg)
+
+namespace {
+// Written at two sites — the poll that emits it and the disconnect that closes
+// its run — and LogCollapse decides "repeat" by comparing text, so the two must
+// stay byte-identical or the collapse silently stops collapsing. It doubles as
+// the collapse KEY, which is safe here only because this file has exactly one
+// collapsed line; a second one gets its own key rather than sharing this.
+inline QString batteryPollText() {
+    return QStringLiteral("Polling battery (display-on refresh)");
+}
+}  // namespace
 
 DecentScale::DecentScale(ScaleBleTransport* transport, QObject* parent)
     : ScaleDevice(parent)
@@ -91,10 +103,22 @@ void DecentScale::onTransportDisconnected() {
     // Re-log the firmware version on the next connect — the LED-response
     // packet only arrives periodically, but capturing it fresh per connect
     // is what makes the line useful for triage.
-    m_firmwareVersion.clear();
+    if (!m_firmwareVersion.isEmpty()) {
+        m_firmwareVersion.clear();
+        emit firmwareVersionChanged();
+    }
     m_lastBatteryByte = -1;
     m_ticksSinceBatteryPoll = 0;
     m_lcdOn = true;
+    // Run end for the battery-poll collapse. Reported rather than dropped: the
+    // count IS the connection's polling history, and discarding it is the same
+    // misattribution as never flushing, only quieter (logcollapse.h).
+    {
+        const LogCollapse::Collapsed collapsed =
+            m_pollLog.flush(batteryPollText(), QDateTime::currentMSecsSinceEpoch());
+        if (collapsed.suppressed > 0)
+            DECENT_LOG(batteryPollText() + LogCollapse::suffix(collapsed));
+    }
     setConnected(false);
 }
 
@@ -317,21 +341,19 @@ void DecentScale::parseWeightData(const QByteArray& data) {
         // Log once per connect; a subsequent packet reporting a different
         // value warn-logs the transition (shouldn't happen on a live
         // scale — a change would itself be diagnostic).
-        const int major = ((d[5] >> 4) & 0x0F) * 10 + (d[5] & 0x0F);
-        const int minor = (d[6] >> 4) & 0x0F;
-        const int patch = d[6] & 0x0F;
-        const QString version = QStringLiteral("%1.%2.%3 (raw 0x%4 0x%5)")
-            .arg(major).arg(minor).arg(patch)
-            .arg(d[5], 2, 16, QLatin1Char('0'))
-            .arg(d[6], 2, 16, QLatin1Char('0'));
+        const QString version = DecentScaleProtocol::decodeHdsFirmwareVersion(d[5], d[6]);
         if (m_firmwareVersion != version) {
             if (m_firmwareVersion.isEmpty()) {
-                DECENT_LOG(QString("Firmware version: %1").arg(version));
+                DECENT_LOG(QString("Firmware version: %1 (raw 0x%2 0x%3)")
+                               .arg(version)
+                               .arg(d[5], 2, 16, QLatin1Char('0'))
+                               .arg(d[6], 2, 16, QLatin1Char('0')));
             } else {
                 DECENT_WARN(QString("Firmware version changed mid-connect: %1 -> %2")
                             .arg(m_firmwareVersion, version));
             }
             m_firmwareVersion = version;
+            emit firmwareVersionChanged();
         }
     } else if (command == 0xAA) {
         // Button pressed
@@ -498,6 +520,28 @@ void DecentScale::resetTimer() {
     sendCommand(QByteArray::fromHex("0B0200"));
 }
 
+void DecentScale::startFirmwareUpdate(const QString& targetVersion) {
+    if (!supportsFirmwareUpdate()) {
+        DECENT_WARN(DecentScaleProtocol::firmwareUpdateUnknownVersionMessage());
+        return;
+    }
+    // The version is required: a bare command starts the scale's own picker.
+    // See DecentScaleProtocol::buildTargetedFirmwareUpdateCommand.
+    const QByteArray command = DecentScaleProtocol::buildTargetedFirmwareUpdateCommand(targetVersion);
+    if (command.isEmpty()) {
+        DECENT_WARN(DecentScaleProtocol::firmwareUpdateBadTargetMessage(targetVersion));
+        return;
+    }
+    DECENT_INFO(DecentScaleProtocol::firmwareUpdateStartingMessage(targetVersion));
+    // sendCommand pads to the fixed 7-byte packet, which stays correct here for
+    // two independent reasons: the Bluetooth path has no framer at all — one
+    // characteristic write goes to one handler, which reads data[2..4] for a
+    // targeted 0x1B and stops (openscale include/ble.h) — and that handler's
+    // length check is a minimum, not an equality
+    // (openscale include/decent_protocol.h, decentRequireLength is `>=`).
+    sendCommand(command);
+}
+
 void DecentScale::sleep() {
     stopWatchdog();
     stopHeartbeat();
@@ -572,7 +616,15 @@ void DecentScale::startHeartbeat() {
             if (++m_ticksSinceBatteryPoll >= kBatteryPollHeartbeatTicks) {
                 m_ticksSinceBatteryPoll = 0;
                 if (m_lcdOn) {
-                    DECENT_LOG("Polling battery (display-on refresh)");
+                    // Collapsed: identical every ~4 min for the connection's
+                    // life — see m_pollLog. The COMMAND is unconditional; only
+                    // the line about it is suppressed.
+                    const QString pollText = batteryPollText();
+                    LogCollapse::Collapsed collapsed;
+                    if (m_pollLog.shouldLog(pollText, pollText,
+                                            QDateTime::currentMSecsSinceEpoch(), &collapsed)) {
+                        DECENT_LOG(pollText + LogCollapse::suffix(collapsed));
+                    }
                     sendCommand(QByteArray::fromHex("0A01010001"));
                 }
                 // else: skip poll while LCD is off — see m_lcdOn.

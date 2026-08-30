@@ -1517,11 +1517,15 @@ void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage*
                 // Prior-shot history for THIS bean+profile so advice builds on what's already been tried.
                 if (!shot.profileKbId.isEmpty()) {
                     QJsonObject hist;
+                    // Equipment scope (#1857): the shot's own package, so both
+                    // history and bean-best exclude shots on other baskets rather
+                    // than pool grind settings that don't transfer.
+                    const AdviceScope scope(shot.equipmentId);
                     const QJsonArray sessions =
-                        DialingBlocks::buildDialInSessionsBlock(db, shot.profileKbId, shotId, 5);
+                        DialingBlocks::buildDialInSessionsBlock(db, shot.profileKbId, scope, shotId, 5);
                     if (!sessions.isEmpty()) hist[QStringLiteral("dialInSessions")] = sessions;
                     const QJsonObject best = DialingBlocks::buildBeanBestShotBlock(
-                        db, shot.profileKbId, shot.beanBrand, shot.beanType, QString(), shotId, shot);
+                        db, shot.profileKbId, shot.beanBrand, shot.beanType, QString(), scope, shotId, shot);
                     if (!best.isEmpty()) hist[QStringLiteral("beanBestShot")] = best;
                     if (!hist.isEmpty()) result[QStringLiteral("history")] = hist;
                 }

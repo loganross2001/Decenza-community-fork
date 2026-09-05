@@ -141,7 +141,9 @@ public:
     // credibility. So the search path gets its own tool per provider:
     // web_search_20250305 (Anthropic), web_search on the Responses API
     // (OpenAI), google_search grounding (Gemini).
-    virtual bool supportsWebSearch() const { return false; }
+    // [barista-fork] supportsWebSearch() is declared once above (the fork added it
+    // for the analyzeConversation web-search path); upstream's product-page search
+    // reuses it, so only the new searchWeb() virtual lands here.
     // Same contract as analyzeUrl (completes via analysisComplete/-Failed);
     // the difference is the tool attached to the request.
     virtual void searchWeb(const QString& systemPrompt, const QString& userPrompt) {
@@ -363,7 +365,8 @@ public:
     bool supportsUrlAnalysis() const override { return true; }
     bool supportsVision() const override { return true; }   // [barista-fork] Claude models read images
     void analyzeUrl(const QString& systemPrompt, const QString& userPrompt) override;
-    bool supportsWebSearch() const override { return true; }
+    // supportsWebSearch() declared above ([barista-fork] server web_search); upstream's
+    // product-page search reuses it, so only searchWeb() lands here.
     void searchWeb(const QString& systemPrompt, const QString& userPrompt) override;
     void testConnection() override;
 

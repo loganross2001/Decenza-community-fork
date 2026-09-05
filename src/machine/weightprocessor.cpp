@@ -22,6 +22,11 @@
 // line's text, and m_constantSampleLog's declaration says why: the text carries
 // the weight, so keying on it would open a run per value and close none of them.
 constexpr auto kConstantSampleLogKey = QLatin1String("constantWeightAlive");
+// Collapse key for the disagreement line: measured interval in 50 ms buckets, capped.
+// Bucketed rather than constant so an episode's worst window still speaks; capped
+// because logcollapse.h requires a caller keying on measured data to bound its keys.
+constexpr int kRateDisagreeBucketMs = 50;
+constexpr int kRateDisagreeMaxBucket = 20;
 
 // Largest pre-shot zero we will treat as drift and subtract. Measured drift is
 // 0.1-0.5 g; 2 g leaves room for a worse scale while staying far below any cup, so a
@@ -41,9 +46,51 @@ WeightProcessor::WeightProcessor(QObject* parent)
 {
 }
 
+void WeightProcessor::clearAwaitingTare(bool zeroObserved, qint64 wallClockMs,
+                                        const QString& reason)
+{
+    if (!m_awaitingTare) return;
+    m_awaitingTare = false;
+    m_tareLandedSamples = 0;
+    m_tareGraceSamples = -1;  // disarmed
+    // Only on the observed path. The grace path stamped its own anchor at the last
+    // granted arrival, which is earlier and is the honest one — see processWeight().
+    if (zeroObserved) m_tareWaitEndedMs = wallClockMs;
+    if (m_preTareSamplesSkipped > 0) {
+        SAWW_LOG(QStringLiteral("Tare wait ended (%1): %2 pre-tare sample(s) skipped")
+                     .arg(reason).arg(m_preTareSamplesSkipped));
+        m_preTareSamplesSkipped = 0;
+    }
+    // Only a zero we actually saw is worth re-anchoring on. On the abandoned path the
+    // reading never came back to zero, so telling consumers "tare landed" would hand
+    // them the untared cup as their new baseline.
+    if (zeroObserved) emit tareLanded();
+}
+
 void WeightProcessor::processWeight(double weight)
 {
     qint64 wallClock = m_wallClock();
+
+    // Spend one arrival of the post-flow-start grace, here at the top because a granted
+    // arrival takes every early return out of this function — there is nowhere below
+    // that all of them reach. Rejected samples count too: a rejection run must not be
+    // able to hold the window open.
+    //
+    // The wait ends at the start of the arrival AFTER the last granted one, which is
+    // what makes "granted" mean granted.
+    if (m_tareGraceSamples >= 0) {
+        if (m_tareGraceSamples == 0) {
+            clearAwaitingTare(false, wallClock,
+                              QStringLiteral("no zero within grace after flow start"));
+        } else if (--m_tareGraceSamples == 0) {
+            // The last granted arrival. Stamp the window anchor HERE rather than letting
+            // clearAwaitingTare() stamp it above: the wait ends lazily, on whatever
+            // arrival comes next, and on a feed that then goes quiet that could be
+            // seconds later — which would restart the untared-cup window at an arbitrary
+            // moment instead of where judging became possible.
+            m_tareWaitEndedMs = wallClock;
+        }
+    }
 
     // Spike filter (issue #610): reject single-packet BLE corruption.
     // A Felicita scale was observed sending 1649g instead of ~10g, causing a
@@ -96,8 +143,8 @@ void WeightProcessor::processWeight(double weight)
             // full pre-tare reading — firing exactly the skipFrame the gate below
             // exists to prevent. Same shape as the oscillation detector's settle
             // count, and it costs ~200 ms of preheat.
-            m_awaitingTare = false;
-            m_tareLandedSamples = 0;
+            clearAwaitingTare(true, wallClock,
+                              QStringLiteral("zero confirmed across the tare step"));
             m_consecutiveRejections = 0;
         } else if (m_awaitingTare && qAbs(weight) <= kTareLandedThresholdG) {
             // Near zero but unconfirmed. Hold it: do NOT let it become the baseline,
@@ -115,8 +162,9 @@ void WeightProcessor::processWeight(double weight)
             // (e.g. 200, 0, 200, 0): each zero holds and is discarded without updating
             // m_lastRawWeight, each 200 is a 0 g step that resets the confirmation
             // count, so m_awaitingTare never clears for the whole preheat. Bounded —
-            // markExtractionStart() arms unconditionally at flow start — but worth
-            // seeing rather than guessing at.
+            // the grace armed by markExtractionStart() ends the wait within
+            // kTareGraceSamplesAfterFlow arrivals of flow start — but worth seeing
+            // rather than guessing at.
             SAWW_LOG(QStringLiteral("Tare candidate held (unconfirmed): weight=%1 g last=%2 g "
                                     "confirmations=%3/%4")
                          .arg(weight, 0, 'f', 2).arg(m_lastRawWeight, 0, 'f', 2)
@@ -156,10 +204,8 @@ void WeightProcessor::processWeight(double weight)
         // at zero) still satisfies the tare we were waiting for, and is confirmed the
         // same way. Samples here are accepted normally either way; only the flag waits.
         if (m_awaitingTare && qAbs(weight) <= kTareLandedThresholdG) {
-            if (++m_tareLandedSamples >= kTareLandedConfirmations) {
-                m_awaitingTare = false;
-                m_tareLandedSamples = 0;
-            }
+            if (++m_tareLandedSamples >= kTareLandedConfirmations)
+                clearAwaitingTare(true, wallClock, QStringLiteral("zero confirmed"));
         } else {
             m_tareLandedSamples = 0;
         }
@@ -220,10 +266,10 @@ void WeightProcessor::processWeight(double weight)
     if (m_rateWindowStartMs == 0 || sinceLast > kReconnectGapMs) {
         // Measurements from before a reconnect describe a different stream.
         // Through the helper, never field-by-field: m_rateRecentCount is a FILL
-        // count that the minimum loop below uses as an index bound, which is only
+        // count that the median below uses as an index bound, which is only
         // valid while writes restart at zero. Clearing the count here and leaving
         // m_rateRecentNext where it was is a two-line edit that reads correct and
-        // is not — the next window writes at the stale index, the loop reads
+        // is not — the next window writes at the stale index, the median reads
         // [0, count) and so reads the pre-reconnect value it was just told to
         // discard while never reading the fresh one. Two windows, ~2 s, of the
         // wrong cadence, arriving exactly when a feed has just come back.
@@ -237,55 +283,45 @@ void WeightProcessor::processWeight(double weight)
         // every synthetic timestamp identical, the exact failure being fixed here.
         const int measured =
             qMax(1, static_cast<int>(rateSpanMs / (m_rateWindowCount - 1)));
-        // MINIMUM of the last few windows, not an average and not the latest.
+        // MEDIAN of the last few windows, not the minimum and not the latest.
         //
-        // Contamination here is one-directional: a dropped frame or a sub-reconnect
-        // hiccup removes arrivals from a window and can only ever push `measured`
-        // UP, since nothing delivers more samples than the scale sent. So the
-        // smallest recent window is the least contaminated, and taking it discards a
-        // bad window outright instead of blending its error in. An EMA was tried
-        // first and is worse: simulated on a 10 Hz feed with one 1.5 s hiccup it
-        // pulled the estimate to 145 ms and ~1 s of pour read 1.38-1.53 g/s against
-        // a true 2.00 g/s.
+        // A stalled transport does not DROP samples, it QUEUES them: the backlog lands
+        // in one window that then holds twice the arrivals its span deserves and
+        // measures half the true interval. The minimum this replaced assumed
+        // contamination could only push `measured` UP — true of the stream, false of
+        // one window — and latched onto that catch-up value for the ring's full depth.
+        // From a field log, one main-thread hitch:
         //
-        // A MEDIAN was tried, and the honest answer is that IT MAKES NO DIFFERENCE
-        // to the problem it was reached for. The argument was that ordinary jitter
-        // is two-directional, so the minimum of three noisy windows sits on their
-        // low tail. Measured at matching sample positions on the jittered bursty
-        // fixture in cadenceEstimateDoesNotTrackTheLowTail, one burst reads:
+        //     measured=609 committed=99  (arrivals=4  over 1828 ms)  starved window
+        //     measured=96  committed=42  (arrivals=12 over 1066 ms)  42 latched
+        //     measured=100 committed=42  (arrivals=11 over 1004 ms)  still latched
         //
-        //     minimum   2.25  2.92  2.92  2.25  0.04
-        //     median    2.16  2.96  2.96  2.16  0.04
+        // 42 ms against a true ~100 ms spaces synthetic timestamps 2.4x too tightly
+        // for ~3 s — flow over-read 2.4x, right after a hitch.
         //
-        // Same shape, same magnitude, same near-zero at the burst boundary. An
-        // earlier version of this comment claimed the median was "twice as wrong"
-        // at 2.96 against 2.25; that was two different FRAMES of the oscillation
-        // above compared against each other, not one measurement under two
-        // statistics. Recorded because the wrong comparison looked convincing.
-        //
-        // The real defect is the oscillation itself — flow swinging from 0.04 to
-        // ~2.9 g/s inside a single burst on a true 2.00 g/s feed, with the last
-        // sample of every burst reading near zero. Which statistic is committed to
-        // does not touch it, so do not spend another pass on the statistic. It is
-        // held by cadenceEstimateDoesNotTrackTheLowTail as a QEXPECT_FAIL.
-        //
-        // A genuine rate change still lands asymmetrically: a scale speeding UP
-        // takes effect on the next closed window, since a smaller value wins the
-        // minimum immediately, while a slowdown waits for the stale entries to age
-        // out.
+        // Does NOT address the burst oscillation held as a QEXPECT_FAIL by
+        // cadenceEstimateDoesNotTrackTheLowTail: that fixture has a majority of
+        // contaminated windows, the one shape a median cannot reject.
         m_rateRecent[m_rateRecentNext] = measured;
         m_rateRecentNext = (m_rateRecentNext + 1) % kRateRecentWindows;
         if (m_rateRecentCount < kRateRecentWindows) ++m_rateRecentCount;
-        int committed = m_rateRecent[0];
-        for (int i = 1; i < m_rateRecentCount; ++i) {
-            committed = qMin(committed, m_rateRecent[i]);
-        }
+        // Spelled out rather than std::sort over the ring: GCC 13 at -O3 rejects a sort
+        // of a 3-element array under -Werror=array-bounds, because
+        // __final_insertion_sort names `__first + 16` in a branch that a range this
+        // short cannot reach. Clang does not, so it is a Linux-only build break — which
+        // is how it reached CI (run 33570498092). Three elements do not need a sort.
+        //
+        // Upper of the two while filling. Pinned so it cannot flip silently, NOT argued
+        // as safer: a larger interval under-reads flow, so SAW fires late.
+        const int committed =
+            m_rateRecentCount == 1 ? m_rateRecent[0]
+          : m_rateRecentCount == 2 ? qMax(m_rateRecent[0], m_rateRecent[1])
+          : qMax(qMin(m_rateRecent[0], m_rateRecent[1]),
+                 qMin(qMax(m_rateRecent[0], m_rateRecent[1]), m_rateRecent[2]));
 
-        // Disagreement between this window and what we are committing to. Silent
-        // while the estimator is stable, which is most of the time — it exists to
-        // catch the shape that was invisible until now: the per-window measurements
-        // are the input, and only their aggregate was ever logged, so an estimator
-        // walking the low tail of its own noise could not be seen from a field log.
+        // Silent while the estimator is stable. Both tails speak: a starved window and
+        // the catch-up window behind it are one episode, and the catch-up one moves
+        // the estimate.
         if (committed > 0
             && qAbs(measured - committed) * 100 > kRateDisagreementPct * committed) {
             // SCALEFEED, not SAWW: this answers "were the readings timed right",
@@ -294,10 +330,27 @@ void WeightProcessor::processWeight(double weight)
             // filed under [SAW] first, where a reader chasing a stop-at-weight
             // problem would meet rate-estimator noise and a reader checking feed
             // health would never see it.
-            SCALEFEED_LOG(QStringLiteral("De-jitter rate window disagrees: measured=%1 ms "
-                                    "committed=%2 ms (arrivals=%3 over %4 ms)")
-                         .arg(measured).arg(committed)
-                         .arg(m_rateWindowCount).arg(rateSpanMs));
+            const QString key =
+                QString::number(qMin(measured / kRateDisagreeBucketMs, kRateDisagreeMaxBucket));
+            LogCollapse::Collapsed collapsed;
+            if (m_rateDisagreeLog.shouldLog(key, key, wallClock, &collapsed)) {
+                SCALEFEED_LOG(QStringLiteral("De-jitter rate window disagrees: measured=%1 ms "
+                                        "committed=%2 ms (arrivals=%3 over %4 ms)")
+                             .arg(measured).arg(committed)
+                             .arg(m_rateWindowCount).arg(rateSpanMs)
+                             + LogCollapse::suffixSimilar(collapsed));
+            }
+        } else if (committed > 0) {
+            // An agreeing window ends the episode. Event-based and within one window of
+            // the real end, which is what keeps the span honest: flush() dates a tally
+            // to the moment it fires, so deferring to a shot boundary printed an idle
+            // episode inside the next shot (the bug m_constantSampleLog already carries).
+            for (const auto& [bucket, collapsed] : m_rateDisagreeLog.flushAll(wallClock)) {
+                SCALEFEED_LOG(QStringLiteral("De-jitter rate window disagreement run ended "
+                                             "(measured ~%1 ms)")
+                                  .arg(bucket.toInt() * kRateDisagreeBucketMs)
+                              + LogCollapse::suffixSimilar(collapsed));
+            }
         }
         m_estimatedIntervalMs = committed;
         if (m_djIntervalMinMs == 0 || committed < m_djIntervalMinMs)
@@ -594,29 +647,63 @@ void WeightProcessor::processWeight(double weight)
     // Sanity check: unreasonable weight early in extraction (likely untared cup)
     if (m_extractionStartTime > 0) {
         double extractionTime = (wallClock - m_extractionStartTime) / 1000.0;
+        // The window opens when JUDGING starts, which is flow start or the end of the
+        // tare wait, whichever is later. Measuring it from flow start alone is a defect
+        // that scales with the scale: the grace is bounded in ARRIVALS and this window
+        // in SECONDS, so on a 2 Hz scale (Bookoo) six granted arrivals are 3.0 s and
+        // consume the whole window before the first sample can be judged — a genuinely
+        // untared cup would then never warn and never raise the popup, on exactly the
+        // hardware where the pour is longest.
+        //
+        // CLAMPED, because arrivals carry no wall-clock bound and a stalled feed can
+        // otherwise put this window anywhere in the pour. Late is the dangerous
+        // direction: past ~10 s a >50 g reading is real coffee on a large target, and a
+        // false positive here is not merely a wrong banner — the signal latches
+        // (m_untaredCupSignalled below freezes the streak, which holds withinWindow
+        // true through the streak clause), so every later heavy sample returns from
+        // here ahead of the SAW stop and the per-frame exit. One spurious verdict would
+        // disable stop-at-weight for the rest of the shot.
+        //
+        // The bound is the grace's own worst case: six arrivals at the slowest cadence
+        // this file supports (2 Hz, ~3.0 s) plus margin. So the window can never extend
+        // past ~7 s of flow, where yield is single-digit grams and nowhere near 50 g.
+        // Residual, accepted: if the feed stalls longer than the window between the last
+        // granted arrival and the next one, this shot is not judged at all. That is a
+        // multi-second gap, which is the scale-stall detector's business (kScaleStaleMs)
+        // rather than something to widen this window for.
+        constexpr qint64 kMaxAnchorShiftMs = 4000;
+        const qint64 windowAnchor = qMin(qMax(m_extractionStartTime, m_tareWaitEndedMs),
+                                         m_extractionStartTime + kMaxAnchorShiftMs);
+        const double judgedTime = (wallClock - windowAnchor) / 1000.0;
         // Once a streak is under way, let it keep confirming past the 3.0s mark
         // rather than discarding it — otherwise a streak that starts right at the
         // boundary (e.g. 2.9s) can have its confirming sample land just after 3.0s
         // and be silently swallowed, never firing the popup at all. A streak can
         // still only START inside the window (m_highWeightStreakSamples == 0 gates
         // that below).
-        bool withinWindow = extractionTime < 3.0 || m_highWeightStreakSamples > 0;
+        bool withinWindow = judgedTime < 3.0 || m_highWeightStreakSamples > 0;
         if (withinWindow && weight > 50.0) {
+            if (m_awaitingTare) {
+                // Our own tare has not landed yet, so this is a stale PRE-tare reading
+                // and not a cup anyone forgot to tare. Skip it like any untrusted
+                // sample, but do not accuse the user and do not let it build the streak
+                // that fires the popup — that verdict was the visible half of the race
+                // markExtractionStart() now holds the wait open for.
+                ++m_preTareSamplesSkipped;
+                return;
+            }
             SAWW_WARN(QStringLiteral("Sanity check: weight %1 g at %2 s into extraction — "
                                      "skipping stop-at-weight (likely untared cup)")
                           .arg(weight, 0, 'f', 2).arg(extractionTime, 0, 'f', 1));
-            // Debounce the user-facing popup (#1837): a Hot Water shot that leaves
-            // 70-140g on the scale, followed immediately by Espresso, re-tares the
-            // scale but the zeroed BLE notification can land after extraction has
-            // already started — so the stale Hot Water weight reads as "untared
-            // cup" for a few arrivals before the real zero arrives. Require the
-            // high reading to persist across consecutive samples (event-based, not
-            // a timer — see CLAUDE.md's "never use timers as guards" rule) before
-            // telling the user, mirroring the oscillation-recovery debounce above
-            // (m_settleCount). Three logged #1837 incidents topped out at 3
-            // consecutive stale samples before the real zero arrived; 4 clears
-            // all three with one sample of margin.
-            constexpr int UNTARED_CUP_CONFIRM_SAMPLES = 4;
+            // Debounce the user-facing popup. This is NOT the #1837 stale-sample
+            // debounce it grew from: the tare race is handled above, by the condition
+            // that actually describes it, and re-deriving what is left gives a smaller
+            // number. What remains is corruption — a single bad packet reading 60 g
+            // from a tared zero is a 60 g step, under the spike filter's 100 g bar, and
+            // would otherwise accuse the user on one sample. Two consecutive samples
+            // answers that, the same reasoning and the same count as
+            // kTareLandedConfirmations. Event-based, not a timer (CLAUDE.md).
+            constexpr int UNTARED_CUP_CONFIRM_SAMPLES = 2;
             if (!m_untaredCupSignalled &&
                 ++m_highWeightStreakSamples >= UNTARED_CUP_CONFIRM_SAMPLES) {
                 m_untaredCupSignalled = true;
@@ -954,6 +1041,9 @@ void WeightProcessor::startExtraction()
     m_consecutiveRejections = 0;
     m_awaitingTare = true;  // Cleared when the scale is seen to reach zero
     m_tareLandedSamples = 0;
+    m_tareGraceSamples = -1;  // Armed by markExtractionStart(), not here
+    m_tareWaitEndedMs = 0;
+    m_preTareSamplesSkipped = 0;
     m_currentFrame = -1;
     m_tareComplete = false;
     m_oscillationDetected = false;
@@ -1001,9 +1091,17 @@ void WeightProcessor::markExtractionStart()
     // roughly double the true arrival rate next to a committed interval that
     // contradicted it.
     resetShotDiagnostics();
-    // Flow has begun, so whatever the scale reads now is its post-tare zero even if
-    // it never passed through the near-zero window (an untared cup left on the
-    // platter, say). Arm the spike filter unconditionally here.
+    // Flow has begun, so whatever the scale reads shortly after this is its post-tare
+    // zero even if it never passes through the near-zero window (an untared cup left on
+    // the platter, say). Re-arm the spike filter here — but NOT on this instant.
+    //
+    // The DE1 starts flow on its own schedule, and in field logs it did so ~50 ms after
+    // the app's own tare command — so the samples still in flight carry the OLD zero.
+    // Clearing m_awaitingTare here outright handed those to every consumer downstream as
+    // if they were post-tare readings; tst_WeightProcessor::tareLandingAfterFlowStartIsNotASpike
+    // replays the sequence. Hold the wait open for a bounded run of arrivals instead;
+    // the near-zero confirmation in processWeight() ends it as soon as the real zero
+    // shows up, usually within one or two.
     //
     // Deliberately NOT warned about. An earlier revision logged when m_awaitingTare
     // was still set here, on the theory that reaching flow without an observed tare is
@@ -1018,11 +1116,13 @@ void WeightProcessor::markExtractionStart()
     // extractionElapsed > 5 s, and extractionElapsed is 0 while m_extractionStartTime
     // is 0 — so the hold-off costs nothing there. It is the per-frame weight exit that
     // needed protecting in the meantime, and that has its own !m_awaitingTare gate.
-    // Read BEFORE the clear below: it is the only state that says whether the reading
-    // we are about to adopt is a settled POST-tare zero or a value from before the
-    // tare landed. Clearing first would silently discard that distinction.
+    // Whether the reading we are about to adopt is a settled POST-tare zero or a value
+    // from before the tare landed. Read at THIS instant, not after the grace: the offset
+    // describes the zero as it stood when flow began, and a zero that arrives later did
+    // not. In the race this guards it is moot either way — a pre-tare cup reads far
+    // above kMaxPreShotZeroOffsetG — but the distinction is what the field says.
     const bool tareWasObserved = !m_awaitingTare;
-    m_awaitingTare = false;
+    if (m_awaitingTare) m_tareGraceSamples = kTareGraceSamplesAfterFlow;
 
     // Bounded to kMaxPreShotZeroOffsetG, and only adopted if the tare was seen to
     // land: otherwise m_lastRawWeight may still be a PRE-tare reading, and adopting
@@ -1132,6 +1232,9 @@ void WeightProcessor::resetForRetare()
     m_consecutiveRejections = 0;
     m_awaitingTare = true;  // Retare moves the zero point again — same reasoning
     m_tareLandedSamples = 0;
+    m_tareGraceSamples = -1;
+    m_tareWaitEndedMs = 0;
+    m_preTareSamplesSkipped = 0;
     m_extractionStartTime = 0;  // Will be set when extraction actually starts
     m_stopTriggered = false;
     m_frameWeightSkipSent.clear();

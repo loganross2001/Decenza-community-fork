@@ -91,6 +91,10 @@ public:
         Q_ASSERT(thread() == QThread::currentThread());
         m_wallClock = std::move(fn);
     }
+    // The committed cadence estimate. Asserted directly rather than through flow: the
+    // estimate only reaches flow via the batched branch, so a flow-watching test would
+    // pass on any evenly-paced feed.
+    int estimatedIntervalMsForTesting() const { return m_estimatedIntervalMs; }
 #endif
 
 signals:
@@ -101,6 +105,14 @@ signals:
     void skipFrame(int frameNumber);
     void flowRatesReady(double weight, double flowRate, double flowRateShort);
     void untaredCupDetected();
+    // The scale's own zero, seen to arrive. Distinct from MachineState::tareCompleted
+    // on the fire-and-forget paths this app takes for espresso and hot water, where
+    // that signal fires when the COMMAND went out and the zeroed sample lands tens of
+    // ms later — so a consumer that re-anchors on it is still holding a pre-tare
+    // reading when it does. (On the legacy wait-for-zero path, machinestate.h:172, the
+    // two coincide.) Not emitted when the wait is abandoned unobserved — there is no
+    // new zero to re-anchor on. See clearAwaitingTare().
+    void tareLanded();
     // The scale's post-tare zero as it stood when flow began, adopted for this shot
     // and subtracted from every weight below. Published so the surfaces that read the
     // scale directly — the live readout, MQTT, MCP — can subtract the same number and
@@ -133,6 +145,11 @@ signals:
 
 private:
     double computeLSLR(int windowMs) const;
+    // The one exit from the tare wait, so its three correlated fields cannot be
+    // half-cleared and the pre-tare sample tally is reported wherever the wait ends.
+    // zeroObserved separates the two ways out: the scale's zero arrived (consumers are
+    // told, via tareLanded), or the grace after flow start ran out without it.
+    void clearAwaitingTare(bool zeroObserved, qint64 wallClockMs, const QString& reason);
     // Closes the constant-weight liveness run and reports its tally — see
     // m_constantSampleLog.
     void flushConstantSampleLog();
@@ -187,8 +204,22 @@ private:
     // Held from startExtraction()/resetForRetare() until the tare is observed to
     // have landed at the scale. The step from a loaded portafilter to zero is the
     // app's own doing, not corruption — see processWeight(). Cleared by a near-zero
-    // sample or, at the latest, by markExtractionStart().
+    // sample or, at the latest, kTareGraceSamplesAfterFlow samples after flow starts.
     bool m_awaitingTare = false;
+    // Arrivals of grace still granted to a tare that was in flight when flow began,
+    // armed by markExtractionStart(). -1 is the sentinel for "no grace running" — it
+    // has to be distinct from 0, which means "the last granted arrival has been used
+    // and the next one ends the wait".
+    int m_tareGraceSamples = -1;
+    // When the tare wait ended, so the untared-cup window can be measured from the
+    // first sample this class was willing to JUDGE rather than from flow start. 0 until
+    // a wait ends. See the window comment in processWeight() for what measuring from
+    // flow start alone costs on a slow scale.
+    qint64 m_tareWaitEndedMs = 0;
+    // Pre-tare samples the sanity check skipped this wait, reported when it ends.
+    // Without it those samples are dropped silently, which is the state this whole
+    // window used to be diagnosed in.
+    int m_preTareSamplesSkipped = 0;
     // A tared scale reads within a gram or two of zero; 5 g leaves room for drift
     // and a wet basket without being wide enough to swallow a real cup.
     static constexpr double kTareLandedThresholdG = 5.0;
@@ -197,6 +228,18 @@ private:
     // support sixteen scale types whose behaviour around a tare is unmeasured — so one
     // packet must not be able to consume the exemption. Costs ~200 ms during preheat.
     static constexpr int kTareLandedConfirmations = 2;
+    // How long the grace is. The DE1 starts flow on its own schedule, so the app's tare
+    // can still be travelling to the scale when extraction begins, and the arrivals in
+    // that window carry the OLD zero. Three logged #1837 incidents topped out at 3 such
+    // arrivals before the real zero, so 3 + 1 for margin — plus the arrivals the zero
+    // ITSELF needs to be believed, because the wait must not end between the first
+    // near-zero sample and its confirmation: the held sample deliberately does not
+    // overwrite the stale reading, so a wait that ended in between would judge the
+    // confirming zero as a >100 g spike against it. Composed rather than written as 6,
+    // so raising either input cannot leave this one short again.
+    // Bounded on purpose: a genuinely untared cup never reads near zero, and the wait
+    // has to end so the per-frame weight exit and the untared-cup popup come back.
+    static constexpr int kTareGraceSamplesAfterFlow = 4 + kTareLandedConfirmations;
     int m_tareLandedSamples = 0;
 
     // Scale-feed liveness (in-shot backstop). Evaluated on the DE1 tick so a
@@ -251,11 +294,9 @@ private:
     // WiFi scale until synthetic timestamps outran wall-clock. See processWeight().
     qint64 m_rateWindowStartMs = 0;     // Wall-clock start of the current rate window
     int m_rateWindowCount = 0;          // Arrivals seen in the current rate window
-    // Recent closed-window measurements, of which the MINIMUM is the estimate.
-    // Dropped frames and sub-reconnect hiccups can only inflate a window's
-    // measurement, never deflate it, so the smallest is the least contaminated.
-    // Three windows is the shortest run that survives one bad window while still
-    // following a genuine rate change within a few seconds. See processWeight().
+    // Recent closed-window measurements; the MEDIAN of them is the estimate — see
+    // processWeight() for why not the minimum. Three windows is the shortest run that
+    // rejects one bad window while still following a genuine rate change.
     static constexpr int kRateRecentWindows = 3;
     int m_rateRecent[kRateRecentWindows] = {0, 0, 0};
     int m_rateRecentNext = 0;           // Ring write position
@@ -284,6 +325,12 @@ private:
     // A closing rate window this far from the committed estimate (percent) is worth
     // a line. Loose enough that ordinary jitter stays silent.
     static constexpr int kRateDisagreementPct = 15;
+    // A WINDOW, not kChangesOnly: a source already gated on a problem wants its
+    // repeats, which are evidence rather than reassurance (logcollapse.h).
+    // 5 s sizes one transport hitch (a 2-3 s episode) to a line rather than
+    // rate-limiting a bad feed — on a 31 h field log, 93 -> 45 with the bucket key.
+    // EPISODIC: flushed by the first agreeing window, in processWeight().
+    LogCollapse m_rateDisagreeLog{5000};
 
     // Log throttle timestamps — reset each shot so warnings are never suppressed at shot start
     qint64 m_lastTareWarnMs = 0;
@@ -321,8 +368,10 @@ private:
     // active. Reset on any sample that isn't consistent with a heavy cup,
     // including a spike-rejected sample that itself reads near zero, so a stale
     // reading can't revive a streak the real tare-confirmed zero already broke.
-    // Event-based debounce (consecutive samples, not elapsed time) for the
-    // untared-cup popup against a stale pre-tare-confirmation sample.
+    // Event-based debounce (consecutive samples, not elapsed time) for the untared-cup
+    // popup against a single CORRUPT reading. It no longer guards the #1837 stale
+    // pre-tare sample — m_awaitingTare does that, at the point where the streak would
+    // start; see UNTARED_CUP_CONFIRM_SAMPLES in weightprocessor.cpp.
     int m_highWeightStreakSamples = 0;
 
     // Configuration (set at shot start; m_targetWeight may be updated mid-shot via setTargetWeight)

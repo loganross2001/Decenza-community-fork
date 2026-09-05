@@ -209,6 +209,12 @@ public:
     Q_INVOKABLE void requestUpdateBag(qint64 bagId, const QVariantMap& fields,
                                       bool propagateBeanBase = false); // bagUpdated()
     Q_INVOKABLE void requestMarkEmpty(qint64 bagId);                    // bagUpdated()
+    // Stamp "the AI product-page search already ran for this bag" into the
+    // stored blob (add-beanbase-archive-link-fallback). Its own key, not
+    // linkDead: a bag whose URL died is precisely the one the search must
+    // still be allowed to run for. Read-modify-write of the STORED blob, so a
+    // caller holding unsaved form edits cannot persist them through this.
+    Q_INVOKABLE void requestMarkAiPageSearched(qint64 bagId);
     Q_INVOKABLE void requestTouchLastUsed(qint64 bagId);                // bump MRU timestamp (no bagUpdated)
     // Deletes only when no shot references the bag (shots.bag_id count = 0);
     // emits bagDeleted(bagId, success) — success false when shots exist.
@@ -334,6 +340,11 @@ public:
 
 signals:
     void inventoryReady(const QVariantList& bags);
+    // The read did not happen: the database would not open, or storage was
+    // never initialized. Distinct from an empty inventoryReady, because a view
+    // that waits for "loaded" before deciding what to render would otherwise
+    // wait forever and show neither bags nor an empty state.
+    void inventoryFailed();
     void bagReady(qint64 bagId, const QVariantMap& bag);   // bag empty if not found
     void bagCreated(qint64 bagId, const QVariantMap& bag); // bagId -1 on failure
     void bagUpdated(qint64 bagId, bool success);

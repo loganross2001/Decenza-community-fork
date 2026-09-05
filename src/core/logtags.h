@@ -80,6 +80,12 @@
 #define DECENZA_LOG_MARKER_EQUIPMENT     "Equipment"
 #define DECENZA_LOG_MARKER_MCP           "MCP"
 #define DECENZA_LOG_MARKER_CALIBRATION   "Calibration"
+#define DECENZA_LOG_MARKER_AUTOSLEEP     "AutoSleep"
+#define DECENZA_LOG_MARKER_AUTOLOAD      "AutoLoad"
+#define DECENZA_LOG_MARKER_KEYBOARD      "Keyboard"
+#define DECENZA_LOG_MARKER_APP           "App"
+#define DECENZA_LOG_MARKER_ACCESSIBILITY "Accessibility"
+#define DECENZA_LOG_MARKER_BEANBASE     "BeanBase"
 
 // The registry. Each row: (marker literal, what the subsystem covers).
 // The description is user/assistant-facing — it reaches the MCP tool
@@ -171,7 +177,59 @@
       "calibration, tagged Wizard and Sensor: whether a run was measured, held "   \
       "or never held, and every correction written to the machine's pressure or "  \
       "temperature sensor with the pair it was computed from. Answers \"why "      \
-      "can I not apply a correction\" and \"did my correction actually land\"")
+      "can I not apply a correction\" and \"did my correction actually land\"")                                         \
+    X(DECENZA_LOG_MARKER_ACCESSIBILITY,                                            \
+      "Where a screen-reader announcement went, and why: the platform path when "  \
+      "a reader is active, the app's own TTS when it is not, and the silent and "  \
+      "dropped paths with the reason. Also TTS engine setup and the legacy "       \
+      "settings-store migration. Answers \"TalkBack says nothing on this "         \
+      "screen\" and \"it speaks twice\" — questions no other marker can, because " \
+      "the announcement either reached the platform or it did not, and only "      \
+      "these lines say which. Third-party readers matter here: #1300's reporter "  \
+      "used TalkMan under TalkBack's class name, so the route a line reports is "  \
+      "worth more than any assumption about which reader is installed")            \
+    X(DECENZA_LOG_MARKER_BEANBASE,                                                 \
+      "Where a coffee bag's details and photo came from, and why one of them is "  \
+      "missing. The bag's product URL is the spine: whether it still resolves, "   \
+      "whether a dead one was recovered from the Internet Archive, and what "      \
+      "reading that page filled in or corrected. Answers \"why is there no "      \
+      "picture on this bag\" and \"why did Get info do nothing\", usually the "    \
+      "same fault seen twice - a URL that 404s takes the photo and the details "   \
+      "with it. The automatic product-page search records which condition "        \
+      "declined it, because a silent gate is indistinguishable from a broken "     \
+      "button")                                                                    \
+    X(DECENZA_LOG_MARKER_AUTOSLEEP,                                                \
+      "Why the app did or did not put the machine to sleep on its own: the "       \
+      "inactivity countdown starting and being reset, a scheduled stay-awake "     \
+      "window holding sleep off, the auto-wake firing, and a sleep asked for "     \
+      "remotely over MQTT or the REST API. Answers \"my machine went to sleep "    \
+      "mid-session\" and \"it never sleeps any more\". The countdown reaching "   \
+      "zero inside a stay-awake window is reported ONCE per window, not once a "   \
+      "minute — a repeat there says nothing the first line did not. OUTCOMES are "\
+      "INFO (slept, stayed awake, woke, remote request); the countdown's own "    \
+      "bookkeeping stays DEBUG, because a line per phase change and per touch is "\
+      "the firehose this tier exists to keep off the screen)")                    \
+    X(DECENZA_LOG_MARKER_AUTOLOAD,                                                 \
+      "Why the loaded profile changed without anyone choosing it: the idle "       \
+      "countdown that reverts to the pinned profile, and the revert that runs "    \
+      "when the machine wakes from sleep. Answers \"my profile changed by "        \
+      "itself\", which is otherwise indistinguishable from a mis-tap")            \
+    X(DECENZA_LOG_MARKER_KEYBOARD,                                                 \
+      "Physical-keyboard shortcuts: which key was pressed, what it tried to "      \
+      "start, and the reason a press did nothing (machine not ready, GHC "         \
+      "active, wrong phase). Answers \"the E key stopped starting shots\", "      \
+      "where the press itself is invisible and the refusal is the whole story")   \
+    X(DECENZA_LOG_MARKER_APP,                                                      \
+      "The app's own housekeeping, as distinct from anything the machine does: "   \
+      "the update check (when it ran, the versions it compared, whether a newer "  \
+      "build was offered) and the weather and sun-time fetches behind the idle "   \
+      "screen. Tagged Update and Weather. Answers \"why am I not being offered "   \
+      "the update\" — usually a release with no asset for this platform rather "   \
+      "than a check that failed — and \"why is the weather wrong or stale\", "     \
+      "which separates a provider outage from a location resolved incorrectly. "   \
+      "One marker rather than two because neither is a machine subsystem and a "   \
+      "reader reaching for either is asking the same kind of question: is the "    \
+      "APP misbehaving, or the espresso machine")
 
 // ---- The one place a log line's shape is built -------------------------
 //

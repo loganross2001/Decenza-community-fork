@@ -4,7 +4,6 @@
 #include <QPointer>
 #include <QTimer>
 #include <QElapsedTimer>
-#include <QtQml/qqmlregistration.h>
 #include "../ble/protocol/de1characteristics.h"
 
 class DE1Device;
@@ -12,15 +11,13 @@ class ScaleDevice;
 class Profile;
 class Settings;
 class ShotTimingController;
-class QQmlEngine;
-class QJSEngine;
 
 class MachineState : public QObject {
     Q_OBJECT
 
-    // Compile-time QML registration, replacing BOTH the setContextProperty("MachineState", …)
-    // and the qmlRegisterUncreatableType<MachineState>(…, "MachineStateType") that main.cpp used
-    // to do. The two existed because a context property shadows a type of the same name, so the
+    // Registered to QML by MachineStateForeign (core/contextsingletons_qml.h), replacing BOTH
+    // the setContextProperty("MachineState", …) and the
+    // qmlRegisterUncreatableType<MachineState>(…, "MachineStateType") that main.cpp used to do. The two existed because a context property shadows a type of the same name, so the
     // enums had to be reached under a second, invented name. A QML_SINGLETON needs no such
     // split: `MachineState.Phase.Pouring` resolves through the singleton, and unlike either of
     // the runtime calls it is visible to qmllint, qmlcachegen and the language server. Full
@@ -30,10 +27,10 @@ class MachineState : public QObject {
     // singleton INSIDE the instance guard — qqmltypewrapper.cpp:320,
     // `if (QObject *qobjectSingleton = enginePrivate->singletonInstance<QObject*>(type))`, with
     // the enum branch within it. The old uncreatable-type registration took the `else` at :361,
-    // which needs no instance at all. So the 155 `MachineState.Phase.X` reads in qml/ (on 153
-    // lines) used to be instance-independent constants and now depend on setQmlInstance().
+    // which needs no instance at all. So the 157 `MachineState.Phase.X` reads in qml/ (on 155
+    // lines) used to be instance-independent constants and now depend on the publish below.
     //
-    // Miss that call and `MachineState.Phase` is `undefined`, so reading `.Pouring` off it
+    // Miss that publish and `MachineState.Phase` is `undefined`, so reading `.Pouring` off it
     // THROWS a TypeError with a file and line — these sites are the loud ones. The quiet damage
     // is elsewhere in the same failure: `Connections { target: MachineState }` (20+ sites)
     // resolves its target to null and simply never connects, and plain reads like
@@ -41,8 +38,11 @@ class MachineState : public QObject {
     // logging only their own "cannot start" line. If you are ever debugging that, look at the
     // Connections, not at the enums. tst_qmlregistration asserts the publish call for exactly
     // this reason.
-    QML_ELEMENT
-    QML_SINGLETON
+    //
+    // The enum survives the move to a foreign wrapper: QML_FOREIGN registers THIS class's
+    // metaobject, so Q_ENUM(Phase) is exported exactly as before — verified against the
+    // generated Decenza.qmltypes, which carries the same `Enum { name: "Phase" }` block with
+    // all its values either way.
 
     Q_PROPERTY(Phase phase READ phase NOTIFY phaseChanged)
     Q_PROPERTY(bool isFlowing READ isFlowing NOTIFY phaseChanged)
@@ -69,8 +69,10 @@ class MachineState : public QObject {
     Q_PROPERTY(double pourVolume READ pourVolume NOTIFY pourVolumeChanged)
     // True while the DE1's front standby switch is cutting AC power (substate
     // Error_NoAC), on firmware new enough to report it reliably. Always false while
-    // disconnected — see updatePhase(). Firmware < 1337 reports this substate
-    // spuriously, matching de1app's own gate.
+    // disconnected, and for the first few seconds of any Error_NoAC episode — the
+    // machine reports the substate briefly while waking or heating and clears it
+    // untouched. See updatePhase(). Firmware < 1337 reports this substate spuriously,
+    // matching de1app's own gate.
     Q_PROPERTY(bool standbySwitchOpen READ standbySwitchOpen NOTIFY standbySwitchOpenChanged)
 public:
     enum class Phase {
@@ -110,11 +112,6 @@ public:
     double preinfusionVolume() const { return m_preinfusionVolume; }
     double pourVolume() const { return m_pourVolume; }
     bool standbySwitchOpen() const { return m_standbySwitchOpen; }
-    // QML_SINGLETON hooks. The engine does not create this object: main.cpp builds it on the
-    // stack and publishes the pointer before QQmlEngine::load(). See maincontroller.h.
-    static void setQmlInstance(MachineState *instance);
-    static MachineState *create(QQmlEngine *qmlEngine, QJSEngine *jsEngine);
-
     ScaleDevice* scale() const;
     void setScale(ScaleDevice* scale);
     QString activeScaleType() const;
@@ -201,7 +198,6 @@ private slots:
     void onTimingControllerTareComplete();
 
 private:
-    static MachineState *s_qmlInstance;
 
     // Install the serving-scale provider on SettingsCalibration, which resolves the SAW
     // pool key for every consumer. Called from setSettings() ONLY, and once is enough:
@@ -214,6 +210,10 @@ private:
     void updatePhase();
     void startShotTimer();
     void stopShotTimer();
+    // The app's shot clock and the scale's on-device timer are stopped together
+    // at every site that stops either one mid-flow. `reason` names the site in
+    // the log, which is the only thing that differed between the copies.
+    void stopShotAndScaleTimers(const char* reason);
     void checkStopAtWeightHotWater(double weight);
     void checkStopAtVolume();
     void checkStopAtVolumeHotWater();
@@ -237,6 +237,15 @@ private:
     double m_pourVolume = 0.0;          // Volume during pouring substate (ml)
     int m_lastEmittedPourVolumeMl = -1;         // Throttle: only emit when rounded ml changes
     bool m_standbySwitchOpen = false;
+    // Set when the current Error_NoAC episode has outlasted m_noAcSettleTimer, i.e.
+    // it is the standby switch rather than one of the machine's own brief reports.
+    // See updatePhase().
+    bool m_noAcSettled = false;
+    QTimer* m_noAcSettleTimer = nullptr;
+    // Measured length of the current Error_NoAC episode. Logged on every exit, because
+    // the settle interval is an estimate from one reported episode and only field logs
+    // can say whether it is the right one.
+    QElapsedTimer m_noAcEpisode;
 
     QTimer* m_shotTimer = nullptr;
     qint64 m_shotStartTime = 0;
@@ -280,6 +289,15 @@ private:
     // SAW uses (scale_weight - baseline) so it works whether or not the BLE tare executes.
     double m_hotWaterTareBaseline = 0.0;
     qint64 m_hotWaterTareTimeMs = 0;  // For burst logging first 2s after tare
+    // True between scheduling the hot-water tare and running it. The tare is delayed to
+    // keep it off the timer commands' heels, and the DE1 delivers weight samples in the
+    // meantime — samples that carry the PREVIOUS pour's zero. Without this the SAW check
+    // reported them as "Tare not completed", which reads as a tare that failed rather
+    // than one that has not been sent yet.
+    bool m_hotWaterTarePending = false;
+    // Throttle anchor for the warning above it. Per-object and reset with the flag, so
+    // a pour's first genuinely-untared sample always gets a line.
+    qint64 m_lastHotWaterTareWarnMs = 0;
     double m_hotWaterMaxEffectiveWeight = 0.0;  // Peak effective weight seen (guards baseline clearing)
     double m_hotWaterFrozenWeight = -1.0;       // Effective weight at SAW trigger (-1 = not frozen). Reset on every new flow cycle start.
     double m_hotWaterSawTriggerWeight = -1.0;  // Raw scale weight at SAW trigger for learning overshoot (-1 = no trigger)
@@ -300,3 +318,4 @@ private:
     friend class tst_LiveSteamCoach;
 #endif
 };
+

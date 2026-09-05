@@ -133,6 +133,22 @@ public:
     // provider/model is the one that runs, and the honest answer when it can't read images is to say so
     // (CLAUDE.md: never silently substitute a provider). Default false.
     virtual bool supportsVision() const { return false; }
+
+    // Searching the web is NOT the same capability as fetching a URL the
+    // prompt already names, and only one provider's tool does both. Anthropic's
+    // web_fetch and Gemini's url_context are fetch-only — asked to FIND a page
+    // they answer from memory, which is a hallucinated URL wearing a tool's
+    // credibility. So the search path gets its own tool per provider:
+    // web_search_20250305 (Anthropic), web_search on the Responses API
+    // (OpenAI), google_search grounding (Gemini).
+    virtual bool supportsWebSearch() const { return false; }
+    // Same contract as analyzeUrl (completes via analysisComplete/-Failed);
+    // the difference is the tool attached to the request.
+    virtual void searchWeb(const QString& systemPrompt, const QString& userPrompt) {
+        Q_UNUSED(systemPrompt);
+        Q_UNUSED(userPrompt);
+        emit analysisFailed(QStringLiteral("webSearchUnsupported"));
+    }
     virtual void analyzeUrl(const QString& systemPrompt, const QString& userPrompt) {
         Q_UNUSED(systemPrompt); Q_UNUSED(userPrompt);
         emit analysisFailed(tr_("ai.error.urlNotSupported", "URL analysis not supported by this provider"));
@@ -280,6 +296,8 @@ public:
     // web_search requirement.
     bool supportsUrlAnalysis() const override { return true; }
     void analyzeUrl(const QString& systemPrompt, const QString& userPrompt) override;
+    bool supportsWebSearch() const override { return true; }
+    void searchWeb(const QString& systemPrompt, const QString& userPrompt) override;
     void testConnection() override;
 
 private slots:
@@ -345,6 +363,8 @@ public:
     bool supportsUrlAnalysis() const override { return true; }
     bool supportsVision() const override { return true; }   // [barista-fork] Claude models read images
     void analyzeUrl(const QString& systemPrompt, const QString& userPrompt) override;
+    bool supportsWebSearch() const override { return true; }
+    void searchWeb(const QString& systemPrompt, const QString& userPrompt) override;
     void testConnection() override;
 
     // [barista-fork] Attach an image block to the LAST user message for a vision turn (Anthropic content-array
@@ -384,9 +404,12 @@ private slots:
     void onTestReply(QNetworkReply* reply);
 
 private:
-    void sendRequest(const QJsonObject& requestBody);
+    // betaFeature sets `anthropic-beta` for a body carrying a beta tool
+    // (web_fetch); empty for the GA paths.
+    void sendRequest(const QJsonObject& requestBody, const QByteArray& betaFeature = {});
     // cachePrefixLen ≥ 0 and < systemPrompt length ⇒ two blocks: a cached stable-core prefix + an uncached
     // varying suffix (see RequestOptions::cachePrefixLen). Default -1 ⇒ one cached block (whole prompt).
+    // [barista-fork] The default-arg form also covers upstream's plain buildCachedSystemPrompt(systemPrompt).
     static QJsonArray buildCachedSystemPrompt(const QString& systemPrompt, int cachePrefixLen = -1);
 
     // [barista-fork] server-side web search continuation state. When the model pauses mid-turn to run a
@@ -479,6 +502,8 @@ public:
     bool supportsUrlAnalysis() const override { return true; }
     bool supportsVision() const override { return true; }   // [barista-fork] Gemini models read images
     void analyzeUrl(const QString& systemPrompt, const QString& userPrompt) override;
+    bool supportsWebSearch() const override { return true; }
+    void searchWeb(const QString& systemPrompt, const QString& userPrompt) override;
     void testConnection() override;
 
     // [barista-fork] Append an inlineData image part to the LAST user-role entry of an already-built Gemini

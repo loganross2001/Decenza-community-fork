@@ -119,6 +119,10 @@ void DecentScale::onTransportDisconnected() {
         if (collapsed.suppressed > 0)
             DECENT_LOG(batteryPollText() + LogCollapse::suffix(collapsed));
     }
+    for (const auto& [shape, collapsed] :
+         m_frameShapeLog.flushAll(QDateTime::currentMSecsSinceEpoch())) {
+        DECENT_LOG(shape + LogCollapse::suffix(collapsed));
+    }
     setConnected(false);
 }
 
@@ -171,18 +175,54 @@ void DecentScale::onCharacteristicsDiscoveryFinished(const QBluetoothUuid& servi
 
     DECENT_LOG("Characteristics discovered");
     m_characteristicsReady = true;
+
+    // BEFORE setConnected(), which emits connectedChanged() SYNCHRONOUSLY
+    // (scaledevice.cpp) and so hands control to observers while this function is
+    // still mid-way through the connect sequence. One of them re-enters us:
+    // main.cpp's connectedChanged handler calls wake() when scaleLcdRestorePending
+    // is set (the DE1 slept, the link dropped, the scale came back). With the flag
+    // still false at that instant, wake()'s guards both pass and it arms the
+    // watchdog HERE — about 300 ms before the notify-enable is even submitted, and
+    // on a contended radio well over a second before it reaches the dispatcher.
+    // kWatchdogFirstTimeoutMs is 1000 ms, so it expires against a question that
+    // was never asked, logs "no initial weight data", and re-enables — the very
+    // duplicate CCCD write #1885 deleted the 400 ms repeat to avoid. Ten of those
+    // force-disconnect a healthy scale.
+    //
+    // This is the same defect the guard in wake() was written for (arming a
+    // "did weight arrive" clock against something that is not an enable); it just
+    // reaches it by a path the flag was not yet set to cover. Nothing between here
+    // and the wake sequence below reads the flag, so setting it early is free.
+    m_watchdogArmPending = true;
+
     setConnected(true);
 
     // Start periodic heartbeat to keep connection alive
     startHeartbeat();
 
-    // Follow de1app sequence EXACTLY (temporal order):
+    // Follow de1app sequence (temporal order):
     // 1. Heartbeat immediately
     // 2. LCD at 200ms
     // 3. Enable notifications at 300ms
-    // 4. Enable notifications at 400ms (again for reliability)
-    // 5. LCD at 500ms (in case first was dropped)
-    // 6. Heartbeat at 2000ms
+    // 4. LCD at 500ms (in case first was dropped)
+    // 5. Heartbeat at 2000ms
+    //
+    // de1app also enables notifications a second time at 400ms "for
+    // reliability". We do not, because under the shared GATT queue that second
+    // enable is not a cheap duplicate — it is a second queued CCCD write behind
+    // a first that has usually not been dispatched yet. Measured on this tablet
+    // with the DE1 connecting concurrently: the two enables dispatched 1161 ms
+    // and 1097 ms after being queued, and they are what produced the session's
+    // only Bluetooth warning — BleGattQueue's "N Bluetooth operation(s) were
+    // delayed because another device was using the radio; the worst (scale
+    // enable notifications) waited 1161 ms".
+    //
+    // Nothing is lost. The failure the blanket retry guards against — an enable
+    // that reached the scale and was ignored — is exactly what the watchdog
+    // detects (no weight data within kWatchdogFirstTimeoutMs of the enable
+    // ISSUING, see onNotificationsIssued) and it re-enables on each retry. That
+    // is the evidence-driven version of the same recovery: it fires when weight
+    // data actually failed to arrive, rather than every connect regardless.
 
     DECENT_LOG("Starting de1app-style wake sequence");
 
@@ -200,12 +240,7 @@ void DecentScale::onCharacteristicsDiscoveryFinished(const QBluetoothUuid& servi
     QTimer::singleShot(300, this, [this]() {
         if (!m_transport || !m_characteristicsReady) return;
         enableWeightNotifications("300ms");
-    });
-
-    // Enable BLE notifications again at 400ms (de1app does this twice for reliability)
-    QTimer::singleShot(400, this, [this]() {
-        if (!m_transport || !m_characteristicsReady) return;
-        enableWeightNotifications("400ms retry");
+        armWatchdogIfEnableNeverIssues();
     });
 
     // LCD enable again at 500ms (in case first was dropped)
@@ -234,7 +269,9 @@ void DecentScale::onCharacteristicsDiscoveryFinished(const QBluetoothUuid& servi
     // smaller edit and would have left the same bug reachable: an enable that is
     // still queued when the watchdog was never armed at all (a wake sequence cut
     // short) has nothing to restart.
-    m_watchdogArmPending = true;
+    //
+    // Set at the top of this function rather than here — see the comment beside
+    // it for the re-entrant observer that reaches wake() before this point.
 
     // Heartbeat at 2000ms
     QTimer::singleShot(2000, this, [this]() {
@@ -244,29 +281,112 @@ void DecentScale::onCharacteristicsDiscoveryFinished(const QBluetoothUuid& servi
     });
 }
 
+// The watchdog is armed BY the enable reaching the radio (onNotificationsIssued),
+// so an enable that fails BEFORE dispatch arms nothing: m_watchdogArmPending stays
+// set, wake()'s own arm is gated on that same flag being clear (and startWatchdog()
+// declines a second arm besides), and the watchdog never fires — no re-enable, no retry ladder, no disconnect, with the app still
+// believing a scale is connected that will never report a weight. That is the
+// #1519 symptom.
+//
+// Four paths in QtScaleBleTransport::enableNotifications reach failGattOperation()
+// without emitting notificationsIssued (link not ready, service missing,
+// characteristic invalid, no CCCD; CoreBluetooth has the same shape), and the
+// first is live during the DE1's concurrent connect burst. A fifth case is an
+// operation the queue never dispatches at all.
+//
+// The 400 ms duplicate enable used to cover this by accident — a second,
+// independent chance to arm. Removing it removed that, so the arm needs a path
+// that does not depend on the enable succeeding.
+//
+// TIMED FROM THE SUBMISSION, and deliberately generous. An earlier version hung
+// this off the wake sequence's existing 2000 ms step, which left only ~540 ms of
+// margin: the enable is submitted at 300 ms, and this file's own measurement 100
+// lines up records 1161 ms of queue wait with the DE1 connecting concurrently, so
+// dispatch at ~1461 ms. Tripping early is not harmless — it WARNs that an enable
+// still sitting in the queue "never reached the radio", and its retry submits a
+// second CCCD write behind the first, which is the exact thing removing the
+// duplicate was meant to stop. So the budget is the transport's own operation
+// clock (ScaleBleTransport::OPERATION_TIMEOUT_MS, 5 s) plus a margin: past this
+// point the queue has either abandoned the operation or is wedged, and both want
+// the watchdog running.
+void DecentScale::armWatchdogIfEnableNeverIssues() {
+    QTimer::singleShot(kEnableIssueBudgetMs, this, [this]() {
+        if (!m_transport || !m_characteristicsReady) return;
+        if (!m_watchdogArmPending) return;  // the enable issued; nothing to do
+        DECENT_WARN(QString("Notify-enable was never issued to the radio within %1 ms — "
+                            "arming the watchdog anyway so its retry can re-enable")
+                        .arg(kEnableIssueBudgetMs));
+        m_watchdogArmPending = false;
+        startWatchdog();
+    });
+}
+
 void DecentScale::onCharacteristicChanged(const QBluetoothUuid& characteristicUuid,
                                           const QByteArray& value) {
     if (characteristicUuid == Scale::Decent::READ) {
-        tickleWatchdog();
-        parseWeightData(value);
+        // Only a frame the parser DECODED counts as the feed being alive. The
+        // tickle used to run first and unconditionally, so a scale sending
+        // nothing this driver can read -- one left in ADS debug mode, or framing
+        // in a way we do not decode -- kept the watchdog satisfied forever: the
+        // app reported connected and healthy while the weight sat frozen and
+        // stop-at-weight never fired. The watchdog exists to catch exactly that
+        // and was being fed by the frames that caused it.
+        if (parseWeightData(value))
+            tickleWatchdog();
     }
 }
 
-void DecentScale::parseWeightData(const QByteArray& data) {
-    if (data.size() < 7) return;
+void DecentScale::logFrameShapeOnce(const QString& shape, const QByteArray& data) {
+    const QString line = scaleFrameShapeLine(m_frameShapeLog, shape, data,
+                                             QDateTime::currentMSecsSinceEpoch());
+    if (!line.isEmpty())
+        DECENT_LOG(line);
+}
+
+// Returns true when the frame was decoded, which is what the caller treats as
+// the weight feed being alive.
+bool DecentScale::parseWeightData(const QByteArray& data) {
+    if (data.size() < 2) {
+        logFrameShapeOnce(QString("Undersized frame, %1 bytes").arg(data.size()), data);
+        return false;
+    }
 
     const uint8_t* d = reinterpret_cast<const uint8_t*>(data.constData());
 
     uint8_t command = d[1];
+
+    // Dispatch on LENGTH before checksum, so a frame this driver cannot decode
+    // never reaches the v1 auto-disable counter below.
+    //
+    // A notification carries exactly one frame, so the length is known and the
+    // exact form of the question is the right one -- notifiedFrameLength() asks
+    // only whether enough bytes have arrived, which suits the USB stream framer.
+    // Without this a 12-byte frame of any type would be read as a 7-byte packet
+    // and spend the auto-disable budget.
+    const qsizetype frameLen = DecentScaleProtocol::notifiedFrameLengthExact(command, data.size());
+    if (frameLen == 0) {
+        logFrameShapeOnce(QString("Undecodable frame, type 0x%1, %2 bytes")
+                              .arg(command, 2, 16, QChar('0'))
+                              .arg(data.size()),
+                          data);
+        return false;
+    }
+    if (command == DecentScaleProtocol::TypeAdsDebug) {
+        // Not decoded — nothing in the app consumes ADS internals. Recorded so a
+        // submitted log shows the scale was left in ADS debug mode, which is
+        // settable over either transport and persists until cleared or reboot,
+        // so Decenza can meet a scale already in it.
+        logFrameShapeOnce(QStringLiteral("ADS debug frame (type 0x25)"), data);
+        return false;
+    }
 
     // Validate XOR checksum on all packet types except LED response (0x0A),
     // which uses all 7 bytes for data and has no room for a checksum.
     // See: https://github.com/Kulitorum/Decenza/issues/560
     // Original Decent Scale (v1) does not compute checksums correctly — auto-disable
     // after consecutive failures. See: https://github.com/Kulitorum/Decenza/issues/630
-    if (command != 0x0A && !m_checksumDisabled) {
-        uint8_t expected = DecentScaleProtocol::calculateXor(data);
-        if (expected != d[6]) {
+    if (command != DecentScaleProtocol::TypeLedResponse && !m_checksumDisabled) {
+        if (!DecentScaleProtocol::checksumMatches(data, frameLen)) {
             m_consecutiveChecksumFailures++;
             if (m_consecutiveChecksumFailures >= kChecksumFailureThreshold) {
                 m_checksumDisabled = true;
@@ -276,19 +396,19 @@ void DecentScale::parseWeightData(const QByteArray& data) {
                             .arg(command, 2, 16, QChar('0'))
                             .arg(m_consecutiveChecksumFailures)
                             .arg(kChecksumFailureThreshold));
-                return;
+                return false;
             }
         } else {
             m_consecutiveChecksumFailures = 0;
         }
     }
 
-    if (command == 0xCE || command == 0xCA) {
+    if (command == DecentScaleProtocol::TypeWeight || command == DecentScaleProtocol::TypeWeightAlt) {
         // Weight data
         int16_t weightRaw = (static_cast<int16_t>(d[2]) << 8) | d[3];
         double weight = weightRaw / 10.0;  // Weight in grams
         setWeight(weight);
-    } else if (command == 0x0A && d[0] == 0x03) {
+    } else if (command == DecentScaleProtocol::TypeLedResponse && d[0] == DecentScaleProtocol::PacketHeader) {
         // LED response packet (openscale/HDS format):
         // [0]=0x03 header, [1]=0x0A type, [2-3]=weight, [4]=battery, [5-6]=firmware version
         // Battery: 0-100 = percentage, 0xFF = charging
@@ -359,7 +479,17 @@ void DecentScale::parseWeightData(const QByteArray& data) {
         // Button pressed
         int button = d[2];
         emit buttonPressed(button);
+    } else {
+        // A 7-byte frame of a type this driver has no branch for. Its checksum
+        // was valid, so the scale is framing correctly and we simply do not read
+        // this one -- distinct from the undecodable shapes above, and not
+        // evidence that the weight feed is alive.
+        logFrameShapeOnce(QString("Unhandled frame type 0x%1")
+                              .arg(command, 2, 16, QChar('0')),
+                          data);
+        return false;
     }
+    return true;
 }
 
 void DecentScale::sendKeepAlive() {
@@ -380,10 +510,11 @@ void DecentScale::onNotificationsIssued(const QBluetoothUuid& characteristicUuid
         return;
     }
 
-    // A later enable — the wake sequence's own 400 ms repeat, or one the
-    // watchdog itself issued on retry. Restart the countdown so it measures from
-    // this attempt, but do NOT go through startWatchdog(): resetting the retry
-    // counter here would let the watchdog retry forever.
+    // A later enable — today only one the watchdog itself issued on retry (the
+    // wake sequence's own 400 ms repeat is gone; see the sequence comment).
+    // Restart the countdown so it measures from this attempt, but do NOT go
+    // through startWatchdog(): resetting the retry counter here would let the
+    // watchdog retry forever.
     if (m_watchdogTimer && m_watchdogTimer->isActive()) {
         m_watchdogTimer->start(m_watchdogUpdatesSeen ? kWatchdogTickleTimeoutMs
                                                      : kWatchdogFirstTimeoutMs);
@@ -397,6 +528,27 @@ void DecentScale::enableWeightNotifications(const QString& reason) {
 }
 
 void DecentScale::startWatchdog() {
+    // Already running: leave it entirely alone. This resets m_watchdogRetries and
+    // m_watchdogUpdatesSeen, so a second arm silently restores the whole retry
+    // budget and forgets that weight data had been seen — the next lapse is then
+    // timed as a first sight (kWatchdogFirstTimeoutMs) rather than as a stall.
+    // Build 3574's log shows two arms 198 ms apart: the enable issued at 5.040 s
+    // and cleared the pending flag, then the 500 ms wake() armed again at
+    // 5.238 s. Before #1885 quietened the connect burst the enable landed after
+    // both wakes, so this was unreachable.
+    //
+    // The guard lives HERE rather than at the caller because startWatchdog() has
+    // three callers — wake(), onNotificationsIssued() and
+    // armWatchdogIfEnableNeverIssues() — and only one of them was guarded. That
+    // left the others correct by an invariant nothing asserts. startHeartbeat()
+    // below took the same decision for the same reason.
+    //
+    // Note this is NOT onNotificationsIssued()'s "later enable" rule, which
+    // restarts the countdown while preserving the counters. This restarts
+    // nothing: a wake()'s LCD write carries no information about when weight data
+    // should arrive, so the window already in flight is the correct one to keep.
+    if (m_watchdogTimer && m_watchdogTimer->isActive()) return;
+
     if (!m_watchdogTimer) {
         m_watchdogTimer = new QTimer(this);
         m_watchdogTimer->setSingleShot(true);
@@ -578,6 +730,9 @@ void DecentScale::wake() {
         // Measured on a tablet: armed at 6.412 by the 500 ms wake, expired at
         // 7.412, and the enable did not reach the radio until 7.690. The
         // warning fired 278 ms before the question was asked.
+        //
+        // A watchdog already running is declined by startWatchdog() itself, not
+        // by a second condition here — see the guard at the top of it.
         if (!m_watchdogArmPending) startWatchdog();
     }
 }
@@ -597,6 +752,14 @@ void DecentScale::sendHeartbeat() {
 }
 
 void DecentScale::startHeartbeat() {
+    // Already ticking: leave it alone. The connect wake sequence calls this
+    // once directly and then again from each wake() at 200 ms and 500 ms, which
+    // restarted a running timer three times in half a second and logged
+    // "Starting heartbeat timer" for each — a line that was not true twice, and
+    // that reset the battery-poll tick count along with it. The sleep() → wake()
+    // path, where the timer really is stopped, still starts it here.
+    if (m_heartbeatTimer && m_heartbeatTimer->isActive()) return;
+
     if (!m_heartbeatTimer) {
         m_heartbeatTimer = new QTimer(this);
         m_heartbeatTimer->setInterval(1000);  // Every 1 second like de1app

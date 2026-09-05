@@ -9,7 +9,6 @@
 #include <QHash>
 #include <QJsonArray>
 #include <QSet>
-#include <QtQml/qqmlregistration.h>
 #include "../profile/profile.h"
 
 class Settings;
@@ -17,8 +16,6 @@ class DE1Device;
 class MachineState;
 class ProfileStorage;
 class SteamHeaterPolicy;
-class QQmlEngine;
-class QJSEngine;
 
 // Profile source enumeration (moved from maincontroller.h)
 enum class ProfileSource {
@@ -79,8 +76,6 @@ class ProfileManager : public QObject {
     // main.cpp used to do. A context property is invisible to qmllint, qmlcachegen and the
     // language server, so every `ProfileManager.x` in QML was unchecked. Full rationale in
     // src/controllers/maincontroller.h.
-    QML_ELEMENT
-    QML_SINGLETON
 
     Q_PROPERTY(QString currentProfileName READ currentProfileName NOTIFY currentProfileChanged)
     // The UNDECORATED title — what `shots.profile_name` is written from
@@ -96,6 +91,11 @@ class ProfileManager : public QObject {
     Q_PROPERTY(bool brewByRatioActive READ brewByRatioActive NOTIFY targetWeightChanged)
     Q_PROPERTY(double brewByRatioDose READ brewByRatioDose NOTIFY targetWeightChanged)
     Q_PROPERTY(double brewByRatio READ brewByRatio NOTIFY targetWeightChanged)
+
+    // Exposed so no QML file spells these numbers itself and drifts from the C++ that
+    // enforces them.
+    Q_PROPERTY(double defaultPressureFlowLimit READ defaultPressureFlowLimit CONSTANT)
+    Q_PROPERTY(double maxSettableFlow READ maxSettableFlow CONSTANT)
     Q_PROPERTY(QVariantList availableProfiles READ availableProfiles NOTIFY profilesChanged)
     Q_PROPERTY(QVariantList selectedProfiles READ selectedProfiles NOTIFY profilesChanged)
     Q_PROPERTY(QVariantList allBuiltInProfiles READ allBuiltInProfiles NOTIFY allBuiltInProfileListChanged)
@@ -149,11 +149,6 @@ class ProfileManager : public QObject {
     Q_PROPERTY(bool isCurrentProfileReadOnly READ isCurrentProfileReadOnly NOTIFY currentProfileChanged)
 
 public:
-    // QML_SINGLETON hooks. The engine does not create this object: MainController owns it and
-    // main.cpp publishes the pointer before QQmlEngine::load(). See maincontroller.h.
-    static void setQmlInstance(ProfileManager *instance);
-    static ProfileManager *create(QQmlEngine *qmlEngine, QJSEngine *jsEngine);
-
     // `steamHeaterPolicy` is THE steam-target derivation (see steamheaterpolicy.h).
     // Passing it is how uploadCurrentProfile() avoids re-deriving the steam
     // temperature itself, which it used to do from an incomplete set of inputs.
@@ -171,6 +166,8 @@ public:
 
     // === Profile state ===
     QString currentProfileName() const;
+    double defaultPressureFlowLimit() const { return Profile::kDefaultPressureFlowLimit; }
+    double maxSettableFlow() const { return Profile::kMaxSettableFlow; }
     QString currentProfileTitle() const { return m_currentProfile.title(); }
     QString baseProfileName() const { return m_baseProfileName; }
     Q_INVOKABLE QString previousProfileName() const { return m_previousProfileName; }
@@ -522,6 +519,11 @@ public slots:
     bool persistCurrentProfile();  // Save to downloaded folder if not already installed (no re-upload)
     void refreshProfiles();
     Q_INVOKABLE void uploadCurrentProfile();
+
+    // Connect/reconnect variant: defers while the DE1 is still asleep, because
+    // the connect sequence wakes the machine and would otherwise upload into
+    // the wake transition. See the definition for the failure it prevents.
+    void uploadCurrentProfileOnConnect();
     Q_INVOKABLE void uploadProfile(const QVariantMap& profileData);
     Q_INVOKABLE bool saveProfile(const QString& filename);
     Q_INVOKABLE bool saveProfileAs(const QString& filename, const QString& title);
@@ -649,7 +651,6 @@ private:
     // Shared body of the two profileDialInDiff* invokables.
     static QVariantMap dialInDiffFor(const Profile& p);
 
-    static ProfileManager *s_qmlInstance;
 
     // Current profile's frames with every temperature shifted so the reference
     // temperature (espressoTemperature) becomes targetTemp. Single source of truth
@@ -657,6 +658,29 @@ private:
     QList<ProfileFrame> framesShiftedToTemperature(double targetTemp) const;
 
     void loadDefaultProfile();
+
+    // THE one place m_currentProfile is assigned. Every path that makes a profile current
+    // goes through here, and `currentProfileAssignedOnlyBySetCurrentProfile`
+    // (tst_profilemanager) fails the build if a new one does not.
+    //
+    // It exists because the alternative was measured and failed: the load-time pressure
+    // flow cap was first wired by mirroring de1app's two call sites, and Decenza turned
+    // out to have SIX ways a profile becomes current — startup's _current.json restore,
+    // the default profile and both new-profile paths were left uncapped, brewing
+    // uncapped shots while every other profile in the library was capped.
+    //
+    // `context` names the path in the log, so a support log says which one applied it.
+    void setCurrentProfile(Profile profile, const QString& context);
+
+    // Push the current profile's stop targets and type at MachineState. Six hand-written
+    // copies of these three lines, three carrying the same comment, before this existed.
+    //
+    // Through the ladder (targetWeight()), not the raw profile value: they resolve
+    // identically when idle, but mid-shot targetWeight() honours the latch while the raw
+    // read would shove a new target at the machine during the pour (reachable from MCP /
+    // the web editor, which can save a profile at any time). So settle brew overrides
+    // BEFORE calling this — the ladder reads them.
+    void syncMachineStateToCurrentProfile();
 
     // Rewrite a just-loaded profile in the canonical encoding, but only where that
     // is provably lossless. Runs on load rather than as a one-time migration: the
@@ -774,3 +798,4 @@ private:
     friend class tst_McpToolsWrite;
 #endif
 };
+

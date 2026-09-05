@@ -3,6 +3,7 @@
 #include <QRegularExpression>
 
 #include "machine/weightprocessor.h"
+#include "support/TareWaitTestHelpers.h"
 
 // Test WeightProcessor edge cases: LSLR flow estimation, oscillation recovery,
 // per-frame weight exit, untared cup detection, and processWeight state guards.
@@ -58,9 +59,7 @@ private:
         QVector<double> weights = {exitWeight, 0.0};
         QVector<FrameExitCondition> conds = {fw, {}};
         configureEspresso(wp, 0, 0, weights, conds);   // no SAW target
-        wp.startExtraction();
-        wp.markExtractionStart();
-        wp.setTareComplete(true);
+        TareWait::armExtraction(wp, m_fakeClock);
     }
 
     // Arm a shot whose scale sits at `zero` when flow starts. The sample COUNT is the
@@ -299,9 +298,8 @@ private slots:
     // kScaleStaleMs and kReconnectGapMs are both 2000, so a 1.5 s gap is by
     // definition neither a stall nor a reconnect, and an averaging estimator folded
     // it in as ordinary spacing: 145 ms learned for a 100 ms feed, and ~1 s of pour
-    // reading 1.38-1.53 g/s. Taking the minimum of recent windows discards the
-    // contaminated one instead — contamination is one-directional, since nothing
-    // can deliver MORE samples than the scale sent.
+    // reading 1.38-1.53 g/s. Taking the median of recent windows discards the
+    // contaminated one instead.
     void subReconnectHiccupDoesNotPoisonTheInterval() {
         WeightProcessor wp;
         installFakeClock(wp);
@@ -317,9 +315,9 @@ private slots:
     // measurement it just discarded.
     //
     // The reconnect branch clears the ring's fill count, and that count doubles as
-    // the index bound for the minimum loop — so it only means anything while the
+    // the index bound for the median — so it only means anything while the
     // write index is also back at zero. Clearing one and not the other left the
-    // next window writing at a stale index: the loop read the pre-reconnect value
+    // next window writing at a stale index: the median read the pre-reconnect value
     // it had been told to drop and never read the fresh one, for two windows, at
     // the exact moment a feed came back. Both fields now move through
     // resetRateCalibration().
@@ -359,6 +357,48 @@ private slots:
         assertShortFlowNear(spy, 2.0, 3, "5 Hz bursty feed after a >2 s reconnect gap");
     }
 
+    // A transport stall must not latch the cadence estimate onto the catch-up burst.
+    // A stall queues samples rather than dropping them, so the backlog lands in one
+    // window measuring half the true interval — see processWeight().
+    //
+    // The stall gives a 1500 ms inter-arrival gap (1400 plus the trailing step), under
+    // kReconnectGapMs (2000, weightprocessor.cpp:245): calibration is NOT reset, so the
+    // latch path is live. Above it the estimator starts over and the fixture proves
+    // nothing.
+    void stallCatchUpDoesNotLatchTheCadenceEstimateLow() {
+        WeightProcessor wp;
+        installFakeClock(wp);
+
+        constexpr int kCadenceMs = 100;
+        constexpr double kFlow = 2.0;
+        qint64 sentMs = 0;
+
+        // Weight follows the time the sample was TAKEN, not the time it arrived —
+        // the queued samples carry the weights they were measured at.
+        auto send = [&](qint64 arrivalStepMs) {
+            wp.processWeight(kFlow * sentMs / 1000.0);
+            sentMs += kCadenceMs;
+            m_fakeClock += arrivalStepMs;
+        };
+
+        for (int i = 0; i < 50; ++i) send(kCadenceMs);   // 5 s even: commits 100 ms
+        QCOMPARE(wp.estimatedIntervalMsForTesting(), 100);
+
+        m_fakeClock += 1400;                             // transport stalls
+        for (int i = 0; i < 14; ++i) send(2);            // backlog released together
+
+        // The latching window closes on the 10th sample of the resumed feed, so assert
+        // at a DEFINED point rather than min-tracking a loop whose length is load-
+        // bearing but unstated: at 8 samples the catch-up window never closes and the
+        // test would pass while discriminating nothing.
+        for (int i = 0; i < 12; ++i) send(kCadenceMs);   // feed resumes at 10 Hz
+        const int committed = wp.estimatedIntervalMsForTesting();
+
+        QVERIFY2(committed >= 90,
+                 qPrintable(QString("cadence estimate fell to %1 ms after a 1.5 s "
+                                    "transport stall on a true 100 ms feed").arg(committed)));
+    }
+
     // KNOWN DEFECT, held here on purpose: jittered burst timing over-reads flow.
     //
     // This test FAILS by design (QEXPECT_FAIL). It reproduces a real defect that
@@ -388,12 +428,11 @@ private slots:
     // irregularly — gaps followed by tight runs — which is a different problem the
     // 65%-fill rule handles badly and which this fixture does not model.
     //
-    // What it is NOT: a choice of averaging statistic. The estimate was switched
-    // from minimum-of-three to median-of-three specifically to fix this. Measured
-    // at MATCHING sample positions the median gives 2.16 2.96 2.96 2.16 0.04 —
-    // the same shape, the same near-zero. An earlier version of this comment
-    // claimed the median was "twice as wrong" at 2.96 against 2.25; those were two
-    // different frames of the oscillation above, compared against each other.
+    // What it is NOT: a choice of averaging statistic. The estimate is a
+    // median-of-three, switched from minimum-of-three to fix the stall latch (a
+    // different defect — see processWeight()), and measured at MATCHING sample
+    // positions the median gives 2.16 2.96 2.96 2.16 0.04 against the minimum's
+    // 2.25 2.92 2.92 2.25 0.04: the same shape, the same near-zero.
     // Recorded because the wrong comparison was convincing enough to ship.
     //
     // Do not compare statistics on a single sample from this fixture. Any one frame
@@ -444,10 +483,10 @@ private slots:
             hi = qMax(hi, f);
         }
         QEXPECT_FAIL("", "Jittered burst timing makes short flow oscillate within "
-                         "each burst (measured 0.04-2.92 g/s on a true 2.00, with the "
+                         "each burst (measured 0.04-2.96 g/s on a true 2.00, with the "
                          "last sample of every burst near zero). Open. NOT a choice "
-                         "of averaging statistic — median measures the same. See the "
-                         "comment above this test.", Abort);
+                         "of averaging statistic — the minimum measures the same. See "
+                         "the comment above this test.", Abort);
         QVERIFY2(hi - lo < 0.2 * kFlow,
                  qPrintable(QString("short flow swung %1 to %2 g/s within one burst "
                                     "on a steady %3 g/s feed").arg(lo).arg(hi).arg(kFlow)));
@@ -515,9 +554,7 @@ private slots:
         WeightProcessor wp;
         installFakeClock(wp);
         configureEspresso(wp, 36.0, 0);
-        wp.startExtraction();
-        wp.markExtractionStart();
-        wp.setTareComplete(true);
+        TareWait::armExtraction(wp, m_fakeClock);
         wp.setCurrentFrame(0);
 
         QSignalSpy stopSpy(&wp, &WeightProcessor::stopNow);
@@ -535,9 +572,7 @@ private slots:
         WeightProcessor wp;
         installFakeClock(wp);
         configureEspresso(wp, 36.0, 0);
-        wp.startExtraction();
-        wp.markExtractionStart();
-        wp.setTareComplete(true);
+        TareWait::armExtraction(wp, m_fakeClock);
         wp.setCurrentFrame(0);
 
         QSignalSpy stopSpy(&wp, &WeightProcessor::stopNow);
@@ -564,9 +599,7 @@ private slots:
         WeightProcessor wp;
         installFakeClock(wp);
         configureEspresso(wp, 36.0, 0);
-        wp.startExtraction();
-        wp.markExtractionStart();
-        wp.setTareComplete(true);
+        TareWait::armExtraction(wp, m_fakeClock);
         wp.setCurrentFrame(0);
 
         QSignalSpy stopSpy(&wp, &WeightProcessor::stopNow);
@@ -600,9 +633,7 @@ private slots:
         installFakeClock(wp);
         QVector<double> frameExits = {0.0, 5.0, 0.0};  // Frame 1 exits at 5g
         configureEspresso(wp, 0, 0, frameExits);  // No SAW target
-        wp.startExtraction();
-        wp.markExtractionStart();
-        wp.setTareComplete(true);
+        TareWait::armExtraction(wp, m_fakeClock);
         wp.setCurrentFrame(1);
 
         QSignalSpy skipSpy(&wp, &WeightProcessor::skipFrame);
@@ -620,9 +651,7 @@ private slots:
         installFakeClock(wp);
         QVector<double> frameExits = {5.0};
         configureEspresso(wp, 0, 0, frameExits);
-        wp.startExtraction();
-        wp.markExtractionStart();
-        wp.setTareComplete(true);
+        TareWait::armExtraction(wp, m_fakeClock);
         wp.setCurrentFrame(0);
 
         QSignalSpy skipSpy(&wp, &WeightProcessor::skipFrame);
@@ -641,15 +670,13 @@ private slots:
         installFakeClock(wp);
         QVector<double> frameExits = {0.0};  // Disabled
         configureEspresso(wp, 0, 0, frameExits);
-        wp.startExtraction();
-        wp.markExtractionStart();
-        wp.setTareComplete(true);
+        TareWait::armExtraction(wp, m_fakeClock);
         wp.setCurrentFrame(0);
 
         QSignalSpy skipSpy(&wp, &WeightProcessor::skipFrame);
 
         QTest::ignoreMessage(QtWarningMsg, QRegularExpression("Sanity check: weight 99"));
-        wp.processWeight(99.0);
+        wp.processWeight(99.0);  // tare landed by armExtraction, so this is judged
         m_fakeClock += 200;
 
         QCOMPARE(skipSpy.count(), 0);  // Disabled, no skip
@@ -884,17 +911,14 @@ private slots:
         WeightProcessor wp;
         installFakeClock(wp);
         configureEspresso(wp, 36.0, 0);
-        wp.startExtraction();
-        wp.markExtractionStart();
-        wp.setTareComplete(true);
+        TareWait::armExtractionUntared(wp, 55.0, m_fakeClock);  // grace spent, no zero ever arrived
 
         QSignalSpy cupSpy(&wp, &WeightProcessor::untaredCupDetected);
 
-        // Weight > 50g immediately — triggers sanity check warning. The popup
-        // itself is debounced against a single stale sample (#1837): it needs
-        // UNTARED_CUP_CONFIRM_SAMPLES (4, event-based — see weightprocessor.cpp)
-        // consecutive readings before it fires.
-        for (int i = 0; i < 4; i++) {
+        // Past the grace, weight > 50 g is judged and warned about. The popup is
+        // debounced against a single corrupt packet: UNTARED_CUP_CONFIRM_SAMPLES
+        // (2, event-based — see weightprocessor.cpp) consecutive readings.
+        for (int i = 0; i < 2; i++) {
             QTest::ignoreMessage(QtWarningMsg, QRegularExpression("Sanity check: weight 55"));
             wp.processWeight(55.0);
             m_fakeClock += 100;
@@ -907,13 +931,13 @@ private slots:
         WeightProcessor wp;
         installFakeClock(wp);
         configureEspresso(wp, 36.0, 0);
-        wp.startExtraction();
-        wp.markExtractionStart();
-        wp.setTareComplete(true);
+        TareWait::armExtractionUntared(wp, 55.0, m_fakeClock);  // grace spent, no zero ever arrived
 
         QSignalSpy cupSpy(&wp, &WeightProcessor::untaredCupDetected);
 
-        // Advance past 3s detection window
+        // Advance past 3s detection window. Arming with the cup's own reading matters
+        // here: a test that spent the grace on nothing would pass on the grace rather
+        // than on the window it is named for.
         m_fakeClock += 3500;
 
         wp.processWeight(55.0);
@@ -926,9 +950,7 @@ private slots:
         WeightProcessor wp;
         installFakeClock(wp);
         configureEspresso(wp, 36.0, 0);
-        wp.startExtraction();
-        wp.markExtractionStart();
-        wp.setTareComplete(true);
+        TareWait::armExtractionUntared(wp, 49.0, m_fakeClock);  // below threshold throughout, grace spent
 
         QSignalSpy cupSpy(&wp, &WeightProcessor::untaredCupDetected);
 
@@ -947,9 +969,7 @@ private slots:
         WeightProcessor wp;
         installFakeClock(wp);
         configureEspresso(wp, 42.0, 0);
-        wp.startExtraction();
-        wp.markExtractionStart();
-        wp.setTareComplete(true);
+        TareWait::armExtraction(wp, m_fakeClock);
         wp.setCurrentFrame(2);
 
         QSignalSpy stopSpy(&wp, &WeightProcessor::stopNow);
@@ -1054,6 +1074,59 @@ private slots:
         QCOMPARE(flowSpy.count(), countBeforeTare + 1);  // accepted, not rejected
     }
 
+    void tareLandingAfterFlowStartIsNotASpike() {
+        // The Sep 1 2026 field log, exactly: a 141.1 g cup left by the previous hot-water
+        // pour, the app's tare in flight, and the DE1 starting flow 47 ms before the
+        // zeroed sample arrived. Ending the tare wait AT flow start closed the spike
+        // filter's tare exemption just before the step it exists for, so the app's own
+        // zero was rejected three times and then escape-hatched, and the same stale
+        // samples were reported as a cup the user had forgotten to tare.
+        //
+        // Nothing here may warn — init() calls QTest::failOnWarning(), so the three
+        // WARN families that log carried are asserted absent, not assumed.
+        WeightProcessor wp;
+        installFakeClock(wp);
+        configureEspresso(wp, 36.0, 0);
+        QSignalSpy landed(&wp, &WeightProcessor::tareLanded);
+
+        wp.startExtraction();
+        wp.processWeight(141.1);  m_fakeClock += 100;  // cup from the previous pour
+        wp.markExtractionStart();                      // flow starts, tare still travelling
+        wp.setTareComplete(true);
+
+        wp.processWeight(141.1);  m_fakeClock += 100;  // still the old zero
+        wp.processWeight(0.0);    m_fakeClock += 100;  // the real zero: held, not rejected
+        QCOMPARE(landed.count(), 0);                   // one packet is not proof
+
+        wp.processWeight(0.0);
+        QCOMPARE(landed.count(), 1);  // confirmed — consumers can re-anchor on it
+    }
+
+    void perFrameExitWaitsForTheTareThenReturns() {
+        // The wait the fix holds open is BOUNDED, and this is why it has to be: a cup
+        // that never reads near zero would otherwise keep the per-frame weight exit
+        // switched off for the whole shot.
+        WeightProcessor wp;
+        installFakeClock(wp);
+        QVector<double> frameExits = {30.0};
+        configureEspresso(wp, 0, 0, frameExits);  // no SAW target
+        wp.startExtraction();
+        wp.markExtractionStart();  // flow starts with the tare still in flight
+        wp.setTareComplete(true);
+        wp.setCurrentFrame(0);
+
+        QSignalSpy skipSpy(&wp, &WeightProcessor::skipFrame);
+
+        // A pre-tare reading clears any plausible exitWeight, so acting on one would
+        // skip a frame on a number we have already decided not to trust.
+        TareWait::burnGrace(wp, 40.0, m_fakeClock);  // every granted arrival, none of them judged
+        QCOMPARE(skipSpy.count(), 0);
+
+        // The next arrival ends the wait, and is judged by the exit it just unblocked.
+        wp.processWeight(40.0);
+        QCOMPARE(skipSpy.count(), 1);
+    }
+
     void tareLandsWithoutABigStep() {
         // The common case, and the one the >100 g branch never sees: the scale was
         // already at (or returned to) about zero, so the tare arrives as an ordinary
@@ -1136,16 +1209,17 @@ private slots:
 
     void flowStartConsumesTareExemption() {
         // Backstop for a scale that never reads near zero (an untared cup left on the
-        // platter): once flow begins there is no tare still to come, so a later drop to
-        // zero must be filtered rather than mistaken for one.
+        // platter): the tare wait outlives flow start by a bounded run of arrivals, and
+        // once THAT is spent there is no tare still to come, so a later drop to zero
+        // must be filtered rather than mistaken for one.
         WeightProcessor wp;
         installFakeClock(wp);
         QSignalSpy flowSpy(&wp, &WeightProcessor::flowRatesReady);
 
         wp.startExtraction();
         wp.processWeight(150.0); m_fakeClock += 200;  // never passes through zero
-        wp.markExtractionStart();                     // flow begins → exemption spent
-        feedRising(wp, 150.0, 2.0, 4);
+        wp.markExtractionStart();                     // flow begins; grace starts here
+        feedRising(wp, 150.0, 2.0, TareWait::kGraceArrivals);   // every granted arrival, no zero
         const qsizetype countBefore = flowSpy.count();
 
         QTest::ignoreMessage(QtWarningMsg, QRegularExpression("Spike rejected: weight=0\\.00 "));
@@ -1282,9 +1356,7 @@ private slots:
         WeightProcessor wp;
         installFakeClock(wp);
         configureEspresso(wp, 36.0, 0);
-        wp.startExtraction();
-        wp.markExtractionStart();
-        wp.setTareComplete(true);
+        TareWait::armExtraction(wp, m_fakeClock);
         wp.setCurrentFrame(0);
 
         // Stop extraction
@@ -1306,9 +1378,7 @@ private slots:
         installFakeClock(wp);
         QVector<double> empty;
         wp.configure(36.0, 0, empty, {}, empty, empty, false);
-        wp.startExtraction();
-        wp.markExtractionStart();
-        wp.setTareComplete(true);
+        TareWait::armExtraction(wp, m_fakeClock);
         wp.setCurrentFrame(0);
 
         // Process weight with frame index beyond empty vector — should not crash
@@ -1324,9 +1394,7 @@ private slots:
         WeightProcessor wp;
         installFakeClock(wp);
         configureEspresso(wp, 36.0, 0);
-        wp.startExtraction();
-        wp.markExtractionStart();
-        wp.setTareComplete(true);
+        TareWait::armExtraction(wp, m_fakeClock);
         wp.setCurrentFrame(0);
 
         QSignalSpy stopSpy(&wp, &WeightProcessor::stopNow);
@@ -1354,9 +1422,7 @@ private slots:
         WeightProcessor wp;
         installFakeClock(wp);
         configureEspresso(wp, 36.0, 2);  // 2 preinfuse frames
-        wp.startExtraction();
-        wp.markExtractionStart();
-        wp.setTareComplete(true);
+        TareWait::armExtraction(wp, m_fakeClock);
         wp.setCurrentFrame(1);  // Still in preinfusion (1 < 2)
 
         QSignalSpy stopSpy(&wp, &WeightProcessor::stopNow);

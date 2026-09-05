@@ -1,35 +1,33 @@
 #ifndef ACCESSIBILITYMANAGER_H
 #define ACCESSIBILITYMANAGER_H
 
+#include <atomic>
 #include <QObject>
 #include <QPointer>
 #include <QTextToSpeech>
 #include <QSoundEffect>
 #include "appsettings.h"
-#include <QtQml/qqmlregistration.h>
 
 #ifndef QT_NO_ACCESSIBILITY
 #include <QAccessible>
 #endif
 
-class QQmlEngine;
-class QJSEngine;
 class TranslationManager;
 
 class AccessibilityManager : public QObject
 {
     Q_OBJECT
 
-    // A compile-time-registered QML singleton. The macros are what put the type in the module's
-    // generated Decenza.qmltypes — the only place qmllint, qmlcachegen and the language server
-    // learn about C++ types. A runtime qmlRegisterSingletonInstance() would be invisible to all
-    // three, which is why this replaced a setContextProperty.
+    // Registered to QML by AccessibilityManagerForeign (core/contextsingletons_qml.h), not by
+    // macros on this class — see that struct for why, and docs/CLAUDE_MD/QML_GOTCHAS.md for the
+    // bug that moved it. The registration is what puts the type in the module's generated
+    // Decenza.qmltypes — the only place qmllint, qmlcachegen and the language server learn about
+    // C++ types. A runtime qmlRegisterSingletonInstance() would be invisible to all three, which
+    // is why this replaced a setContextProperty.
     //
     // Registering the type is necessary but NOT sufficient: main.cpp must also call
     // qml_register_types_Decenza() explicitly, or no declarative type in this module reaches the
     // runtime registry at all. See the comment at that call site.
-    QML_ELEMENT
-    QML_SINGLETON
     Q_PROPERTY(bool enabled READ enabled WRITE setEnabled NOTIFY enabledChanged)
     Q_PROPERTY(bool ttsEnabled READ ttsEnabled WRITE setTtsEnabled NOTIFY ttsEnabledChanged)
     Q_PROPERTY(bool tickEnabled READ tickEnabled WRITE setTickEnabled NOTIFY tickEnabledChanged)
@@ -45,12 +43,6 @@ class AccessibilityManager : public QObject
 public:
     explicit AccessibilityManager(QObject *parent = nullptr);
     ~AccessibilityManager();
-
-    // QML_SINGLETON hooks. The engine does not create this object: main.cpp owns it on the stack
-    // and wires it into the MCP server and the live-coaching signal path before QML exists, so
-    // main publishes the instance and create() hands that same one back.
-    static void setQmlInstance(AccessibilityManager *instance);
-    static AccessibilityManager *create(QQmlEngine *qmlEngine, QJSEngine *jsEngine);
 
 #ifdef DECENZA_TESTING
     // Test-only ctor sentinel: skip QTextToSpeech / QSoundEffect construction
@@ -145,6 +137,18 @@ protected:
     // AccessibilityManager and override these to record calls without touching
     // real Qt accessibility / TTS state.
     virtual bool isScreenReaderActive() const;
+
+    // Where isScreenReaderActive()'s last answer came from. Set by it, read only
+    // by the route logging — a `true` the platform CONFIRMED and a `true` guessed
+    // from QAccessible::isActive() are the same bool and very different evidence,
+    // and collapsing them is what made the original silence unreadable: the log
+    // said path=platform either way. Linux still takes the fallback and is known
+    // wrong there, so this is the line that tells a reader which one they got.
+    // mutable because isScreenReaderActive() is const; a test overriding that
+    // virtual leaves this at Fallback, which is honest — the probe did not run.
+    enum class ScreenReaderSource { Fallback, PlatformProbe };
+    QString screenReaderSourceName() const;
+    mutable ScreenReaderSource m_screenReaderSource = ScreenReaderSource::Fallback;
     virtual void dispatchPlatformAnnouncement(const QString& text, bool assertive);
     virtual void dispatchTtsAnnouncement(const QString& text, bool interrupt);
 
@@ -181,9 +185,10 @@ public:
         QSettings& primary, QSettings& legacy);
 
 private:
-    // The instance create() hands to the engine. Not owned here — main's stack object outlives
-    // the engine, which is why create() pins CppOwnership.
-    static AccessibilityManager *s_qmlInstance;
+    // How many have been built. The app owns exactly one — main.cpp's stack
+    // object, handed to QML through AccessibilityManagerForeign — so a second is
+    // a defect. See the constructor for what the second one costs.
+    static std::atomic<int> s_instanceCount;
 
     void loadSettings();
     void saveSettings();

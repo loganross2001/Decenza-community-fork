@@ -397,9 +397,28 @@ public:
     // empty-object "the page states nothing"). Static + public for tests.
     static QVariantMap parseBagExtraction(const QString& response, bool* ok = nullptr);
 
+    // Last rung of the photo/details ladder: ask the SELECTED provider (never
+    // a substitute) to find a vendor's product page for a named product, using
+    // its own web tool. Completes via productPageFound / -Failed. The result
+    // is a suggestion the caller must have confirmed before storing — see the
+    // bag-detail-editing spec.
+    Q_INVOKABLE void findProductPage(const QString& requestToken, const QString& roaster,
+                                     const QString& coffee, const QString& kind);
+    // Whether the SELECTED provider can search the web (Anthropic, OpenAI and
+    // Gemini all can, each with its own tool). Distinct from
+    // supportsUrlExtraction(), which is about fetching a URL already known.
+    Q_INVOKABLE bool supportsProductPageSearch() const;
+    // Which condition declined the AUTOMATIC search. Every gate used to return
+    // in silence, so a submitted log could not answer "did the app try?".
+    Q_INVOKABLE void logProductPageSearchDeclined(const QString& reason) const;
+    // The URL out of that reply's JSON, or empty when the model found none or
+    // answered with something that is not an https URL. Static + public for tests.
+    static QString parseProductPageUrl(const QString& response);
+
     // Multi-turn conversation - sends system prompt and full message array to current provider.
-    // [barista-fork] clientTools enables the barista's registered client-side tools (default off — advisor
-    // unaffected). The tool definitions + executor live in src/barista/baristatools.{h,cpp}.
+    // [barista-fork] webSearch/clientTools ride RequestOptions (default off — advisor unaffected). The
+    // barista's client tool definitions + executor live in src/barista/baristatools.{h,cpp}. The default-arg
+    // form also covers upstream's plain analyzeConversation(systemPrompt, messages) call sites.
     void analyzeConversation(const QString& systemPrompt, const QJsonArray& messages,
                              bool webSearch = false, bool clientTools = false);
 
@@ -513,6 +532,11 @@ signals:
     void phrasebookReady(const QString& requestToken, const QString& json);
     void sessionSummaryReady(const QString& userToken, const QString& summary);   // [barista-fork] Step 6
     void phrasebookFailed(const QString& requestToken, const QString& error);
+
+    // findProductPage outcome. `url` is a SUGGESTION, not a link: it is probed
+    // and confirmed by the user before anything stores it.
+    void productPageFound(const QString& requestToken, const QString& url);
+    void productPageSearchFailed(const QString& requestToken, const QString& error);
     // A metadata write this class made — capturing something the user told the
     // advisor — landed on a shot id that does not exist, so the value was
     // discarded. Emitted so the failure is addressable instead of vanishing
@@ -683,6 +707,8 @@ private:
     // cache the core across the per-question tailoring's varying suffix. -1 ⇒ cache the whole prompt (untailored).
     // Consumed+cleared in analyzeConversation → rides exactly one turn.
     int m_pendingCachePrefixLen = -1;
+    bool m_isProductPageSearch = false;
+    QString m_productPageToken;
 
 #ifdef DECENZA_TESTING
     friend class tst_AIManager;

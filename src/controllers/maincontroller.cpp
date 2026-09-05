@@ -71,8 +71,6 @@
 #include "../core/storagelogging.h"
 #include <QEventLoop>
 #include <QTimer>
-#include <QQmlEngine>
-#include <QJSEngine>
 
 // ShotSettings drift: the DE1 reporting back something other than what we
 // commanded, and the resend ladder that answers it. Aliased rather than typing
@@ -91,37 +89,6 @@
 namespace {
 constexpr auto kDriftGiveUpLogKey = QLatin1String("shotSettingsDriftGiveUp");
 }  // namespace
-
-MainController *MainController::s_qmlInstance = nullptr;
-
-void MainController::setQmlInstance(MainController *instance)
-{
-    s_qmlInstance = instance;
-}
-
-MainController *MainController::create(QQmlEngine *qmlEngine, QJSEngine *jsEngine)
-{
-    Q_UNUSED(qmlEngine)
-    Q_UNUSED(jsEngine)
-    if (!s_qmlInstance) {
-        // Reached only if QML resolves the singleton before main.cpp published the instance.
-        // Name the missing call: the symptom otherwise is most of the UI reading as undefined,
-        // which looks like a dozen unrelated bugs rather than one missing line.
-        qCritical("MainController: QML asked for the singleton before "
-                  "MainController::setQmlInstance() was called. Publish the instance before "
-                  "QQmlEngine::load().");
-        return nullptr;
-    }
-    // No second-engine guard, matching AccessibilityManager and for the same reason: this class
-    // holds no per-engine state. TranslationManager needs one only because `translate` is a
-    // QJSValue bound to one QJSEngine. Add a guard here only if this class gains a QJSValue or
-    // QJSEngine member.
-    //
-    // The engine would otherwise take ownership of what it is handed and delete a stack object
-    // owned by main().
-    QJSEngine::setObjectOwnership(s_qmlInstance, QJSEngine::CppOwnership);
-    return s_qmlInstance;
-}
 
 void MainController::setScaleDeviceProxy(ScaleDeviceProxy* proxy)
 {
@@ -1475,6 +1442,30 @@ void MainController::setupRecipeConnections() {
             deactivateRecipe();
             return;
         }
+        // The pitcher and vessel are ingredients too, so the same two windows
+        // this block exists for — the startup restore, and an external edit
+        // that re-points the recipe — have to reconcile them. Nothing else
+        // can: the live watchers only see the USER change a selection, and
+        // with the write-through gone the divergence no longer self-heals.
+        {
+            auto* brew = m_settings->brew();
+            const QVariantMap pitcher = brew->getSteamPitcherPreset(brew->selectedSteamPitcher());
+            const QVariantMap vessel = brew->getWaterVesselPreset(brew->selectedWaterVessel());
+            const bool pitcherGone = Recipe::steamPitcherDiverged(
+                recipe.value(QStringLiteral("steamJson")).toString(),
+                pitcher.value(QStringLiteral("name")).toString(),
+                SettingsBrew::isHeaterOffPitcher(pitcher));
+            const bool vesselGone = Recipe::waterVesselDiverged(
+                recipe.value(QStringLiteral("hotWaterJson")).toString(),
+                vessel.value(QStringLiteral("name")).toString());
+            if (pitcherGone || vesselGone) {
+                qWarning() << "[recipe] restored/refreshed recipe" << recipeId
+                           << "names a" << (pitcherGone ? "pitcher" : "water vessel")
+                           << "that is not the live selection - deactivating";
+                deactivateRecipe();
+                return;
+            }
+        }
         const qint64 resolvedBagId = m_activeRecipe.value(
             QStringLiteral("resolvedBagId"), m_settings->dye()->activeBagId()).toLongLong();
         m_activeRecipe = recipe;
@@ -1576,6 +1567,42 @@ void MainController::setupRecipeConnections() {
         if (recipeEq > 0 && m_settings->dye()->activeEquipmentId() != recipeEq)
             deactivateRecipe();
     });
+    // The steam pitcher and the water vessel are ingredients too (#1895): the
+    // user picking a different one is making a different drink, not editing
+    // this one. Only the SELECTION deactivates — a preset edit is not a swap,
+    // and the milk weight is captured automatically at the end of steaming, so
+    // deactivating on it would drop every milk recipe just before its own shot
+    // is saved.
+    connect(m_settings->brew(), &SettingsBrew::selectedSteamPitcherChanged, this, [this]() {
+        if (m_applyingRecipe || m_activeRecipe.isEmpty())
+            return;
+        auto* brew = m_settings->brew();
+        const QString steamJson = m_activeRecipe.value(QStringLiteral("steamJson")).toString();
+        const QVariantMap live = brew->getSteamPitcherPreset(brew->selectedSteamPitcher());
+        if (!Recipe::steamPitcherDiverged(steamJson, live.value(QStringLiteral("name")).toString(),
+                                          SettingsBrew::isHeaterOffPitcher(live)))
+            return;
+        // Dropping the parked standing selection stops deactivateRecipe's
+        // override unwind from re-selecting it over the pick that got us here.
+        // Only when there WAS a pick: deleting the preset the recipe names
+        // lands here too (shiftedForRemoval answers with the Heater off
+        // sentinel for the entry that was deleted) and nobody chose anything,
+        // so the user's parked pitcher has to survive to be unwound to. The
+        // recipe's own pitcher still being present is what tells the two
+        // apart.
+        if (recipeSteamPitcherStillExists(steamJson))
+            brew->setStandingSteamPitcher(SettingsBrew::NoStandingPitcher);
+        deactivateRecipe();
+    });
+    connect(m_settings->brew(), &SettingsBrew::selectedWaterVesselChanged, this, [this]() {
+        if (m_applyingRecipe || m_activeRecipe.isEmpty())
+            return;
+        auto* brew = m_settings->brew();
+        const QVariantMap live = brew->getWaterVesselPreset(brew->selectedWaterVessel());
+        if (Recipe::waterVesselDiverged(m_activeRecipe.value(QStringLiteral("hotWaterJson")).toString(),
+                                        live.value(QStringLiteral("name")).toString()))
+            deactivateRecipe();
+    });
     connect(m_profileManager, &ProfileManager::currentProfileChanged, this, [this]() {
         if (m_applyingRecipe || m_activeRecipe.isEmpty())
             return;
@@ -1650,22 +1677,9 @@ void MainController::setupRecipeConnections() {
         if (DrinkTypes::hasGrind(m_activeRecipe.value("drinkType").toString()))
             stampActiveRecipe(QStringLiteral("rpmPinned"), m_settings->dye()->dyeGrinderRpm());
     });
-    // Steam tweaks (pitcher selection/edits, milk weight) refresh the block.
-    connect(m_settings->brew(), &SettingsBrew::selectedSteamPitcherChanged, this,
-            [this]() { stampActiveRecipeSteam(); });
-    connect(m_settings->brew(), &SettingsBrew::steamPitcherPresetsChanged, this,
-            [this]() { stampActiveRecipeSteam(); });
-    connect(m_settings->brew(), &SettingsBrew::lastSteamMilkGChanged, this,
-            [this]() { stampActiveRecipeSteam(); });
-
-    // Hot-water tweaks (vessel selection/edits) refresh the block the same way.
-    // Only fires for a hot-water recipe: stampActiveRecipeHotWater re-snapshots
-    // the selected vessel, and stampActiveRecipe's equality guard means
-    // re-selecting the same vessel is a no-op (never deactivates).
-    connect(m_settings->brew(), &SettingsBrew::selectedWaterVesselChanged, this,
-            [this]() { stampActiveRecipeHotWater(); });
-    connect(m_settings->brew(), &SettingsBrew::waterVesselPresetsChanged, this,
-            [this]() { stampActiveRecipeHotWater(); });
+    // The steam and hot-water blocks have NO write-through (#1895) — the
+    // selection watchers above deactivate instead. tst_RecipeStorage's
+    // onlyDialInValuesStampTheActiveRecipe holds the absence.
 
     // selectedRecipeId (the synchronous pill-selection marker) follows
     // activeRecipeId in steady state: a successful activation sets activeRecipeId
@@ -2417,6 +2431,24 @@ void MainController::loadAutoLoadRecipeIfNeeded() {
     m_recipeStorage->requestRecipe(recipeId);
 }
 
+bool MainController::recipeSteamPitcherStillExists(const QString& steamJson) const {
+    if (!m_settings)
+        return false;
+    const QJsonObject o = QJsonDocument::fromJson(steamJson.toUtf8()).object();
+    if (o.value(QStringLiteral("heaterOff")).toBool())
+        return true;  // the built-in entry, which no delete can remove
+    const QString name = o.value(QStringLiteral("pitcherName")).toString().trimmed();
+    if (name.isEmpty())
+        return false;
+    const QVariantList presets = m_settings->brew()->steamPitcherPresets();
+    for (const QVariant& v : presets) {
+        if (v.toMap().value(QStringLiteral("name")).toString()
+                .compare(name, Qt::CaseInsensitive) == 0)
+            return true;
+    }
+    return false;
+}
+
 void MainController::stampActiveRecipe(const QString& field, const QVariant& value) {
     if (m_applyingRecipe || m_activeRecipe.isEmpty() || !m_recipeStorage || !m_settings)
         return;
@@ -2428,12 +2460,6 @@ void MainController::stampActiveRecipe(const QString& field, const QVariant& val
     m_activeRecipe.insert(field, value);
     m_pendingRecipeSelfWrites++;
     m_recipeStorage->requestUpdateRecipe(recipeId, {{field, value}});
-}
-
-void MainController::stampActiveRecipeSteam() {
-    if (m_applyingRecipe || m_activeRecipe.isEmpty())
-        return;
-    stampActiveRecipe(QStringLiteral("steamJson"), currentSteamSpecJson());
 }
 
 QString MainController::currentSteamSpecJson() const {
@@ -2465,20 +2491,6 @@ QString MainController::currentSteamSpecJson() const {
     if (brew->lastSteamMilkG() > 0)
         o.insert("milkWeightG", brew->lastSteamMilkG());
     return compactJson(o);
-}
-
-void MainController::stampActiveRecipeHotWater() {
-    if (m_applyingRecipe || m_activeRecipe.isEmpty())
-        return;
-    // Only write through for a recipe that actually uses hot water. Otherwise a
-    // brew-screen vessel change (unrelated to this recipe) would stamp an empty
-    // block over a dormant hasWater:false recipe, erasing its remembered vessel
-    // and pour order. currentHotWaterSpecJson() returns "" when hasWater is
-    // false, so without this guard the equality check would persist that "".
-    if (!parseHotWaterBlock(m_activeRecipe.value(QStringLiteral("hotWaterJson")).toString())
-             .value(QStringLiteral("hasWater")).toBool())
-        return;
-    stampActiveRecipe(QStringLiteral("hotWaterJson"), currentHotWaterSpecJson());
 }
 
 QString MainController::currentHotWaterSpecJson() const {
@@ -2580,24 +2592,26 @@ void MainController::onShotSettingsReported(double deviceSteamTargetC, int devic
     // down cannot fire, because nothing between it and the WARN above pumps the
     // event loop.
     if (!m_device || !m_device->isConnected() || !m_settings) {
-        if (m_shotSettingsResendInFlight || m_shotSettingsDriftResendCount > 0) {
+        if (m_shotSettingsDriftResendCount > 0) {
             DRIFT_INFO(QStringLiteral(
                 "device gone with a resend outstanding — ladder abandoned, drift unresolved"));
-            m_shotSettingsResendInFlight = false;
             m_shotSettingsDriftResendCount = 0;
             flushDriftGiveUpLog();
         }
         return;
     }
 
-    const double commandedSteam = m_device->commandedSteamTargetC();
-    const int commandedDuration = m_device->commandedSteamDurationSec();
-    const double commandedHotWaterTemp = m_device->commandedHotWaterTempC();
-    const int commandedHotWaterVol = m_device->commandedHotWaterVolMl();
-    const double commandedGroup = m_device->commandedGroupTargetC();
-    const bool haveCommanded = (commandedSteam >= 0.0 && commandedDuration >= 0
-                                && commandedHotWaterTemp >= 0.0 && commandedHotWaterVol >= 0
-                                && commandedGroup >= 0.0);
+    // What THIS report was expected to carry, not the newest write — reading
+    // commanded* here is what made a burst of writes warn about a dropped write
+    // that never happened. See DE1Device::m_pendingShotSettings.
+    const double expectedSteam = m_device->expectedSteamTargetC();
+    const int expectedDuration = m_device->expectedSteamDurationSec();
+    const double expectedHotWaterTemp = m_device->expectedHotWaterTempC();
+    const int expectedHotWaterVol = m_device->expectedHotWaterVolMl();
+    const double expectedGroup = m_device->expectedGroupTargetC();
+    const bool haveExpected = (expectedSteam >= 0.0 && expectedDuration >= 0
+                               && expectedHotWaterTemp >= 0.0 && expectedHotWaterVol >= 0
+                               && expectedGroup >= 0.0);
 
     // Sentinel values emitted by DE1Device on disconnect — skip, there's
     // nothing to compare against.
@@ -2607,33 +2621,31 @@ void MainController::onShotSettingsReported(double deviceSteamTargetC, int devic
         return;
     }
 
-    // Tolerances cover BLE encoding rounding. Temperatures use u8p0 (1°C
-    // quantum) or u16p8; 0.5°C absorbs FP noise. Integer fields (duration,
-    // volume) must match exactly.
-    constexpr double kTempToleranceC = 0.5;
+    // Same tolerance DE1Device matches in-flight echoes with — one definition,
+    // so the two cannot disagree about whether a value came back unchanged.
+    constexpr double kTempToleranceC = DE1Device::kShotSettingsTempToleranceC;
 
-    // Compare reported against COMMANDED — "did the DE1 honor our last
-    // write?" This is the authoritative question for #746, and it correctly
-    // handles code paths that write values diverging from Settings
-    // (startSteamHeating forces heater on regardless of the resolved heater policy,
-    // softStopSteam writes a 1s timeout, etc.). Comparing against
-    // Settings-derived "expected" would make the drift handler clobber
-    // those writes.
-    const bool steamDrift = haveCommanded &&
-        std::abs(deviceSteamTargetC - commandedSteam) > kTempToleranceC;
-    const bool durationDrift = haveCommanded &&
-        deviceSteamDurationSec != commandedDuration;
-    const bool hotWaterTempDrift = haveCommanded &&
-        std::abs(deviceHotWaterTempC - commandedHotWaterTemp) > kTempToleranceC;
-    const bool hotWaterVolDrift = haveCommanded &&
-        deviceHotWaterVolMl != commandedHotWaterVol;
-    const bool groupDrift = haveCommanded &&
-        std::abs(deviceGroupTargetC - commandedGroup) > kTempToleranceC;
+    // Compare reported against what WE WROTE — "did the DE1 honor this write?"
+    // — never against a Settings-derived value. Several paths deliberately
+    // write values diverging from Settings (startSteamHeating forces the heater
+    // on regardless of the resolved heater policy, softStopSteam writes a 1s
+    // timeout), and re-deriving would make the drift handler clobber them.
+    // #746.
+    const bool steamDrift = haveExpected &&
+        std::abs(deviceSteamTargetC - expectedSteam) > kTempToleranceC;
+    const bool durationDrift = haveExpected &&
+        deviceSteamDurationSec != expectedDuration;
+    const bool hotWaterTempDrift = haveExpected &&
+        std::abs(deviceHotWaterTempC - expectedHotWaterTemp) > kTempToleranceC;
+    const bool hotWaterVolDrift = haveExpected &&
+        deviceHotWaterVolMl != expectedHotWaterVol;
+    const bool groupDrift = haveExpected &&
+        std::abs(deviceGroupTargetC - expectedGroup) > kTempToleranceC;
 
     // Skip before we've ever written — DE1's initial indication on subscribe
     // reflects its power-on state, not ours, and racing against that would
     // log a bogus drift on every connect.
-    if (!haveCommanded) {
+    if (!haveExpected) {
         DRIFT_LOG(QString(
             "pre-commanded report ignored: "
             "reported(steam=%1C dur=%2s hw=%3C vol=%4ml group=%5C) — waiting for first write")
@@ -2674,49 +2686,48 @@ void MainController::onShotSettingsReported(double deviceSteamTargetC, int devic
         // which is what flush() itself tests, and coupling it to a counter it
         // does not depend on is how the next edit to that counter breaks this.
         flushDriftGiveUpLog();
-        m_shotSettingsResendInFlight = false;
         return;
     }
 
-    // Drift detected. The received indication is the post-write state
-    // (read is queued after the write), so any mismatch is real drift.
+    // Drift: the report matched no write still awaiting confirmation, so it is
+    // the DE1's answer to our newest one and it does not carry what we sent.
 
     // Classify for the log so we can scan `grep SettingsDrift` in bug
     // reports and immediately see what happened.
     QString summary;
     if (steamDrift) {
-        if (commandedSteam == 0.0 && deviceSteamTargetC > 0.0) {
+        if (expectedSteam == 0.0 && deviceSteamTargetC > 0.0) {
             summary = QStringLiteral("steam heater ON at %1C but we commanded OFF")
                           .arg(deviceSteamTargetC, 0, 'f', 0);
-        } else if (commandedSteam > 0.0 && deviceSteamTargetC == 0.0) {
+        } else if (expectedSteam > 0.0 && deviceSteamTargetC == 0.0) {
             summary = QStringLiteral("steam heater OFF but we commanded %1C")
-                          .arg(commandedSteam, 0, 'f', 0);
+                          .arg(expectedSteam, 0, 'f', 0);
         } else {
             summary = QStringLiteral("steam target %1C but we commanded %2C")
                           .arg(deviceSteamTargetC, 0, 'f', 0)
-                          .arg(commandedSteam, 0, 'f', 0);
+                          .arg(expectedSteam, 0, 'f', 0);
         }
     }
     if (durationDrift) {
         QString note = QStringLiteral("steam duration %1s but we commanded %2s")
-                           .arg(deviceSteamDurationSec).arg(commandedDuration);
+                           .arg(deviceSteamDurationSec).arg(expectedDuration);
         summary = summary.isEmpty() ? note : summary + QStringLiteral("; ") + note;
     }
     if (hotWaterTempDrift) {
         QString note = QStringLiteral("hot water temp %1C but we commanded %2C")
                            .arg(deviceHotWaterTempC, 0, 'f', 1)
-                           .arg(commandedHotWaterTemp, 0, 'f', 1);
+                           .arg(expectedHotWaterTemp, 0, 'f', 1);
         summary = summary.isEmpty() ? note : summary + QStringLiteral("; ") + note;
     }
     if (hotWaterVolDrift) {
         QString note = QStringLiteral("hot water vol %1ml but we commanded %2ml")
-                           .arg(deviceHotWaterVolMl).arg(commandedHotWaterVol);
+                           .arg(deviceHotWaterVolMl).arg(expectedHotWaterVol);
         summary = summary.isEmpty() ? note : summary + QStringLiteral("; ") + note;
     }
     if (groupDrift) {
         QString note = QStringLiteral("group target %1C but we commanded %2C")
                            .arg(deviceGroupTargetC, 0, 'f', 2)
-                           .arg(commandedGroup, 0, 'f', 2);
+                           .arg(expectedGroup, 0, 'f', 2);
         summary = summary.isEmpty() ? note : summary + QStringLiteral("; ") + note;
     }
 
@@ -2730,39 +2741,20 @@ void MainController::onShotSettingsReported(double deviceSteamTargetC, int devic
         .arg(deviceHotWaterTempC, 0, 'f', 1)
         .arg(deviceHotWaterVolMl)
         .arg(deviceGroupTargetC, 0, 'f', 2)
-        .arg(commandedSteam, 0, 'f', 1)
-        .arg(commandedDuration)
-        .arg(commandedHotWaterTemp, 0, 'f', 1)
-        .arg(commandedHotWaterVol)
-        .arg(commandedGroup, 0, 'f', 2));
+        .arg(expectedSteam, 0, 'f', 1)
+        .arg(expectedDuration)
+        .arg(expectedHotWaterTemp, 0, 'f', 1)
+        .arg(expectedHotWaterVol)
+        .arg(expectedGroup, 0, 'f', 2));
 
-    // If a resend is already in flight (we sent one and haven't yet received
-    // its indication), wait for that to resolve before firing another. This
-    // is the event-based replacement for a 2s wall-clock rate limit.
-    if (m_shotSettingsResendInFlight) {
-        // This indication IS that resend's answer — the read is queued after the
-        // write, per the comment above — and it still shows drift. Consume it by
-        // clearing the flag, so the NEXT report can fire attempt N+1.
-        //
-        // Without this clear the flag was set once and never reset on a drifting
-        // path (the only other resets are the no-drift branch and a reconnect),
-        // so the ladder stalled at one attempt: kMaxResendAttempts was never
-        // reached and the "giving up" WARN below could not execute on any
-        // connection. What a user saw instead was DE1-dropped-write re-warned on
-        // every indication, forever, with no terminal line.
-        //
-        // de1app has no ShotSettings drift detection to compare against. Its
-        // nearest equivalent — confirm_de1_send_shot_frames_worked — detects the
-        // same class of fault and then deliberately does NOT auto-resend
-        // (de1plus/de1_comms.tcl:1566, commented out to avoid a 500ms retry
-        // loop). That hazard does not apply here: this ladder is bounded at
-        // kMaxResendAttempts and advances only when the DE1 sends an
-        // indication, so it cannot spin.
-        m_shotSettingsResendInFlight = false;
-        DRIFT_LOG(QStringLiteral("resend already in flight — this report answers it, still drifting"));
-        return;
-    }
-
+    // No rate limiter here. Each resend queues its own read-back
+    // (DE1Device::resendLastShotSettings), so a still-drifting report is that
+    // resend's answer and must advance the ladder to the next rung. Gating on an
+    // "is a resend in flight" flag consumed exactly that report without counting
+    // it, so the ladder stalled at attempt 1, kMaxResendAttempts was never
+    // reached, and the episode ended on a WARN with no terminal line — the
+    // failure half of a narrative, which LOGGING.md exists to prevent. The ladder
+    // cannot spin: it is bounded below and advances only on a report.
     constexpr int kMaxResendAttempts = 3;
     if (m_shotSettingsDriftResendCount >= kMaxResendAttempts) {
         // Collapsed, because this branch returns without latching and is
@@ -2794,7 +2786,6 @@ void MainController::onShotSettingsReported(double deviceSteamTargetC, int devic
     }
 
     m_shotSettingsDriftResendCount++;
-    m_shotSettingsResendInFlight = true;
     DRIFT_WARN(QString(
         "resending last ShotSettings payload (attempt %1 of %2)")
         .arg(m_shotSettingsDriftResendCount).arg(kMaxResendAttempts));
@@ -2839,8 +2830,8 @@ void MainController::sendMachineSettings(const QString& reason) {
     qDebug() << "sendMachineSettings: steam=" << steamTemp << "°C, groupTemp=" << groupTemp << "°C";
 
     // 1. ShotSettings (single write with all temperatures).
-    // DE1Device::setShotSettings() internally records the commanded values
-    // so onShotSettingsReported() can compare reported against commanded.
+    // DE1Device::setShotSettings() records the write so onShotSettingsReported()
+    // can score the DE1's answer against it.
     m_device->setShotSettings(
         steamTemp,
         m_settings->brew()->steamTimeout(),
@@ -3037,18 +3028,17 @@ void MainController::applyAllSettings() {
     // report, because that line is gated on the counter being non-zero — so a
     // drift that ended in a reconnect left the WARN as the last word a reader
     // ever saw.
-    if (m_shotSettingsDriftResendCount > 0 || m_shotSettingsResendInFlight) {
+    if (m_shotSettingsDriftResendCount > 0) {
         DRIFT_INFO(QString("drift ladder reset by reconnect after %1 resend(s) — "
                            "the previous session's drift was never resolved")
                        .arg(m_shotSettingsDriftResendCount));
     }
     flushDriftGiveUpLog();
     m_shotSettingsDriftResendCount = 0;
-    m_shotSettingsResendInFlight = false;
 
     // 1. Upload current profile (espresso)
     if (m_profileManager->currentProfile().mode() == Profile::Mode::FrameBased) {
-        m_profileManager->uploadCurrentProfile();
+        m_profileManager->uploadCurrentProfileOnConnect();
     }
 
     // 2. Apply steam/hot water/flush settings (unified)
@@ -3392,7 +3382,7 @@ void MainController::computeAutoFlowCalibration(double pouredMultiplier) {
              << bestCount << "samples)"
              << "meanMachineFlow=" << meanMachineFlow
              << "meanWeightFlow=" << meanWeightFlow
-             << "ratio=" << windowRatio
+             << "rawRatio=" << windowRatio
              << "currentFactor=" << currentEffective;
 
     // Guard against division by zero. Should be impossible since every sample
@@ -3543,8 +3533,13 @@ void MainController::computeAutoFlowCalibration(double pouredMultiplier) {
     // "two or three" the doc quotes for a 20% error.
     const double densityAdjustedRatio = windowRatio * kAutoFlowCalWaterDensity93C;
     if (densityAdjustedRatio > kMaxWindowRatio || densityAdjustedRatio < kMinWindowRatio) {
-        CAL_DETAIL("AutoFlow") << windowModeLabel << "window ratio" << densityAdjustedRatio
-                 << "(reported" << meanMachineFlow << "ml/s vs weight" << meanWeightFlow
+        // Both ratios, both named: the bound tests raw * density, and printing
+        // only the adjusted one beside the two raw flows invited a reader to
+        // divide them and get a different number.
+        CAL_DETAIL("AutoFlow") << windowModeLabel << "window density-adjusted ratio"
+                 << densityAdjustedRatio << "(raw" << windowRatio << "x density"
+                 << kAutoFlowCalWaterDensity93C << "; reported" << meanMachineFlow
+                 << "ml/s vs weight" << meanWeightFlow
                  << "g/s) outside bounds [" << kMinWindowRatio << "," << kMaxWindowRatio
                  << "] - skipping (scale data or extraction suspect)";
         noteAutoFlowCalRejection(profileName,
@@ -3899,11 +3894,8 @@ void MainController::snapshotForDescaleHeaterHold() {
     // outranks every veto. Clearing it on entry is correct and final.
     //
     // Deliberately NOT the selected pitcher either. turnOffSteamHeater() does not touch the
-    // selection, so there is nothing to restore — and setSelectedSteamCup() is not inert: it
-    // emits selectedSteamPitcherChanged, which is wired to stampActiveRecipeSteam()
-    // (maincontroller.cpp, constructor) and rewrites the ACTIVE recipe's persisted steamJson.
-    // Restoring a stale pitcher an hour later would overwrite the steam spec of whatever
-    // recipe the user had activated meanwhile.
+    // selection, so there is nothing to restore, and putting a stale pitcher back an hour
+    // later would silently change what the user has since chosen to steam with.
     m_descaleHeaterHoldPrevSteamDisabled = m_settings->brew()->steamDisabled();
 }
 

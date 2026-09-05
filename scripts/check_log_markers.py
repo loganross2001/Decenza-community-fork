@@ -111,6 +111,12 @@ COVERED_GLOBS = [
     # usually explains the other.
     "src/network/mdnsresolver.cpp",
     "src/core/settings_hardware.cpp",
+    # Wholly about the coffee-bag detail pipeline: canonical search, the product
+    # URL's state, archive recovery, page extraction and the image cache. Covered
+    # rather than marker-only because every log line in it is a [BeanBase] line —
+    # and it shipped with TWO hand-rolled prefixes ("BeanBaseClient:" and
+    # "BeanBase:") across twelve calls, so no single grep returned the story.
+    "src/network/beanbaseclient.cpp",
     # Wholly about sensor calibration: every line in it is either a refused
     # correction and why, or a correction being applied with the pair it was
     # computed from. That is the whole answer to "why can I not apply a
@@ -128,6 +134,22 @@ COVERED_GLOBS = [
     # tool files are included deliberately — a query failure inside shots_list is
     # still something an assistant's user reports as "my AI can't see my shots".
     "src/mcp/**/*.cpp",
+    # Wholly about the weather/sun-time fetches, and wholly about the update
+    # check. Both carried a hand-typed "WeatherManager: " / "UpdateChecker: "
+    # prefix that no registered marker matched, which is exactly why they were
+    # invisible to a per-marker analysis of a submitted log while being two of
+    # its largest repeaters. Covered so a future bare qDebug in either cannot
+    # re-open that hole.
+    "src/weather/weathermanager.cpp",
+    "src/core/updatechecker.cpp",
+    # Wholly about screen-reader announcements and the TTS engine behind them:
+    # every line is either the route an announcement took or the setup that
+    # decides which routes exist. Covered because "TalkBack says nothing on this
+    # screen" is answered ONLY by these lines, and the file shipped with two
+    # hand-rolled conventions that had already drifted apart — eight "[a11y] "
+    # bare-qInfo lines and six "AccessibilityManager: " ones — so neither a
+    # marker filter nor a single grep returned the whole story.
+    "src/core/accessibilitymanager.cpp",
 ]
 
 # Files that HOST a registered subsystem's lines alongside unrelated code.
@@ -178,6 +200,10 @@ MARKER_ONLY_GLOBS = [
     # rule 6 existing rather than for adding files by hand.
     "src/core/settings_theme.cpp",
     "src/screensaver/iosbrightness.mm",
+    # Hosts the [BeanBase][FindPage] decline line beside the advisor, the
+    # conversation store and every provider dispatch, none of which is the bag
+    # pipeline — marker-only for exactly that reason.
+    "src/ai/aimanager.cpp",
     # Hosts two subsystems' lines: [Equipment][Migration] (the constructor's
     # adoption of the package migration 35/36 healed) and [DE1][SettingsDrift]
     # (the ShotSettings resend ladder in onShotSettingsReported). Both sit beside
@@ -215,7 +241,40 @@ def helper_headers():
 # logtags.h calls a marker "API, not an implementation detail"; rule 4 is what makes
 # the QML side of that true.
 QML_GLOBS = ["qml/**/*.qml"]
-QML_MARKER_RE = re.compile(r'"\[([A-Z][A-Za-z0-9]*)\]"')
+# A bracketed marker in QML. Matches BOTH shapes this rule has to cover, which
+# is the part that took two tries to get right.
+#
+# TWO shapes, and a pattern that covers only one of them is the recurring bug
+# here — it has now been written wrong in both directions:
+#
+#   "[DE1]"                      a log VIEW's filter (SubsystemLogView.markers)
+#   console.log("[DE1] woke")    a log CALL
+#
+# The original `r'"\[([A-Z][A-Za-z0-9]*)\]"'` required the closing quote to sit
+# immediately after the `]`, so it matched the filter form and nothing else: rule
+# 4 saw 7 tokens in qml/ where there were 59, and 46 call sites under 12
+# unregistered names ([AutoSleep], [Keyboard], [Background], [CustomEditorPopup]
+# and friends) were invisible.
+#
+# The first fix replaced that quote with `[ :]`, which INVERTED the coverage
+# rather than widening it — the 46 calls were caught and the three filter sites
+# at SettingsConnectionsTab.qml:765/:941/:1961 went blind, i.e. the exact sites
+# the rule-4 preamble above says the rule exists for. Caught in review by
+# injecting an unregistered marker into a bare filter string and watching the
+# gate pass.
+#
+# So: a LOOKAHEAD, which consumes nothing and admits a space, a colon, or the
+# closing quote. That keeps the token anchored to a whole word rather than a
+# prefix of a longer one while covering both shapes at once.
+#
+# The opening class is `["'`]` and the lookahead accepts the same three, because
+# single-quoted strings and template literals are ordinary QML/JS. Neither occurs
+# in the tree today; being anchored to a double quote alone was the same "cannot
+# match the shape it is written for" hazard one edit away from mattering.
+#
+# Hyphens are allowed inside the token so a hand-rolled "[R2-diag]" is CAUGHT
+# rather than skipped for not looking like an identifier.
+QML_MARKER_RE = re.compile(r'''["'`]\[([A-Z][A-Za-z0-9-]*)\](?=[ :"'`])''')
 
 BARE_LOG_RE = re.compile(r"\bq(Debug|Info|Warning|Critical)\s*\(\s*\)")
 EXEMPT_RE = re.compile(r"log-marker-exempt")

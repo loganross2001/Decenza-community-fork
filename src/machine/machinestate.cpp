@@ -2,6 +2,7 @@
 
 #include "core/logtags.h"
 #include "sawlogging.h"
+#include "../ble/de1logging.h"
 #include "../ble/de1device.h"
 #include "../ble/scaledevice.h"
 #include "../ble/scales/scaletypeids.h"
@@ -15,35 +16,11 @@
 #include <QDateTime>
 #include <QDebug>
 #include <QMetaEnum>
-#include <QQmlEngine>
-#include <QJSEngine>
 
-MachineState *MachineState::s_qmlInstance = nullptr;
-
-void MachineState::setQmlInstance(MachineState *instance)
-{
-    s_qmlInstance = instance;
-}
-
-MachineState *MachineState::create(QQmlEngine *qmlEngine, QJSEngine *jsEngine)
-{
-    Q_UNUSED(qmlEngine)
-    Q_UNUSED(jsEngine)
-    if (!s_qmlInstance) {
-        // Reached only if QML resolves the singleton before main.cpp published the instance.
-        // Name the missing call: the symptom otherwise is every phase-driven binding in the app
-        // reading as undefined, which looks like a dozen unrelated bugs rather than one missing
-        // line.
-        qCritical("MachineState: QML asked for the singleton before "
-                  "MachineState::setQmlInstance() was called. Publish the instance before "
-                  "QQmlEngine::load().");
-        return nullptr;
-    }
-    // No per-engine state here, so no second-engine guard — same reasoning as MainController.
-    // The engine would otherwise take ownership of a stack object owned by main().
-    QJSEngine::setObjectOwnership(s_qmlInstance, QJSEngine::CppOwnership);
-    return s_qmlInstance;
-}
+// MachineState carries no logMessage signal, so the stderr form. Aliased, never
+// copied — see de1logging.h. INFO throughout: all three lines are the user-facing
+// half of "why did (or didn't) the warning appear".
+#define STANDBY_INFO(msg) DE1_INFO_STDERR_TAGGED("StandbySwitch", msg)
 
 MachineState::MachineState(DE1Device* device, QObject* parent)
     : QObject(parent)
@@ -74,6 +51,20 @@ MachineState::MachineState(DE1Device* device, QObject* parent)
     m_shotTimer = new QTimer(this);
     m_shotTimer->setInterval(100);  // Update every 100ms
     connect(m_shotTimer, &QTimer::timeout, this, &MachineState::onShotTimerTick);
+
+    // How long Error_NoAC must persist before it counts as the standby switch.
+    //
+    // 6 s is OUR estimate, not a figure from anywhere: the one field observation we
+    // have is a spurious episode of "about three seconds" on a single machine
+    // (firmware v1363, #1893), and this is that plus margin. de1app is NOT precedent
+    // for it — see the note at the standbySwitchOpen computation.
+    m_noAcSettleTimer = new QTimer(this);
+    m_noAcSettleTimer->setSingleShot(true);
+    m_noAcSettleTimer->setInterval(6000);
+    connect(m_noAcSettleTimer, &QTimer::timeout, this, [this]() {
+        m_noAcSettled = true;
+        updatePhase();
+    });
 
     if (m_device) {
         connect(m_device, &DE1Device::stateChanged, this, &MachineState::onDE1StateChanged);
@@ -338,8 +329,8 @@ void MachineState::onDE1SubStateChanged() {
 }
 
 namespace {
-// The substates that mean "the machine is heating and water has NOT reached the
-// puck yet". Shared deliberately: updatePhase() uses it to decide
+// The substates that mean "the machine is heating and water has NOT reached the puck
+// yet". Shared deliberately: updatePhase() uses it to decide
 // Phase::EspressoPreheating, and the auto-tare gate re-checks the substate directly
 // because m_phase lags behind BLE state changes. That second read is only sound
 // while both agree — as two hand-written copies they could drift apart, and the
@@ -374,15 +365,40 @@ void MachineState::updatePhase() {
                                         m_phase == Phase::Preinfusion ||
                                         m_phase == Phase::Pouring ||
                                         m_phase == Phase::Ending);
+            // Neither timer stops on its own: both other stop sites sit past
+            // this early return, and onShotTimerTick() has no connectivity
+            // guard. The scale is a separate BLE link and keeps counting on
+            // its own display.
+            //
+            // Gated like the other stop sites, which all require that
+            // something was running: a drop from Idle or Sleep must not send
+            // an unsolicited stop to a scale the user is timing with by hand.
+            if (m_shotTimer->isActive() || wasInEspresso)
+                stopShotAndScaleTimers("DE1 disconnected");
             m_phase = Phase::Disconnected;
             emit phaseChanged();
             if (wasInEspresso)
                 emit espressoCycleEnded();
         }
+        if (m_noAcEpisode.isValid()) {
+            // A drop mid-episode is a real way for one to end, and losing its length
+            // loses exactly the measurement the interval needs correcting from.
+            STANDBY_INFO(QStringLiteral("no-AC episode ended by a DE1 disconnect after "
+                                        "%1 ms (the wait is %2 ms); %3")
+                             .arg(m_noAcEpisode.elapsed())
+                             .arg(m_noAcSettleTimer->interval())
+                             .arg(m_standbySwitchOpen
+                                      ? QStringLiteral("the warning was showing and is "
+                                                       "now cleared")
+                                      : QStringLiteral("no warning had shown")));
+        }
         if (m_standbySwitchOpen) {
             m_standbySwitchOpen = false;
             emit standbySwitchOpenChanged();
         }
+        m_noAcSettleTimer->stop();
+        m_noAcSettled = false;
+        m_noAcEpisode.invalidate();
         return;
     }
 
@@ -394,10 +410,74 @@ void MachineState::updatePhase() {
 
     // Front standby switch cutting AC (Error_NoAC). Firmware < 1337 reports this
     // substate spuriously, matching de1app's own gate — see DE1::SubState::Error_NoAC.
-    const bool standbySwitchOpen = (subState == DE1::SubState::Error_NoAC)
+    //
+    // Firmware >= 1337 reports it spuriously too, briefly: the machine enters
+    // Error_NoAC while waking or heating and leaves it untouched a few seconds later
+    // (field reports on v1363, seen on every tap-to-wake). A snapshot cannot tell that
+    // apart from the real thing — an open switch reports "Idle, Error_NoAC" and so
+    // does the blip — so DURATION is the only discriminator, and this is a
+    // measurement of the hardware rather than a guard against a race.
+    //
+    // de1app does NOT do this, and the difference is unexplained. It shows its warning
+    // immediately (machine.tcl:1354, no duration test; commit 04d3b02e reports "page
+    // appears ~1ms after the switch is flipped" on firmware 1352). Its only timer here
+    // is a one-shot `after 6000` on connect (de1_de1.tcl:946) that re-checks a machine
+    // already latched in Error_NoAC — the gap our firmwareVersionChanged hook covers,
+    // not a settling wait. Whether their users tolerate the same flash, or 1352 and 1363
+    // differ, is unknown — so 6 s is a workaround for a mechanism nobody has identified,
+    // and the logging below exists to identify it.
+    //
+    // Deliberately not keyed on what preceded the episode: the substate it arrives
+    // from varies by entry point (Ready on a tap-to-wake, a heating substate mid
+    // warm-up, nothing at all on a fresh connect), so every history-based rule misses
+    // at least one path. Duration covers them all.
+    //
+    // Every line that ENDS an episode carries its measured length in ms. That is the
+    // diagnostic value here: 6 s is an estimate from one reported episode, so a
+    // submitted log has to say how long real episodes actually run. Without it a report
+    // of "still happening" cannot distinguish a longer episode from a different
+    // mechanism. The warning-cleared line below carries no duration and does not need
+    // to: the episode-ended line always fires alongside it, and by then the episode has
+    // been invalidated anyway.
+    const bool noAc = (subState == DE1::SubState::Error_NoAC);
+    if (!noAc) {
+        if (m_noAcEpisode.isValid()) {
+            STANDBY_INFO(QStringLiteral("machine reported no AC for %1 ms then cleared "
+                                        "it (substate is now %2); the wait is %3 ms, so "
+                                        "%4")
+                             .arg(m_noAcEpisode.elapsed())
+                             .arg(DE1::subStateToString(subState))
+                             .arg(m_noAcSettleTimer->interval())
+                             .arg(m_standbySwitchOpen
+                                      ? QStringLiteral("the warning had already shown")
+                                      : QStringLiteral("no warning was shown")));
+            m_noAcEpisode.invalidate();
+        }
+        m_noAcSettleTimer->stop();
+        m_noAcSettled = false;
+    } else if (!m_noAcSettled && !m_noAcSettleTimer->isActive()) {
+        m_noAcEpisode.start();
+        m_noAcSettleTimer->start();
+    }
+
+    // m_noAcSettled, not the timer, is what the firmware-arrival re-run reads: the
+    // build number can land after the wait has already elapsed.
+    const bool standbySwitchOpen = noAc && m_noAcSettled
         && m_device->firmwareBuildNumber() >= 1337;
     if (standbySwitchOpen != m_standbySwitchOpen) {
         m_standbySwitchOpen = standbySwitchOpen;
+        if (standbySwitchOpen) {
+            STANDBY_INFO(QStringLiteral("warning shown: machine has reported no AC for "
+                                        "%1 ms, past the %2 ms wait (state=%3, firmware "
+                                        "build %4)")
+                             .arg(m_noAcEpisode.elapsed())
+                             .arg(m_noAcSettleTimer->interval())
+                             .arg(DE1::stateToString(state))
+                             .arg(m_device->firmwareBuildNumber()));
+        } else {
+            STANDBY_INFO(QStringLiteral("warning cleared: substate is now %1")
+                             .arg(DE1::subStateToString(subState)));
+        }
         emit standbySwitchOpenChanged();
     }
 
@@ -567,6 +647,8 @@ void MachineState::updatePhase() {
 
                 m_tareCompleted = false;
                 m_waitingForTare = false;
+                m_hotWaterTarePending = false;
+                m_lastHotWaterTareWarnMs = 0;
                 if (m_tareTimeoutTimer)
                     m_tareTimeoutTimer->stop();
 
@@ -583,7 +665,12 @@ void MachineState::updatePhase() {
                 // Delay 200ms after resetTimer/startTimer to avoid BLE command contention —
                 // WriteWithoutResponse can silently drop packets when sent in rapid succession.
                 if (m_phase == Phase::HotWater) {
+                    m_hotWaterTarePending = true;
                     QTimer::singleShot(200, this, [this]() {
+                        // Cleared on BOTH paths: the early return leaves no tare coming,
+                        // and a pending flag that outlives its tare would silence the
+                        // warning for the rest of the pour.
+                        m_hotWaterTarePending = false;
                         if (m_phase != Phase::HotWater) return;  // Operation ended before timer fired
                         tareScale();
                         qDebug() << "=== TARE: Hot Water started (200ms after timer cmds) ===";
@@ -633,12 +720,7 @@ void MachineState::updatePhase() {
         } else if (!isFlowing() && wasFlowing) {
             // Don't stop timer during espresso Ending phase - let it run until cycle ends
             if (!isInEspresso) {
-                stopShotTimer();
-                // Stop scale timer when flow ends
-                if (m_scale) {
-                    m_scale->stopTimer();
-                    qDebug() << "=== SCALE TIMER: Stopped (flow ended) ===";
-                }
+                stopShotAndScaleTimers("flow ended");
                 // Steam left the Steaming phase. Two cases reach this: a manual
                 // stop straight out of flowing steam (the pending flag emits
                 // here), or the Steaming->Idle exit AFTER an auto-stop —
@@ -792,11 +874,7 @@ void MachineState::updatePhase() {
             qDebug().noquote() << QString("MachineState: steam flow stopped via substate change (substate=%1)")
                 .arg(DE1::subStateToString(m_device->subState()));
         }
-        stopShotTimer();
-        if (m_scale) {
-            m_scale->stopTimer();
-            qDebug() << "=== SCALE TIMER: Stopped (substate change) ===";
-        }
+        stopShotAndScaleTimers("substate change");
         // Steam auto-stop path: substate left Steaming (Puffing/Ending) while
         // the phase stays Steaming. This emission marks the actual end of flow;
         // consuming the pending flag here keeps the later Steaming->Idle
@@ -995,14 +1073,24 @@ void MachineState::onScaleWeightChanged(double weight) {
 void MachineState::checkStopAtWeightHotWater(double weight) {
     if (m_stopAtWeightTriggered) return;
     if (!m_tareCompleted) {
-        // Throttle this warning to every 5s to avoid log spam at 5Hz
-        static qint64 s_lastTareWarnMs = 0;
-        qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
-        if (nowMs - s_lastTareWarnMs >= 5000) {
-            SAW_WARN_STDERR("HotWater",
-                QStringLiteral("Tare not completed — skipping stop-at-weight check, weight=%1 g")
-                    .arg(weight, 0, 'f', 2));
-            s_lastTareWarnMs = nowMs;
+        // Not yet SENT is not the same as failed. The tare is scheduled a moment after
+        // flow starts, and the samples arriving in between still carry the last pour's
+        // zero (a logged one read -138.40 g, 56 ms before its own tare fired). Skipping
+        // them is right; warning about them is not — it named a condition that had not
+        // had its chance to happen yet.
+        if (!m_hotWaterTarePending) {
+            // Throttle this warning to every 5s to avoid log spam at 5Hz. A MEMBER, not
+            // a function-local static: a process-wide throttle outlives every object in
+            // the process, so whichever caller reached this line first in the last five
+            // seconds decides whether anyone else gets a line — which in a test binary
+            // means one test can silence another's expected warning.
+            qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+            if (nowMs - m_lastHotWaterTareWarnMs >= 5000) {
+                SAW_WARN_STDERR("HotWater",
+                    QStringLiteral("Tare not completed — skipping stop-at-weight check, weight=%1 g")
+                        .arg(weight, 0, 'f', 2));
+                m_lastHotWaterTareWarnMs = nowMs;
+            }
         }
         return;
     }
@@ -1186,6 +1274,15 @@ void MachineState::startShotTimer() {
 
 void MachineState::stopShotTimer() {
     m_shotTimer->stop();
+}
+
+void MachineState::stopShotAndScaleTimers(const char* reason) {
+    stopShotTimer();
+    if (m_scale) {
+        m_scale->stopTimer();
+        qDebug().noquote()
+            << QStringLiteral("=== SCALE TIMER: Stopped (%1) ===").arg(QLatin1String(reason));
+    }
 }
 
 void MachineState::onShotTimerTick() {

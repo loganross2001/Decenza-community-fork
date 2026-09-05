@@ -248,6 +248,53 @@ private slots:
 
     // parseBagExtraction: the "Get info" response contract — JSON possibly
     // wrapped in markdown fences, whitelisted to the blob vocabulary keys.
+    // parseProductPageUrl: the last-rung search's reply contract. A model's
+    // guess is about to be offered as a bag's product page, so anything that
+    // is not plainly an https URL is treated as "found nothing".
+    // Finding a page is a SEARCH, and only one provider's web tool does both
+    // search and fetch. Anthropic's web_fetch and Gemini's url_context can only
+    // open a URL the prompt already names — routed through those, the model
+    // answers from memory, which is a hallucinated URL wearing a tool's
+    // credibility. All three must therefore declare a real search tool.
+    void everyKeyedProviderCanSearchTheWeb()
+    {
+        QNetworkAccessManager nam;
+        OpenAIProvider openai(&nam, QStringLiteral("k"));
+        AnthropicProvider anthropic(&nam, QStringLiteral("k"));
+        GeminiProvider gemini(&nam, QStringLiteral("k"));
+        QVERIFY(openai.supportsWebSearch());
+        QVERIFY(anthropic.supportsWebSearch());
+        QVERIFY(gemini.supportsWebSearch());
+
+        // Ollama has no server-side web tool; the caller must see that rather
+        // than be handed a fabricated answer.
+        OllamaProvider ollama(&nam, QStringLiteral("http://localhost:11434"),
+                              QStringLiteral("llama3"));
+        QVERIFY(!ollama.supportsWebSearch());
+    }
+
+    void parseProductPageUrlAcceptsOnlyAnHttpsUrl()
+    {
+        QCOMPARE(AIManager::parseProductPageUrl(
+                     "{\"url\": \"https://roaster.example/products/x\"}"),
+                 QString("https://roaster.example/products/x"));
+        // Fences and prose around the object are tolerated, as elsewhere.
+        QCOMPARE(AIManager::parseProductPageUrl(
+                     "Here you go:\n```json\n{\"url\":\"https://r.example/p\"}\n```"),
+                 QString("https://r.example/p"));
+
+        // The honest empty answer.
+        QVERIFY(AIManager::parseProductPageUrl("{}").isEmpty());
+        // Prose instead of JSON.
+        QVERIFY(AIManager::parseProductPageUrl("I could not find it").isEmpty());
+        // http, and other schemes: refused outright — this URL is about to be
+        // fetched and handed to a provider.
+        QVERIFY(AIManager::parseProductPageUrl("{\"url\":\"http://r.example/p\"}").isEmpty());
+        QVERIFY(AIManager::parseProductPageUrl("{\"url\":\"file:///etc/passwd\"}").isEmpty());
+        QVERIFY(AIManager::parseProductPageUrl("{\"url\":\"\"}").isEmpty());
+        QVERIFY(AIManager::parseProductPageUrl("{\"url\":\"https://\"}").isEmpty());
+    }
+
     void parseBagExtractionHandlesFencesWhitelistAndGarbage()
     {
         bool ok = false;
@@ -3325,16 +3372,23 @@ private slots:
         const QString prior = QStringLiteral("How did this taste?");
         const QString reply = QStringLiteral("82, actually the roast is dark");
 
+        // Installed BEFORE the producers run, not after. requestUpdateShotMetadata()
+        // posts to a background SerialDbWorker and "No shot with id ... to update"
+        // is emitted from THAT thread, so nothing orders it against the main thread
+        // reaching these lines. With init()'s failOnWarning() in force, losing that
+        // race fails the test with "Received a warning that resulted in a failure"
+        // — which is how it failed on a loaded machine. The sibling test above gets
+        // this order right; this one was the outlier.
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression("No shot with id 8473 to update"));
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression("No shot with id 8473 to update"));
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression("did not land"));
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression("did not land"));
+
         mgr.maybePersistRatingFromReply(reply, prior, 8473);
         mgr.maybePersistBeanCorrectionFromReply(reply, prior, 8473);
         // The premise of the refcount, asserted rather than assumed: both
         // producers registered a write against the same shot id.
         QCOMPARE(mgr.m_pendingMetadataWrites.value(8473), 2);
-
-        QTest::ignoreMessage(QtWarningMsg, QRegularExpression("No shot with id 8473 to update"));
-        QTest::ignoreMessage(QtWarningMsg, QRegularExpression("No shot with id 8473 to update"));
-        QTest::ignoreMessage(QtWarningMsg, QRegularExpression("did not land"));
-        QTest::ignoreMessage(QtWarningMsg, QRegularExpression("did not land"));
 
         QTRY_COMPARE_WITH_TIMEOUT(failed.count(), 2, 5000);
         QVERIFY(!mgr.m_pendingMetadataWrites.contains(8473));

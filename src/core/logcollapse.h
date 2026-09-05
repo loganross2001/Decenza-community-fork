@@ -127,6 +127,13 @@ public:
         return false;
     }
 
+    // How many keys are live, and whether one of them is `key`. For a caller that must BOUND its
+    // key space: the collapse limits repeats within a key and says nothing about how many keys
+    // exist, so a caller keying on attacker- or noise-supplied data (a frame's command byte, say)
+    // has to fold past a cap of its own. See scaleFrameShapeLine().
+    qsizetype keyCount() const { return m_entries.size(); }
+    bool hasKey(const QString& key) const { return m_entries.contains(key); }
+
     // Ends a run: returns what is still pending for `key` and forgets the key entirely, so the next
     // run starts as a first sighting.
     //
@@ -183,6 +190,18 @@ public:
         if (c.suppressed <= 0)
             return QString();
         return QStringLiteral(" (+%1 identical in the preceding %2 s)")
+            .arg(c.suppressed)
+            .arg(c.spanMs / 1000);
+    }
+
+    // For a caller whose key is a BUCKET rather than the whole line: the suppressed
+    // lines were alike, not identical, and saying "identical" would tell a reader the
+    // numbers never moved when they moved within the bucket.
+    static QString suffixSimilar(const Collapsed& c)
+    {
+        if (c.suppressed <= 0)
+            return QString();
+        return QStringLiteral(" (+%1 similar in the preceding %2 s)")
             .arg(c.suppressed)
             .arg(c.spanMs / 1000);
     }

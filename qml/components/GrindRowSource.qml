@@ -150,13 +150,29 @@ QtObject {
     // is adjustable on the first tap. Only a seed — nothing written until picked.
     readonly property int rpmDefaultAnchor: 1000
 
-    // Wheel window half-width, in steps. Deliberately far beyond any physical
-    // dial so spinning is effectively unbounded — the user must never have to
-    // close and reopen the picker to keep going (a Niche 9 -> -1 move is 40
-    // steps at 0.25). The REAL limits are semantic and live in the stepper:
-    // click-indexed grinders floor at 0, letters clamp A..Z. Only ~5 rows are
-    // visible at a time, so a wide window costs nothing to look at.
-    readonly property int grindWindowSteps: 400
+    // Wheel window half-width, in steps. The number is load-bearing, not taste.
+    //
+    // Was 400. The wheel's target row is always the window's middle, and
+    // assigning a new array to Tumbler.model replaces the model object —
+    // QQuickItemViewPrivate::setModel then forces currentIndex back to 0 and
+    // refills around 0 (qquickitemview.cpp:1163-1169), so `currentIndex = middle`
+    // has to reach that far outside what was just realised. Measured on a Samsung
+    // SM-X210, three opens each with the grind changed:
+    //
+    //   801 rows (±400):  currentIndex= 629/640/633 ms   open 768/770/753 ms
+    //   401 rows (±200):  currentIndex=     0/3/2 ms     open   35/41/38 ms
+    //
+    // A CLIFF, not a slope — halving the rows cut it ~300x, not 2x, so something
+    // between 401 and 801 crosses a threshold in QQuickListView. Where exactly is
+    // NOT established; 200 is on the good side of it with margin. Do not raise it
+    // without re-measuring on a slow tablet. The view TRAVERSAL is not the reason:
+    // positionViewAtIndex crossed 400 rows in 16 ms.
+    //
+    // The range given up costs nothing. ±200 steps is ±50 dial units at a 0.25
+    // step — five times the widest real move (a Niche 9 -> -1 is 40 steps) — and
+    // only ~5 rows are visible at a time. The REAL limits are semantic and live in
+    // the stepper: click-indexed grinders floor at 0, letters clamp A..Z.
+    readonly property int grindWindowSteps: 200
     readonly property int rpmWindowSteps: 40
 
     // --- Stepping algorithm -------------------------------------------------
@@ -201,7 +217,7 @@ QtObject {
 
     // Return the grind setting `n` steps from `currentString`,
     // or "" to skip (unparseable / below a click-indexed dial floor).
-    function stepGrind(currentString, n, step) {
+    function stepGrind(currentString, n, step, precomputed) {
         var s = String(currentString == null ? "" : currentString).trim()
         if (s.length === 0)
             return ""
@@ -210,8 +226,15 @@ QtObject {
         //    "a+b") step through the notation-aware pipeline. Returns "" for a
         //    custom grinder, an unparseable value, or a click-indexed
         //    below-floor candidate — then the JS branches take over.
-        var viaCatalog = Settings.dye.stepGrinderSetting(root.grinderBrand, root.grinderModel,
-                                                         s, n * step, _stepDecimals(step, s))
+        //
+        // `precomputed` is this row's catalog answer when the caller already has
+        // it from stepGrinderSettingRange(). Same value, one crossing for the
+        // whole wheel instead of 801 — see that function. Undefined means "ask",
+        // which is what every single-row caller does.
+        var viaCatalog = (precomputed !== undefined)
+            ? precomputed
+            : Settings.dye.stepGrinderSetting(root.grinderBrand, root.grinderModel,
+                                              s, n * step, _stepDecimals(step, s))
         if (viaCatalog && viaCatalog.length > 0)
             return viaCatalog
 
@@ -321,11 +344,14 @@ QtObject {
     // May return a short (or empty) array when the anchor seeds few rows; the
     // caller (grindRowsFor) treats <= 2 rows as failure and falls through.
     function _windowAround(anchor, step) {
-        var canon = root.stepGrind(anchor, 0, step)
+        var catalog = Settings.dye.stepGrinderSettingRange(
+            root.grinderBrand, root.grinderModel, anchor, step,
+            -root.grindWindowSteps, root.grindWindowSteps, root._stepDecimals(step, anchor))
+        var canon = root.stepGrind(anchor, 0, step, catalog[root.grindWindowSteps])
         var out = []
         var seen = ({})
         for (var n = -root.grindWindowSteps; n <= root.grindWindowSteps; n++) {
-            var v = root.stepGrind(anchor, n, step)
+            var v = root.stepGrind(anchor, n, step, catalog[n + root.grindWindowSteps])
             if (v === "" || v === undefined) continue
             if (seen[v]) continue
             seen[v] = true
@@ -337,17 +363,59 @@ QtObject {
     // Candidate rows around an arbitrary value — the picker calls this with its
     // PENDING value when re-seeding after typed entry, so the wheel rebases on
     // what the user typed rather than snapping back to the old lattice.
+    // One-entry memo of the last generated row set.
+    //
+    // The rows are a pure function of (cur, step, grinderBrand, grinderModel):
+    // same inputs, same 801 strings. Reopening the picker without changing the
+    // value — and the text <-> wheel toggle, which rebuilds — regenerate an
+    // identical array, so they are served from here.
+    //
+    // ONLY the lattice path is stored. Its rows are generated from the key's own
+    // four inputs and nothing else, and `step` is re-read from the query on every
+    // rebuild, so a step that moves misses by construction.
+    //
+    // The two history-derived paths are deliberately NOT memoized:
+    // _observedFallback() and _medianObservedAnchor() both read
+    // getDistinctGrinderSettingsForGrinder(), which is a second input the key does
+    // not name. Storing them was a real bug — a grinder with non-numeric settings
+    // ("coarse"/"fine") takes the fallback on every open, and recording a new
+    // setting does not move `cur`, `step`, brand or model, so the memo kept
+    // serving a list the new setting was missing from for the rest of the session.
+    // That is the same invalidated-on-the-wrong-axis failure as the distinct-value
+    // cache CLAUDE.md records as deleted.
+    //
+    // The array is only ever read by its consumers, never mutated, so handing back
+    // the same object is safe. Returning an identical reference also means QML
+    // signals no change, so the Tumbler skips rebuilding a model it already has —
+    // measured as assign=0ms on a hit against 3ms on a miss.
+    property var _rowsMemoKey: ""
+    property var _rowsMemo: null
+
+    function _rowsKeyFor(cur, step) {
+        return String(cur) + "\u0000" + String(step) + "\u0000"
+             + String(root.grinderBrand) + "\u0000" + String(root.grinderModel)
+    }
+
     function grindRowsFor(cur) {
         cur = String(cur == null ? "" : cur).trim()
         var step = root.grindStep()
+        var _key = root._rowsKeyFor(cur, step)
+        if (root._rowsMemo !== null && root._rowsMemoKey === _key)
+            return root._rowsMemo
         // Canonical current = the value reformatted to the step's decimals
         // (exactly what n === 0 produces); highlight whichever surviving row
         // equals it so clamp-edge dedup can't lose the highlight.
-        var canonicalCurrent = root.stepGrind(cur, 0, step)
+        // One crossing for the whole wheel. Entry i is row (i - grindWindowSteps);
+        // empty entries mean the catalog declined that row and stepGrind falls
+        // through to its JS branches, exactly as when it asked per row.
+        var catalog = Settings.dye.stepGrinderSettingRange(
+            root.grinderBrand, root.grinderModel, cur, step,
+            -root.grindWindowSteps, root.grindWindowSteps, root._stepDecimals(step, cur))
+        var canonicalCurrent = root.stepGrind(cur, 0, step, catalog[root.grindWindowSteps])
         var generated = []
         var seen = ({})
         for (var n = -root.grindWindowSteps; n <= root.grindWindowSteps; n++) {
-            var v = root.stepGrind(cur, n, step)
+            var v = root.stepGrind(cur, n, step, catalog[n + root.grindWindowSteps])
             if (v === "" || v === undefined) continue
             if (seen[v]) continue
             seen[v] = true
@@ -373,8 +441,12 @@ QtObject {
                         return win
                 }
             }
+            // Not memoized — see the memo declaration. This list comes from shot
+            // history, which the key does not name.
             return root._observedFallback(cur)
         }
+        root._rowsMemoKey = _key
+        root._rowsMemo = generated
         return generated
     }
 

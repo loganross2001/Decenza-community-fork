@@ -276,6 +276,19 @@ public:
     // Bumping it on a release that fixes the dual-HIGH contention is how the
     // fix reaches already-latched devices. A legacy pre-epoch record (no
     // stored epoch) is migrated forward, NOT re-detected (see setSettings).
+    //
+    // A LATCH IS MEANT TO LAST FOREVER, and a bump is the ONLY thing that ends
+    // one — which is why it is not routine maintenance. Once a device has
+    // proved it cannot carry two HIGH-priority links, BALANCED is where it
+    // stays: the upside of HIGH is very small for almost everyone, and the
+    // downside of re-testing is re-inflicting the fault the latch was set to
+    // avoid (broken scale discovery, a ~70 s DE1 GATT collapse). The asymmetry
+    // is the whole argument — do not bump to "recheck whether the device got
+    // better", to expire an old classification, or because the diagnostic
+    // build code in the persisted record looks ancient. That build code is
+    // provenance, not staleness (see "Build code does not gate" in
+    // openspec/specs/ble-connection-priority/spec.md); a record set on build
+    // 3391 rehydrating on build 3576 is the design working.
     static constexpr int kBleDetectionEpoch = 1;
 
     bool scaleSkipHighPriority() const { return m_scaleSkipHigh.latched; }
@@ -705,6 +718,12 @@ public slots:
     // Connecting for ~30s and starves the DE1 link (issue #1303). A saved scale
     // still auto-connects via onDeviceDiscovered when it's seen advertising.
     Q_INVOKABLE void tryDirectConnectToScale(bool allowDirectConnect = true);
+
+    // Ask main.cpp, which owns the reconnect ladder, to restart it from the top.
+    // firstDelayMs < 0 means the ramp's own first step.
+    Q_INVOKABLE void requestScaleReconnectRampRestart(
+        const QString& reason = QStringLiteral("Scale notice dismissed"),
+        int firstDelayMs = -1);
     /**
      * The DE1's connect attempt started or ended. OBSERVABILITY ONLY.
      *
@@ -785,6 +804,7 @@ signals:
     void scaleRetryNeeded();   // Emitted on EVERY connection-failure path (including the post-WiFi→BLE-fallback give-up), regardless of the flowScaleFallback gate, so the persistent reconnect ladder in main.cpp survives the scale-type-change timer stop. Don't bind UI to this — it's for re-arming the retry timer only.
     void scaleDisconnected();  // Emitted when physical scale disconnects
     void scaleConnected();     // Emitted when a physical scale (re)connects — lets the UI dismiss the scale-disconnect / no-scale notice
+    void scaleReconnectRampRestartRequested(const QString& reason, int firstDelayMs);
     void scanStarted();  // Emitted when BLE scan actually begins
     // Emitted when a saved WiFi scale fails to connect within the connection
     // timeout and BLEManager has started a BLE scan as a fallback. UI binds

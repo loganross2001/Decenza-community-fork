@@ -6,7 +6,10 @@
 #include <QPointer>
 #include <QSet>
 #include <QTimer>
+#include <QStringList>
 #include <QVariantList>
+
+#include <functional>
 
 #include <QtQml/qqmlregistration.h>
 class QNetworkAccessManager;
@@ -107,15 +110,84 @@ public:
     // and reports the outcome so the consumer can persist "the right data":
     //   • 200 (incl. via redirect) → bagLinkResolved(id, finalUrl): a stale
     //     Shopify handle alias is normalized to the durable canonical URL.
-    //   • confirmed 404/410        → bagLinkDead(id): the roaster removed the
-    //     page; the consumer clears the dead link (and marks it so recovery
-    //     never re-adds the same dead URL from the canonical API).
+    //   • confirmed 404/410        → the Internet Archive is asked for a
+    //     capture. A hit is bagLinkArchived(id, snapshotUrl), which becomes the
+    //     bag's link; a confirmed no-capture is bagLinkDead(id), on which the
+    //     consumer clears the dead link (and marks it so recovery never re-adds
+    //     the same dead URL from the canonical API); an archive fault is
+    //     neither, so a later session retries.
     //   • transient error (timeout/DNS/5xx) → neither, so it can retry later.
-    // One GET per canonical id per session; BagCard additionally gates on a
+    // One GET per (canonical id, url) per session; BagCard additionally gates on a
     // persisted linkChecked marker so it is genuinely once-per-bag, not a
     // per-view probe. Independent of the image cache, so previewing a result
     // (which caches the photo) can't cause the validation to be skipped.
     Q_INVOKABLE void validateBagLink(const QString& canonicalId, const QString& productUrl);
+
+    // Ask the Internet Archive for a capture of a URL already known to be
+    // dead, and emit bagLinkArchived when it has one. Used two ways: by
+    // validateBagLink's 404/410 arm before it gives up, and directly by a bag
+    // already stamped linkDead whose pristine `canonical` snapshot still names
+    // the original URL. Never called for a live URL — no URL reaches the
+    // archive until the roaster has been asked first.
+    //
+    // Silent on a miss for THIS entry point (the caller decides what a miss
+    // means: validateBagLink turns it into bagLinkDead; an already-dead bag
+    // has nothing left to say). Silent too when the archive itself fails —
+    // that must never be mistaken for "no capture", which would permanently
+    // stamp a bag dead over a blip.
+    Q_INVOKABLE void lookupArchivedLink(const QString& canonicalId, const QString& productUrl);
+
+    // --- Link state, for ordering Bean Base search results ---
+    // Three states plus "unknown": "live" (the URL answers), "archived" (it is
+    // gone but the Internet Archive has a capture), "none" (gone with no
+    // capture, or no URL at all). "unknown" means not yet resolved, and orders
+    // as live so results appear at once and only ever sink as answers arrive.
+    // Session-cached per URL, so repeating a search costs nothing.
+    Q_INVOKABLE QString linkState(const QString& url) const;
+    // Resolve a URL's state if it is not already known. Bounded: at most
+    // kMaxLinkProbesInFlight run at once, the rest queue.
+    Q_INVOKABLE void probeLinkState(const QString& url);
+    // Drop probes queued for a superseded result set (see the definition).
+    Q_INVOKABLE void cancelQueuedLinkProbes();
+
+    // Parse of the availability API's answer: the snapshot URL for a usable
+    // capture, empty otherwise. `ok` distinguishes a well-formed answer (a
+    // real miss) from an unparseable one (an archive fault) — the two must not
+    // be conflated. Static + public for tests.
+    static QString parseArchiveSnapshot(const QByteArray& json, bool* ok = nullptr);
+
+    // Whether a URL points into the Wayback Machine. Recovery is terminal, so
+    // an already-archived link is neither re-probed nor re-recovered. `host`
+    // exists so a test can point the whole archive at a local server; every
+    // production caller takes the default.
+    static bool isArchiveUrl(const QString& url, const QString& host = archiveSnapshotHost());
+
+    // Whether a failed page fetch is worth asking the archive about. Pure and
+    // public because a plain-HTTP loopback stub cannot reach this decision:
+    // parseArchiveSnapshot upgrades a capture URL to https, so the retry never
+    // lands on the stub and `status` short-circuits the gate before the caller's
+    // own flag is read — which made the network form of this test unfailable.
+    static bool archiveRetryApplies(int httpStatus, bool archiveFallback);
+
+    // The `id_` form of a snapshot URL: the ORIGINAL page bytes, with no
+    // archive toolbar and no URL rewriting, so og:image already names the
+    // roaster's own asset and the extraction text carries no archive chrome.
+    // Returns the input unchanged when it is not a snapshot URL or already
+    // carries a modifier. Static + public for tests.
+    static QString archiveRawForm(const QString& snapshotUrl,
+                                  const QString& host = archiveSnapshotHost());
+    // The `im_` form for an asset: what the archive holds for `assetUrl` as
+    // captured alongside `snapshotUrl`. The fallback for when the roaster's
+    // own copy of the asset is gone. Empty when snapshotUrl is not a snapshot.
+    static QString archiveAssetForm(const QString& snapshotUrl, const QString& assetUrl,
+                                    const QString& host = archiveSnapshotHost());
+
+    // The Wayback host snapshot URLs live on. A test seam only: it is a
+    // process-wide default rather than per-instance because the three helpers
+    // above are static, and they are static because they are pure string
+    // rewrites the tests exercise directly.
+    static QString archiveSnapshotHost();
+    static void setArchiveSnapshotHost(const QString& host);
 
     // --- Blob edit helpers (add-bag-detail-editing) ---
     // Thin QML bridges over the header-only BeanBaseBlob helpers so the bag
@@ -123,7 +195,34 @@ public:
     // string→string; no instance state.
     Q_INVOKABLE static QString mergeBeanDetails(const QString& blob, const QVariantMap& edits);
     Q_INVOKABLE static QString revertToCanonical(const QString& blob);
+    // Write `link` and drop the marks describing whatever URL it replaces —
+    // see BeanBaseBlob::setBlobLink for why. A writer that is SETTING the marks
+    // wants blobWithLinkVerdict below instead; between them they are every path
+    // that writes `link`.
+    Q_INVOKABLE static QString blobWithLink(const QString& blob, const QString& link);
+    // The link check's verdict: `dead` buries the URL, otherwise it stands as
+    // checked and alive. Separate from blobWithLink because setBlobLink DROPS
+    // the marks and this one is SETTING them. Both refuse a corrupt blob, which
+    // is why QML callers must pass the blob AS STORED and never a re-serialized
+    // parse of it: a failed `JSON.parse` yields {}, which is valid JSON and
+    // would sail past the guard, replacing the row with an empty object.
+    Q_INVOKABLE static QString blobWithLinkVerdict(const QString& blob, const QString& link,
+                                                   bool dead);
+    // Pure, so a QML binding tracks its ARGUMENTS: reading fBeanBaseData and
+    // fLink at the call site is what makes the binding re-evaluate, which a
+    // binding over a Q_INVOKABLE alone would not do.
+    Q_INVOKABLE static bool linkIsUsable(const QString& blob, const QString& link);
     Q_INVOKABLE static bool blobDiffersFromCanonical(const QString& blob);
+    // Apply AI-extracted page values to a blob: fill empty fields, correct
+    // values that came from Bean Base, never touch a value the user typed. See
+    // BeanBaseBlob::applyExtraction — the single definition shared by the bag
+    // editor and the ShotServer's /api/beans/extract.
+    // `current` carries the caller's own live values where they are not in the
+    // blob yet (the bag editor's form fields); keys absent from it fall back to
+    // the blob. Returns {"blob", "applied", "corrections"}.
+    Q_INVOKABLE static QVariantMap applyExtraction(const QString& blob,
+                                                   const QVariantMap& extracted,
+                                                   const QVariantMap& current = {});
 
     // Fetch a roaster product page and reduce it to plain text for the
     // "Get info" AI extraction — the same reduction Visualizer's scraper
@@ -155,6 +254,8 @@ public:
     // Test seam: redirect requests at a local fake server. Production code
     // never calls this; the default is the live service.
     void setVisualizerBaseUrl(const QString& baseUrl) { m_visualizerBaseUrl = baseUrl; }
+    // Test seam: the Internet Archive availability API's host.
+    void setArchiveBaseUrl(const QString& baseUrl) { m_archiveBaseUrl = baseUrl; }
     // Test seam: cache directory override (default: CacheLocation/bagimages).
     void setImageCacheDir(const QString& dir) { m_imageCacheDir = dir; }
 
@@ -197,6 +298,19 @@ signals:
     void bagLinkResolved(const QString& canonicalId, const QString& link);
     void bagLinkDead(const QString& canonicalId);
 
+    // The dead link had a capture: `link` is the snapshot URL, which becomes
+    // the bag's link. Distinct from bagLinkRecovered, whose consumer ignores it
+    // when the blob already holds a link — which is exactly the state here, the
+    // dead URL still being in the blob at that moment.
+    void bagLinkArchived(const QString& canonicalId, const QString& link);
+
+    // A probed URL's state settled: "live", "archived", "none", or "unknown"
+    // when the probe reached no verdict. Every probe emits exactly once — a
+    // consumer waiting on this must never be left waiting — and "unknown" is
+    // reported as itself rather than as "none", because an inconclusive probe
+    // is not evidence that a page is gone.
+    void linkStateResolved(const QString& url, const QString& state);
+
 private:
     void doSendCanonicalSearch(const QString& query);
     // Shared body of ensureBagImage/refreshBagImage. force=true skips the
@@ -205,11 +319,36 @@ private:
     void startBagImageResolve(const QString& canonicalId, const QString& roastName,
                               const QString& productUrl, bool force);
     void fetchProductPage(const QString& canonicalId, const QString& productUrl);
-    void downloadBagImage(const QString& canonicalId, const QString& imageUrl);
+    // Shared body of the two archive entry points. `done(snapshot, answered)`:
+    // a non-empty snapshot is a hit; empty with answered=true is a confirmed
+    // no-capture; empty with answered=false means the question was never
+    // answered (archive fault, or never asked) and carries no verdict.
+    void queryArchiveSnapshot(const QString& canonicalId, const QString& productUrl,
+                              std::function<void(const QString&, bool)> done);
+    // The availability request itself, with no guard of its own. Three callers
+    // gate it differently and ask the same question: queryArchiveSnapshot once
+    // per (bag, url), the link-state probe once per url, and the extraction
+    // fallback not at all — a user who presses Get info twice asked twice.
+    void fetchArchiveAvailability(const QString& productUrl,
+                                  std::function<void(const QString&, bool)> done);
+    // The page-text GET itself. `reportUrl` is what the signals echo, so the
+    // caller matches on the URL it asked for however the fetch was redirected
+    // through the archive. `archiveFallback` is false on the retry, which is
+    // what bounds the recursion at one extra fetch.
+    void requestPageText(const QString& fetchUrl, const QString& reportUrl, bool archiveFallback);
+    void startLinkStateProbe(const QString& url, bool useGet);
+    void finishLinkStateProbe(const QString& url, const QString& state);
+    // fallbackImageUrl is tried whenever the first URL yields nothing usable
+    // (unreachable, empty, oversized, or not a picture) — the archive's own
+    // copy of an asset whose roaster-hosted original is gone. Empty for every
+    // non-archived page, which is the common case.
+    void downloadBagImage(const QString& canonicalId, const QString& imageUrl,
+                          const QString& fallbackImageUrl = QString());
     QString imageCacheDir() const;
 
     QNetworkAccessManager* m_networkManager = nullptr;  // Non-owning
     QString m_visualizerBaseUrl;
+    QString m_archiveBaseUrl;
 
     // Canonical (Visualizer) debounce state — coalesces type-ahead; see search().
     QTimer m_canonicalDebounceTimer;
@@ -225,7 +364,23 @@ private:
     QString m_imageCacheDir;
     QSet<QString> m_imageAttempted;
     QSet<QString> m_linkAttempted;
-    QSet<QString> m_linkValidated;  // validateBagLink: one GET per id per session
+    // Both guards ask "have we already asked THIS question", and the question
+    // is about a URL, not a bag: keyed on the id alone they also refuse a
+    // different URL on the same bag, which is exactly what a revert or an
+    // accepted AI suggestion produces. `linkGuardKey` builds the composite.
+    QSet<QString> m_linkValidated;   // validateBagLink: one GET per (id, url) per session
+    QSet<QString> m_archiveAttempted;  // queryArchiveSnapshot: one query per (id, url) per session
+    static QString linkGuardKey(const QString& canonicalId, const QString& url) {
+        // Canonical ids are UUIDs and urls are http(s), so neither part can
+        // contain the separator and no two distinct inputs share a key.
+        return canonicalId + QLatin1Char('\n') + url.trimmed();
+    }
+
+    // Link state per URL, for result ordering. Session-lifetime.
+    QHash<QString, QString> m_linkStateByUrl;
+    QSet<QString> m_linkStateInFlight;
+    QStringList m_linkStateQueued;
+    QSet<QString> m_linkStateUnresolvable;  // asked, no verdict — do not ask again this session
     // Ids whose image resolution is waiting on link recovery (legacy blobs).
     QSet<QString> m_imageAwaitingLink;
 };

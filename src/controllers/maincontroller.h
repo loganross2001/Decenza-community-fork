@@ -51,11 +51,8 @@
 #include "../core/datamigrationclient.h"
 #include "../core/databasebackupmanager.h"
 
-#include <QtQml/qqmlregistration.h>
 
 class QNetworkAccessManager;
-class QQmlEngine;
-class QJSEngine;
 class Settings;
 class DE1Device;
 class MachineState;
@@ -72,37 +69,33 @@ struct ShotSample;
 class MainController : public QObject {
     Q_OBJECT
 
-    // A compile-time-registered QML singleton. The macros are what put the type in the module's
-    // generated Decenza.qmltypes — the only place qmllint, qmlcachegen and the language server
-    // learn about C++ types. This replaced a setContextProperty, which exists only at runtime and
-    // is therefore invisible to all three: it was the largest source of unresolvable names
-    // REMAINING once TranslationManager and Settings had migrated (design.md records those at
-    // 3,459 and 1,335 against this one's 879 — and the 879 anchor was itself stale; the measured
-    // reduction was 916).
+    // Registered to QML by MainControllerForeign (core/contextsingletons_qml.h), not by macros
+    // on this class. That registration is what puts the type in the module's generated
+    // Decenza.qmltypes — the only place qmllint, qmlcachegen and the language server learn about
+    // C++ types. It replaced a setContextProperty, which exists only at runtime and is therefore
+    // invisible to all three: it was the largest source of unresolvable names REMAINING once
+    // TranslationManager and Settings had migrated (design.md records those at 3,459 and 1,335
+    // against this one's 879 — and the 879 anchor was itself stale; the measured reduction was
+    // 916).
     //
     // Registering the type is necessary but NOT sufficient: main.cpp must also call
     // qml_register_types_Decenza() explicitly, or no declarative type in this module reaches the
     // runtime registry at all. See the comment at that call site.
     //
-    // Direct macros rather than the QML_FOREIGN wrapper Settings uses.
-    //
-    // Be careful with the reason, because the rule as written in settings_qml.h does not hold.
-    // That file says a <QtQml/...> include in a header compiled by saw_parity "is a build break".
-    // Measured on this branch: it is not. saw_parity compiles coffeebagstorage.cpp and
-    // equipmentstorage.cpp, shot_eval reaches shothistorystorage.h, all three headers now carry
-    // qqmlregistration.h, and both tools link and run — QML_ELEMENT/QML_UNCREATABLE expand to
-    // Q_CLASSINFO plus friend declarations, which need no Qml symbols, and the header resolves
-    // through Qt6::Core's own include paths. So the wrapper was not forced by what that comment
-    // claims forced it. Recorded in bugs-found.md rather than rewritten here: settings_qml.h is a
-    // merged, reviewed decision and re-deciding it is not this change's business.
+    // This class used to carry QML_ELEMENT/QML_SINGLETON directly, and a long note here argued
+    // that direct macros were fine because settings_qml.h's stated reason for the wrapper (a
+    // <QtQml/...> include being "a build break" in saw_parity) was measurably false. That
+    // measurement still stands, but it was never the reason that mattered: Qt tests
+    // is_default_constructible BEFORE it looks for a create() factory (qqmlprivate.h:161-164), so
+    // a directly-registered singleton whose constructor gains a defaulted parameter silently gets
+    // `new T` and its factory is never called. AccessibilityManager shipped exactly that. The
+    // wrapper shape cannot reach that branch at all — see docs/CLAUDE_MD/QML_GOTCHAS.md.
     //
     // What IS true and worth checking before copying either shape: a class registered directly
     // needs a complete type for every pointer parameter of its Q_INVOKABLE/signal/slot signatures,
     // because moc must build a metatype for each. That is what forced real #includes into
     // visualizeruploader.h, and what defers ShotDataModel/SteamDataModel (their registerFastSeries
     // would drag <QQuickItem> into every consumer of this header).
-    QML_ELEMENT
-    QML_SINGLETON
 
     // Non-profile QML properties (profile properties are on ProfileManager)
     //
@@ -226,13 +219,6 @@ public:
                            MachineState* machineState, ShotDataModel* shotDataModel,
                            ProfileStorage* profileStorage = nullptr,
                            QObject* parent = nullptr);
-
-    // QML_SINGLETON hooks. The engine does not create this object: main.cpp builds it on the
-    // stack with five collaborators the constructor requires, and wires it into the MCP server,
-    // the ShotServer and the machine signal path long before QML exists. So main publishes the
-    // instance and create() hands that same one back.
-    static void setQmlInstance(MainController *instance);
-    static MainController *create(QQmlEngine *qmlEngine, QJSEngine *jsEngine);
 
     // ProfileManager accessor
     ProfileManager* profileManager() const { return m_profileManager; }
@@ -650,7 +636,6 @@ private slots:
 private:
     // The instance create() hands to the engine. Not owned here — main's stack object outlives
     // the engine, which is why create() pins CppOwnership.
-    static MainController *s_qmlInstance;
 
     void applyAllSettings();
     void applyLoadedShotMetadata(qint64 shotId, const ShotRecord& shotRecord, double doseOverride = 0,
@@ -776,17 +761,11 @@ private:
     int m_frameWeightSkipSent = -1;  // Frame number for which we've sent a weight-based skip command
     double m_frameStartTime = 0;     // Shot-relative time when current frame started
 
-    // ShotSettings drift auto-heal tracking. The commanded values live on
-    // DE1Device (so every call site — MainController, ProfileManager —
-    // feeds the same tracker); we only keep the retry
-    // bookkeeping here. Both fields are reset in applyAllSettings() so every
-    // reconnect / initial-settings cycle starts with a fresh retry budget.
+    // ShotSettings drift auto-heal tracking. The written values live on
+    // DE1Device (so every call site — MainController, ProfileManager — feeds
+    // the same tracker); only the retry bookkeeping is here. Reset in
+    // applyAllSettings() so every reconnect starts with a fresh budget.
     int m_shotSettingsDriftResendCount = 0;
-    // Event-based "is a resend in flight?" flag, cleared when the DE1's
-    // next indication matches commanded (in onShotSettingsReported). Replaces
-    // a wall-clock rate limiter — see CLAUDE.md's "never timers as guards"
-    // rule.
-    bool m_shotSettingsResendInFlight = false;
     // Closes a "giving up" episode and reports its tally — see m_driftGiveUpLog.
     void flushDriftGiveUpLog();
     // The "giving up after N resend attempts" WARN, collapsed.
@@ -896,16 +875,17 @@ private:
     // Stamp a tweak onto the active recipe row (no-op when none is active
     // or activation is applying).
     void stampActiveRecipe(const QString& field, const QVariant& value);
+    // True when the pitcher the recipe's steam block names is still one of the
+    // stored presets. Distinguishes "the user picked another pitcher" from
+    // "the recipe's pitcher was deleted", which reach the selection watcher
+    // identically. A heater-off recipe names the built-in, which cannot be
+    // deleted, so it always counts as present.
+    bool recipeSteamPitcherStillExists(const QString& steamJson) const;
     // Recipes-first layout upgrade offer (recipes-idle-layout-upgrade):
     // cached result of the last checkRecipesUpgradeEligibility() background
     // pass, consumed by acceptRecipesFirstUpgrade().
     bool m_recipesUpgradeWillCreate = false;
     ShotRecord m_recipesUpgradeShotRecord;
-    // Rebuild + stamp the active recipe's steam block from live settings.
-    void stampActiveRecipeSteam();
-    // Rebuild + stamp the active recipe's hot-water block from live settings
-    // (selected water vessel). No-op unless a hot-water recipe is active.
-    void stampActiveRecipeHotWater();
     // THE single ShotSettings write for every steam entry point. The four
     // non-steam fields are read live from Settings here, so no caller can push
     // a half-stale payload — four call sites used to hand-roll this identical
@@ -951,3 +931,4 @@ private:
     ShotReporter* m_shotReporter = nullptr;
     DatabaseBackupManager* m_backupManager = nullptr;
 };
+

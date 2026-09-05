@@ -1,5 +1,6 @@
 #include <QtTest>
 #include <QSignalSpy>
+#include <QRegularExpression>
 
 #include "machine/machinestate.h"
 #include "ble/de1device.h"
@@ -33,6 +34,19 @@ private:
             state.onDE1StateChanged();
         }
     };
+
+    // Elapses the settle wait by shortening the REAL timer and letting it fire, so the
+    // production connect() in the constructor is what sets m_noAcSettled. Setting that
+    // flag by hand instead would leave the wiring — the whole mechanism — uncovered:
+    // deleting the connect() would then fail no test at all.
+    // (QTimer::timeout takes a QPrivateSignal, so it cannot be emitted from here.)
+    static void elapseNoAcWait(TestFixture& f) {
+        QVERIFY(f.state.m_noAcSettleTimer->isActive());
+        f.state.m_noAcSettleTimer->stop();
+        f.state.m_noAcSettleTimer->setInterval(1);
+        f.state.m_noAcSettleTimer->start();
+        QTRY_VERIFY(f.state.m_noAcSettled);
+    }
 
     // Puts the fixture in the pre-flow window with a completed tare, which is the
     // only state in which either gate is live.
@@ -203,6 +217,38 @@ private slots:
     }
 
     // ==========================================
+    // Hot water tare
+    // ==========================================
+
+    // The tare is scheduled a moment after flow starts, to keep it off the timer
+    // commands' heels. Weight samples arrive in between carrying the PREVIOUS pour's
+    // zero (a field log read -138.40 g, 56 ms before its own tare fired). Skipping them
+    // is right; reporting "Tare not completed" is not — that names a tare that failed,
+    // and this one had not been sent yet. init() calls QTest::failOnWarning(), so the
+    // silence is asserted.
+    void hotWaterTareInFlightIsNotReportedAsAFailedTare() {
+        TestFixture f;
+
+        f.setDE1State(DE1::State::HotWater, DE1::SubState::Pouring);
+        QVERIFY(f.state.m_hotWaterTarePending);   // scheduled, not yet sent
+        QVERIFY(!f.state.m_tareCompleted);
+        f.state.checkStopAtWeightHotWater(-138.4);
+    }
+
+    // ...and the warning is still there for a tare that really did not complete: the
+    // gate is the pendency, not the phase.
+    void hotWaterTareNeverCompletedStillWarns() {
+        TestFixture f;
+
+        f.setDE1State(DE1::State::HotWater, DE1::SubState::Pouring);
+        f.state.m_hotWaterTarePending = false;    // the scheduled tare has run
+        QVERIFY(!f.state.m_tareCompleted);
+
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression("Tare not completed"));
+        f.state.checkStopAtWeightHotWater(-138.4);
+    }
+
+    // ==========================================
     // Stop flags reset
     // ==========================================
 
@@ -349,6 +395,60 @@ private slots:
         QCOMPARE(f.state.phase(), MachineState::Phase::Disconnected);
     }
 
+    void midFlowDisconnectStopsBothTimersOnce_data() {
+        QTest::addColumn<int>("de1State");
+        QTest::addColumn<int>("de1SubState");
+        // Espresso and steam start both timers down different branches of
+        // updatePhase(), and the stop is deliberately not gated on the espresso
+        // predicate. Without the steam row, moving the stop under the
+        // wasInEspresso gate seven lines below leaves the suite green.
+        QTest::newRow("espresso") << int(DE1::State::Espresso) << int(DE1::SubState::Pouring);
+        QTest::newRow("steam") << int(DE1::State::Steam) << int(DE1::SubState::Steaming);
+    }
+
+    // A drop mid-flow has to stop both clocks, and stop them once: updatePhase()
+    // runs again on every DE1 signal while the link is down, so a stop that is
+    // not latched by the phase would put repeated BLE writes on a scale that is
+    // already stopped.
+    void midFlowDisconnectStopsBothTimersOnce() {
+        QFETCH(int, de1State);
+        QFETCH(int, de1SubState);
+
+        TestFixture f;
+        f.scale.mockSetConnected(true);
+        f.setDE1State(static_cast<DE1::State>(de1State),
+                      static_cast<DE1::SubState>(de1SubState));
+        QVERIFY(f.state.m_shotTimer->isActive());
+        QCOMPARE(f.scale.stopTimerCount(), 0);
+
+        f.device.m_simulationMode = false;
+        f.state.onDE1StateChanged();
+
+        QCOMPARE(f.state.phase(), MachineState::Phase::Disconnected);
+        QVERIFY(!f.state.m_shotTimer->isActive());
+        QCOMPARE(f.scale.stopTimerCount(), 1);
+
+        f.state.onDE1StateChanged();
+        f.state.onDE1StateChanged();
+        QCOMPARE(f.scale.stopTimerCount(), 1);
+    }
+
+    // The gate that keeps the stop off a scale nobody was timing with. A drop
+    // from Idle has no clock to stop, and the scale's own button is the other
+    // way its timer starts.
+    void disconnectFromIdleSendsNoScaleStop() {
+        TestFixture f;
+        f.scale.mockSetConnected(true);
+        f.setDE1State(DE1::State::Idle, DE1::SubState::Ready);
+        QVERIFY(!f.state.m_shotTimer->isActive());
+
+        f.device.m_simulationMode = false;
+        f.state.onDE1StateChanged();
+
+        QCOMPARE(f.state.phase(), MachineState::Phase::Disconnected);
+        QCOMPARE(f.scale.stopTimerCount(), 0);
+    }
+
     // ==========================================
     // Standby switch (Error_NoAC) — de1app commit 04d3b02e
     // ==========================================
@@ -357,6 +457,7 @@ private slots:
         TestFixture f;
         f.device.m_firmwareBuildNumber = 1337;
         f.setDE1State(DE1::State::Idle, DE1::SubState::Error_NoAC);
+        elapseNoAcWait(f);
         QVERIFY(f.state.standbySwitchOpen());
     }
 
@@ -372,6 +473,9 @@ private slots:
         TestFixture f;
         f.device.m_firmwareBuildNumber = firmwareBuildNumber;
         f.setDE1State(DE1::State::Idle, DE1::SubState::Error_NoAC);
+        // Elapse the wait, or this passes because of the wait rather than the firmware
+        // gate — and deleting the gate would not fail it.
+        elapseNoAcWait(f);
         QVERIFY(!f.state.standbySwitchOpen());
     }
 
@@ -379,10 +483,127 @@ private slots:
         TestFixture f;
         f.device.m_firmwareBuildNumber = 1337;
         f.setDE1State(DE1::State::Idle, DE1::SubState::Error_NoAC);
+        elapseNoAcWait(f);
         QVERIFY(f.state.standbySwitchOpen());
 
         f.device.m_simulationMode = false;  // No transport + no sim = disconnected
         f.state.onDE1StateChanged();
+        QVERIFY(!f.state.standbySwitchOpen());
+    }
+
+    // A snapshot cannot tell an open switch from the machine's own brief report —
+    // both read "Idle, Error_NoAC" — so the warning waits the condition out. Field
+    // reports on v1363 (inside the range the 1337 gate trusts) show the blip on every
+    // tap-to-wake, clearing untouched after ~3 s.
+    void standbySwitchWaitsBeforeWarning() {
+        TestFixture f;
+        f.device.m_firmwareBuildNumber = 1363;
+        f.setDE1State(DE1::State::Idle, DE1::SubState::Error_NoAC);
+        QVERIFY(!f.state.standbySwitchOpen());
+
+        elapseNoAcWait(f);
+        QVERIFY(f.state.standbySwitchOpen());
+    }
+
+    // The interval is a deliberate figure, and the spec names it. Pinned so a change to
+    // it is a decision rather than a typo.
+    void standbySwitchWaitIsSixSeconds() {
+        TestFixture f;
+        QCOMPARE(f.state.m_noAcSettleTimer->interval(), 6000);
+        QVERIFY(f.state.m_noAcSettleTimer->isSingleShot());
+    }
+
+    // The log lines are the deliverable: the interval is an estimate, and only a field
+    // log can correct it. Asserted on content, not merely that something was emitted,
+    // because a line missing its duration is the failure that matters.
+    void standbySwitchLogsTheEpisodeDurationWhenItSelfClears() {
+        TestFixture f;
+        f.device.m_firmwareBuildNumber = 1363;
+        f.setDE1State(DE1::State::Idle, DE1::SubState::Error_NoAC);
+        QTest::ignoreMessage(QtInfoMsg,
+            QRegularExpression("\\[DE1\\]\\[StandbySwitch\\].*reported no AC for "
+                               "\\d+ ms then cleared it.*Heating"));
+        f.setDE1State(DE1::State::Idle, DE1::SubState::Heating);
+    }
+
+    void standbySwitchLogsWhenTheWarningIsShown() {
+        TestFixture f;
+        f.device.m_firmwareBuildNumber = 1363;
+        f.setDE1State(DE1::State::Idle, DE1::SubState::Error_NoAC);
+        QTest::ignoreMessage(QtInfoMsg,
+            QRegularExpression("\\[DE1\\]\\[StandbySwitch\\] warning shown.*"
+                               "\\d+ ms.*firmware build 1363"));
+        elapseNoAcWait(f);
+        QVERIFY(f.state.standbySwitchOpen());
+    }
+
+    // Guards against a future history-based shortcut, not against current behaviour:
+    // there is no branch on the preceding substate, so all four rows take one path
+    // today. They are here because the design that keyed on the arriving substate
+    // shipped once and missed the tap-to-wake entry point (Ready) entirely.
+    void standbySwitchWaitsWhateverItArrivedFrom_data() {
+        QTest::addColumn<int>("fromSubState");
+        QTest::newRow("Ready (tap-to-wake)") << int(DE1::SubState::Ready);
+        QTest::newRow("Heating") << int(DE1::SubState::Heating);
+        QTest::newRow("FinalHeating") << int(DE1::SubState::FinalHeating);
+        QTest::newRow("Stabilising") << int(DE1::SubState::Stabilising);
+    }
+
+    void standbySwitchWaitsWhateverItArrivedFrom() {
+        QFETCH(int, fromSubState);
+        TestFixture f;
+        f.device.m_firmwareBuildNumber = 1363;
+        f.setDE1State(DE1::State::Idle, static_cast<DE1::SubState>(fromSubState));
+        f.setDE1State(DE1::State::Idle, DE1::SubState::Error_NoAC);
+        QVERIFY(!f.state.standbySwitchOpen());
+    }
+
+    // The reported defect: the substate clears on its own before the wait elapses.
+    void standbySwitchNeverWarnsForAnEpisodeThatClearsItself() {
+        TestFixture f;
+        f.device.m_firmwareBuildNumber = 1363;
+        f.setDE1State(DE1::State::Idle, DE1::SubState::Error_NoAC);
+        f.setDE1State(DE1::State::Idle, DE1::SubState::Heating);
+
+        QVERIFY(!f.state.m_noAcSettleTimer->isActive());
+        QVERIFY(!f.state.standbySwitchOpen());
+    }
+
+    // The wait must not restart on every re-evaluation, or an episode that outlives it
+    // would never reach the user. updatePhase() re-runs on connectedChanged and
+    // firmwareVersionChanged with the substate unchanged.
+    void standbySwitchWaitIsNotRestartedByAReEvaluation() {
+        TestFixture f;
+        f.device.m_firmwareBuildNumber = 1363;
+        f.setDE1State(DE1::State::Idle, DE1::SubState::Error_NoAC);
+        QTimer* timer = f.state.m_noAcSettleTimer;
+        QVERIFY(timer->isActive());
+
+        // Watch the episode clock, not the timer: isActive() stays true whether or not
+        // start() was called again, and remainingTime() is too coarse at 6 s to resolve a
+        // short wait. m_noAcEpisode is a QElapsedTimer restarted in the same branch, so a
+        // restart shows up as its elapsed time going backwards. Both weaker checks were
+        // tried here and neither could fail for the regression this test names.
+        QTest::qWait(20);
+        const qint64 beforeReEvaluation = f.state.m_noAcEpisode.elapsed();
+        QVERIFY(beforeReEvaluation > 0);
+
+        emit f.device.firmwareVersionChanged();
+        QVERIFY(f.state.m_noAcEpisode.elapsed() >= beforeReEvaluation);
+        QVERIFY(timer->isActive());
+    }
+
+    // A disconnect ends the episode: the wait must not carry over and fire against a
+    // machine we are no longer talking to.
+    void standbySwitchWaitIsAbandonedOnDisconnect() {
+        TestFixture f;
+        f.device.m_firmwareBuildNumber = 1363;
+        f.setDE1State(DE1::State::Idle, DE1::SubState::Error_NoAC);
+        QVERIFY(f.state.m_noAcSettleTimer->isActive());
+
+        f.device.m_simulationMode = false;  // No transport + no sim = disconnected
+        f.state.onDE1StateChanged();
+        QVERIFY(!f.state.m_noAcSettleTimer->isActive());
         QVERIFY(!f.state.standbySwitchOpen());
     }
 
@@ -395,6 +616,7 @@ private slots:
         // the rest of the session.
         TestFixture f;
         f.setDE1State(DE1::State::Idle, DE1::SubState::Error_NoAC);
+        elapseNoAcWait(f);
         QVERIFY(!f.state.standbySwitchOpen());  // firmware still unknown
 
         f.device.m_firmwareBuildNumber = 1400;

@@ -233,7 +233,7 @@ void BleTransport::subscribeAll() {
     // SHOT_SETTINGS is intentionally NOT subscribed: the DE1 firmware does
     // not push notifications on writes (confirmed in de1app's de1_comms.tcl).
     // Verification happens via explicit read() after each write in
-    // DE1Device::setShotSettings().
+    // DE1Device::setShotSettings() and resendLastShotSettings().
 
     submitReadyMarker();
 
@@ -259,6 +259,7 @@ void BleTransport::disconnect() {
     // make the very next fresh connect look like a zombie before its first
     // notification arrives (the ready marker re-baselines it on connected()).
     m_notificationLiveness.invalidate();
+    m_livenessTeardownStarted = false;
 
     // Stop any pending retries
     m_retryTimer.stop();
@@ -461,6 +462,7 @@ void BleTransport::onControllerDisconnected() {
     m_gattQueue->forget(this);
     m_characteristicsReady = false;
     m_notificationLiveness.invalidate();
+    m_livenessTeardownStarted = false;
     // Failures observed while a link was already dying must not be carried
     // into the next connection, where they would make a healthy link look
     // write-dead after one more abandoned write.
@@ -875,12 +877,26 @@ void BleTransport::setupService() {
     if (!m_service) return;
 
     const QList<QLowEnergyCharacteristic> chars = m_service->characteristics();
+    // One line, not one per characteristic: the set is constant per firmware, so
+    // the per-char form was one line per characteristic of the same answer on
+    // every connect. Every uuid/props pair is still here.
+    //
+    // The count is 18 on a DE1+ running firmware v1358 — the 2026-08-30 SM-X210
+    // session logged 18 "Char 0000a0NN" lines followed by the caller's
+    // "Characteristics ready: 18 registered" (onServiceStateChanged, :722).
+    // Stated as an observation of one
+    // machine rather than a property of the protocol: de1characteristics.h names
+    // only the 13 Decenza uses, so the device exposing more than we name is the
+    // expected case, not a discrepancy.
+    QStringList summary;
+    summary.reserve(chars.size());
     for (const auto& c : chars) {
         m_characteristics[c.uuid()] = c;
-        log(QString("  Char %1 props=0x%2")
-            .arg(c.uuid().toString().mid(1, 8))
-            .arg(static_cast<int>(c.properties()), 2, 16, QChar('0')));
+        summary << QString("%1:%2")
+                       .arg(c.uuid().toString().mid(1, 8))
+                       .arg(static_cast<int>(c.properties()), 2, 16, QChar('0'));
     }
+    log(QString("Chars (uuid:props) %1").arg(summary.join(u' ')));
 }
 
 void BleTransport::writeCharacteristic(const QBluetoothUuid& uuid, const QByteArray& data) {
@@ -927,6 +943,13 @@ bool BleTransport::linkAcceptsGattOperations(const QBluetoothUuid& uuid,
 
 void BleTransport::noteWriteAbandoned() {
     ++m_consecutiveWriteFailures;
+    // An abandoned write is the app's earliest evidence that the link is not
+    // working, and on an otherwise idle DE1 it is the ONLY thing that happens
+    // for the next minute — the 60 s MMR keepalive is the sole guaranteed
+    // periodic write. Both episodes in debug-2.log reached this line 22.5 s
+    // before Qt reported the controller Unconnected, and nothing looked at the
+    // link in between.
+    evaluateLinkLiveness();
     if (m_consecutiveWriteFailures < WRITE_DEAD_LINK_THRESHOLD)
         return;
 
@@ -959,10 +982,80 @@ void BleTransport::noteWriteAbandoned() {
     warn(QString("DE1 link has stopped accepting writes: %1 consecutive writes "
                  "abandoned after exhausting their retries, while the link "
                  "still reports itself connected. Commands sent to the machine "
-                 "are being discarded. Reconnecting the DE1 is what clears "
-                 "this — from the Connections page, or over MCP with "
-                 "devices_connect_de1.")
+                 "are being discarded. If the DE1 also stops sending, the app "
+                 "reconnects it automatically. While it is still sending, it "
+                 "will not — reconnect the DE1 from the Connections page, or "
+                 "over MCP with devices_connect_de1.")
              .arg(m_consecutiveWriteFailures));
+}
+
+bool BleTransport::shouldRecoverAfterAbandonedWrite(qint64 silentMs) {
+    // Two independent signals have to agree: a write has just exhausted its
+    // retries (the caller only reaches here on that path), and the DE1 has also
+    // stopped sending. Either alone is weak — writes fail transiently, and a
+    // quiet period is only suspicious against a cadence nobody has measured —
+    // but together they say the link is carrying nothing in either direction.
+    //
+    // There is deliberately no silence-alone arm and no "leave it alone while
+    // the machine is busy" arm. Both were written and removed. The busy guard
+    // could never release: its input came from MachineState::phaseChanged,
+    // driven by the very notifications being measured, so once the link went
+    // quiet the phase froze and the deferral held forever. The silence-alone
+    // arm was unjustifiable from evidence: it would have run ~5850 times over
+    // the 97.6 h of the log this came from, betting each time on an unmeasured
+    // cadence, while catching neither of the two real episodes that this path
+    // does not already catch.
+    return silentMs > NOTIFICATION_STALE_CORROBORATED_MS;
+}
+
+void BleTransport::evaluateLinkLiveness() {
+    // One teardown per episode: a failing link produces a burst of abandoned
+    // writes, and each one lands here.
+    if (m_livenessTeardownStarted) return;
+    if (!isConnected()) return;
+    // No baseline yet (never connected, or torn down) — nothing to measure.
+    if (!m_notificationLiveness.isValid()) return;
+
+    const qint64 silentMs = m_notificationLiveness.elapsed();
+    if (!shouldRecoverAfterAbandonedWrite(silentMs)) return;
+
+    m_livenessTeardownStarted = true;
+    warn(QString("DE1 has sent nothing for %1 ms and a write has just been abandoned, "
+                 "while the link still reports itself connected. Reconnecting it — the "
+                 "machine is not receiving commands in this state.")
+             .arg(silentMs));
+
+    // Queued, never inline. This runs inside a GATT operation's own failure
+    // callback, and disconnect() tears down the controller the callback is
+    // unwinding from — the same re-entrancy the zombie path in connectToDevice()
+    // avoids by ordering its fault emit after the teardown.
+    QMetaObject::invokeMethod(this, [this]() {
+        if (!isConnected()) {
+            // The platform reported the drop first; its own path owns the
+            // reconnect and starting a second one here would race it. Nothing
+            // was torn down here, so nothing is pending a recovery report.
+            log(QStringLiteral("liveness teardown skipped — the link already went "
+                               "away on its own"));
+            return;
+        }
+        disconnect();
+        // No "the link recovered" counterpart is logged here. One was written
+        // and removed: DE1Device::connectToDevice() builds a NEW BleTransport
+        // for every reconnect attempt and deleteLater()s this one, so a flag
+        // set on this object could never be read by the instance that actually
+        // reconnects. The reconnect is already visible at INFO through the
+        // ordinary connect path ("DE1 CONNECTED (BLE)").
+        //
+        // Deliberately NO de1LinkFault here. de1LinkFault is wired
+        // unconditionally to ScaleBleTransport::onDe1LinkFault (main.cpp),
+        // which feeds the dual-HIGH scale-priority detector — a latch that
+        // persists across restarts until devices_reset_scale_priority and that
+        // its own comment marks KNOWN OVER-EAGER (#1691: one keepalive
+        // exhaustion latched it on a desktop). Raising a new fault kind off a
+        // threshold whose cadence is unmeasured would let this permanently
+        // demote every scale to BALANCED. The teardown's own disconnected()
+        // already drives everything this recovery needs.
+    }, Qt::QueuedConnection);
 }
 
 void BleTransport::noteWriteSucceeded() {
@@ -1225,6 +1318,7 @@ void BleTransport::submitReadyMarker() {
         // pushes a single notification also ages out and is caught as a zombie
         // on the next reconnect attempt — not just one that goes quiet later.
         m_notificationLiveness.start();
+        m_livenessTeardownStarted = false;
         emit connected();
         // Issues nothing to the platform, so nothing else will ever end it.
         m_gattQueue->noteSucceeded(this);

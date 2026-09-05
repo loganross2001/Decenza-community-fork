@@ -11,6 +11,7 @@
 #include "ble/transport/scalebletransport.h"
 #include "ble/protocol/de1characteristics.h"
 #include "ble/protocol/decentscaleprotocol.h"
+#include "messagecapture.h"
 
 // Test BLE packet parsing for scale implementations.
 // Feeds raw byte arrays through onCharacteristicChanged() (public slot)
@@ -52,8 +53,16 @@ public:
         // a driver waiting on the signal look broken (or, worse, lets one that
         // should wait look fine). Emitted inline here — the ORDER is what the
         // drivers care about, not the delay.
+        //
+        // Suppressible, because "the enable never reaches the radio" is a real
+        // transport state with four routes into it (link not ready, service
+        // missing, characteristic invalid, no CCCD — every one of them calls
+        // failGattOperation() and emits nothing), and a driver that only ever
+        // sees the happy path cannot be tested against it.
+        if (m_suppressNotificationsIssued) return;
         emit notificationsIssued(characteristic);
     }
+    bool m_suppressNotificationsIssued = false;
     void writeCharacteristic(const QBluetoothUuid& service, const QBluetoothUuid&,
                              const QByteArray& value, WriteType = WriteType::WithResponse) override {
         m_writes.append(value);
@@ -582,6 +591,190 @@ private slots:
         QCOMPARE(spy.count(), 0);
     }
 
+    // Build the 41-byte ADS debug frame the firmware sends while debug mode is
+    // on (openscale include/usbcomm.h buildAdsDebugPacket): type 0x25, checksum
+    // over bytes 0-39 in byte 40.
+    static QByteArray buildDecentAdsDebugFrame(uint8_t marker = 0x11) {
+        QByteArray pkt(41, 0);
+        pkt[0] = 0x03;
+        pkt[1] = 0x25;
+        pkt[5] = static_cast<char>(marker);  // a timestamp byte, i.e. volatile payload
+        uint8_t xorSum = 0;
+        for (int i = 0; i < 40; i++)
+            xorSum ^= static_cast<uint8_t>(pkt[i]);
+        pkt[40] = static_cast<char>(xorSum);
+        return pkt;
+    }
+
+    void decentAdsDebugFrameDoesNotDisableChecksumValidation() {
+        // A 41-byte debug frame is not a 7-byte packet, so it must not reach the
+        // v1 auto-disable counter. It used to: the checksum was computed over
+        // data.size() and compared against byte 6, which in this frame is the
+        // high byte of the raw ADC reading (openscale include/usbcomm.h:601-612
+        // puts the timestamp in 2-5 and rawValue in 6-9). Five frames retired
+        // checksum validation and reported the HDS as an original Decent Scale.
+        DecentScale scale(nullptr);
+        MessageCapture capture;
+
+        for (int i = 0; i < DecentScale::kChecksumFailureThreshold + 2; i++)
+            scale.onCharacteristicChanged(Scale::Decent::READ, buildDecentAdsDebugFrame(uint8_t(i)));
+
+        QCOMPARE(capture.count(QStringLiteral("Checksum validation disabled")), 0);
+
+        // Checksum validation is still live: a corrupt weight packet still drops.
+        QSignalSpy spy(&scale, &ScaleDevice::weightChanged);
+        auto bad = buildDecentWeightPacket(42.0);
+        bad[6] = static_cast<char>(static_cast<uint8_t>(bad[6]) ^ 0xFF);
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression(".*Invalid checksum.*dropping packet.*"));
+        scale.onCharacteristicChanged(Scale::Decent::READ, bad);
+        QCOMPARE(spy.count(), 0);
+    }
+
+    // Build the 10-byte weight frame the original Decent Scale's v1.2 firmware
+    // notifies: the 7-byte layout with minutes/seconds/milliseconds after the
+    // weight short, two unused bytes, and the XOR in byte 9 (de1app
+    // decent_scale_weight_read_spec_v12, binary.tcl:350-364).
+    static QByteArray buildDecentV12WeightFrame(double grams) {
+        const int16_t raw = static_cast<int16_t>(qRound(grams * 10.0));
+        QByteArray pkt(10, 0);
+        pkt[0] = 0x03;
+        pkt[1] = static_cast<char>(0xCE);
+        pkt[2] = static_cast<char>((raw >> 8) & 0xFF);
+        pkt[3] = static_cast<char>(raw & 0xFF);
+        pkt[4] = 0x01;  // minutes
+        pkt[5] = 0x1E;  // seconds
+        pkt[6] = 0x05;  // milliseconds — the byte a 7-byte frame checksums on
+        uint8_t xorSum = 0;
+        for (int i = 0; i < 9; i++)
+            xorSum ^= static_cast<uint8_t>(pkt[i]);
+        pkt[9] = static_cast<char>(xorSum);
+        return pkt;
+    }
+
+    void decentV12TenByteWeightFrameDecodes() {
+        // #1891 dispatched every non-0x25 notification at exactly 7 bytes, so a
+        // v1.2 scale's 10-byte weight frames became undecodable: no weight, and
+        // — because the watchdog is now fed only by a decoded frame — ten
+        // "no initial weight data" retries and a disconnect loop.
+        DecentScale scale(nullptr);
+        QSignalSpy spy(&scale, &ScaleDevice::weightChanged);
+
+        scale.onCharacteristicChanged(Scale::Decent::READ, buildDecentV12WeightFrame(42.0));
+
+        QCOMPARE(spy.count(), 1);
+        QCOMPARE(spy.last().at(0).toDouble(), 42.0);
+    }
+
+    void decentV12FrameChecksumIsReadAtByteNine() {
+        // The checksum must be evaluated over the frame's own length. Checked at
+        // byte 6 the frame reads as corrupt, which spends the v1 auto-disable
+        // budget and retires checksum validation for the session.
+        DecentScale scale(nullptr);
+        MessageCapture capture;
+        QSignalSpy spy(&scale, &ScaleDevice::weightChanged);
+
+        for (int i = 0; i < DecentScale::kChecksumFailureThreshold + 2; i++)
+            scale.onCharacteristicChanged(Scale::Decent::READ, buildDecentV12WeightFrame(10.0 + i));
+
+        QCOMPARE(capture.count(QStringLiteral("Checksum validation disabled")), 0);
+        QCOMPARE(capture.count(QStringLiteral("Invalid checksum")), 0);
+        QCOMPARE(spy.count(), DecentScale::kChecksumFailureThreshold + 2);
+    }
+
+    void decentTenByteFrameOfAnotherTypeStaysUndecodable() {
+        // Only weight is decoded at ten bytes: the LED response's battery and
+        // firmware bytes have no known v1.2 position, so guessing at them would
+        // report a wrong battery level rather than nothing.
+        DecentScale scale(nullptr);
+        MessageCapture capture;
+
+        QByteArray led = buildDecentV12WeightFrame(42.0);
+        led[1] = 0x0A;
+        scale.onCharacteristicChanged(Scale::Decent::READ, led);
+
+        QCOMPARE(capture.count(QStringLiteral("Undecodable frame, type 0x0a, 10 bytes")), 1);
+    }
+
+    void decentWeightPacketFoundAtAnOffset() {
+        // The USB probes open a port mid-stream, so the packet that identifies
+        // the scale rarely starts at byte 0 -- and a run of leading bytes must
+        // not be mistaken for one.
+        const QByteArray packet = buildDecentWeightPacket(42.0);
+        QCOMPARE(DecentScaleProtocol::indexOfWeightPacket(packet), 0);
+        QCOMPARE(DecentScaleProtocol::indexOfWeightPacket(QByteArray("noise") + packet), 5);
+        QCOMPARE(DecentScaleProtocol::indexOfWeightPacket(QByteArray("noise")), qsizetype(-1));
+
+        QByteArray corrupt = packet;
+        corrupt[6] = static_cast<char>(static_cast<uint8_t>(corrupt[6]) ^ 0xFF);
+        QCOMPARE(DecentScaleProtocol::indexOfWeightPacket(corrupt), qsizetype(-1));
+    }
+
+    void decentUndecodedFrameLoggedOnceWithItsBytes() {
+        // One line per shape, carrying the hex, and nothing on repeats — the
+        // payload here changes every frame, which is exactly what defeats a
+        // text-keyed suppressor if the hex is left in the repeat line.
+        DecentScale scale(nullptr);
+        MessageCapture capture;
+
+        const QByteArray first = buildDecentAdsDebugFrame(0x41);
+        scale.onCharacteristicChanged(Scale::Decent::READ, first);
+        for (int i = 0; i < 19; i++)
+            scale.onCharacteristicChanged(Scale::Decent::READ, buildDecentAdsDebugFrame(uint8_t(i)));
+        // A length no notify produces. Two of them: the first is a new shape and
+        // logs, the second shares that shape and must not.
+        scale.onCharacteristicChanged(Scale::Decent::READ, QByteArray::fromHex("030a03"));
+        scale.onCharacteristicChanged(Scale::Decent::READ, QByteArray::fromHex("030a04"));
+
+        MessageCapture::Entry entry;
+        QVERIFY(capture.single(QStringLiteral("ADS debug frame"), &entry));
+        // The whole frame, not just its header: "03 25" opens every one of these,
+        // so asserting on that would pass even if the line carried two bytes.
+        // The claim under test is that the FIRST sighting carries the volatile
+        // payload -- and that the 19 frames after it, whose payload differs, add
+        // no line at all.
+        QVERIFY(entry.text.contains(QString::fromLatin1(first.toHex(' '))));
+        QCOMPARE(capture.count(QStringLiteral("Undecodable frame, type 0x0a")), 1);
+
+        // Past the cap, every further shape folds into one key. Without this the
+        // key space is the command byte x the length, so a corrupted stream
+        // emits a line per shape live and another per shape at the flush --
+        // which is the flood the collapse was added to prevent, arriving by a
+        // different route.
+        capture.clear();
+        for (int type = 0x50; type < 0x60; type++) {
+            QByteArray odd(3, 0);
+            odd[0] = 0x03;
+            odd[1] = static_cast<char>(type);
+            scale.onCharacteristicChanged(Scale::Decent::READ, odd);
+        }
+        QCOMPARE(capture.count(QStringLiteral("Further undecoded frame shapes")), 1);
+        QVERIFY(capture.count(QStringLiteral("Undecodable frame, type 0x5")) <= 3);
+    }
+
+    void decentOriginalScaleAutoDisableStillReachedByShortFrames() {
+        // The v1 accommodation (#630) must survive the length gate. What is
+        // asserted is narrow and checkable: a 7-byte frame with a bad checksum
+        // still advances the counter to its threshold, with debug frames
+        // interleaved. (Whether a v1 scale sends anything BUT 7-byte frames is
+        // not established here — its firmware is not in ../openscale.)
+        DecentScale scale(nullptr);
+        QSignalSpy spy(&scale, &ScaleDevice::weightChanged);
+
+        auto bad = buildDecentWeightPacket(42.0);
+        bad[6] = static_cast<char>(static_cast<uint8_t>(bad[6]) ^ 0xFF);
+        for (int i = 0; i < DecentScale::kChecksumFailureThreshold - 1; i++) {
+            QTest::ignoreMessage(QtWarningMsg, QRegularExpression(".*Invalid checksum.*dropping packet.*"));
+            // Interleave a debug frame: it must not reset or advance the counter.
+            scale.onCharacteristicChanged(Scale::Decent::READ, buildDecentAdsDebugFrame(uint8_t(i)));
+            scale.onCharacteristicChanged(Scale::Decent::READ, bad);
+        }
+        QCOMPARE(spy.count(), 0);
+
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression(".*Checksum validation disabled.*"));
+        scale.onCharacteristicChanged(Scale::Decent::READ, bad);
+        QCOMPARE(spy.last().at(0).toDouble(), 42.0);
+    }
+
     void decentLedResponseSkipsChecksum() {
         // LED-response (cmd 0x0A) has no checksum — bytes [5-6] carry the
         // BCD-encoded firmware version, NOT a checksum, and the parser must
@@ -673,12 +866,19 @@ private slots:
     // ==========================================
 
     void oversizedPacketNoCrash() {
-        // 255-byte junk packet should not crash any scale
+        // 255-byte junk packet should not crash any scale, and must not be
+        // charged to the checksum counter: 255 bytes is not the frame length
+        // type 0x42 occupies, so it is reported as an undecodable shape rather
+        // than as a scale computing XOR wrongly. Before the length gate this
+        // warned "Invalid checksum", which is how junk spent the v1
+        // auto-disable budget (#630).
         QByteArray oversized(255, 0x42);
 
         DecentScale decent(nullptr);
-        QTest::ignoreMessage(QtWarningMsg, QRegularExpression(".*Invalid checksum.*"));
+        MessageCapture capture;
         decent.onCharacteristicChanged(Scale::Decent::READ, oversized);
+        QCOMPARE(capture.count(QStringLiteral("Invalid checksum")), 0);
+        QCOMPARE(capture.count(QStringLiteral("Undecodable frame, type 0x42")), 1);
 
         BookooScale bookoo(nullptr);
         bookoo.onCharacteristicChanged(Scale::Bookoo::STATUS, oversized);
@@ -736,6 +936,37 @@ private slots:
         QTest::qWait(800);
 
         QCOMPARE(transport->m_notifyEnableCount, countAfterTickle);
+    }
+
+    void undecodableFramesDoNotFeedTheWatchdog() {
+        // The defect this pins: a scale streaming frames the driver cannot
+        // decode used to keep the watchdog satisfied, because the tickle ran
+        // before the parse and unconditionally. The app then reported connected
+        // and healthy with a frozen weight, and stop-at-weight never fired.
+        // A decoded frame still counts (asserted by watchdogTickleResetsTimer).
+        auto* transport = new MockScaleBleTransport;
+        DecentScale scale(transport);
+        // SwallowAll: the watchdog warning is what this asserts ON, so it must
+        // not also reach failOnWarning.
+        MessageCapture capture(MessageCapture::SwallowAll);
+
+        scale.m_characteristicsReady = true;
+        scale.startWatchdog();
+        const int enablesBefore = transport->m_notifyEnableCount;
+
+        // Feed undecodable frames faster than the 1 s initial timeout, for
+        // longer than it: under the old behaviour every one of these was a
+        // tickle and the watchdog could never fire.
+        for (int i = 0; i < 15; i++) {
+            scale.onCharacteristicChanged(Scale::Decent::READ,
+                                          buildDecentAdsDebugFrame(uint8_t(i)));
+            QTest::qWait(100);
+        }
+
+        QVERIFY(transport->m_notifyEnableCount > enablesBefore);
+        // "no initial weight data", not "stale": nothing decodable ever arrived,
+        // so m_watchdogUpdatesSeen was never set.
+        QVERIFY(capture.count(QStringLiteral("Watchdog: no initial weight data")) >= 1);
     }
 
     void watchdogDisconnectsAfterMaxRetries() {
@@ -828,6 +1059,102 @@ private slots:
     // removed the sequence's own inline arm, the sibling below passed, and on
     // hardware wake() armed it anyway 278 ms before the enable went out. Asserts
     // the PROPERTY (nothing is armed yet) rather than one call site.
+    // ...but an enable that NEVER issues must still end up armed, or nothing
+    // recovers. onNotificationsIssued() is the only other arm, so without this
+    // fallback m_watchdogArmPending stays set, wake()'s arm stays gated on it,
+    // and the watchdog never fires: no re-enable, no retry, no disconnect, and
+    // the app holds a scale that will never report a weight (#1519).
+    //
+    // Deleting armWatchdogIfEnableNeverIssues() leaves the rest of the suite
+    // green — noPathArmsTheWatchdogBeforeTheEnableIsIssued() below asserts the
+    // opposite half — so this slot is the only thing standing between that
+    // deletion and the field symptom.
+    void anEnableThatNeverIssuesStillArmsTheWatchdog() {
+        auto* transport = new MockScaleBleTransport;
+        transport->m_suppressNotificationsIssued = true;
+        DecentScale scale(transport);
+
+        scale.m_serviceFound = true;
+        scale.onCharacteristicsDiscoveryFinished(Scale::Decent::SERVICE);
+        scale.enableWeightNotifications(QStringLiteral("test"));
+        scale.m_watchdogArmPending = true;
+        scale.armWatchdogIfEnableNeverIssues();
+
+        // Nothing arms it up front — that is the other test's subject.
+        QVERIFY(!(scale.m_watchdogTimer && scale.m_watchdogTimer->isActive()));
+
+        QTest::ignoreMessage(QtWarningMsg,
+            QRegularExpression("Notify-enable was never issued to the radio"));
+        QTRY_VERIFY_WITH_TIMEOUT(scale.m_watchdogTimer && scale.m_watchdogTimer->isActive(),
+                                 DecentScale::kEnableIssueBudgetMs + 2000);
+        QVERIFY(!scale.m_watchdogArmPending);
+    }
+
+    // A wake() while the watchdog is already running must not re-arm it.
+    // startWatchdog() resets m_watchdogRetries and m_watchdogUpdatesSeen, so a
+    // second arm hands back the whole retry budget and forgets that weight data
+    // had been seen — the next lapse is then timed as a first sight rather than
+    // a stall. Build 3574 logged both arms 198 ms apart once the enable started
+    // dispatching promptly enough to clear the pending flag before the 500 ms
+    // wake().
+    void aWakeDoesNotReArmARunningWatchdog() {
+        auto* transport = new MockScaleBleTransport;
+        DecentScale scale(transport);
+
+        scale.m_serviceFound = true;
+        scale.onCharacteristicsDiscoveryFinished(Scale::Decent::SERVICE);
+
+        // onCharacteristicsDiscoveryFinished() set m_watchdogArmPending; the
+        // enable then issues (the mock emits notificationsIssued inline), which
+        // arms the watchdog and clears the flag — the state the 500 ms wake()
+        // runs in.
+        scale.enableWeightNotifications(QStringLiteral("test"));
+        QVERIFY(scale.m_watchdogTimer && scale.m_watchdogTimer->isActive());
+        QVERIFY(!scale.m_watchdogArmPending);
+
+        // Spend part of the budget and see data, then wake.
+        scale.m_watchdogRetries = 4;
+        scale.m_watchdogUpdatesSeen = true;
+        const int remainingBeforeWake = scale.m_watchdogTimer->remainingTime();
+        scale.wake();
+
+        QCOMPARE(scale.m_watchdogRetries, 4);
+        QVERIFY(scale.m_watchdogUpdatesSeen);
+        QVERIFY(scale.m_watchdogTimer->isActive());
+        // The countdown is left ALONE, not restarted. Without this a wrong fix
+        // that called m_watchdogTimer->start() — "parity with
+        // onNotificationsIssued()" — would still pass every assertion above.
+        QVERIFY(scale.m_watchdogTimer->remainingTime() <= remainingBeforeWake);
+    }
+
+    // main.cpp wakes the scale from its connectedChanged handler when an LCD
+    // restore is pending, and connectedChanged is emitted SYNCHRONOUSLY from
+    // inside onCharacteristicsDiscoveryFinished(). That re-enters wake() before
+    // the connect sequence has submitted its notify-enable, so the arm-pending
+    // flag has to be set before setConnected() rather than after it — otherwise
+    // the watchdog arms against an LCD command and expires before the enable is
+    // ever asked for.
+    //
+    // noPathArmsTheWatchdogBeforeTheEnableIsIssued() below cannot see this: it
+    // wires no connectedChanged observer, so it passes either way.
+    void aWakeReEnteredFromConnectedChangedDoesNotArmTheWatchdog() {
+        auto* transport = new MockScaleBleTransport;
+        transport->m_suppressNotificationsIssued = true;
+        DecentScale scale(transport);
+
+        connect(&scale, &ScaleDevice::connectedChanged, &scale, [&scale]() {
+            if (scale.isConnected()) scale.wake();
+        });
+
+        scale.m_serviceFound = true;
+        scale.onCharacteristicsDiscoveryFinished(Scale::Decent::SERVICE);
+
+        // The re-entrant wake() must not have armed anything: no enable has been
+        // submitted yet, so there is nothing for a watchdog to time.
+        QVERIFY(!(scale.m_watchdogTimer && scale.m_watchdogTimer->isActive()));
+        QVERIFY(scale.m_watchdogArmPending);
+    }
+
     void noPathArmsTheWatchdogBeforeTheEnableIsIssued() {
         auto* transport = new MockScaleBleTransport;
         DecentScale scale(transport);

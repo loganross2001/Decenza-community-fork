@@ -1,5 +1,6 @@
 #include "usb/usbscalemanager.h"
 #include "usb/usbdecentscale.h"
+#include "ble/protocol/decentscaleprotocol.h"
 
 #include "ble/scales/scalelogging.h"
 
@@ -125,19 +126,17 @@ void UsbScaleManager::connectToScale()
         return;
     }
 
-#ifdef Q_OS_ANDROID
-    // Recover from a stale-but-enumerated connection: on Android the device can
-    // stay plugged in while its serial link silently dies (no port-disappear
-    // event for the poll to catch). Watch the scale's connected state and tear
-    // it down when it drops. Guarded on m_scale so it stays idempotent with the
-    // poll-based unplug detection in onPollTimerTickAndroid.
+    // Unconditional, not Android-only: with USB scanning off (the default) desktop
+    // has no poll and no hotplug, so a manual "Scan for Devices" was the only
+    // trigger left. Measured on macOS before this: port died t=253.7, scale still
+    // held until the scan at t=272.9 — 19 s with neither the USB scale nor its
+    // FlowScale fallback.
     connect(m_scale, &ScaleDevice::connectedChanged, this, [this] {
         if (m_scale && !m_scale->isConnected()) {
-            warn(QStringLiteral("Connection lost — dropped while device still enumerated"));
+            warn(QStringLiteral("Connection lost — scale reported disconnected"));
             teardownConnectedScale();
         }
     });
-#endif
 
     emit scaleConnectedChanged();
     emit scaleDiscovered(m_scale);
@@ -149,8 +148,9 @@ bool UsbScaleManager::teardownConnectedScale()
 
     // Drop the Android connectedChanged watchdog (wired in connectToScale) BEFORE
     // close() below: close() emits connectedChanged synchronously, which would
-    // otherwise re-enter this function and double-free m_scale. No-op on desktop
-    // (no such connection exists there).
+    // otherwise re-enter this function and double-free m_scale. Load-bearing on
+    // EVERY platform — the watchdog stopped being Android-only when USB scanning
+    // became opt-in and desktop lost the poll that used to catch an unplug.
     disconnect(m_scale, &ScaleDevice::connectedChanged, this, nullptr);
 
     // Emit scaleLost() FIRST, while m_scale is still valid: main.cpp's handler
@@ -190,7 +190,8 @@ void UsbScaleManager::disconnectScale()
 
     // Drop the Android connectedChanged watchdog before close() — same re-entrancy
     // hazard as teardownConnectedScale(): close() emits connectedChanged, which the
-    // watchdog would turn into a teardownConnectedScale() re-entry. No-op on desktop.
+    // watchdog would turn into a teardownConnectedScale() re-entry. On every
+    // platform now, not just Android — see connectToScale().
     disconnect(m_scale, &ScaleDevice::connectedChanged, this, nullptr);
 
     m_scale->close();
@@ -220,10 +221,33 @@ void UsbScaleManager::startPolling()
     m_pollTimer.start();
 }
 
+void UsbScaleManager::onHotplugEvent()
+{
+    // info(), not log(): the views default to minLevel INFO.
+    info(QStringLiteral("Hotplug event — running a probe pass now"));
+    onPollTimerTick();
+}
+
+void UsbScaleManager::onPermissionResult()
+{
+    onHotplugEvent();
+#ifdef Q_OS_ANDROID
+    if (!m_scale && !AndroidUsbScaleHelper::hasPermission()) {
+        warn(QStringLiteral("USB permission was not granted — the scale cannot be used. "
+                            "Unplug and reconnect it to be asked again."));
+    }
+#endif
+}
+
 void UsbScaleManager::probeNow()
 {
     log(QStringLiteral("On-demand probe requested (scan)"));
     m_scanProbePending = true;
+#ifdef Q_OS_ANDROID
+    // Clear the permission latch: a scan is the user explicitly asking again, and
+    // without this the button is inert for the rest of the session after a denial.
+    m_androidPermissionRequested = false;
+#endif
 
 #ifndef Q_OS_ANDROID
     // Forget which ports have already been probed, so a user-initiated scan
@@ -356,7 +380,7 @@ void UsbScaleManager::onPollTimerTickAndroid()
     if (!AndroidUsbScaleHelper::hasPermission()) {
         if (!m_androidPermissionRequested) {
             m_androidPermissionRequested = true;
-            log(QStringLiteral("Requesting USB permission..."));
+            info(QStringLiteral("Requesting USB permission..."));
             AndroidUsbScaleHelper::requestPermission();
         }
         return;
@@ -416,31 +440,18 @@ void UsbScaleManager::onAndroidProbeRead()
 
     m_probeBuffer.append(data);
 
-    // Look for a valid weight packet: 0x03 followed by 0xCE or 0xCA
-    for (int i = 0; i <= m_probeBuffer.size() - 7; i++) {
-        uint8_t b0 = static_cast<uint8_t>(m_probeBuffer[i]);
-        uint8_t b1 = static_cast<uint8_t>(m_probeBuffer[i + 1]);
+    if (DecentScaleProtocol::indexOfWeightPacket(m_probeBuffer) < 0)
+        return;
 
-        if (b0 == 0x03 && (b1 == 0xCE || b1 == 0xCA)) {
-            // Validate XOR checksum
-            uint8_t xorVal = 0;
-            for (int j = i; j < i + 6; j++) {
-                xorVal ^= static_cast<uint8_t>(m_probeBuffer[j]);
-            }
-            if (xorVal == static_cast<uint8_t>(m_probeBuffer[i + 6])) {
-                info(QStringLiteral("Half Decent Scale confirmed (weight packet received)"));
+    info(QStringLiteral("Half Decent Scale confirmed (weight packet received)"));
 
-                // Stop probe timers but DON'T close — connectToScale() reuses
-                // the JNI connection when the user selects the USB entry.
-                cleanupAndroidProbe(false);
+    // Stop probe timers but DON'T close — connectToScale() reuses the JNI
+    // connection when the user selects the USB entry.
+    cleanupAndroidProbe(false);
 
-                // Record availability only — do NOT auto-connect. main.cpp lists
-                // it as selectable and connects on selection / saved-primary.
-                setScaleAvailable(true);
-                return;
-            }
-        }
-    }
+    // Record availability only — do NOT auto-connect. main.cpp lists it as
+    // selectable and connects on selection / saved-primary.
+    setScaleAvailable(true);
 }
 
 void UsbScaleManager::onAndroidProbeTimeout()
@@ -630,32 +641,20 @@ void UsbScaleManager::onProbeReadyRead()
         return;
     }
 
-    // Look for valid weight packet: 0x03, 0xCE/0xCA, ..., XOR
-    for (int i = 0; i <= m_probeBuffer.size() - 7; i++) {
-        uint8_t b0 = static_cast<uint8_t>(m_probeBuffer[i]);
-        uint8_t b1 = static_cast<uint8_t>(m_probeBuffer[i + 1]);
+    if (DecentScaleProtocol::indexOfWeightPacket(m_probeBuffer) < 0)
+        return;
 
-        if (b0 == 0x03 && (b1 == 0xCE || b1 == 0xCA)) {
-            uint8_t xorVal = 0;
-            for (int j = i; j < i + 6; j++) {
-                xorVal ^= static_cast<uint8_t>(m_probeBuffer[j]);
-            }
-            if (xorVal == static_cast<uint8_t>(m_probeBuffer[i + 6])) {
-                QString confirmedPort = m_probingPortInfo.portName();
-                info(QStringLiteral("Half Decent Scale found on %1 (binary weight packet)")
-                        .arg(confirmedPort));
+    const QString confirmedPort = m_probingPortInfo.portName();
+    info(QStringLiteral("Half Decent Scale found on %1 (binary weight packet)")
+            .arg(confirmedPort));
 
-                // Close the probe port — connectToScale() reopens it on demand.
-                cleanupProbe();
+    // Close the probe port — connectToScale() reopens it on demand.
+    cleanupProbe();
 
-                // Record availability only — do NOT auto-connect. main.cpp lists
-                // it as selectable and connects on selection / saved-primary.
-                m_confirmedPortName = confirmedPort;
-                setScaleAvailable(true);
-                return;
-            }
-        }
-    }
+    // Record availability only — do NOT auto-connect. main.cpp lists it as
+    // selectable and connects on selection / saved-primary.
+    m_confirmedPortName = confirmedPort;
+    setScaleAvailable(true);
 }
 
 void UsbScaleManager::onProbeTimeout()

@@ -591,6 +591,16 @@ add_decenza_test(tst_speechchunker
     ${CMAKE_SOURCE_DIR}/src/barista/speechchunker.cpp
 )
 
+# --- tst_anthropicstreamparser: [barista-fork] the streaming voice pipeline's Anthropic SSE parser
+# (BARISTA_VOICE_STREAMING_DESIGN.md §1.1). Pure QtCore/QJson, no network/voice deps — pins the real-socket
+# hazards (frames split mid-line across reads, ping heartbeats, per-block input_json_delta accumulation, CRLF,
+# mid-stream error frames, unmodelled delta types) that would otherwise only surface as a wedged or mis-parsed
+# live conversation on-device, where the readyRead wiring is verified. ---
+add_decenza_test(tst_anthropicstreamparser
+    tst_anthropicstreamparser.cpp
+    ${CMAKE_SOURCE_DIR}/src/barista/anthropicstreamparser.cpp
+)
+
 # --- tst_speakerembedder: [barista-fork] voice-ID MFCC embedder DSP (FFT/mel/DCT + aggregation). QtCore-only
 # (MfccEmbedder depends on nothing but QVector/QByteArray) — validates determinism + discrimination in software,
 # no device/mic. ---

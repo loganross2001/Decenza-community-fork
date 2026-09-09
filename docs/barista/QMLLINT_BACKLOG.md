@@ -29,13 +29,26 @@ or an explicit `--target qmllint_check`. So it has been latently red. A full bui
 (CLAUDE.md's #1 QML gotcha), so every access is "unqualified" and the URL-loaded overlay's `item` is
 `QObject` (so `.reservedWidth`/`.implicitHeight` are "missing-property").
 - **Proper fix (CLAUDE.md-prescribed):** expose `Barista` as a **compile-time QML singleton** via a
-  `QML_FOREIGN` wrapper (`contextsingletons_qml.h` pattern), not `setContextProperty`. That resolves
-  all of these AND lets the `typeof … !== "undefined"` guards go away.
-- **Why deferred:** the module is *runtime-installed with dependency injection* (DESIGN.md §4.1 chose
-  one `setContextProperty` on purpose for modularity). Converting touches `baristamodule.*`,
-  `main.cpp`, and risks the default-constructible-singleton trap (QML_GOTCHAS). It changes how the
-  whole feature is wired and **must be verified in the running app** — not a blind overnight change.
-  This is the one decision that unblocks ~85% of the remaining gate.
+  `QML_FOREIGN` wrapper (mirror `src/core/contextsingletons_qml.h`, which already exists), not
+  `setContextProperty` (currently `baristamodule.cpp:1082`). Install order is already fine —
+  `BaristaModule::install` runs at `main.cpp:4148`, before `engine.load()` at `:4199`.
+- **Exact scope (assessed 2026-09-08 — it is bigger than "wrap BaristaModule"):**
+  1. `QML_FOREIGN`+`QML_SINGLETON` wrapper for `BaristaModule` returning the app-owned instance
+     (contextsingletons pattern avoids the default-constructible trap).
+  2. **`AssistantOrchestrator` AND `AssistantSettings` also need QML registration**
+     (`QML_FOREIGN`+`QML_UNCREATABLE`) — they are currently bare C++ QObjects, so even once `Barista`
+     resolves, `Barista.orchestrator.lastShotId` / `Barista.settings.assistantName` would stay
+     "member not found on QObject" without it.
+  3. **The `typeof Barista !== "undefined"` guards are LOAD-BEARING for the `DECENZA_BARISTA=OFF`
+     bisect build** (a documented fork feature — build vanilla to bisect upstream regressions). A
+     compile-time singleton changes that contract: per QML_GOTCHAS a registered singleton with no
+     instance is *truthy*, so the guards must become member guards (e.g. `Barista.enabled ?? false`),
+     and **an OFF build must still register the singleton returning null** or `main.qml`/`IdlePage`
+     break for it. Get this wrong and the app's MAIN SCREEN breaks for ALL users, not just barista.
+- **Why deferred:** must be verified in the running app in **both** build configs (ON and OFF); the
+  failure modes (null-instance member access at load, OFF-build regression) are invisible to the
+  build and to `ctest`. This is the one decision that unblocks ~85% of the remaining gate, and it is
+  a "verify at the machine" change, not a blind one.
 
 ### Delegate `ComponentBehavior: Bound` (needs the screen open)
 `BaristaChipRow.qml` (20), `BaristaEditDialog.qml` (4 remaining), `SettingsHistoryDataTab.qml` (7)

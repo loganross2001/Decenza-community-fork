@@ -1,5 +1,18 @@
 # qmllint gate backlog — analysis & remediation plan
 
+> **✅ RESOLVED 2026-09-08 — the gate is now GREEN (clean 251/251).** The keystone (Barista →
+> compile-time QML singleton) landed, and the remaining delegate/layout/qualification items were
+> cleared with this repo's established patterns (`pragma ComponentBehavior: Bound` where delegates
+> already declared their roles, `postShotReviewPage.`-qualified page accesses, `implicitWidth/Height`
+> on layout children, `// qmllint disable` for the two URL-loaded Loader items and the intentional
+> tap-overlay anchors, `Number().toFixed`, and a missing `accessibleName`). Verified: app compiles +
+> links, ctest green, runtime smoke clean, full gate passes. **ONE residual, pre-existing and
+> separate:** the `DECENZA_BARISTA=OFF` vanilla-bisect build does not compile (main.cpp:2190-2193
+> declare `AssistantVoice*`/`CoachPhrasebook*` outside any `#ifdef`) — predates this work; tracked
+> below. Two delegate screens (People-settings tab, Barista edit dialog) got the pragma but were not
+> exercised at runtime — a quick on-device look is worth it, though the change is the low-risk pattern.
+> The analysis below is kept as the record of how it was done.
+
 **Why the gate is red and was not noticed:** the fork verifies via `ctest` (unit tests), but the
 qmllint gate is a separate cmake target (`qmllint_check`) that only runs on a full `cmake --build . -j`
 or an explicit `--target qmllint_check`. So it has been latently red. A full build surfaced it

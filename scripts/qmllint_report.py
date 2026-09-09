@@ -185,7 +185,30 @@ IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # it suppresses ("this .qml is on disk but not in the module") is one of the failure modes this
 # gate exists to catch, and a future exemption should have to be added deliberately, with its
 # reason, rather than by re-introducing the mechanism.
-NOT_IN_MODULE_BY_DESIGN: set[str] = set()
+# [barista-fork] The proactive-barista assistant QML is bundled through its OWN qt_add_resources
+# blocks in cmake/barista.cmake (PREFIX /qml/assistant) and loaded BY URL via a Loader in main.qml,
+# deliberately kept OUT of the qt_add_qml_module QML_FILES so upstream's list stays untouched and
+# `main` keeps merging cleanly (see .fork/FORK.md, DESIGN.md §4.1). They are therefore bundled at
+# runtime but NOT linted by this gate — an accepted fork tradeoff for that isolation, not a
+# forgotten CMakeLists entry. Listed explicitly (not a glob) so a genuinely-orphaned new .qml still
+# trips the check. Fork-only edit to an upstream-owned script; see .fork/MERGE.md.
+NOT_IN_MODULE_BY_DESIGN: set[str] = {
+    "qml/assistant/ActionConfirmChip.qml",
+    "qml/assistant/AssistantOverlay.qml",
+    "qml/assistant/AssistantSettingsPanel.qml",
+    "qml/assistant/AssistantSettingsSection.qml",
+    "qml/assistant/BagCameraCapture.qml",
+    "qml/assistant/BaristaAvatar.qml",
+    "qml/assistant/BaristaSavedVoices.qml",
+    "qml/assistant/BaristaSectionCard.qml",
+    "qml/assistant/CoachingCard.qml",
+    "qml/assistant/ElevenLabsVoicePicker.qml",
+    "qml/assistant/MaintenanceSettingsDialog.qml",
+    "qml/assistant/avatars/AvatarBean.qml",
+    "qml/assistant/avatars/AvatarCup.qml",
+    "qml/assistant/avatars/AvatarFace.qml",
+    "qml/assistant/avatars/AvatarOrb.qml",
+}
 
 def relative_to_repo(path: str) -> str:
     """Normalise a path qmllint printed (or Qt's response file listed) to a repo-relative key.

@@ -1080,7 +1080,12 @@ T.Page {
             ? new Date(shotTs * 1000).toLocaleString(Qt.locale(),
                 Settings.app.use12HourTime ? "MMM d, h:mm AP" : "MMM d, HH:mm")
             : ""
-        var summary = conversation.processShotForConversation(raw, shotLabel)
+        // [barista-fork] Upstream #1857 removed AIConversation::processShotForConversation (its
+        // change-detection moved into the prose envelope). The reference call sites
+        // (ConversationOverlay.qml, ShotDetailPage.qml) now use buildShotAnalysisProseForShot output
+        // directly, so this coaching-card path does too — calling the removed method threw a
+        // TypeError and broke the card. See docs/barista/QMLLINT_BACKLOG.md.
+        var summary = raw
         var message = "## Shot (" + shotLabel + ")\n\nHere's my latest shot:\n\n"
                       + summary + "\n\n"
                       + TranslationManager.translate("postshotreview.coach.prompt",

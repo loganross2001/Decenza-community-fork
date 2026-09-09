@@ -72,7 +72,7 @@ Dialog {
     }
 
     function commit() {
-        Qt.inputMethod.commit()  // flush in-progress IME word before reading text
+        Keyboard.commit()  // flush in-progress IME word before reading text (compile-time singleton; Qt.inputMethod is typed as bare QObject and its .commit() is unresolvable — see CLAUDE.md QML gotchas)
         var name = nameField.text.trim()
         if (name.length === 0 || !baristaStorage || _pendingOp.length > 0)
             return

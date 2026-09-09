@@ -337,13 +337,20 @@ QJsonObject buildPalateProfileBlock(QSqlDatabase& db)
 // demand (look_up_bean / search_visualizer_shots), wired into the persona rather than fetched
 // proactively every turn.
 //
-// `current` must genuinely BE the current bean's shot — the caller gates on !beanFilterMissed, because
-// a mismatched anchor (latest overall, a different bean) would match "similar" to the wrong bean.
-// Returns {} when the current bean carries no origin/process/roast to match on, or nothing rated is
-// similar. (The new-bean case — current bean never pulled, so no shot to read attributes from — is
-// handled in the persona via look_up_bean, not here; see docs/barista/PROACTIVE_COACHING.md #2b.)
-QJsonObject buildSimilarBeanBlock(QSqlDatabase& db, const ShotProjection& current)
+// The caller passes the CURRENT bean's own attributes (already lowercased) and its identity to
+// exclude from the match. Those attributes come from the anchor shot when this bean has shots, or
+// from the active bag when it is brand-new (beanFilterMissed — Increment 2b); either way they must
+// describe the CURRENT bean, or "similar" would be measured against the wrong coffee. `currentIsNew`
+// only flavors the block (so the barista can say "you haven't pulled this yet, but ..."). Returns {}
+// when there is nothing to match on, or nothing rated is similar.
+QJsonObject buildSimilarBeanBlock(QSqlDatabase& db,
+                                  const QString& curOrigin, const QString& curProcess, const QString& curRoast,
+                                  const QString& excludeBrand, const QString& excludeType,
+                                  bool currentIsNew)
 {
+    if (curOrigin.isEmpty() && curProcess.isEmpty() && curRoast.isEmpty())
+        return QJsonObject();
+
     const auto attrsOf = [](const ShotProjection& s, QString& origin, QString& process, QString& roast) {
         origin.clear(); process.clear();
         if (!s.beanBaseJson.isEmpty()) {
@@ -353,10 +360,6 @@ QJsonObject buildSimilarBeanBlock(QSqlDatabase& db, const ShotProjection& curren
         }
         roast = s.roastLevel.trimmed().toLower();
     };
-    QString curOrigin, curProcess, curRoast;
-    attrsOf(current, curOrigin, curProcess, curRoast);
-    if (curOrigin.isEmpty() && curProcess.isEmpty() && curRoast.isEmpty())
-        return QJsonObject();
 
     // Top-rated shot per OTHER bean (bounded scan, deduped keeping the highest since ordered).
     // Drain the id cursor before the per-shot loads — same idiom as buildPalateProfileBlock.
@@ -368,8 +371,8 @@ QJsonObject buildSimilarBeanBlock(QSqlDatabase& db, const ShotProjection& curren
             "WHERE enjoyment > 0 AND NOT (bean_brand = ? AND bean_type = ?) "
             "AND (TRIM(bean_brand) <> '' OR TRIM(bean_type) <> '') "
             "ORDER BY enjoyment DESC, timestamp DESC LIMIT 40"));
-        q.addBindValue(current.beanBrand);
-        q.addBindValue(current.beanType);
+        q.addBindValue(excludeBrand);
+        q.addBindValue(excludeType);
         QSet<QString> seenBeans;
         if (q.exec ())
             while (q.next()) {
@@ -422,13 +425,16 @@ QJsonObject buildSimilarBeanBlock(QSqlDatabase& db, const ShotProjection& curren
 
     QJsonObject out;
     out["similarBeans"] = beans;
+    if (currentIsNew)
+        out["currentBeanIsNew"] = true;   // no shots on this bean yet — lean on these openly
     out["note"] = QStringLiteral(
         "The user's OWN best-rated shots on beans that RESEMBLE the current one (shared roast / origin "
-        "/ process). Use it to advise even when this exact bean has little history ('on your other "
-        "washed Ethiopians you liked a finer grind'). Grounding for ONE suggestion, not a list to "
-        "recite; grind is grinder+bean specific, so treat a borrowed number as a starting hint, never a "
-        "target to copy. For roaster/community info beyond the user's history, reach for look_up_bean "
-        "or search_visualizer_shots.");
+        "/ process). Use it to advise even when this exact bean has little or no history — if "
+        "currentBeanIsNew is set, they've never pulled this bean, so this is your best starting read "
+        "('you haven't dialed this one yet, but on your other washed Ethiopians a finer grind sang'). "
+        "Grounding for ONE suggestion, not a list to recite; grind is grinder+bean specific, so treat a "
+        "borrowed number as a starting hint, never a target to copy. For roaster/community info beyond "
+        "the user's history, reach for look_up_bean or search_visualizer_shots.");
     return out;
 }
 }
@@ -1623,9 +1629,27 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
     // worker loads the roster from the shot DB and formats the [Who] block.
     const QString activeUser = (m_settings && m_settings->dye()) ? m_settings->dye()->dyeBarista() : QString();
 
+    // [barista-fork] Increment 2b: the CURRENT bean's own attributes, read live from the active bag on
+    // the main thread, so similar-bean matching still works when this bean has NO shots yet
+    // (beanFilterMissed) and the worker has no shot to read them from. Only trusted when the bag's bean
+    // matches the requested bean (otherwise the bag describes a different coffee). Lowercased to match
+    // the worker's comparisons.
+    QString newBeanOrigin, newBeanProcess, newBeanRoast;
+    if (m_settings && m_settings->dye()) {
+        auto* dye = m_settings->dye();
+        if (dye->dyeBeanBrand().compare(beanBrand, Qt::CaseInsensitive) == 0
+            && dye->dyeBeanType().compare(beanType, Qt::CaseInsensitive) == 0) {
+            newBeanRoast = dye->dyeRoastLevel().trimmed().toLower();
+            const QJsonObject bb = QJsonDocument::fromJson(dye->dyeBeanBaseData().toUtf8()).object();
+            newBeanOrigin  = bb.value(QStringLiteral("origin")).toString().trimmed().toLower();
+            newBeanProcess = bb.value(QStringLiteral("process")).toString().trimmed().toLower();
+        }
+    }
+
     // self is captured by value but ONLY dereferenced inside the main-thread callback (QPointer is
     // not thread-safe). See requestRecentShotContext for the same discipline.
-    QThread* thread = QThread::create([self, dbPath, feedbackDbPath, beanBrand, beanType, profileName, serial, activeRecipeId, activeUser]() {
+    QThread* thread = QThread::create([self, dbPath, feedbackDbPath, beanBrand, beanType, profileName, serial, activeRecipeId, activeUser,
+                                       newBeanOrigin, newBeanProcess, newBeanRoast]() {
         qint64 anchorId = 0;
         bool beanFilterMissed = false;
         ShotProjection shot;
@@ -1724,11 +1748,23 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
             // quiet on a thin history rather than inventing a preference.
             palateProfile = buildPalateProfileBlock(db);
 
-            // [barista-fork] Similar-bean transfer learning. Only when the anchor IS the current bean
-            // (!beanFilterMissed) — otherwise the anchor is the latest shot OVERALL (a different bean)
-            // and matching "similar" to it would surface beans like the wrong coffee.
-            if (!beanFilterMissed)
-                similarBean = buildSimilarBeanBlock(db, shot);
+            // [barista-fork] Similar-bean transfer learning. The current bean's attributes come from the
+            // anchor shot when it IS this bean; from the active bag (passed in) when this bean has no
+            // shots yet (beanFilterMissed — Increment 2b), which is exactly when transfer advice matters
+            // most. Either source excludes the current bean itself from the match by identity.
+            {
+                QString simOrigin, simProcess, simRoast;
+                if (!beanFilterMissed) {
+                    const QJsonObject bb = QJsonDocument::fromJson(shot.beanBaseJson.toUtf8()).object();
+                    simOrigin  = bb.value(QStringLiteral("origin")).toString().trimmed().toLower();
+                    simProcess = bb.value(QStringLiteral("process")).toString().trimmed().toLower();
+                    simRoast   = shot.roastLevel.trimmed().toLower();
+                } else {
+                    simOrigin = newBeanOrigin; simProcess = newBeanProcess; simRoast = newBeanRoast;
+                }
+                similarBean = buildSimilarBeanBlock(db, simOrigin, simProcess, simRoast,
+                                                    beanBrand, beanType, /*currentIsNew=*/beanFilterMissed);
+            }
         });
 
         // [barista-fork] Proactive retrieval (advisor refinement #3): fold the user's recent VERBAL tasting

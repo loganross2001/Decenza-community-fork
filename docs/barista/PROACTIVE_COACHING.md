@@ -87,9 +87,14 @@ when the bean is new to them or they go deeper, reach for the **community tools*
 others pulled it) — and fold ONE attributed takeaway in. Community stays a tool reached on demand
 (no per-turn network fetch), so latency/cost stay bounded.
 
-### Increment 2b — NOT started (the new-bean local case)
-When the current bean was NEVER pulled (`beanFilterMissed`), there's no shot to read its attributes
-from, so local similar-matching can't run — the persona covers it via `look_up_bean`. Doing local
-similar-matching for a brand-new bean needs its attributes from the active bag (`SettingsDye`,
-main-thread) threaded into the worker-thread query, or a Bean-Base-attribute → history match. Real
-cross-thread surgery; deferred. This is the one high-value case Increment 2 does NOT cover locally.
+### Increment 2b — DONE (the new-bean local case)
+When the current bean was NEVER pulled (`beanFilterMissed`) there's no shot to read its attributes
+from — which is exactly when transfer advice matters most. Now `requestBaristaContext` reads the
+CURRENT bean's origin/process (from the active bag's `dyeBeanBaseData` JSON) + roast (`dyeRoastLevel`)
+on the main thread, guarded to the case where the bag's bean matches the requested bean, and passes
+them into the worker. `buildSimilarBeanBlock` was refactored to take explicit attributes + the
+identity to exclude + a `currentIsNew` flag (set on `beanFilterMissed`), so it matches similar beans
+for a brand-new bean too. The block gains `currentBeanIsNew: true` in that case, and the persona's
+SIMILAR BEANS clause leads with it ("you haven't dialed this one yet, but your other washed
+Ethiopians landed around a finer grind"). Community tools (`look_up_bean` / `search_visualizer_shots`)
+are now the fallback for when *nothing rated resembles* the bean, or the user wants to go deeper.

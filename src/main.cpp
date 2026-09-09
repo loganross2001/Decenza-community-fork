@@ -2186,11 +2186,14 @@ int main(int argc, char *argv[])
     // [barista-fork] The live coaches speak in the CHOSEN AI "coaching voice" when the barista module
     // provides one; otherwise they fall back to the on-device AccessibilityManager path (unchanged
     // behaviour). These are populated below, after BaristaModule::install(). They are assigned before
-    // engine.load(), so before any machine phase (and thus any cue) can fire. In a no-barista build both
-    // stay null and the routing is byte-identical to upstream.
+    // engine.load(), so before any machine phase (and thus any cue) can fire. In a no-barista build the
+    // barista types don't exist, so these declarations (and their captures below) are compiled out and the
+    // routing is byte-identical to upstream.
+#ifdef DECENZA_BARISTA
     AssistantVoice* coachingVoice = nullptr;   // the AI coaching voice (null → native fallback)
     AssistantVoice* baristaVoice = nullptr;    // the barista voice — stopped so coaching wins during shot/steam
     CoachPhrasebook* coachPhrasebook = nullptr; // [barista-fork] model-generated varied cue phrasing (null → deterministic text)
+#endif
 
     // Steam-coach voice: the coach emits speakRequested only when its own audio setting is on. Prefer the
     // AI coaching voice; else route via announceCoaching, which bypasses BOTH accessibility voice gates —
@@ -2198,7 +2201,11 @@ int main(int argc, char *argv[])
     // (see AccessibilityManager::announceCoaching). Do not reroute this through announce()/routeAnnouncement.
     QObject::connect(mainController.liveSteamCoach(), &LiveSteamCoach::speakRequested,
                      &accessibilityManager,
-                     [&accessibilityManager, &coachingVoice, &baristaVoice, &coachPhrasebook](const QString& id, const QString& text, bool interrupt) {
+                     [&accessibilityManager
+#ifdef DECENZA_BARISTA
+                      , &coachingVoice, &baristaVoice, &coachPhrasebook
+#endif
+                     ]([[maybe_unused]] const QString& id, const QString& text, bool interrupt) {
 #ifdef DECENZA_BARISTA
                          if (coachingVoice) {
                              // [barista-fork] Arbiter: coaching wins over the barista ONLY when urgent (interrupt).
@@ -2222,7 +2229,11 @@ int main(int argc, char *argv[])
     // non-barista fallback path (it's an accessibility concept, default ON — contradicts the owner's opt-in).
     QObject::connect(mainController.liveShotCoach(), &LiveShotCoach::speakRequested,
                      &accessibilityManager,
-                     [&accessibilityManager, &coachingVoice, &baristaVoice, &coachPhrasebook, &settings](const QString& id, const QString& text, bool interrupt) {
+                     [&accessibilityManager
+#ifdef DECENZA_BARISTA
+                      , &coachingVoice, &baristaVoice, &coachPhrasebook, &settings
+#endif
+                     ]([[maybe_unused]] const QString& id, const QString& text, bool interrupt) {
 #ifdef DECENZA_BARISTA
                          if (coachingVoice) {
                              if (!settings.app()->espressoCoachAudioEnabled())

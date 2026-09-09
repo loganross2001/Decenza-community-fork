@@ -582,6 +582,15 @@ add_decenza_test(tst_closeintent
     ${CMAKE_SOURCE_DIR}/src/barista/closeintent.cpp
 )
 
+# --- tst_speechchunker: [barista-fork] the streaming voice pipeline's text → speakable-chunk splitter
+# (BARISTA_VOICE_STREAMING_DESIGN.md §1.2). Pure QtCore, no voice/mic/AI/timer deps — pins the boundary edge
+# cases (decimals, ratio colons, abbreviations, min/max sizing, the first-chunk fast rule, barge-in reset) that
+# would otherwise only surface as choppy or mis-split TTS on-device, where the rest of the pipeline is verified. ---
+add_decenza_test(tst_speechchunker
+    tst_speechchunker.cpp
+    ${CMAKE_SOURCE_DIR}/src/barista/speechchunker.cpp
+)
+
 # --- tst_speakerembedder: [barista-fork] voice-ID MFCC embedder DSP (FFT/mel/DCT + aggregation). QtCore-only
 # (MfccEmbedder depends on nothing but QVector/QByteArray) — validates determinism + discrimination in software,
 # no device/mic. ---

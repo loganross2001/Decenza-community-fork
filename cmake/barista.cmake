@@ -104,6 +104,8 @@ if(DECENZA_BARISTA)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristaconversation.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/closeintent.h
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/closeintent.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/speechchunker.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/speechchunker.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristaknowledge.h
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristaknowledge.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristaactions.h

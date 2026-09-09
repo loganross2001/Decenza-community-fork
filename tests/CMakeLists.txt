@@ -345,6 +345,31 @@ target_link_libraries(decenza_shotlib PUBLIC
 # includes. PUBLIC so linking targets inherit it and don't each repeat it.
 target_include_directories(decenza_shotlib PUBLIC ${CMAKE_BINARY_DIR})
 
+# ---------------------------------------------------------------------------
+# decenza_baristavoicelib: [barista-fork] the voice-conversation controller + its borrowed actuators,
+# compiled ONCE for the tests that exercise the state machine. Split from decenza_testlib for the same reason
+# decenza_shotlib is: these drag in Qt Multimedia + TextToSpeech (assistantvoice.cpp: QMediaPlayer /
+# QAudioOutput / QTextToSpeech), which the small pure-logic tests have no reason to link. The narrow-library
+# shape is the CLAUDE.md-prescribed fix for shared production sources — it keeps baristadiagnostics.cpp and
+# closeintent.cpp compiled once here rather than duplicated into tst_baristaconversation's own source list.
+# The actuators are linked only to resolve the null-guarded call symbols; tst_baristaconversation constructs
+# the controller with null actuators.
+add_library(decenza_baristavoicelib STATIC
+    ${CMAKE_SOURCE_DIR}/src/barista/baristaconversation.cpp
+    ${CMAKE_SOURCE_DIR}/src/barista/assistantvoice.cpp
+    ${CMAKE_SOURCE_DIR}/src/barista/voiceinput.cpp
+    ${CMAKE_SOURCE_DIR}/src/barista/speakergate.cpp
+    ${CMAKE_SOURCE_DIR}/src/barista/baristadiagnostics.cpp
+    ${CMAKE_SOURCE_DIR}/src/barista/closeintent.cpp
+    ${CMAKE_SOURCE_DIR}/src/barista/assistantsettings.cpp
+)
+set_target_properties(decenza_baristavoicelib PROPERTIES AUTOMOC ON AUTOMOC_PATH_PREFIX OFF)
+target_compile_definitions(decenza_baristavoicelib PUBLIC DECENZA_TESTING)
+target_link_libraries(decenza_baristavoicelib PUBLIC
+    decenza_testlib
+    Qt6::Multimedia Qt6::TextToSpeech
+)
+
 # The production resources.qrc, compiled ONCE for the three targets that need
 # :/icons/* and :/backgrounds/* to resolve (tst_backgroundpresets,
 # tst_mcpserver_protocol, tst_mcpremoteaccess). Each used to AUTORCC it into
@@ -590,6 +615,18 @@ add_decenza_test(tst_speechchunker
     tst_speechchunker.cpp
     ${CMAKE_SOURCE_DIR}/src/barista/speechchunker.cpp
 )
+
+# --- tst_baristaconversation: [barista-fork] the two-way-comms voice state machine (BARISTA_TwoWay_Comms
+# _Redesign.md §13) — the controller that was "on-device only" because it lives under the unlinted QML overlay.
+# It borrows its actuators (AssistantVoice/VoiceInput) and null-guards every call, and its inputs are the public
+# transition-table slots, so it runs headless with NULL actuators — pinning the two bugs the redesign kills by
+# construction (won't-close-on-farewell, stall-drops-to-Listening) with no mic/TTS/network/device. The actuator
+# .cpp files are compiled in only to resolve the (never-taken) null-guarded call symbols; hence Multimedia +
+# TextToSpeech, which assistantvoice.cpp needs. ---
+add_decenza_test(tst_baristaconversation
+    tst_baristaconversation.cpp
+)
+target_link_libraries(tst_baristaconversation PRIVATE decenza_baristavoicelib)
 
 # --- tst_anthropicstreamparser: [barista-fork] the streaming voice pipeline's Anthropic SSE parser
 # (BARISTA_VOICE_STREAMING_DESIGN.md §1.1). Pure QtCore/QJson, no network/voice deps — pins the real-socket

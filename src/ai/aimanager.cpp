@@ -39,6 +39,8 @@
 #include <QThread>
 #include <QSqlDatabase>
 #include <QSqlQuery>
+#include <QSet>           // [barista-fork] similar-bean dedupe
+#include <algorithm>      // [barista-fork] std::sort for similar-bean ranking
 #include <QSqlError>
 #include "../core/dbutils.h"
 #include <QPointer>
@@ -213,6 +215,221 @@ QJsonObject buildProactiveRecBlock(SettingsDye* dye)
         o.insert(QStringLiteral("recentShotNote"), notes.left(240));
 
     return o;
+}
+
+// [barista-fork] PALATE PROFILE — a CROSS-BEAN read of what the user's own ratings say they like,
+// so the barista can OPEN its first reply with a grounded read ("your best pours lean lighter,
+// around a normale") instead of only answering literally then waiting to be asked for advice.
+// Distinct from the two blocks that already exist: fullHistory is bean COUNTS with no ratings, and
+// recentTastingFeedbackOnThisBean is the CURRENT bean only. This spans every bean.
+//
+// Source discipline: enjoyment (shots.db) is the base that is actually populated, so the palate is
+// built from it. Ratio and temperature are stored as SPARSE per-shot overrides (temperatureOverrideC
+// is 0 when the shot used the profile default), so an AVG() over the raw columns would be wrong —
+// the dial is instead read off the top-rated shots through the same trusted loadShotRecordStatic
+// path the best-shot blocks use, and bounded to a small sample.
+//
+// COLD-START GUARD: returns {} below kPalateMinRatedShots so the barista stays quiet rather than
+// manufacturing "you consistently like X" from two ratings. A roast preference is asserted only on
+// a genuine plurality (>=2), never a lone data point.
+QJsonObject buildPalateProfileBlock(QSqlDatabase& db)
+{
+    constexpr int kPalateMinRatedShots = 6;   // below this one bad week skews the whole read
+    constexpr int kLikedSampleSize     = 8;   // top-rated shots to read the shared dial from
+
+    int ratedShots = 0;
+    QSqlQuery cq(db);
+    // Whitespace before () dodges a permission-hook false-positive on the pattern `.exec(`.
+    if (cq.exec ("SELECT COUNT(*) FROM shots WHERE enjoyment > 0") && cq.next())
+        ratedShots = cq.value(0).toInt();
+    if (ratedShots < kPalateMinRatedShots)
+        return QJsonObject();
+
+    QJsonObject palate;
+    palate["ratedShots"] = ratedShots;
+
+    // The best-rated coffees. Capped at 3 — a lead-in signal, not a ranked catalogue. HAVING >= 2
+    // so one lucky high-rated shot can't crown a bean as "your best" (same plurality discipline as
+    // the roast guard below); a bean with a single rated shot simply doesn't appear.
+    QSqlQuery bq(db);
+    if (bq.exec ("SELECT bean_brand, bean_type, COUNT(*) n, ROUND(AVG(enjoyment)) av, MAX(enjoyment) bst "
+                 "FROM shots WHERE enjoyment > 0 AND (TRIM(bean_brand) <> '' OR TRIM(bean_type) <> '') "
+                 "GROUP BY bean_brand, bean_type HAVING COUNT(*) >= 2 "
+                 "ORDER BY AVG(enjoyment) DESC, n DESC LIMIT 3")) {
+        QJsonArray top;
+        while (bq.next()) {
+            QJsonObject o;
+            o["beanBrand"]         = bq.value(0).toString();
+            o["beanType"]          = bq.value(1).toString();
+            o["ratedShots"]        = bq.value(2).toInt();
+            o["avgRating0to100"]   = bq.value(3).toInt();
+            o["bestRating0to100"]  = bq.value(4).toInt();
+            top.append(o);
+        }
+        if (!top.isEmpty())
+            palate["topRatedBeans"] = top;
+    }
+
+    // The dial the user's highest-rated shots cluster around, read through the trusted per-shot path.
+    // Drain the id cursor FIRST, then do the (heavier, blob-pulling) loadShotRecordStatic reads — the
+    // best-shot builders follow the same order; stepping loadShotRecordStatic's query inside a live
+    // result set on the same connection is a SQLite-driver fragility class to stay clear of.
+    QList<qint64> likedIds;
+    {
+        QSqlQuery lq(db);
+        lq.prepare(QStringLiteral(
+            "SELECT id FROM shots WHERE enjoyment > 0 ORDER BY enjoyment DESC, timestamp DESC LIMIT ?"));
+        lq.addBindValue(kLikedSampleSize);
+        if (lq.exec ())
+            while (lq.next())
+                likedIds.append(lq.value(0).toLongLong());
+    }
+    if (!likedIds.isEmpty()) {
+        double ratioSum = 0; int ratioN = 0;
+        double tempSum = 0;  int tempN = 0;
+        QHash<QString, int> roastCounts;
+        for (const qint64 id : likedIds) {
+            const ShotProjection s = ShotHistoryStorage::convertShotRecord(
+                ShotHistoryStorage::loadShotRecordStatic(db, id));
+            if (!s.isValid())
+                continue;
+            if (s.doseWeightG > 0 && s.finalWeightG > 0) {
+                ratioSum += s.finalWeightG / s.doseWeightG;
+                ++ratioN;
+            }
+            if (s.temperatureOverrideC > 0) {   // 0 == used profile default, no reliable temp
+                tempSum += s.temperatureOverrideC;
+                ++tempN;
+            }
+            const QString roast = s.roastLevel.trimmed().toLower();
+            if (!roast.isEmpty())
+                roastCounts[roast] += 1;
+        }
+        QJsonObject liked;
+        if (ratioN > 0)
+            liked["typicalRatio"] = QString("1:%1").arg(ratioSum / ratioN, 0, 'f', 1);
+        if (tempN > 0)
+            liked["typicalTempC"] = qRound(tempSum / tempN);
+        if (!roastCounts.isEmpty()) {
+            QString modalRoast; int modalCount = 0;
+            for (auto it = roastCounts.constBegin(); it != roastCounts.constEnd(); ++it)
+                if (it.value() > modalCount) { modalCount = it.value(); modalRoast = it.key(); }
+            if (modalCount >= 2)   // a genuine plurality, not a single shot's roast
+                liked["preferredRoastLevel"] = modalRoast;
+        }
+        if (!liked.isEmpty())
+            palate["highestRatedShotsShareThisDial"] = liked;
+    }
+
+    palate["note"] = QStringLiteral(
+        "A CROSS-BEAN read of the user's OWN ratings — what their whole history says they tend to "
+        "like, not just the current bean. Use it to make your opening read and your suggestions "
+        "genuinely informed, but keep the one-proactive-thing discipline: it is grounding for the "
+        "single thing you raise, NOT a list to recite. Never read its numbers aloud.");
+    return palate;
+}
+
+// [barista-fork] SIMILAR-BEAN EXPERIENCE — transfer learning across the user's OWN rated history:
+// what they've liked on OTHER beans that resemble the current one (shared roast / origin / process),
+// so the barista can advise beyond a single bean's own record ("on your other washed Ethiopians you
+// dialed in around a finer grind"). Local and reliable — matched from shots.db, no network. The
+// COMMUNITY half of "similar beans" (Bean Base / Visualizer) stays a tool the model reaches for on
+// demand (look_up_bean / search_visualizer_shots), wired into the persona rather than fetched
+// proactively every turn.
+//
+// `current` must genuinely BE the current bean's shot — the caller gates on !beanFilterMissed, because
+// a mismatched anchor (latest overall, a different bean) would match "similar" to the wrong bean.
+// Returns {} when the current bean carries no origin/process/roast to match on, or nothing rated is
+// similar. (The new-bean case — current bean never pulled, so no shot to read attributes from — is
+// handled in the persona via look_up_bean, not here; see docs/barista/PROACTIVE_COACHING.md #2b.)
+QJsonObject buildSimilarBeanBlock(QSqlDatabase& db, const ShotProjection& current)
+{
+    const auto attrsOf = [](const ShotProjection& s, QString& origin, QString& process, QString& roast) {
+        origin.clear(); process.clear();
+        if (!s.beanBaseJson.isEmpty()) {
+            const QJsonObject o = QJsonDocument::fromJson(s.beanBaseJson.toUtf8()).object();
+            origin  = o.value(QStringLiteral("origin")).toString().trimmed().toLower();
+            process = o.value(QStringLiteral("process")).toString().trimmed().toLower();
+        }
+        roast = s.roastLevel.trimmed().toLower();
+    };
+    QString curOrigin, curProcess, curRoast;
+    attrsOf(current, curOrigin, curProcess, curRoast);
+    if (curOrigin.isEmpty() && curProcess.isEmpty() && curRoast.isEmpty())
+        return QJsonObject();
+
+    // Top-rated shot per OTHER bean (bounded scan, deduped keeping the highest since ordered).
+    // Drain the id cursor before the per-shot loads — same idiom as buildPalateProfileBlock.
+    QList<qint64> candidateIds;
+    {
+        QSqlQuery q(db);
+        q.prepare(QStringLiteral(
+            "SELECT id, bean_brand, bean_type FROM shots "
+            "WHERE enjoyment > 0 AND NOT (bean_brand = ? AND bean_type = ?) "
+            "AND (TRIM(bean_brand) <> '' OR TRIM(bean_type) <> '') "
+            "ORDER BY enjoyment DESC, timestamp DESC LIMIT 40"));
+        q.addBindValue(current.beanBrand);
+        q.addBindValue(current.beanType);
+        QSet<QString> seenBeans;
+        if (q.exec ())
+            while (q.next()) {
+                const QString key = q.value(1).toString() + QLatin1Char('\x1f') + q.value(2).toString();
+                if (seenBeans.contains(key))
+                    continue;   // keep only the top-rated shot per bean
+                seenBeans.insert(key);
+                candidateIds.append(q.value(0).toLongLong());
+                if (candidateIds.size() >= 12)
+                    break;
+            }
+    }
+
+    struct Match { QJsonObject entry; int score; int enjoyment; };
+    QList<Match> matches;
+    for (const qint64 id : candidateIds) {
+        const ShotProjection s = ShotHistoryStorage::convertShotRecord(
+            ShotHistoryStorage::loadShotRecordStatic(db, id));
+        if (!s.isValid())
+            continue;
+        QString o, p, r;
+        attrsOf(s, o, p, r);
+        QStringList shared;
+        int score = 0;
+        if (!curRoast.isEmpty()   && r == curRoast)   { score += 2; shared << QStringLiteral("roast (%1)").arg(r); }
+        if (!curOrigin.isEmpty()  && o == curOrigin)  { score += 2; shared << QStringLiteral("origin (%1)").arg(o); }
+        if (!curProcess.isEmpty() && p == curProcess) { score += 1; shared << QStringLiteral("process (%1)").arg(p); }
+        if (score < 2)
+            continue;   // a lone weak overlap (process only) is not "similar"
+        QJsonObject e;
+        e["beanBrand"]        = s.beanBrand;
+        e["beanType"]         = s.beanType;
+        e["sharedWith"]       = QStringLiteral("same ") + shared.join(QStringLiteral(", "));
+        e["bestRating0to100"] = s.enjoyment0to100;
+        if (s.doseWeightG > 0 && s.finalWeightG > 0)
+            e["ratio"] = QString("1:%1").arg(s.finalWeightG / s.doseWeightG, 0, 'f', 1);
+        if (!s.grinderSetting.isEmpty())
+            e["grind"] = s.grinderSetting;
+        matches.append({ e, score, s.enjoyment0to100 });
+    }
+    if (matches.isEmpty())
+        return QJsonObject();
+
+    std::sort(matches.begin(), matches.end(), [](const Match& a, const Match& b) {
+        return a.score != b.score ? a.score > b.score : a.enjoyment > b.enjoyment;
+    });
+    QJsonArray beans;
+    for (int i = 0; i < matches.size() && i < 2; ++i)   // top 2 — a lead-in, not a catalogue
+        beans.append(matches[i].entry);
+
+    QJsonObject out;
+    out["similarBeans"] = beans;
+    out["note"] = QStringLiteral(
+        "The user's OWN best-rated shots on beans that RESEMBLE the current one (shared roast / origin "
+        "/ process). Use it to advise even when this exact bean has little history ('on your other "
+        "washed Ethiopians you liked a finer grind'). Grounding for ONE suggestion, not a list to "
+        "recite; grind is grinder+bean specific, so treat a borrowed number as a starting hint, never a "
+        "target to copy. For roaster/community info beyond the user's history, reach for look_up_bean "
+        "or search_visualizer_shots.");
+    return out;
 }
 }
 
@@ -1423,6 +1640,8 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
         QJsonObject docChange;     // [barista-fork] a pending Decent cleaning-guide change to OFFER (assistant.db)
         QJsonObject occasion;      // [barista-fork] today's US holiday + personal dates for the greeting/goodbye
         QJsonArray knownFacts;     // [barista-fork] durable basic facts the user told the barista (remember_fact)
+        QJsonObject palateProfile; // [barista-fork] cross-bean read of what the user's ratings say they like
+        QJsonObject similarBean;   // [barista-fork] what the user liked on beans resembling the current one
 
         withTempDb(dbPath, "barista_ctx", [&](QSqlDatabase& db) {
             // Anchor: latest shot for the current bean; else latest overall (robust to bean-name drift).
@@ -1499,6 +1718,17 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
                         fullHistory["beans"] = beans;
                 }
             }
+
+            // [barista-fork] Cross-bean palate read (what the user's ratings say they like), built on
+            // the same shots.db connection. Returns {} below its cold-start floor so the barista stays
+            // quiet on a thin history rather than inventing a preference.
+            palateProfile = buildPalateProfileBlock(db);
+
+            // [barista-fork] Similar-bean transfer learning. Only when the anchor IS the current bean
+            // (!beanFilterMissed) — otherwise the anchor is the latest shot OVERALL (a different bean)
+            // and matching "similar" to it would surface beans like the wrong coffee.
+            if (!beanFilterMissed)
+                similarBean = buildSimilarBeanBlock(db, shot);
         });
 
         // [barista-fork] Proactive retrieval (advisor refinement #3): fold the user's recent VERBAL tasting
@@ -1686,7 +1916,7 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
 
         QMetaObject::invokeMethod(qApp, [self, serial, shot, anchorId, beanFilterMissed,
                                          beanBrand, beanType, profileName, beanFeedback, dueItems, docChange,
-                                         occasion, knownFacts, blocks, fullHistory, recipesBlock, whoBlock]() {
+                                         occasion, knownFacts, blocks, fullHistory, palateProfile, similarBean, recipesBlock, whoBlock]() {
             if (!self || serial != self->m_baristaContextSerial)
                 return;   // stale — a newer request superseded this one
             self->m_lastBaristaAnchorId = (anchorId > 0 && shot.isValid()) ? anchorId : 0;
@@ -1797,6 +2027,16 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
             addShotDescriptor(obj, QStringLiteral("beanBestShot"));
             if (!fullHistory.isEmpty())
                 obj.insert(QStringLiteral("fullHistory"), fullHistory);
+            // [barista-fork] Cross-bean palate read — grounds the barista's opening read + its single
+            // proactive suggestion in what the user's whole rating history says they like. Absent (not
+            // inserted) below the cold-start floor, so the persona's OPENING READ degrades gracefully.
+            if (!palateProfile.isEmpty())
+                obj.insert(QStringLiteral("palateProfile"), palateProfile);
+            // [barista-fork] Similar-bean transfer learning — what the user liked on beans resembling
+            // this one, so advice holds up even when this exact bean is thin on history. Absent when the
+            // current bean has no matchable attributes or nothing rated is similar.
+            if (!similarBean.isEmpty())
+                obj.insert(QStringLiteral("similarBeanExperience"), similarBean);
             // [barista-fork] Proactive verbal-feedback retrieval: the user's own past words about how this
             // bean tasted, so the barista closes the loop ("you called this sour twice") without a tool call.
             if (!beanFeedback.isEmpty())

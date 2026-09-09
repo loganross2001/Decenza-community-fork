@@ -5,6 +5,10 @@
 cd "${CLAUDE_PROJECT_DIR:-.}" 2>/dev/null || exit 0
 {
   echo "=== Decenza fork (feat/barista) ==="
+  echo "CANONICAL FOLDER: $(pwd) (the only git checkout). Work HERE, nowhere else."
+  echo "IGNORE stale June siblings: ~/Decenza, ~/Decenza-contribution,"
+  echo "  ~/decenza-hardening-backup-*. Any note citing branches community-fork/"
+  echo "  weight-dialing or PR #1348 is OBSOLETE — see docs/barista/FORK_STATE.md."
   echo "Fork of Kulitorum/Decenza. Fork-only surface: barista AI assistant, bean/recipe"
   echo "management, voice (STT/TTS), AI bean extraction. Upstream owns CLAUDE.md,"
   echo "docs/CLAUDE_MD/**, openspec/**. Re-sync is regular; class-2 ledger in .fork/MERGE.md."

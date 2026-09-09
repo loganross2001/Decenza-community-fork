@@ -143,6 +143,57 @@ The app links OpenSSL directly (for TLS certificate generation in Remote Access)
 - **AAB output**: `build/.../android-build-Decenza/build/outputs/bundle/release/`
   - `Decenza-X.Y.Z.aab` (versioned, for Play Store)
 
+### [barista-fork] Building an installable APK **on this Mac** (`~/Decenza-fork`)
+
+The upstream flow above (Qt Creator `--sign`, the `C:/CODE` keystore) is a **Windows/CI** description and
+does NOT work as-is on this Mac. `./build.sh --target ANDROID --dev` compiles + links fully, then its
+gradle auto-sign step **fails harmlessly** (it points at the non-existent `C:/CODE/Android APK
+keystore.jks`) and leaves an **unsigned** APK. Two gotchas have each cost real debugging time more than
+once — do these exactly:
+
+1. **Export `JAVA_HOME` first, or packaging dies with "Unable to locate a Java Runtime."** The JDK is
+   Homebrew `openjdk@17`, which is keg-only, so `/usr/libexec/java_home` (what `build.sh` and `apksigner`
+   both use) returns empty. Shell state does not persist between commands — export it in the *same* command:
+   ```sh
+   export JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home
+   cd ~/Decenza-fork && ./build.sh --target ANDROID --dev
+   # unsigned APK: build/Qt_6_10_1_for_Android_arm64_v8a_Release/android-build/build/outputs/apk/release/android-build-release-unsigned.apk
+   ```
+   (`apksigner`/`aapt2`/`zipalign` are Java tools — they need `JAVA_HOME` set too.)
+
+2. **Sign with the DEBUG keystore, and force v2-ONLY, or the tablet rejects it.** There is no release
+   `.jks` on this Mac, and the tablet's installed app is **debug-signed** — so `~/.android/debug.keystore`
+   (cert `C=US,O=Android,CN=Android Debug`, SHA-256 `5c7458da2bfaddb516f20852c50c1d0ab8d21930fb94715f2cc665d2de9442a0`)
+   is the **matching** key: signing with it upgrades over the installed app and keeps its data; any other
+   key → signature-mismatch install failure that forces an uninstall (wipes shot history). The Galaxy Tab
+   A8 / One UI 6.1 sideload installer **rejects a v3-signed APK as "package invalid"** — the working profile
+   is **v2-only** (`v1:false v2:true v3:false`). apksigner (build-tools 35) defaults to v3, so you MUST pin
+   `--min-sdk-version 28 --max-sdk-version 34` AND `--v3-signing-enabled false`. Use plain `zipalign -f 4`
+   (NOT `-p`):
+   ```sh
+   BT=~/Library/Android/sdk/build-tools/35.0.0
+   UNSIGNED=~/Decenza-fork/build/Qt_6_10_1_for_Android_arm64_v8a_Release/android-build/build/outputs/apk/release/android-build-release-unsigned.apk
+   VC=$("$BT/aapt2" dump badging "$UNSIGNED" | grep -oE "versionCode='[0-9]+'" | grep -oE '[0-9]+')
+   "$BT/zipalign" -f 4 "$UNSIGNED" /tmp/decenza_aligned.apk
+   "$BT/apksigner" sign --ks ~/.android/debug.keystore --ks-pass pass:android \
+     --ks-key-alias androiddebugkey --key-pass pass:android \
+     --min-sdk-version 28 --max-sdk-version 34 \
+     --v1-signing-enabled false --v2-signing-enabled true --v3-signing-enabled false \
+     --out ~/Downloads/Decenza-<desc>-vc${VC}.apk /tmp/decenza_aligned.apk
+   "$BT/apksigner" verify --verbose ~/Downloads/Decenza-<desc>-vc${VC}.apk   # want v2:true, v1/v3:false
+   "$BT/apksigner" verify --print-certs ~/Downloads/Decenza-<desc>-vc${VC}.apk # want SHA-256 5c7458da…
+   ```
+   **Ground-truth check:** the last-working APK in `~/Downloads/Decenza-*.apk` is itself v2-only with cert
+   `5c7458da…` — verify a new build matches it before handing it over.
+
+3. **versionCode must exceed the installed one** or Android rejects the install as a downgrade ("package
+   invalid" — easily mistaken for a signing problem). `--dev` derives an ever-increasing clock-based code
+   (`LOCAL_DEV_BUILD`), which already beats any prior delivery, so **with `--dev` no `versioncode.txt` edit
+   is needed**. Only a non-`--dev` build needs `echo <NNNN> > versioncode.txt` (a local dev-dir bump; don't
+   commit it — CI owns the tracked value). The `vcNNNN` filename label should equal the internal code.
+
+Then sideload the `~/Downloads/*.apk` onto the tablet (installs over the existing app, keeps data).
+
 ## Decent Tablet Troubleshooting
 
 The tablets shipped with Decent espresso machines have some quirks:

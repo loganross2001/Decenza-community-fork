@@ -3,6 +3,11 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import Decenza
 
+// [barista-fork] Lets the color/avatar Repeater delegates reference outer ids (root) from their
+// nested scopes. Safe: both delegates already declare `required property var modelData`, so they do
+// not rely on injected model roles (the case QML_GOTCHAS warns the pragma would break).
+pragma ComponentBehavior: Bound
+
 // Create / rename / delete a barista (pr/barista-identity). Opened by
 // BaristaChipRow's "+" chip (create) and a chip long-press (edit). Writes go
 // through MainController.baristaStorage; the caller refreshes its roster on the

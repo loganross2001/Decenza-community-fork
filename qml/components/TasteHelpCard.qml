@@ -94,6 +94,7 @@ Popup {
             Layout.alignment: Qt.AlignRight
             Layout.topMargin: Theme.spacingSmall
             text: root.tr("common.button.gotIt", "Got it")
+            accessibleName: text
             onClicked: root.close()
         }
     }

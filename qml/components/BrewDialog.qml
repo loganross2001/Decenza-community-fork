@@ -252,7 +252,7 @@ DecenzaDialog {
             ratio = doseValue > 0 && targetValue > 0 ? targetValue / doseValue
                                                      : Settings.brew.lastUsedRatio
         }
-        targetManuallySet = Settings.brew.hasBrewYieldOverride
+        root.targetManuallySet = Settings.brew.hasBrewYieldOverride
 
         // [barista-fork] Bean memory: surface the best-rated recipe for this bean + profile. Re-runs here so it
         // refreshes both on open and after an in-dialog recipe switch (seedFromCurrentState is the re-seed path).

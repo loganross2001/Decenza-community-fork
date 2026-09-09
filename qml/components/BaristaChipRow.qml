@@ -2,6 +2,11 @@ import QtQuick
 import QtQuick.Layouts
 import Decenza
 
+// [barista-fork] Lets the Repeater delegate reference outer ids (root, editDialog) from its nested
+// scope. Safe here: the delegate already declares `required property var modelData`, so it does not
+// rely on injected model roles (the case QML_GOTCHAS warns the pragma would break).
+pragma ComponentBehavior: Bound
+
 // Horizontal row of barista chips for the idle screen (pr/barista-identity).
 // Each chip is a circular avatar (the person's `avatar` string, else the first
 // letter of their name) filled in their `color` (Theme fallback when empty) with
@@ -175,7 +180,9 @@ FocusScope {
 
                 AccessibleTapHandler {
                     id: avatarTap
-                    anchors.fill: parent
+                    // qmllint disable Quick.layout-positioning
+                    anchors.fill: parent   // intentional tap overlay covering the whole chip, NOT a layout cell
+                    // qmllint enable Quick.layout-positioning
                     supportLongPress: true
                     accessibleName: TranslationManager.translate("barista.brewAs", "Brew as %1")
                                         .arg(chip.modelData.name || "")
@@ -202,8 +209,8 @@ FocusScope {
             Rectangle {
                 id: addCircle
                 Layout.alignment: root.compact ? Qt.AlignVCenter : Qt.AlignHCenter
-                width: root.avatarInner
-                height: root.avatarInner
+                implicitWidth: root.avatarInner
+                implicitHeight: root.avatarInner
                 radius: width / 2
                 color: "transparent"
                 border.width: 1
@@ -232,7 +239,9 @@ FocusScope {
 
             AccessibleTapHandler {
                 id: addTap
-                anchors.fill: parent
+                // qmllint disable Quick.layout-positioning
+                anchors.fill: parent   // intentional tap overlay covering the whole add-chip, NOT a layout cell
+                // qmllint enable Quick.layout-positioning
                 accessibleName: TranslationManager.translate("barista.addBarista", "Add barista")
                 accessibleItem: addCircle
                 onAccessibleClicked: editDialog.openForCreate()

@@ -72,13 +72,13 @@ Dialog {
         if (/^-?\d+(\.\d+)?$/.test(s)) {
             var v = parseFloat(s) + n * step
             if (v < 0) return ""
-            return v.toFixed(_stepDecimals(step))
+            return Number(v).toFixed(_stepDecimals(step))
         }
         var m = s.match(/^(\D*)(\d+(?:\.\d+)?)(\D*)$/)
         if (m) {
             var nv = parseFloat(m[2]) + n * step
             if (nv < 0) nv = 0
-            return m[1] + nv.toFixed(_stepDecimals(step)) + m[3]
+            return m[1] + Number(nv).toFixed(_stepDecimals(step)) + m[3]
         }
         if (/^[A-Za-z]{1,3}$/.test(s)) {
             var last = s.charAt(s.length - 1)

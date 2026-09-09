@@ -5,6 +5,11 @@ import QtQuick.Dialogs
 import QtQuick.Effects
 import Decenza
 
+// [barista-fork] Lets the people Repeater delegate reference outer ids (peopleCard, peopleEditDialog)
+// from its nested scope. Safe: the delegate already declares `required property var modelData`, so it
+// does not rely on injected model roles (the case QML_GOTCHAS warns the pragma would break).
+pragma ComponentBehavior: Bound
+
 KeyboardAwareContainer {
     id: historyDataTab
     textFields: [totpCodeField]
@@ -620,8 +625,8 @@ KeyboardAwareContainer {
                             // Avatar — emoji (SVG image) or the name's initial.
                             Rectangle {
                                 Layout.alignment: Qt.AlignVCenter
-                                width: Theme.scaled(30)
-                                height: Theme.scaled(30)
+                                implicitWidth: Theme.scaled(30)
+                                implicitHeight: Theme.scaled(30)
                                 radius: width / 2
                                 color: peopleCard.colorFor(personRow.modelData)
 
@@ -669,8 +674,8 @@ KeyboardAwareContainer {
                             // white edit icon was invisible on the light card, so editing looked absent).
                             Rectangle {
                                 Layout.alignment: Qt.AlignVCenter
-                                width: Theme.scaled(32)
-                                height: Theme.scaled(32)
+                                implicitWidth: Theme.scaled(32)
+                                implicitHeight: Theme.scaled(32)
                                 radius: width / 2
                                 color: editTap.isPressed ? Theme.backgroundColor : Qt.rgba(Theme.textColor.r, Theme.textColor.g, Theme.textColor.b, 0.07)
                                 border.width: 1

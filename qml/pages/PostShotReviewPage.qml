@@ -412,7 +412,7 @@ T.Page {
                 postShotReviewPage._editLoaded = true
                 // [barista-fork] Reflect any previously-saved one-tap taste marker in the taste row's selected
                 // state, then honor the "coach automatically" preference now that the record is loaded.
-                postShotReviewPage.editTasteChoice = postShotReviewPage.tasteChoiceFromNotes(editNotes)
+                postShotReviewPage.editTasteChoice = postShotReviewPage.tasteChoiceFromNotes(postShotReviewPage.editNotes)
                 postShotReviewPage.maybeAutoCoach()
                 // Quality badges already arrived recomputed in `shot` via
                 // loadShotRecordStatic, which also persists drift to the DB
@@ -1734,7 +1734,7 @@ T.Page {
                 id: tasteRow
                 Layout.fillWidth: true
                 spacing: Theme.spacingSmall
-                visible: !!(editShotData.durationSec > 0)
+                visible: !!(postShotReviewPage.editShotData.durationSec > 0)
 
                 Tr {
                     key: "postshotreview.taste.prompt"
@@ -1821,17 +1821,21 @@ T.Page {
             Loader {
                 id: coachingCardLoader
                 Layout.fillWidth: true
-                visible: !!(editShotData && editShotData.durationSec > 0)
+                visible: !!(postShotReviewPage.editShotData && postShotReviewPage.editShotData.durationSec > 0)
                 active: visible
+                // qmllint disable missing-property
+                // item is the URL-loaded CoachingCard (its own resource, not a registered module type),
+                // so qmllint types it as bare QObject and cannot see implicitHeight.
                 Layout.preferredHeight: (active && item) ? item.implicitHeight : 0
+                // qmllint enable missing-property
                 source: "qrc:/qml/assistant/CoachingCard.qml"
                 onLoaded: item.page = postShotReviewPage
                 Connections {
                     target: coachingCardLoader.item
                     ignoreUnknownSignals: true
                     function onRequestDiscussion() {
-                        conversationOverlay.openWithShot(editShotData, editBeanBrand, editBeanType,
-                                                         editShotData.profileName, editShotId)
+                        conversationOverlay.openWithShot(postShotReviewPage.editShotData, postShotReviewPage.editBeanBrand, postShotReviewPage.editBeanType,
+                                                         postShotReviewPage.editShotData.profileName, postShotReviewPage.editShotId)
                     }
                 }
             }

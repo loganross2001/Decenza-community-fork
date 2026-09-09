@@ -1258,8 +1258,12 @@ T.ApplicationWindow {
         // [barista-fork] Reserve the right strip when the barista panel is expanded, so the machine UI
         // reflows into the remaining left area instead of hiding under the panel. 0 when the barista is
         // collapsed to its edge tab or suppressed. Animated so the reflow glides rather than jumps.
+        // qmllint disable missing-property
+        // baristaOverlay.item is the URL-loaded AssistantOverlay (its own resource, deliberately not a
+        // registered module type — NOT_IN_MODULE_BY_DESIGN), so its `reservedWidth` is unknowable to qmllint.
         anchors.rightMargin: (baristaOverlay.visible && baristaOverlay.item)
                              ? baristaOverlay.item.reservedWidth : 0
+        // qmllint enable missing-property
         Behavior on anchors.rightMargin { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
         focus: true
         initialItem: idlePage

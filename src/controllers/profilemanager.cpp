@@ -414,6 +414,12 @@ QString ProfileManager::currentEditorType() const {
     return m_currentProfile.editorType();
 }
 
+// [barista-fork] See the header. Title-keyed (that is what a shot record stores and what the KB
+// matches on); editor type disambiguates. One derivation, shared with the advisor/MCP path.
+QString ProfileManager::currentProfileKbId() const {
+    return ShotSummarizer::computeProfileKbId(currentProfileTitle(), currentEditorType());
+}
+
 
 // === Target weight / brew-by-ratio ===
 

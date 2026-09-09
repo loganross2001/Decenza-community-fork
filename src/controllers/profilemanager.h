@@ -390,6 +390,13 @@ public:
     // user has since deleted is not in the catalog and returns empty.
     Q_INVOKABLE QString profileKbDerivedFrom(const QString& profileTitle) const;
 
+    // [barista-fork] The CURRENT profile's coffee-knowledge id — the same derivation the advisor and
+    // MCP use (ShotSummarizer::computeProfileKbId over the profile's title + editor type), centralized
+    // here so QML callers do not hand-roll it. Returns empty when nothing matches. The BrewDialog
+    // bean-recipe card calls this; it was referenced before it existed (a fork oversight) and threw a
+    // TypeError, so the card silently never populated — see docs/barista/QMLLINT_BACKLOG.md.
+    Q_INVOKABLE QString currentProfileKbId() const;
+
     // The dial-in differences between a profile and the bundled profile whose
     // knowledge is being shown for it (change: summarize-profile-changes-from-builtin).
     //

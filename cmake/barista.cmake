@@ -80,6 +80,10 @@ target_sources(Decenza PRIVATE
 )
 
 if(DECENZA_BARISTA)
+    # NOTE: the QML singleton registration header (baristasingletons_qml.h) is listed in the main
+    # CMakeLists.txt HEADERS block (gated on DECENZA_BARISTA), NOT here — it must be a first-class
+    # module header known at qt_add_qml_module time or the generated qmltyperegistrations.cpp won't
+    # #include it. See the comment there.
     target_sources(Decenza PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristamodule.h
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristamodule.cpp

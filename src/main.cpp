@@ -4145,7 +4145,7 @@ int main(int argc, char *argv[])
     checkpoint("Context properties & type registration");
 
 #ifdef DECENZA_BARISTA
-    auto* baristaModule = BaristaModule::install(&engine, &mainController, &machineState, &settings);  // [barista-fork] hook
+    auto* baristaModule = BaristaModule::install(&mainController, &machineState, &settings);  // [barista-fork] hook (Barista is now a compile-time QML singleton — baristasingletons_qml.h)
     // [barista-fork] Point the live-coach speak routes (wired above) at the AI coaching voice, and give the
     // arbiter a handle to the barista voice so coaching can stop it during shot/steam. Assigned before
     // engine.load() below, so before any cue can fire.

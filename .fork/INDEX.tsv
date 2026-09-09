@@ -19,7 +19,7 @@ tool	search_visualizer_shots	barista	src/barista/baristatools.cpp:1176	-	the use
 tool	set_active_user	barista	src/barista/baristatools.cpp:984	-		
 tool	update_maintenance_default	barista	src/barista/baristatools.cpp:677	-		
 tool	add_bag	bean	src/barista/baristatools.cpp:320	-	create a new bag in the inventory	
-seam	bagOp	bean	src/barista/baristamodule.cpp:831	-	bridges barista bag tools (add/update/finish/delete/list) to storage	refs=CoffeeBagStorage::requestCreateBag
+seam	bagOp	bean	src/barista/baristamodule.cpp:830	-	bridges barista bag tools (add/update/finish/delete/list) to storage	refs=CoffeeBagStorage::requestCreateBag
 tool	delete_bag	bean	src/barista/baristatools.cpp:381	-	permanently remove a bag (refused if shots reference it)	
 tool	detect_grind_drift	bean	src/barista/baristatools.cpp:193	-	has a fixed grind setting drifted faster/slower over time (grinder wear / aging beans)?	
 api	fetchBagPage	bean	src/barista/baristacloudtools.h:35	-	fetch a roaster product page's readable text (keyless) for the model to extract bean details	

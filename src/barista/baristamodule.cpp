@@ -26,8 +26,7 @@
 #include <QDate>                              // [barista-fork] bagOp list: days-off-roast freshness
 #include "../ai/aimanager.h"
 
-#include <QQmlApplicationEngine>
-#include <QQmlContext>
+#include "baristasingletons_qml.h"   // [barista-fork] BaristaModuleForeign::s_singletonInstance
 #include <QFileInfo>
 #include <QNetworkAccessManager>
 #include <QJsonObject>
@@ -1073,13 +1072,19 @@ bool BaristaModule::enabled() const {
     return m_settings->enabled();
 }
 
-BaristaModule* BaristaModule::install(QQmlApplicationEngine* engine,
-                                      MainController* mainController,
+BaristaModule* BaristaModule::install(MainController* mainController,
                                       MachineState* machineState,
                                       Settings* appSettings,
                                       QObject* parent) {
-    auto* module = new BaristaModule(mainController, machineState, appSettings, parent ? parent : engine);
-    engine->rootContext()->setContextProperty(QStringLiteral("Barista"), module);
+    // Parent to MainController (declared before the QQmlApplicationEngine in main.cpp, so destroyed
+    // AFTER it) rather than the engine, so the compile-time QML singleton's instance outlives the
+    // engine — the LIFETIME rule in baristasingletons_qml.h / contextsingletons_qml.h. Created here
+    // before engine.load(), so the lazy singleton create() always finds it.
+    auto* module = new BaristaModule(mainController, machineState, appSettings,
+                                     parent ? parent : static_cast<QObject*>(mainController));
+    // Publish as the `Barista` QML singleton (replaces the old setContextProperty, which was
+    // invisible to qmllint/qmlcachegen — see baristasingletons_qml.h).
+    BaristaModuleForeign::s_singletonInstance = module;
     return module;
 }
 

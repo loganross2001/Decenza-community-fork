@@ -13,7 +13,6 @@
 #include "baristabackup.h"         // ditto for Q_PROPERTY(BaristaBackup*)
 #include "baristavoiceid.h"        // ditto for Q_PROPERTY(BaristaVoiceId*)
 
-class QQmlApplicationEngine;
 class MainController;
 class MachineState;
 class Settings;
@@ -59,11 +58,13 @@ class BaristaModule : public QObject {
     Q_PROPERTY(BaristaVoiceId* voiceId READ voiceId CONSTANT)
 
 public:
-    // Single upstream hook: construct the module (settings + orchestrator), register the
-    // "Barista" context property. Deps are borrowed pointers owned by main(). Returned module
-    // is owned by `parent` (or the engine if null).
-    static BaristaModule* install(QQmlApplicationEngine* engine,
-                                  MainController* mainController,
+    // Single upstream hook: construct the module (settings + orchestrator) and publish it as the
+    // compile-time QML singleton `Barista` (baristasingletons_qml.h), replacing the old
+    // setContextProperty. Deps are borrowed pointers owned by main(). The returned module is owned
+    // by `parent`; when null it defaults to `mainController` so the singleton's instance outlives
+    // the QQmlApplicationEngine (main() declares MainController before the engine) — see the LIFETIME
+    // note in baristasingletons_qml.h.
+    static BaristaModule* install(MainController* mainController,
                                   MachineState* machineState,
                                   Settings* appSettings,
                                   QObject* parent = nullptr);

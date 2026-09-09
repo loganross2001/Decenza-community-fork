@@ -1103,6 +1103,19 @@ if(APPLE)
     )
 endif()
 
+# [barista-fork] The barista QML singleton registration (baristasingletons_qml.h — publishes `Barista`
+# as a compile-time QML_SINGLETON instead of setContextProperty) must be a FIRST-CLASS module header,
+# listed here before qt_add_executable/qt_add_qml_module: a header added later via target_sources
+# (cmake/barista.cmake, included at the bottom) gets its type registered but the generated
+# qmltyperegistrations.cpp does NOT #include it, so the build fails with "undeclared identifier
+# BaristaModuleForeign". The flag is defined here early and re-declared idempotently in barista.cmake.
+# Gated so the OFF vanilla-bisect build never compiles it (it links BaristaModule's impl, which is
+# also gated). src/barista is added to the QML include dirs below so its bare-basename include resolves.
+option(DECENZA_BARISTA "Build the proactive barista assistant module" ON)
+if(DECENZA_BARISTA)
+    list(APPEND HEADERS src/barista/baristasingletons_qml.h)
+endif()
+
 # Resources
 qt_add_resources(RESOURCES resources/resources.qrc)
 qt_add_resources(RESOURCES resources/emoji.qrc)
@@ -1288,6 +1301,10 @@ target_include_directories(Decenza PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/rendering
     ${CMAKE_CURRENT_SOURCE_DIR}/src/ui
     ${CMAKE_CURRENT_SOURCE_DIR}/src/screensaver
+    # [barista-fork] For baristasingletons_qml.h's QML_FOREIGN types — the registrar emits
+    # `#if __has_include(<baristasingletons_qml.h>)` (bare basename). No basename collision with the
+    # dirs above (verified). Harmless on an OFF build (nothing includes it there).
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/barista
 )
 if(NOT IOS)
     # SYSTEM: mjansson/mdns is vendored third-party code, and it is header-only,

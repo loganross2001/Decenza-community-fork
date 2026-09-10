@@ -638,6 +638,17 @@ add_decenza_test(tst_anthropicstreamparser
     ${CMAKE_SOURCE_DIR}/src/barista/anthropicstreamparser.cpp
 )
 
+# --- tst_respondtextextractor: [barista-fork] the streaming voice pipeline's `respond` text extractor
+# (BARISTA_VOICE_STREAMING_DESIGN.md §1.2, corrected). Pure QtCore, no network/voice deps — the barista's
+# forced-`respond` turns carry the spoken reply as input_json_delta of `{"text":"…"}`, not text_delta, so this
+# is the piece that reads the reply out of that streamed JSON. Pins the fragment-split escape hazards (backslash
+# straddling two reads, `\uXXXX` hex split, surrogate pairs, a split key) that would otherwise only surface as
+# garbled TTS on-device, where the readyRead wiring feeding it is verified. ---
+add_decenza_test(tst_respondtextextractor
+    tst_respondtextextractor.cpp
+    ${CMAKE_SOURCE_DIR}/src/barista/respondtextextractor.cpp
+)
+
 # --- tst_speakerembedder: [barista-fork] voice-ID MFCC embedder DSP (FFT/mel/DCT + aggregation). QtCore-only
 # (MfccEmbedder depends on nothing but QVector/QByteArray) — validates determinism + discrimination in software,
 # no device/mic. ---

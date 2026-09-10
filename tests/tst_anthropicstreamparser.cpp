@@ -1,9 +1,14 @@
 #include <QtTest>
 
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+
 #include "barista/anthropicstreamparser.h"
 
 using barista::AnthropicStreamParser;
 using barista::SseEvent;
+using barista::assembleAnthropicResponse;
 
 // [barista-fork] Unit tests for the Anthropic SSE stream parser (BARISTA_VOICE_STREAMING_DESIGN.md §1.1).
 // The parser is the pure, headless-verifiable half of the streaming turn — the readyRead wiring and tool-loop
@@ -196,6 +201,144 @@ private slots:
             p.feed(QByteArray("data: {\"type\":\"message_stop\"}\n\n"));
         QCOMPARE(evs.size(), 1);
         QCOMPARE(evs.first().kind, SseEvent::MessageStop);
+    }
+
+    // --- assembleAnthropicResponse: streamed events → whole-body-equivalent {content, stop_reason} ------------
+    // The invariant the streaming path depends on: parsing a recorded SSE stream and folding it back with
+    // assembleAnthropicResponse yields the SAME `content` array + `stop_reason` that parsing the equivalent
+    // whole-body JSON would — so aiprovider.cpp::finalizeConversationResponse drives one identical tool loop
+    // for both paths. Each test feeds realistic Anthropic SSE bytes (split across two reads to exercise the
+    // line buffer) and compares against the non-streaming JSON for the same logical response.
+
+    // The barista's norm: a forced-`respond` turn. The answer is the respond tool's input.text, streamed as
+    // input_json_delta — reconstructed identically to the whole-body tool_use block.
+    void assembleForcedRespondTurn() {
+        const QByteArray sse =
+            "event: message_start\n"
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"role\":\"assistant\"}}\n\n"
+            "event: content_block_start\n"
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_01\",\"name\":\"respond\",\"input\":{}}}\n\n"
+            "event: content_block_delta\n"
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"text\\\": \\\"\"}}\n\n"
+            "event: content_block_delta\n"
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"Grind one step finer.\\\"}\"}}\n\n"
+            "event: content_block_stop\n"
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n"
+            "event: message_delta\n"
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n"
+            "event: message_stop\n"
+            "data: {\"type\":\"message_stop\"}\n\n";
+        const QByteArray wholeBody =
+            "{\"stop_reason\":\"tool_use\",\"content\":["
+            "{\"type\":\"tool_use\",\"id\":\"toolu_01\",\"name\":\"respond\",\"input\":{\"text\":\"Grind one step finer.\"}}]}";
+        assertStreamMatchesWholeBody(sse, wholeBody);
+    }
+
+    // A real tool turn: a spoken lead-in (text block) followed by a get_weather tool_use — both reconstructed,
+    // in order, exactly as the whole-body content array carries them.
+    void assembleLeadInPlusToolTurn() {
+        const QByteArray sse =
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"One moment.\"}}\n\n"
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n"
+            "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_9\",\"name\":\"get_weather\",\"input\":{}}}\n\n"
+            "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"location\\\":\"}}\n\n"
+            "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\" \\\"Paris\\\"}\"}}\n\n"
+            "data: {\"type\":\"content_block_stop\",\"index\":1}\n\n"
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n"
+            "data: {\"type\":\"message_stop\"}\n\n";
+        const QByteArray wholeBody =
+            "{\"stop_reason\":\"tool_use\",\"content\":["
+            "{\"type\":\"text\",\"text\":\"One moment.\"},"
+            "{\"type\":\"tool_use\",\"id\":\"toolu_9\",\"name\":\"get_weather\",\"input\":{\"location\":\"Paris\"}}]}";
+        assertStreamMatchesWholeBody(sse, wholeBody);
+    }
+
+    // A plain text end_turn reply (the rare non-forced path) reconstructs to a single text block.
+    void assemblePlainTextEndTurn() {
+        const QByteArray sse =
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Nice and \"}}\n\n"
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"even.\"}}\n\n"
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n"
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n"
+            "data: {\"type\":\"message_stop\"}\n\n";
+        const QByteArray wholeBody =
+            "{\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"Nice and even.\"}]}";
+        assertStreamMatchesWholeBody(sse, wholeBody);
+    }
+
+    // Web-search-style multi-text-block reply: Anthropic splits one sentence across two text blocks at citation
+    // boundaries. Both blocks are preserved, so the terminal path concatenates them exactly as whole-body does.
+    void assembleMultiTextBlocks() {
+        const QByteArray sse =
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"The weather is \"}}\n\n"
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n"
+            "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"
+            "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"sunny today.\"}}\n\n"
+            "data: {\"type\":\"content_block_stop\",\"index\":1}\n\n"
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n"
+            "data: {\"type\":\"message_stop\"}\n\n";
+        const QByteArray wholeBody =
+            "{\"stop_reason\":\"end_turn\",\"content\":["
+            "{\"type\":\"text\",\"text\":\"The weather is \"},"
+            "{\"type\":\"text\",\"text\":\"sunny today.\"}]}";
+        assertStreamMatchesWholeBody(sse, wholeBody);
+    }
+
+    // A tool that takes no arguments (no input_json_delta at all) reconstructs input as {}, matching whole-body.
+    void assembleNoArgTool() {
+        const QByteArray sse =
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_end\",\"name\":\"end_conversation\",\"input\":{}}}\n\n"
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n"
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n"
+            "data: {\"type\":\"message_stop\"}\n\n";
+        const QByteArray wholeBody =
+            "{\"stop_reason\":\"tool_use\",\"content\":["
+            "{\"type\":\"tool_use\",\"id\":\"toolu_end\",\"name\":\"end_conversation\",\"input\":{}}]}";
+        assertStreamMatchesWholeBody(sse, wholeBody);
+    }
+
+    // KNOWN LIMITATION, pinned so it is not "fixed" by accident: assembleAnthropicResponse does NOT faithfully
+    // rebuild server-tool blocks (server_tool_use / web_search_tool_result) — it keeps only their `type`,
+    // dropping id/name/input/results. That matters because a web-search turn stops with `pause_turn` and the
+    // continuation path in aiprovider.cpp echoes `content` VERBATIM as the assistant turn on the re-POST; a
+    // lossy reconstruction would make that re-POST malformed. This is WHY 1b gates streaming to
+    // `voiceStreaming && !webSearch` (webSearchEnabled defaults ON) and falls back to the whole-body path when
+    // web search is on. If you widen streaming to web-search turns, you must first make this reconstruction
+    // faithful to server-tool blocks (the parser would need to carry their input/results too).
+    void assembleServerToolBlockIsLossy() {
+        const QByteArray sse =
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"server_tool_use\",\"id\":\"srvtoolu_1\",\"name\":\"web_search\",\"input\":{}}}\n\n"
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n"
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"pause_turn\"}}\n\n";
+        AnthropicStreamParser p;
+        const QJsonObject root = assembleAnthropicResponse(p.feed(sse));
+        QCOMPARE(root.value(QStringLiteral("stop_reason")).toString(), QStringLiteral("pause_turn"));
+        const QJsonArray content = root.value(QStringLiteral("content")).toArray();
+        QCOMPARE(content.size(), 1);
+        // Lossy on purpose: only the type survives — no id/name/input to echo back. Documents the gate above.
+        QJsonObject expected;
+        expected[QStringLiteral("type")] = QStringLiteral("server_tool_use");
+        QCOMPARE(content.first().toObject(), expected);
+    }
+
+private:
+    // Feed the SSE bytes through the parser in two halves (to exercise the mid-frame line buffer), assemble the
+    // events, and assert the reconstructed content + stop_reason equal what parsing the whole-body JSON yields.
+    static void assertStreamMatchesWholeBody(const QByteArray& sse, const QByteArray& wholeBody) {
+        AnthropicStreamParser p;
+        QVector<SseEvent> evs;
+        const qsizetype mid = sse.size() / 2;
+        evs += p.feed(sse.left(mid));
+        evs += p.feed(sse.mid(mid));
+        const QJsonObject streamRoot = assembleAnthropicResponse(evs);
+        const QJsonObject bodyRoot = QJsonDocument::fromJson(wholeBody).object();
+        QCOMPARE(streamRoot.value(QStringLiteral("stop_reason")),
+                 bodyRoot.value(QStringLiteral("stop_reason")));
+        QCOMPARE(streamRoot.value(QStringLiteral("content")),
+                 bodyRoot.value(QStringLiteral("content")));
     }
 };
 

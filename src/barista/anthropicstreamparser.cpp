@@ -1,7 +1,9 @@
 #include "anthropicstreamparser.h"
 
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QMap>
 
 // [barista-fork] See anthropicstreamparser.h. The whole class is a line splitter feeding a per-line JSON
 // decoder. SSE frames are `event: <type>` + `data: <json>` + a blank line; because every Anthropic event's
@@ -103,6 +105,81 @@ QVector<SseEvent> AnthropicStreamParser::parseDataLine(const QByteArray& json) c
 
 void AnthropicStreamParser::reset() {
     m_lineBuffer.clear();
+}
+
+QJsonObject assembleAnthropicResponse(const QVector<SseEvent>& events) {
+    // Accumulate each content block's growing pieces, keyed by its wire index. QMap keeps indices sorted, so
+    // iterating its keys reproduces the block order the whole-body `content` array carries.
+    struct BlockAcc {
+        QString type;
+        QString text;      // text_delta / thinking_delta accumulation
+        QString json;      // input_json_delta accumulation (tool_use)
+        QString toolName;
+        QString toolId;
+    };
+    QMap<int, BlockAcc> blocks;
+    QString stopReason;
+
+    for (const SseEvent& e : events) {
+        switch (e.kind) {
+        case SseEvent::ContentBlockStart: {
+            BlockAcc b;
+            b.type = e.blockType;
+            b.toolName = e.toolName;
+            b.toolId = e.toolId;
+            blocks.insert(e.index, b);   // replaces any stray earlier entry at this index (there shouldn't be one)
+            break;
+        }
+        case SseEvent::TextDelta:
+        case SseEvent::ThinkingDelta:
+            blocks[e.index].text += e.text;
+            break;
+        case SseEvent::InputJsonDelta:
+            blocks[e.index].json += e.partialJson;
+            break;
+        case SseEvent::MessageDelta:
+            if (!e.stopReason.isEmpty())
+                stopReason = e.stopReason;
+            break;
+        default:
+            break;   // MessageStart / ContentBlockStop / MessageStop / Ping / Error / Unknown carry no content
+        }
+    }
+
+    QJsonArray content;
+    for (auto it = blocks.constBegin(); it != blocks.constEnd(); ++it) {
+        const BlockAcc& b = it.value();
+        QJsonObject block;
+        if (b.type == QLatin1String("text")) {
+            block[QStringLiteral("type")] = QStringLiteral("text");
+            block[QStringLiteral("text")] = b.text;
+        } else if (b.type == QLatin1String("thinking")) {
+            block[QStringLiteral("type")] = QStringLiteral("thinking");
+            block[QStringLiteral("thinking")] = b.text;
+        } else if (b.type == QLatin1String("tool_use")) {
+            block[QStringLiteral("type")] = QStringLiteral("tool_use");
+            block[QStringLiteral("id")] = b.toolId;
+            block[QStringLiteral("name")] = b.toolName;
+            QJsonObject input;   // {} when the tool takes no args / sent no input_json_delta
+            if (!b.json.isEmpty()) {
+                QJsonParseError err{};
+                const QJsonDocument d = QJsonDocument::fromJson(b.json.toUtf8(), &err);
+                if (err.error == QJsonParseError::NoError && d.isObject())
+                    input = d.object();
+            }
+            block[QStringLiteral("input")] = input;
+        } else {
+            // An unmodelled block type (e.g. a future server-tool block) — carry the type through so a caller
+            // that skips non-text/non-tool blocks behaves as it would against the whole-body array.
+            block[QStringLiteral("type")] = b.type;
+        }
+        content.append(block);
+    }
+
+    QJsonObject root;
+    root[QStringLiteral("content")] = content;
+    root[QStringLiteral("stop_reason")] = stopReason;
+    return root;
 }
 
 }  // namespace barista

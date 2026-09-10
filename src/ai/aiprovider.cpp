@@ -1218,6 +1218,14 @@ void AnthropicProvider::onAnalysisReply(QNetworkReply* reply)
         return;
     }
 
+    finalizeConversationResponse(root);
+}
+
+// [barista-fork] Extracted from onAnalysisReply so the (coming) SSE streaming path can drive the SAME tool
+// loop / pause_turn continuation / terminal-emit logic: it assembles the streamed events into a synthetic
+// `root` (assembleAnthropicResponse) and calls this, exactly as the whole-body parse does. See the header.
+void AnthropicProvider::finalizeConversationResponse(const QJsonObject& root)
+{
     // Read stop_reason BEFORE any content gate. An early return above it makes
     // the truncation branch unreachable for exactly the case that matters —
     // the reply that stopped with nothing to show (upstream #1691). That ordering

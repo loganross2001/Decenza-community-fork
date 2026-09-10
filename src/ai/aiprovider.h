@@ -407,6 +407,14 @@ private slots:
     void onTestReply(QNetworkReply* reply);
 
 private:
+    // [barista-fork] The turn-finalization logic shared by the whole-body and (coming) streaming paths: reads
+    // stop_reason + content from a response object, runs the client-tool loop / pause_turn continuation, and
+    // emits interimText / analysisComplete / analysisFailed. `onAnalysisReply` calls it with the parsed
+    // whole-body `root`; the streaming path will call it with a synthetic root assembled from SSE events
+    // (assembleAnthropicResponse), so ONE tool loop drives both. Expects `root` to carry `stop_reason` +
+    // `content` (+ optional `usage`), i.e. the shape QJsonDocument::fromJson gives a Messages response.
+    void finalizeConversationResponse(const QJsonObject& root);
+
     // betaFeature sets `anthropic-beta` for a body carrying a beta tool
     // (web_fetch); empty for the GA paths.
     void sendRequest(const QJsonObject& requestBody, const QByteArray& betaFeature = {});

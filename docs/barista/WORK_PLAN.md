@@ -59,9 +59,53 @@ already built. The genuinely-new work is the **streaming core**.
   injected provider so it's deterministic). Deferred; only build it if the on-device voice iteration proves
   too slow.
 
+## ⚠️ Design correction found 2026-09-09 (before writing any wiring) — read first
+The streaming design (`BARISTA_VOICE_STREAMING_DESIGN.md` §1.1/§1.2) assumes the model's spoken reply
+streams as top-level **`text_delta`** blocks, which `SpeechChunker` then splits. **That is wrong for this
+fork.** Every barista turn runs with `forceRespond` (`AIManager::analyzeConversation` sets
+`RequestOptions.forceRespond = clientTools`, always true for the barista → `aiprovider.cpp:1036` appends a
+`respond` tool + `tool_choice:{type:"any"}`). Under Anthropic streaming (confirmed against the `claude-api`
+skill docs, deterministic — no live probe needed):
+  - `tool_choice:"any"` forces the model straight to a tool call, so there is **no leading `text_delta`**.
+  - The spoken answer is the `respond` tool's `input.text`, which streams as **`input_json_delta`**
+    fragments of that tool_use block — partial JSON concatenating to `{"text":"…"}`.
+So the chunker must be fed the *incrementally-decoded value of the `text` key*, extracted from the
+`respond` block's `input_json_delta` stream (un-escaping `\"`,`\n`,`\\`,`\uXXXX` that may split across
+fragments) — NOT raw `text_delta`. `AnthropicStreamParser` already demuxes `InputJsonDelta` correctly;
+the missing piece is a **pure streaming-JSON-string extractor** for the `respond.text` field. (A rare
+non-forced turn could still emit `text_delta`; handle both, but the respond path is the norm.)
+
 ## Forward plan (priority order)
-1. **Wire the voice-streaming pipeline** (SSE parser + `SpeechQueue` + `voiceStreaming` flag). The one piece
-   needing the tablet — now cheap to iterate thanks to the build + remote work. This is the product payoff.
+1. **Wire the voice-streaming pipeline.** Sliced per advisor (headless-first, tablet last):
+   - ✅ **1a DONE (CI, no tablet) 2026-09-09 — not committed:** pure `RespondTextExtractor` (respond
+     `input_json_delta` → incremental spoken text, `tst_respondtextextractor` 15 cases); pure
+     `assembleAnthropicResponse(events)` in `anthropicstreamparser.{h,cpp}` (SSE events → whole-body-equivalent
+     `{content, stop_reason}`, 5 byte-identity fixture tests in `tst_anthropicstreamparser` proving it feeds the
+     tool loop identically to the whole-body parse); and `onAnalysisReply`'s post-`readAll()` body extracted
+     verbatim into `AnthropicProvider::finalizeConversationResponse(root)` (behavior-preserving — `tst_aiproviders`
+     + `tst_aimanager` still green) so the streaming path drives ONE identical tool loop. Lever-1 wins.
+   - **1b (first device trip):** `RequestOptions.streaming` + SSE in `aiprovider.cpp` (barista-only:
+     `readyRead`→`AnthropicStreamParser`; on `message_stop` `assembleAnthropicResponse(events)`→synthetic root
+     →`finalizeConversationResponse(root)` [both DONE in 1a]; `parser.reset()`+re-arm `readyRead` each re-POST
+     round; reset `m_accumulatedText` only at turn start). ⚠️**GATE streaming to `voiceStreaming && !webSearch`**
+     — fall back to the whole-body path when web search is ON (`AssistantSettings.webSearchEnabled` defaults
+     ON). Reason: a web-search turn stops with `pause_turn` and the continuation echoes `content` VERBATIM on
+     re-POST, but `assembleAnthropicResponse` is deliberately LOSSY for server-tool blocks (keeps only `type`,
+     drops id/name/input/results — pinned by `tst_anthropicstreamparser::assembleServerToolBlockIsLossy`), so a
+     streamed web-search re-POST would be malformed. Do NOT widen streaming to web-search turns without first
+     making that reconstruction faithful to server_tool_use/web_search_tool_result (the parser would need to
+     carry their input/results too). The `respond`+client-tool turns that streaming DOES cover reconstruct
+     faithfully (5 byte-identity fixtures green). Route deltas **C++-direct** (module wires
+     provider/manager streaming signal → new `AssistantVoice::feedStreamDelta()`, bypassing QML) and guard
+     the QML `_speakSanitised` calls in `AssistantOverlay.qml` with `if (!voiceStreaming)` so the full answer
+     isn't ALSO spoken (double-speak). `AssistantVoice` owns a `SpeechChunker` + a **serial** queue: speak
+     chunk N, dequeue N+1 on playback-finished (`EndOfMedia`/`handleAndroidPlaybackFinished`/native
+     `stateChanged→Ready`) — the queue must intercept that event so `speaking` stays true across the queue
+     (else the mic reopens mid-answer; tangles with `m_pendingSynth`/`m_speakGen`). `AssistantSettings.
+     voiceStreaming` (QSettings `barista/voiceStreaming`, default OFF) gates the whole feature.
+   - **1c (second slice):** the 2-deep synth lookahead (design §1.3) — pure cloud-gap removal; defer.
+   Verify with the tablet's real `ttsProvider` (remote read); confirm flag-OFF unchanged; macOS `ctest`
+   before the APK. This is the one piece needing the tablet — now cheap to iterate.
 2. **Full scroll conversion of the History & Data tab** — it's the only settings tab without a ScrollView
    (every other tab scrolls); the toggle-collapse fix was a targeted band-aid. This is the proper,
    upstream-worthy fix. Big/complex file (2369 lines) — do it carefully, verify on macOS first.

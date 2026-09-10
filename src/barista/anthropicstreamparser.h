@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QByteArray>
+#include <QJsonObject>
 #include <QString>
 #include <QVector>
 
@@ -60,5 +61,15 @@ private:
 
     QByteArray m_lineBuffer;  // bytes received since the last newline (a line split across two reads)
 };
+
+// [barista-fork] Fold a complete turn's SSE events into a response object shaped like the whole-body Messages
+// reply — `{"stop_reason": ..., "content": [ …blocks… ]}` — so the streaming path can drive the SAME tool
+// loop / terminal logic (aiprovider.cpp::finalizeConversationResponse) the whole-body parse feeds. Blocks are
+// rebuilt in content-block index order: text → {type,text}; thinking → {type,thinking}; tool_use →
+// {type,id,name,input} with `input` parsed from the concatenated input_json_delta fragments ({} if none). Pure
+// and fixture-testable: a recorded SSE stream reconstructs the same content array + stop_reason the equivalent
+// whole-body JSON would (tst_anthropicstreamparser). It does NOT reconstruct usage/message metadata — the tool
+// loop reads only content + stop_reason (usage feeds one diagnostic log line, harmless when absent).
+QJsonObject assembleAnthropicResponse(const QVector<SseEvent>& events);
 
 }  // namespace barista

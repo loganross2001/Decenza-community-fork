@@ -500,6 +500,9 @@ void AIManager::createProviders()
     connect(anthropic, &AIProvider::testResult, this, &AIManager::onTestResult);
     // [barista-fork] Interim pre-tool lead-in (only Anthropic emits it — the tool_use/pause_turn paths).
     connect(anthropic, &AIProvider::interimText, this, &AIManager::onInterimText);
+    // [barista-fork] Streaming voice (only Anthropic emits these, and only for a streaming turn).
+    connect(anthropic, &AIProvider::streamTextDelta, this, &AIManager::onStreamText);
+    connect(anthropic, &AIProvider::streamTextEnd, this, &AIManager::onStreamEnd);
     // [barista-fork] Register the barista's private client-side tools (definitions + executor) behind the
     // provider's generic seam. The executor reads m_shotHistory lazily (it's wired after construction via
     // setShotHistoryStorage), so capturing `this` and forwarding at call time preserves the original behavior.
@@ -2516,7 +2519,7 @@ QVariantMap AIManager::parseBagExtraction(const QString& response, bool* ok)
 }
 
 void AIManager::analyzeConversation(const QString& systemPrompt, const QJsonArray& messages,
-                                    bool webSearch, bool clientTools)
+                                    bool webSearch, bool clientTools, bool streaming)
 {
     if (m_analyzing) {
         emit conversationErrorOccurred(tr_("ai.error.analysisInProgress", "Analysis already in progress"));
@@ -2580,12 +2583,16 @@ void AIManager::analyzeConversation(const QString& systemPrompt, const QJsonArra
     // [barista-fork] Consume the stable-core prefix length staged for this turn (Anthropic cache breakpoint).
     const int turnCachePrefixLen = m_pendingCachePrefixLen;
     m_pendingCachePrefixLen = -1;
+    // [barista-fork] Gate streaming OFF when web search is on for the turn: a paused server-tool turn re-POSTs
+    // its content verbatim, which the stream can't faithfully rebuild (see assembleAnthropicResponse). So the
+    // effective flag is streaming && !webSearch; off ⇒ the whole-body path, unchanged.
+    const bool streamTurn = streaming && !webSearch;
     provider->analyzeConversation(systemPrompt, apiMessages,
                                   // [barista-fork] {webSearch, clientTools, timeoutMs, forceRespond, imageData,
-                                  // imageMediaType, cachePrefixLen} — imageData set only on a photo turn; cachePrefixLen
-                                  // ≥0 only on a tailored barista turn (else -1 = cache the whole prompt).
+                                  // imageMediaType, cachePrefixLen, streaming} — imageData set only on a photo turn;
+                                  // cachePrefixLen ≥0 only on a tailored barista turn (else -1 = cache whole prompt).
                                   AIProvider::RequestOptions{webSearch, clientTools, 30000, clientTools,
-                                                             turnImage, turnImageType, turnCachePrefixLen});
+                                                             turnImage, turnImageType, turnCachePrefixLen, streamTurn});
 }
 
 void AIManager::refreshOllamaModels()
@@ -2651,6 +2658,22 @@ void AIManager::onInterimText(const QString& text)
     // This is NOT a turn completion: m_analyzing stays true, nothing is finalized; it's a "speak this now" nudge.
     if (m_isConversationRequest)
         emit conversationInterimText(text);
+}
+
+void AIManager::onStreamText(const QString& text)
+{
+    // [barista-fork] A streamed reply fragment. Route only for a live conversation turn (same gating as the
+    // interim lead-in). Not a completion — the turn finalizes normally via conversationResponseReceived.
+    if (m_isConversationRequest)
+        emit conversationStreamText(text);
+}
+
+void AIManager::onStreamEnd()
+{
+    // [barista-fork] The streamed turn's spoken content is complete — let the voice flush its chunker tail and
+    // drain the queue. Gated like the deltas above.
+    if (m_isConversationRequest)
+        emit conversationStreamEnd();
 }
 
 void AIManager::onAnalysisFailed(const QString& error)

@@ -158,9 +158,21 @@ AssistantVoice::AssistantVoice(AssistantSettings* settings, Settings* appSetting
         if (s == QTextToSpeech::Error)   // SF-2: native engine failed → release the hold or `speaking` wedges
             m_pendingSynth = false;
         updateSpeaking();
+        // [barista-fork] Native-TTS clip finished (Speaking → Ready): advance the streaming queue if one is
+        // active (no-op otherwise). An Error also ends the clip, so advance on it too — a failed chunk must not
+        // wedge the queue. onSpeechClipFinished self-guards on m_streamSpeaking.
+        if (s == QTextToSpeech::Ready || s == QTextToSpeech::Error)
+            onSpeechClipFinished();
     });
     connect(m_player, &QMediaPlayer::playbackStateChanged, this,
             [this](QMediaPlayer::PlaybackState) { updateSpeaking(); });
+    // [barista-fork] Desktop cloud-TTS clip finished (EndOfMedia on the voice player): advance the streaming
+    // queue. m_player carries ONLY voice playback (bell/cue/preview have their own players), so this is the
+    // per-clip completion signal for a streamed chunk. Self-guards on m_streamSpeaking.
+    connect(m_player, &QMediaPlayer::mediaStatusChanged, this, [this](QMediaPlayer::MediaStatus s) {
+        if (s == QMediaPlayer::EndOfMedia)
+            onSpeechClipFinished();
+    });
     connect(m_player, &QMediaPlayer::errorOccurred, this,   // SF-2: decode/playback error → release the hold
             [this](QMediaPlayer::Error, const QString&) { m_pendingSynth = false; updateSpeaking(); });
 }
@@ -359,6 +371,101 @@ void AssistantVoice::speak(const QString& rawText) {
         m_pendingSynth = false;   // no engine at all → nothing will speak
         updateSpeaking();
     }
+}
+
+// [barista-fork] Streaming voice — see the header. feedStreamDelta receives the reply's decoded text as it
+// arrives and plays it through a serial chunk FIFO; endStream flushes the tail and lets the queue drain.
+void AssistantVoice::feedStreamDelta(const QString& textDelta) {
+    if (m_role != Role::Barista)
+        return;   // only the conversational voice streams
+    if (m_settings && !m_settings->voiceEnabled())
+        return;   // muted barista stays silent
+    if (textDelta.isEmpty())
+        return;
+    if (!m_streamActive) {
+        // First delta of a new streamed reply — start fresh and gate the mic immediately (before any audio).
+        m_streamActive = true;
+        m_chunker.reset();
+        m_speechQueue.clear();
+        m_clipInFlight = false;
+        setStreamSpeaking(true);
+        m_pendingSynth = true;   // hold `speaking` true from the first token
+        updateSpeaking();
+        // Arm the 1.2s first-chunk latency floor (design §1.2): release the opening text even without a
+        // sentence boundary so the lead-in isn't late. Cancelled once the chunker emits.
+        if (!m_firstChunkTimer) {
+            m_firstChunkTimer = new QTimer(this);
+            m_firstChunkTimer->setSingleShot(true);
+            connect(m_firstChunkTimer, &QTimer::timeout, this, &AssistantVoice::releaseFirstChunk);
+        }
+        m_firstChunkTimer->start(1200);
+    }
+    enqueueChunks(m_chunker.feed(textDelta));
+}
+
+void AssistantVoice::releaseFirstChunk() {
+    // The latency floor elapsed with nothing spoken yet: force the chunker to release its buffer even without a
+    // boundary, so the first audio lands ~now instead of waiting for a period.
+    if (!m_streamActive || m_chunker.hasEmitted())
+        return;
+    enqueueChunks(m_chunker.feed(QString(), /*firstChunkDeadlinePassed=*/true));
+}
+
+void AssistantVoice::enqueueChunks(const QStringList& chunks) {
+    if (chunks.isEmpty())
+        return;
+    if (m_firstChunkTimer && m_chunker.hasEmitted())
+        m_firstChunkTimer->stop();   // the lead-in is out → the latency floor is moot
+    m_speechQueue.append(chunks);
+    if (!m_clipInFlight)
+        speakNextChunk();
+}
+
+void AssistantVoice::speakNextChunk() {
+    if (!m_speechQueue.isEmpty()) {
+        const QString chunk = m_speechQueue.takeFirst();
+        m_clipInFlight = true;
+        speak(chunk);   // sets m_pendingSynth → `speaking` stays true across the clip-to-clip handoff
+        return;
+    }
+    if (m_streamActive) {
+        // Queue drained but more text may arrive: hold `speaking` true (mic gated) until the next delta lands.
+        m_clipInFlight = false;
+        m_pendingSynth = true;
+        updateSpeaking();
+        return;
+    }
+    // Stream ended AND queue drained → the whole reply has been spoken; settle.
+    m_clipInFlight = false;
+    m_pendingSynth = false;
+    setStreamSpeaking(false);
+    updateSpeaking();
+}
+
+void AssistantVoice::onSpeechClipFinished() {
+    if (!m_streamSpeaking)
+        return;   // not in a streamed queue → ordinary single-utterance completion, nothing to advance
+    speakNextChunk();
+}
+
+void AssistantVoice::endStream() {
+    if (!m_streamActive)
+        return;
+    m_streamActive = false;
+    if (m_firstChunkTimer)
+        m_firstChunkTimer->stop();
+    const QString tail = m_chunker.flush();   // the trailing partial sentence the chunker was holding
+    if (!tail.isEmpty())
+        m_speechQueue.append(tail);
+    if (!m_clipInFlight)
+        speakNextChunk();   // speak the tail, or (nothing left) settle streaming off
+}
+
+void AssistantVoice::setStreamSpeaking(bool on) {
+    if (on == m_streamSpeaking)
+        return;
+    m_streamSpeaking = on;
+    emit streamingChanged();
 }
 
 void AssistantVoice::synthOpenAI(const QString& text) {
@@ -588,6 +695,15 @@ void AssistantVoice::playMp3(const QByteArray& audio) {
 void AssistantVoice::stop() {
     ++m_speakGen;              // discard any in-flight synth reply
     m_pendingSynth = false;
+    // [barista-fork] Barge-in / new turn: abandon any streamed queue so the next thing spoken isn't the tail of
+    // an interrupted reply. Clears the FIFO + chunker and drops `streaming`.
+    m_streamActive = false;
+    m_clipInFlight = false;
+    m_speechQueue.clear();
+    m_chunker.reset();
+    if (m_firstChunkTimer)
+        m_firstChunkTimer->stop();
+    setStreamSpeaking(false);
     setPlaybackDurationMs(0);  // [barista-fork] clear so a barged-into clip's length can't scroll the next utterance
     if (m_tts)
         m_tts->stop();
@@ -902,6 +1018,7 @@ void AssistantVoice::handleAndroidPlaybackFinished(int tag) {
         BaristaDiagnostics::record(QStringLiteral("voice"), QStringLiteral("native_playback_finished"),
             {{QStringLiteral("role"), roleStr}, {QStringLiteral("tag"), tag}});
         updateSpeaking();
+        onSpeechClipFinished();   // [barista-fork] advance the streaming queue (self-guards on m_streamSpeaking)
     } else if (tag == kTagPreview) {
         if (m_previewPlaying) { m_previewPlaying = false; emit previewPlayingChanged(); }
         BaristaDiagnostics::record(QStringLiteral("voice"), QStringLiteral("preview_off"), {{QStringLiteral("role"), roleStr}});

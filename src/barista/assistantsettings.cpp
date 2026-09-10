@@ -736,6 +736,19 @@ void AssistantSettings::setUseNewConversation(bool on) {
     emit useNewConversationChanged();
 }
 
+bool AssistantSettings::voiceStreaming() const {
+    // [barista-fork] Default OFF: streaming voice is opt-in until it's validated on-device. The whole-body path
+    // is unchanged when this is off; toggling it on is the whole feature's gate (see the Q_PROPERTY comment).
+    return m_settings.value(QStringLiteral("barista/voiceStreaming"), false).toBool();
+}
+
+void AssistantSettings::setVoiceStreaming(bool on) {
+    if (voiceStreaming() == on)
+        return;
+    m_settings.setValue(QStringLiteral("barista/voiceStreaming"), on);
+    emit voiceStreamingChanged();
+}
+
 bool AssistantSettings::avatarEnabled() const {
     return m_settings.value(QStringLiteral("barista/avatarEnabled"), true).toBool();
 }

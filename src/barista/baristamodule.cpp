@@ -296,6 +296,14 @@ BaristaModule::BaristaModule(MainController* mainController, MachineState* machi
             ai->setOpenBagCameraHandler([orch]() {
                 orch->requestOpenBagCamera();
             });
+            // [barista-fork] Streaming voice (voiceStreaming): route the streamed reply C++-direct to the
+            // conversational voice, bypassing QML — the voice speaks each chunk as it arrives while the overlay's
+            // final-answer speech is suppressed (AssistantOverlay guards on Barista.voice.streaming), so there's
+            // no double-speak. conversationStreamText/End fire only for a streaming conversation turn (gated on
+            // m_isConversationRequest in AIManager, and the provider raises them only when the turn streams).
+            AssistantVoice* voice = m_voice;
+            connect(ai, &AIManager::conversationStreamText, voice, &AssistantVoice::feedStreamDelta);
+            connect(ai, &AIManager::conversationStreamEnd, voice, &AssistantVoice::endStream);
             // [barista-fork] Fast-path web tools. The module lambda owns the app-side glue the pure
             // BaristaWebTools service shouldn't: (1) the homeLocation no-city fallback for weather/news, and
             // (2) building the Google-News query from topic/location. Then it forwards to the async getter,

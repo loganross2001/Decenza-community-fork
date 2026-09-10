@@ -84,6 +84,22 @@ non-forced turn could still emit `text_delta`; handle both, but the respond path
      tool loop identically to the whole-body parse); and `onAnalysisReply`'s post-`readAll()` body extracted
      verbatim into `AnthropicProvider::finalizeConversationResponse(root)` (behavior-preserving — `tst_aiproviders`
      + `tst_aimanager` still green) so the streaming path drives ONE identical tool loop. Lever-1 wins.
+   - ✅ **1b BUILT 2026-09-09 (macOS app + all affected tests green; NOT yet on-device-verified — needs the
+     tablet, and the overlay QML is unlinted so a green build ≠ it works):** `RequestOptions.streaming` +
+     `AssistantSettings.voiceStreaming` (QSettings, default OFF); SSE in `aiprovider.cpp` (`onStreamReadyRead`
+     emits early `respond`-text via RespondTextExtractor→streamTextDelta; `onStreamReply` assembles events→
+     `finalizeConversationResponse`→emits `streamTextEnd` when terminal; `resetStreamState` per round; whole-body
+     stays the fallback); threaded `streaming` through `AIManager::analyzeConversation` (gated `streaming &&
+     !webSearch`) + `AIConversation.voiceStreaming`; `AssistantVoice` serial `SpeechQueue` (`feedStreamDelta`/
+     `endStream`, SpeechChunker + FIFO, `speaking`+`streaming` held across the queue via the 3 clip-finish hooks:
+     desktop EndOfMedia, native TTS Ready, Android finished; 1.2s first-chunk timer; barge-in clears in `stop()`);
+     `BaristaModule` wires `AIManager::conversationStreamText/End`→voice C++-direct (bypasses QML); double-speak
+     guarded on `Barista.voice.streaming` in BOTH paths (`BaristaConversation::onModelSpeakable/onModelFinal` for
+     useNewConversation=ON, and `AssistantOverlay` legacy `_speakSanitised` sites). Pure files moved to the
+     UNCONDITIONAL cmake block (aiprovider references them even in a DECENZA_BARISTA=OFF build); narrow
+     `decenza_baristastreamlib` keeps zero test-source duplication. **NEXT = tablet verify** (enable
+     voiceStreaming + turn web search OFF; check first-audio latency, no double-speak, mic stays gated across the
+     queue, barge-in). Original 1b detail:
    - **1b (first device trip):** `RequestOptions.streaming` + SSE in `aiprovider.cpp` (barista-only:
      `readyRead`→`AnthropicStreamParser`; on `message_stop` `assembleAnthropicResponse(events)`→synthetic root
      →`finalizeConversationResponse(root)` [both DONE in 1a]; `parser.reset()`+re-arm `readyRead` each re-POST

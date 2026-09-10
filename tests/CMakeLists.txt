@@ -346,6 +346,22 @@ target_link_libraries(decenza_shotlib PUBLIC
 target_include_directories(decenza_shotlib PUBLIC ${CMAKE_BINARY_DIR})
 
 # ---------------------------------------------------------------------------
+# [barista-fork] Narrow library for the pure streaming-voice helpers: the SSE parser + respond-text extractor
+# (referenced by aiprovider.cpp's streaming path AND their own unit tests) and the SpeechChunker (referenced by
+# assistantvoice.cpp's streaming queue AND tst_speechchunker). ONE definition here, linked by exactly the
+# targets that need it, so each shared .cpp compiles once and stays out of the test-source-duplication gate.
+# Pure QtCore; src/ on the include path so `barista/…` includes resolve. Defined before decenza_baristavoicelib
+# and decenza_aiproviderlib because both link it.
+add_library(decenza_baristastreamlib STATIC
+    ${CMAKE_SOURCE_DIR}/src/barista/anthropicstreamparser.cpp
+    ${CMAKE_SOURCE_DIR}/src/barista/respondtextextractor.cpp
+    ${CMAKE_SOURCE_DIR}/src/barista/speechchunker.cpp
+)
+set_target_properties(decenza_baristastreamlib PROPERTIES AUTOMOC ON AUTOMOC_PATH_PREFIX OFF)
+target_link_libraries(decenza_baristastreamlib PUBLIC Qt6::Core)
+target_include_directories(decenza_baristastreamlib PUBLIC ${CMAKE_SOURCE_DIR}/src)
+
+# ---------------------------------------------------------------------------
 # decenza_baristavoicelib: [barista-fork] the voice-conversation controller + its borrowed actuators,
 # compiled ONCE for the tests that exercise the state machine. Split from decenza_testlib for the same reason
 # decenza_shotlib is: these drag in Qt Multimedia + TextToSpeech (assistantvoice.cpp: QMediaPlayer /
@@ -367,6 +383,7 @@ set_target_properties(decenza_baristavoicelib PROPERTIES AUTOMOC ON AUTOMOC_PATH
 target_compile_definitions(decenza_baristavoicelib PUBLIC DECENZA_TESTING)
 target_link_libraries(decenza_baristavoicelib PUBLIC
     decenza_testlib
+    decenza_baristastreamlib
     Qt6::Multimedia Qt6::TextToSpeech
 )
 
@@ -613,8 +630,8 @@ add_decenza_test(tst_closeintent
 # would otherwise only surface as choppy or mis-split TTS on-device, where the rest of the pipeline is verified. ---
 add_decenza_test(tst_speechchunker
     tst_speechchunker.cpp
-    ${CMAKE_SOURCE_DIR}/src/barista/speechchunker.cpp
 )
+target_link_libraries(tst_speechchunker PRIVATE decenza_baristastreamlib)
 
 # --- tst_baristaconversation: [barista-fork] the two-way-comms voice state machine (BARISTA_TwoWay_Comms
 # _Redesign.md §13) — the controller that was "on-device only" because it lives under the unlinted QML overlay.
@@ -635,8 +652,8 @@ target_link_libraries(tst_baristaconversation PRIVATE decenza_baristavoicelib)
 # live conversation on-device, where the readyRead wiring is verified. ---
 add_decenza_test(tst_anthropicstreamparser
     tst_anthropicstreamparser.cpp
-    ${CMAKE_SOURCE_DIR}/src/barista/anthropicstreamparser.cpp
 )
+target_link_libraries(tst_anthropicstreamparser PRIVATE decenza_baristastreamlib)
 
 # --- tst_respondtextextractor: [barista-fork] the streaming voice pipeline's `respond` text extractor
 # (BARISTA_VOICE_STREAMING_DESIGN.md §1.2, corrected). Pure QtCore, no network/voice deps — the barista's
@@ -646,8 +663,8 @@ add_decenza_test(tst_anthropicstreamparser
 # garbled TTS on-device, where the readyRead wiring feeding it is verified. ---
 add_decenza_test(tst_respondtextextractor
     tst_respondtextextractor.cpp
-    ${CMAKE_SOURCE_DIR}/src/barista/respondtextextractor.cpp
 )
+target_link_libraries(tst_respondtextextractor PRIVATE decenza_baristastreamlib)
 
 # --- tst_speakerembedder: [barista-fork] voice-ID MFCC embedder DSP (FFT/mel/DCT + aggregation). QtCore-only
 # (MfccEmbedder depends on nothing but QVector/QByteArray) — validates determinism + discrimination in software,
@@ -1255,7 +1272,9 @@ target_link_libraries(decenza_beanbaselib PUBLIC decenza_testlib)
 # add_library() and its sources literal and greppable.
 add_library(decenza_aiproviderlib STATIC ${CMAKE_SOURCE_DIR}/src/ai/aiprovider.cpp)
 set_target_properties(decenza_aiproviderlib PROPERTIES AUTOMOC ON AUTOMOC_PATH_PREFIX OFF)
-target_link_libraries(decenza_aiproviderlib PUBLIC decenza_testlib)
+# aiprovider.cpp's streaming path references the pure barista SSE parser + respond-text extractor
+# (decenza_baristastreamlib, defined earlier next to decenza_baristavoicelib).
+target_link_libraries(decenza_aiproviderlib PUBLIC decenza_testlib decenza_baristastreamlib)
 
 add_library(decenza_dialingblockslib STATIC ${CMAKE_SOURCE_DIR}/src/ai/dialing_blocks.cpp)
 set_target_properties(decenza_dialingblockslib PROPERTIES AUTOMOC ON AUTOMOC_PATH_PREFIX OFF)

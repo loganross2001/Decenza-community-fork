@@ -419,8 +419,11 @@ public:
     // [barista-fork] webSearch/clientTools ride RequestOptions (default off — advisor unaffected). The
     // barista's client tool definitions + executor live in src/barista/baristatools.{h,cpp}. The default-arg
     // form also covers upstream's plain analyzeConversation(systemPrompt, messages) call sites.
+    // [barista-fork] `streaming` = the barista's voiceStreaming flag. The stream is gated OFF whenever web search
+    // is on for the turn (a paused server-tool re-POST can't be rebuilt from the stream), so the effective
+    // RequestOptions.streaming = streaming && !webSearch — see analyzeConversation.
     void analyzeConversation(const QString& systemPrompt, const QJsonArray& messages,
-                             bool webSearch = false, bool clientTools = false);
+                             bool webSearch = false, bool clientTools = false, bool streaming = false);
 
     // Extract the trailing fenced ```json block from an assistant message.
     // The shot-analysis system prompt asks the model to append a `nextShot`
@@ -555,6 +558,12 @@ signals:
     // that up") emitted BEFORE a tool/search runs, so the barista can speak it right away instead of sitting
     // silent. Only re-emitted for a conversation request (mirrors conversationResponseReceived gating).
     void conversationInterimText(const QString& text);
+    // [barista-fork] Streaming voice: the provider's streamTextDelta / streamTextEnd, re-emitted for a live
+    // conversation turn only (mirrors conversationInterimText gating). The module wires these C++-direct to the
+    // voice layer, bypassing QML, so streamed chunks speak as they arrive without the overlay also speaking the
+    // final answer (double-speak). Fire only on a streaming turn (the provider raises them only then).
+    void conversationStreamText(const QString& text);
+    void conversationStreamEnd();
     void conversationErrorOccurred(const QString& error);
     // [barista-fork] A tiny model-generated "give me a sec" filler, produced by the dedicated Haiku provider
     // in parallel with the main turn so it can be spoken ~2s sooner. The overlay gates it (only speaks if the
@@ -564,6 +573,8 @@ signals:
 private slots:
     void onAnalysisComplete(const QString& response);
     void onInterimText(const QString& text);   // [barista-fork] route provider interimText → conversation
+    void onStreamText(const QString& text);     // [barista-fork] route provider streamTextDelta → conversation (streaming)
+    void onStreamEnd();                          // [barista-fork] route provider streamTextEnd → conversation (streaming)
     void onQuickFillerReady(const QString& text);   // [barista-fork] filler provider analysisComplete → quickFillerReady
     void onAnalysisFailed(const QString& error);
     void onTestResult(bool success, const QString& message);

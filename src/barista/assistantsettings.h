@@ -79,6 +79,12 @@ class AssistantSettings : public QObject {
     // conversation is driven by the new BaristaConversation state machine (parallel path) instead of the
     // legacy QML latch/timer logic — so the rewrite can be flipped on-device and rolled back with a toggle.
     Q_PROPERTY(bool useNewConversation READ useNewConversation WRITE setUseNewConversation NOTIFY useNewConversationChanged)
+    // [barista-fork] Streaming-voice feature flag (default OFF). When on, a barista conversation turn POSTs with
+    // "stream":true and speaks the reply chunk-by-chunk as it arrives (SSE → RespondTextExtractor → SpeechChunker
+    // → SpeechQueue) instead of waiting for the whole reply. Gates the ENTIRE streaming path; off restores the
+    // whole-body path exactly. Streaming additionally falls back to whole-body whenever web search is on for the
+    // turn (server-tool re-POSTs can't be rebuilt from the stream) — see AIManager::analyzeConversation.
+    Q_PROPERTY(bool voiceStreaming READ voiceStreaming WRITE setVoiceStreaming NOTIFY voiceStreamingChanged)
     Q_PROPERTY(bool avatarEnabled READ avatarEnabled WRITE setAvatarEnabled NOTIFY avatarEnabledChanged)
     Q_PROPERTY(QString avatarStyle READ avatarStyle WRITE setAvatarStyle NOTIFY avatarStyleChanged)
     // [barista-fork] Size of the avatar on the collapsed EDGE TAB (the pull-tab on the screen edge). Owner-
@@ -209,6 +215,8 @@ public:
 
     bool useNewConversation() const;              // [barista-fork] migration flag (default off)
     void setUseNewConversation(bool on);
+    bool voiceStreaming() const;                  // [barista-fork] streaming-voice feature flag (default off)
+    void setVoiceStreaming(bool on);
     bool avatarEnabled() const;                   // show the animated character face (default on)
     void setAvatarEnabled(bool e);
 
@@ -278,6 +286,7 @@ signals:
     void voiceIdMarginChanged();
     void voiceIdMaybeChanged();
     void useNewConversationChanged();
+    void voiceStreamingChanged();   // [barista-fork]
     void avatarEnabledChanged();
     void avatarStyleChanged();
     void avatarTabSizeChanged();

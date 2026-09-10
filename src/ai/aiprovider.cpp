@@ -830,9 +830,18 @@ void AnthropicProvider::sendRequest(const QJsonObject& requestBody, const QByteA
 
     QByteArray body = QJsonDocument(requestBody).toJson();
     QNetworkReply* reply = m_networkManager->post(req, body);
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
-        onAnalysisReply(reply);
-    });
+    // [barista-fork] Streaming turn: parse SSE incrementally on readyRead (early speech), and finalize off the
+    // accumulated events on finished. Each round of a streaming turn re-POSTs through here, so reset the
+    // per-round accumulation now. The non-streaming path is untouched.
+    if (m_streaming) {
+        resetStreamState();
+        connect(reply, &QNetworkReply::readyRead, this, [this, reply]() { onStreamReadyRead(reply); });
+        connect(reply, &QNetworkReply::finished, this, [this, reply]() { onStreamReply(reply); });
+    } else {
+        connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+            onAnalysisReply(reply);
+        });
+    }
 }
 
 void AnthropicProvider::analyze(const QString& systemPrompt, const QString& userPrompt)
@@ -970,6 +979,8 @@ void AnthropicProvider::analyzeConversation(const QString& systemPrompt, const Q
     m_accumulatedText.clear();    // [barista-fork]
     m_toolRounds = 0;             // [barista-fork] reset the client-tool loop counter per turn
     m_forceRespond = options.forceRespond;   // [barista-fork] this turn: tool_choice:"any" + `respond` (barista only)
+    m_streaming = options.streaming;   // [barista-fork] this turn streams (SSE) — see resetStreamState / sendRequest
+    resetStreamState();
     ++m_reqGen;
     m_truncationPolicy = TruncationPolicy::Fail;
     // A conversation turn is prose the user reads, so a cut-off reply still has
@@ -1064,6 +1075,12 @@ void AnthropicProvider::analyzeConversation(const QString& systemPrompt, const Q
     }
     if (!tools.isEmpty())
         requestBody["tools"] = tools;
+
+    // [barista-fork] Stream this turn's reply when the caller asked for it (voiceStreaming && !webSearch). Set on
+    // the base body here so every re-POST of this turn (tool rounds / pause_turn) inherits it via
+    // m_pendingRequestBody — sendRequest wires readyRead + the streaming finished handler when m_streaming.
+    if (m_streaming)
+        requestBody["stream"] = true;
 
     sendRequest(requestBody);
 }
@@ -1433,6 +1450,84 @@ void AnthropicProvider::finalizeConversationResponse(const QJsonObject& root)
             return;
     }
     emit analysisComplete(text);
+}
+
+void AnthropicProvider::resetStreamState()
+{
+    m_streamParser.reset();
+    m_streamEvents.clear();
+    m_respondExtractor.reset();
+    m_streamRespondIndex = -1;
+    m_streamSawOtherTool = false;
+}
+
+void AnthropicProvider::onStreamReadyRead(QNetworkReply* reply)
+{
+    // Feed whatever bytes are available now to the SSE parser, accumulate the events for the finished-time
+    // assembly, and emit early speech: only the `respond` tool's decoded text (or a non-forced turn's plain
+    // text_delta), and only while no real tool has opened this round — a round that also runs a tool is not the
+    // terminal answer, so its respond text (if any) must not be spoken.
+    const QVector<barista::SseEvent> evs = m_streamParser.feed(reply->readAll());
+    for (const barista::SseEvent& e : evs) {
+        m_streamEvents.append(e);
+        switch (e.kind) {
+        case barista::SseEvent::ContentBlockStart:
+            if (e.blockType == QLatin1String("tool_use")) {
+                if (m_forceRespond && e.toolName == QLatin1String("respond")) {
+                    m_streamRespondIndex = e.index;   // this block's input.text is the spoken answer
+                    m_respondExtractor.reset();
+                } else {
+                    m_streamSawOtherTool = true;       // a real tool this round → suppress respond speech
+                }
+            }
+            break;
+        case barista::SseEvent::TextDelta:
+            if (!m_streamSawOtherTool && !e.text.isEmpty())
+                emit streamTextDelta(e.text);
+            break;
+        case barista::SseEvent::InputJsonDelta:
+            if (e.index == m_streamRespondIndex && !m_streamSawOtherTool) {
+                const QString spoken = m_respondExtractor.feed(e.partialJson);
+                if (!spoken.isEmpty())
+                    emit streamTextDelta(spoken);
+            }
+            break;
+        default:
+            break;   // MessageStart / block stop / MessageDelta / MessageStop / ping / error carry no speech
+        }
+    }
+}
+
+void AnthropicProvider::onStreamReply(QNetworkReply* reply)
+{
+    reply->deleteLater();
+    setStatus(Status::Ready);
+
+    if (reply->error() != QNetworkReply::NoError) {
+        // A streamed turn that errors mid-flight: settle the voice queue (streamTextEnd), then surface the
+        // failure. We deliberately do NOT retry a streaming turn — any partial reply already spoken cannot be
+        // un-spoken, so a silent re-POST would double-speak. The whole feature is behind voiceStreaming, so a
+        // transient failure simply ends the turn (the user can ask again).
+        emit streamTextEnd();
+        const QByteArray body = reply->readAll();
+        const QString apiError = body.isEmpty() ? QString()
+            : QJsonDocument::fromJson(body).object()["error"].toObject()["message"].toString();
+        if (!apiError.isEmpty())
+            emit analysisFailed(tr_("ai.anthropic.error", "Anthropic error: %1").arg(apiError));
+        else
+            emit analysisFailed(friendlyNetworkError(reply));
+        return;
+    }
+
+    // Drain any bytes readyRead hadn't delivered before `finished` (no-op if already drained), fold the turn's
+    // events into a whole-body-equivalent root, and drive the SAME finalization / tool loop the non-streaming
+    // path uses. finalize re-POSTs (→ Busy) on a tool round / pause_turn and stays Ready on a terminal turn, so
+    // end the spoken stream only when the turn is actually done — a re-POST keeps the queue open for next round.
+    onStreamReadyRead(reply);
+    const QJsonObject root = barista::assembleAnthropicResponse(m_streamEvents);
+    finalizeConversationResponse(root);
+    if (status() == Status::Ready)
+        emit streamTextEnd();
 }
 
 void AnthropicProvider::testConnection()

@@ -79,6 +79,18 @@ target_sources(Decenza PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/tasksstorage.cpp
 )
 
+# [barista-fork] Streaming-voice SSE parser + respond-text extractor. Registered UNCONDITIONALLY: the
+# always-compiled aiprovider.cpp references barista::AnthropicStreamParser / assembleAnthropicResponse /
+# RespondTextExtractor in its streaming path (RequestOptions.streaming), so a DECENZA_BARISTA=OFF build must
+# still link them (they are inert unless a turn streams). Pure QtCore, no module deps. (SpeechChunker stays
+# gated with the module below — only the voice layer consumes it.)
+target_sources(Decenza PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/anthropicstreamparser.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/anthropicstreamparser.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/respondtextextractor.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/respondtextextractor.cpp
+)
+
 if(DECENZA_BARISTA)
     # NOTE: the QML singleton registration header (baristasingletons_qml.h) is listed in the main
     # CMakeLists.txt HEADERS block (gated on DECENZA_BARISTA), NOT here — it must be a first-class
@@ -106,8 +118,8 @@ if(DECENZA_BARISTA)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/closeintent.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/speechchunker.h
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/speechchunker.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/anthropicstreamparser.h
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/anthropicstreamparser.cpp
+        # anthropicstreamparser.{h,cpp} + respondtextextractor.{h,cpp} moved to the UNCONDITIONAL block above
+        # (aiprovider.cpp's streaming path references them, and it compiles even when the module is off).
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristaknowledge.h
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristaknowledge.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristaactions.h

@@ -4,6 +4,8 @@
 #include <QStringList>
 #include <QVariantList>
 
+#include "speechchunker.h"   // [barista-fork] streaming-voice chunker, owned by value below
+
 #ifdef Q_OS_ANDROID
 #include <QJniObject>   // [barista-fork] native MediaPlayer handle (m_androidPlayer), value member
 #endif
@@ -14,6 +16,7 @@ class QMediaPlayer;
 class QAudioOutput;
 class QBuffer;
 class QNetworkAccessManager;
+class QTimer;
 class AssistantSettings;
 class Settings;
 
@@ -32,6 +35,11 @@ class AssistantVoice : public QObject {
     Q_PROPERTY(bool audible READ audible NOTIFY audibleChanged)
     // [barista-fork] True while an ElevenLabs voice-preview sample is playing (voice-picker highlight state).
     Q_PROPERTY(bool previewPlaying READ previewPlaying NOTIFY previewPlayingChanged)
+    // [barista-fork] True while a STREAMED reply is being spoken chunk-by-chunk (from the first feedStreamDelta
+    // until the speech queue drains after endStream). The overlay reads it to SUPPRESS speaking the final
+    // analysisComplete text (which streaming already voiced), avoiding double-speak. Distinct from `speaking`,
+    // which also covers ordinary single utterances; this is specifically the streaming path.
+    Q_PROPERTY(bool streaming READ streaming NOTIFY streamingChanged)
     // [barista-fork] True on platforms where audio plays through the native player (Android). The voice picker
     // uses this to route previews to the external speaker instead of Qt's built-in-only MediaPlayer.
     Q_PROPERTY(bool usesNativeAudio READ usesNativeAudio CONSTANT)
@@ -59,6 +67,7 @@ public:
     bool speaking() const { return m_speaking; }
     bool audible() const { return m_audible; }
     bool previewPlaying() const { return m_previewPlaying; }
+    bool streaming() const { return m_streamSpeaking; }   // [barista-fork] a streamed reply is being spoken
     bool usesNativeAudio() const {
 #ifdef Q_OS_ANDROID
         return true;
@@ -80,6 +89,14 @@ public:
     // [fork-index] entry=AssistantVoice::speak | domain=voice | change=-
     //   what: TTS entry — speaks a reply (ElevenLabs/OpenAI), unit/ratio-normalized, muted-aware
     Q_INVOKABLE void speak(const QString& rawText);       // no-op when voice is muted; normalizes units/ratios for TTS
+    // [barista-fork] Streaming voice (BARISTA_VOICE_STREAMING_DESIGN.md §1.3). feedStreamDelta receives the
+    // reply's decoded text as it arrives from the provider (AIManager::conversationStreamText, wired C++-direct
+    // by BaristaModule); it splits deltas into speakable chunks (SpeechChunker) and plays them through a serial
+    // FIFO — chunk N finishes → chunk N+1 speaks — keeping `speaking` (and `streaming`) true across the queue so
+    // the mic stays gated for the whole reply. endStream flushes the chunker's tail and lets the queue drain.
+    // Barista role only; a muted barista stays silent. (2-deep synth lookahead is a later slice; this is serial.)
+    Q_INVOKABLE void feedStreamDelta(const QString& textDelta);
+    Q_INVOKABLE void endStream();
     Q_INVOKABLE void stop();
     Q_INVOKABLE void setVoiceByName(const QString& name);  // persists to settings + applies
     Q_INVOKABLE void preview();                            // speak a sample line to audition a voice
@@ -130,6 +147,7 @@ signals:
     void speakingChanged();
     void audibleChanged();            // [barista-fork] real audio started/stopped (avatar talking-animation)
     void previewPlayingChanged();     // [barista-fork] voice-preview sample started/stopped
+    void streamingChanged();          // [barista-fork] streamed-reply speaking started/stopped
     void fetchingVoicesChanged();
     // [barista-fork] Emitted when GET /v1/voices succeeds: a list of QVariantMaps (see fetchElevenlabsVoices).
     void elevenlabsVoicesFetched(const QVariantList& voices);
@@ -165,6 +183,17 @@ private:
 
     void applyVoiceFromSettings();
     void updateSpeaking();
+    // [barista-fork] Streaming speech queue. speakNextChunk pops + speaks the next queued chunk (or, if the
+    // queue is empty mid-stream, holds `speaking` true awaiting more text; or, if the stream is done, settles).
+    // onSpeechClipFinished is called from the three per-backend clip-completion signals (desktop EndOfMedia,
+    // native TTS Ready, Android finished callback) to advance the queue instead of going idle. setStreamSpeaking
+    // flips the `streaming` property + notifies. releaseFirstChunk force-emits the buffered lead-in at the 1.2s
+    // latency floor so the first audio isn't late when the opening text arrives without a boundary.
+    void speakNextChunk();
+    void onSpeechClipFinished();
+    void enqueueChunks(const QStringList& chunks);
+    void setStreamSpeaking(bool on);
+    void releaseFirstChunk();
     void playSpeakerWake();                      // [barista-fork] raw speaker-wake tone (no guards); see .cpp
     void synthOpenAI(const QString& text);       // POST OpenAI TTS → play the returned mp3
     void synthElevenLabs(const QString& text);   // POST ElevenLabs TTS → play the returned mp3
@@ -207,6 +236,16 @@ private:
     // holds `speaking` true across that gap so the mic stays paused. m_speakGen discards a stale/late reply.
     bool m_pendingSynth = false;
     int m_speakGen = 0;
+    // [barista-fork] Streaming speech queue (feedStreamDelta / endStream). m_streamActive: a stream is in
+    // progress and more deltas may arrive. m_streamSpeaking: the streamed reply is being spoken (drives the
+    // `streaming` property) — true from the first delta until the queue fully drains. m_clipInFlight: a queued
+    // chunk's synth/playback is currently underway (so a new delta enqueues rather than double-speaking).
+    barista::SpeechChunker m_chunker;
+    QStringList m_speechQueue;
+    bool m_streamActive = false;
+    bool m_streamSpeaking = false;
+    bool m_clipInFlight = false;
+    QTimer* m_firstChunkTimer = nullptr;   // 1.2s first-chunk latency floor (design §1.2); owned lazily
     // [barista-fork] alternate the cloud-TTS temp file each utterance (decenza_tts_0/_1.mp3). Reusing ONE
     // path makes Android's media backend cache the prior clip's DURATION and stop the new (longer) audio
     // early — the "cut off mid-sentence" bug. A fresh path each time forces a clean reload.

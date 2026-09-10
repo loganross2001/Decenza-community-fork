@@ -357,7 +357,11 @@ void BaristaConversation::onModelSpeakable(const QString& text)
         return;
     setState(State::Speaking);   // turnInFlight stays true
     m_lastSpokenText = text;     // for the self-echo backstop
-    if (m_voice) m_voice->speak(text);
+    // [barista-fork] Streaming voice: the reply is already being spoken chunk-by-chunk by AssistantVoice (fed
+    // C++-direct from the provider), so don't speak it again — the stream owns the audio. State stays Speaking
+    // and the stream's own speakingChanged drives the drain. (Forced-respond turns carry no lead-in, so this
+    // path is rarely reached under streaming; guarded for safety.)
+    if (m_voice && !m_voice->streaming()) m_voice->speak(text);
 }
 
 void BaristaConversation::onModelFinal(const QString& text, bool endConversation)
@@ -383,6 +387,14 @@ void BaristaConversation::onModelFinal(const QString& text, bool endConversation
     m_turnInFlight = false;
     setDisplay(text);
     m_lastSpokenText = text;   // for the self-echo backstop (covers both the queued + direct speak paths)
+    // [barista-fork] Streaming voice: AssistantVoice is already speaking this reply chunk-by-chunk (streamed
+    // from the provider), and streamTextEnd fires AFTER analysisComplete, so streaming() is still true here.
+    // Don't speak or queue the answer again — just mark Speaking; the stream's speakingChanged drives the
+    // Speaking→Cooldown→Listening drain exactly as a normal utterance would.
+    if (m_voice && m_voice->streaming()) {
+        setState(State::Speaking);
+        return;
+    }
     if (m_state == State::Speaking && m_voice && m_voice->speaking()) {
         // A filler/lead-in is still playing — queue the answer; onVoiceSpeakingChanged drains it.
         m_pendingAnswer = text;

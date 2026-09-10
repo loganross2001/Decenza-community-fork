@@ -8,7 +8,14 @@
 #include <QList>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
+#include <QVector>
 #include <functional>
+
+// [barista-fork] Pure QtCore helpers for the Anthropic streaming path (RequestOptions.streaming). Lightweight
+// (no heavy deps), so including them here doesn't burden non-barista builds; the members are inert unless a turn
+// actually streams.
+#include "../barista/anthropicstreamparser.h"
+#include "../barista/respondtextextractor.h"
 
 class TranslationManager;
 
@@ -50,6 +57,13 @@ public:
         // reprocessed. -1 ⇒ no split (cache the whole prompt, the pre-tailoring behaviour). Anthropic-only;
         // other providers ignore it (Gemini gets the same benefit from its own implicit prefix caching).
         int cachePrefixLen = -1;
+        // [barista-fork] Stream this turn's reply (SSE) instead of waiting for the whole body. Anthropic-only,
+        // barista conversation only — the caller sets it from AssistantSettings.voiceStreaming AND already gates
+        // it OFF when web search is on (a paused server-tool turn can't be rebuilt from the stream). When set,
+        // the reply is parsed incrementally: the `respond` tool's text is decoded and emitted via streamTextDelta
+        // for early speech, and message_stop assembles a whole-body-equivalent response that drives the SAME tool
+        // loop as the non-streaming path. Off ⇒ the whole-body path, byte-for-byte unchanged.
+        bool streaming = false;
     };
 
     explicit AIProvider(QNetworkAccessManager* networkManager, QObject* parent = nullptr);
@@ -168,6 +182,14 @@ signals:
     // completes. Emitted at most once per top-level turn's first tool round; only AnthropicProvider raises it.
     // The final analysisComplete then carries ONLY the post-tool answer (no re-fold), so nothing double-speaks.
     void interimText(const QString& text);
+    // [barista-fork] Streaming voice (RequestOptions.streaming). As the reply's `respond` text arrives over SSE
+    // it is decoded and emitted here in fragments, so the voice layer can speak it chunk-by-chunk (~1s to first
+    // audio) instead of waiting for the whole turn. streamTextEnd fires once when the turn's spoken content is
+    // complete (flush the chunker's tail, let the speech queue drain). Only AnthropicProvider raises these, and
+    // only for a streaming turn; the final analysisComplete still carries the full reply for display/history, so
+    // the consumer must NOT also speak it (double-speak) — see the voiceStreaming guard in AssistantOverlay.
+    void streamTextDelta(const QString& text);
+    void streamTextEnd();
     void statusChanged(Status status);
     void testResult(bool success, const QString& message);
 
@@ -407,13 +429,22 @@ private slots:
     void onTestReply(QNetworkReply* reply);
 
 private:
-    // [barista-fork] The turn-finalization logic shared by the whole-body and (coming) streaming paths: reads
+    // [barista-fork] The turn-finalization logic shared by the whole-body and streaming paths: reads
     // stop_reason + content from a response object, runs the client-tool loop / pause_turn continuation, and
     // emits interimText / analysisComplete / analysisFailed. `onAnalysisReply` calls it with the parsed
-    // whole-body `root`; the streaming path will call it with a synthetic root assembled from SSE events
+    // whole-body `root`; the streaming path calls it with a synthetic root assembled from SSE events
     // (assembleAnthropicResponse), so ONE tool loop drives both. Expects `root` to carry `stop_reason` +
     // `content` (+ optional `usage`), i.e. the shape QJsonDocument::fromJson gives a Messages response.
     void finalizeConversationResponse(const QJsonObject& root);
+
+    // [barista-fork] Streaming path (RequestOptions.streaming). onStreamReadyRead feeds each socket chunk to the
+    // parser, accumulates the events, and emits streamTextDelta for the `respond` block's decoded text (early
+    // speech). onStreamReply fires on `finished`: assembles the events into a whole-body-equivalent root and
+    // drives finalizeConversationResponse (same tool loop); when the turn is terminal (didn't re-POST) it emits
+    // streamTextEnd. resetStreamState clears the per-round accumulation before each round's POST.
+    void onStreamReadyRead(QNetworkReply* reply);
+    void onStreamReply(QNetworkReply* reply);
+    void resetStreamState();
 
     // betaFeature sets `anthropic-beta` for a body carrying a beta tool
     // (web_fetch); empty for the GA paths.
@@ -429,6 +460,17 @@ private:
     int m_continuations = 0;
     QString m_accumulatedText;
     static constexpr int MAX_CONTINUATIONS = 2;
+
+    // [barista-fork] Streaming state (RequestOptions.streaming). m_streaming is set for the whole turn; the rest
+    // is per-round accumulation, cleared by resetStreamState() before each round's POST. m_streamRespondIndex /
+    // m_streamSawOtherTool gate early speech: only the `respond` block's text is spoken, and only while no real
+    // tool has opened this round (a round that also runs a tool isn't the terminal answer). See onStreamReadyRead.
+    bool m_streaming = false;
+    barista::AnthropicStreamParser m_streamParser;
+    QVector<barista::SseEvent> m_streamEvents;
+    barista::RespondTextExtractor m_respondExtractor;
+    int m_streamRespondIndex = -1;
+    bool m_streamSawOtherTool = false;
 
     // [barista-fork] generic client-side tool loop. On stop_reason "tool_use" we run m_toolExecutor, append
     // the assistant tool_use turn + our tool_result, and re-POST — bounded by MAX_TOOL_ROUNDS. The tool

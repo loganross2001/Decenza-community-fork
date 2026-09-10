@@ -1396,6 +1396,10 @@ Item {
 
         root._conv.webSearchEnabled = webOn   // barista session only; reset by ask()/resetInMemory()
         root._conv.toolsEnabled = toolsOn     // barista session only; the query_shots opt-in (reset the same way)
+        // [barista-fork] Streaming voice: stream this turn's reply when enabled (AIManager gates it OFF when web
+        // search is on). The streamed audio is spoken C++-direct via Barista.voice; the final-answer speech below
+        // is suppressed while Barista.voice.streaming is true, so there's no double-speak.
+        root._conv.voiceStreaming = !!(root._settings && root._settings.voiceStreaming)
         root._conv.verbatimPairs = 8          // keep more of the chat verbatim so casual context survives the session
         // PRIME AND WAIT: assemble the full system prompt but DO NOT begin the Claude session. The user
         // speaks first — the first _send() calls beginSession(primed, userText). No synthetic kickoff, no
@@ -1861,7 +1865,10 @@ Item {
             root._markSpokeThisTurn()      // suppress the Part B cue + stop the 5s timer
             if (root._voiceInput && root._voiceInput.listening) root._voiceInput.pauseMic()
             root._diag("interim_leadin", { chars: clean.length, speakingNow: root._voice ? root._voice.speaking : false })
-            root._speakSanitised(text)     // speak the model's OWN words now, before the tool result lands
+            // [barista-fork] Under streaming voice the reply (incl. any lead-in) is spoken chunk-by-chunk by
+            // Barista.voice, so don't also speak it here. (Forced-respond streaming turns carry no lead-in anyway.)
+            if (!(root._voice && root._voice.streaming))
+                root._speakSanitised(text)     // speak the model's OWN words now, before the tool result lands
         }
         function onResponseReceived(response) {
             if (root._state !== "conversing")   // BL-1: reply landed after dismiss (or it's an advisor turn) → ignore
@@ -1916,6 +1923,10 @@ Item {
             // Skip the TTS entirely if the answer just duplicates the lead-in (already spoken + shown above).
             if (_dupLeadin) {
                 // no-op: the lead-in already said this; text is displayed, nothing more to speak.
+            } else if (root._voice && root._voice.streaming) {
+                // [barista-fork] Streaming voice already spoke this reply chunk-by-chunk — display only, never
+                // speak (or defer) it again. (Legacy path; the new-conversation path guards in onModelFinal.)
+                root._diag("response_speech_suppressed_streaming", { chars: (response || "").length })
             } else if (root._voice && root._voice.speaking) {
                 root._pendingSpeech = response
                 root._diag("response_deferred_until_leadin_done", { chars: (response || "").length })

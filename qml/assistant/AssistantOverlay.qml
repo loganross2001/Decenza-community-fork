@@ -920,7 +920,13 @@ Item {
             + "field (total shots, the full earliest→latest date range, and per-bean counts) is the TRUE extent of "
             + "their history — treat it as authoritative; NEVER claim you only have recent shots or history back to "
             + "some recent date. Reference what you see, recall your past advice, and pick up where you left off.\n"
-            + "DIALING FRAMEWORK — suggest ONE concrete change for the next shot when it helps. Read taste on two axes: "
+
+        // [barista-fork] Turn-cost: coaching-framework prose (dialing levers, shot types, how to talk about a shot)
+        // is relocated out of the always-resident core to ride includeDialin — the same gate as the ~20k dial-in
+        // DATA block it reasons over — so casual/greeting turns (the frequent ones) don't pay ~900 tokens for it.
+        // JUST-PULLED / log-taste stays RESIDENT (below): a one-word taste reaction ("perfect", "great") trips the
+        // casual gate, and the shot must still get logged on that turn.
+        _mods.coaching = "DIALING FRAMEWORK — suggest ONE concrete change for the next shot when it helps. Read taste on two axes: "
             + "sour/sharp ↔ bitter/harsh, and weak/watery ↔ strong/intense. THE LEVERS are grind, dose, ratio/yield, "
             + "temperature, AND the pressure/flow PROFILE and pre-infusion — pick the ONE that matches the CAUSE, not "
             + "grind by reflex. Grind and ratio move overall extraction (sour+weak → finer or a longer ratio; bitter+strong "
@@ -956,7 +962,8 @@ Item {
             + "a specific figure only when the user asks for it or when that figure IS the point ('grind's at 2.5 — let's "
             + "take it to 2.6'). CONTRAST — DON'T: 'that was a lungo, 18 grams in, 54 out, 1 to 3, 35 seconds, grind 2.7.' "
             + "DO: 'that lungo espresso on the Ethiopian beans — ran nice and long, right in the zone.'\n"
-            + "JUST-PULLED SHOT: if sessionContext.justPulledShot is present, a shot finished a few minutes ago and "
+
+        persona += "JUST-PULLED SHOT: if sessionContext.justPulledShot is present, a shot finished a few minutes ago and "
             + "you already know it — do NOT announce it or ask 'how did it taste?' out of nowhere. Wait for the user. "
             + "When the user describes the taste ('that was sour', 'bit thin', 'perfect') OR gives a rating ('I'd "
             + "call that a 7', 'like an 80') THAT IS the tasting report — you do not need to ask for it, and they "
@@ -1710,6 +1717,9 @@ Item {
         var includeDialin = !!mods.dialin && !casual.test(String(utterance || "").trim().toLowerCase())
         var out = root._coreSystemPrompt.length ? root._coreSystemPrompt : root._primedSystemPrompt
         if (includeDialin) out += "\n" + mods.dialin
+        // [barista-fork] Coaching-framework prose rides the same gate as the dial-in data it reasons over (moved
+        // out of the resident core — see _mods.coaching); placed right after the data so it sits beside it.
+        if (includeDialin && mods.coaching) out += "\n" + mods.coaching
         // Coffee-brain reasoning tools + full-history query instructions ride the same coffee/dialing turns the
         // dial-in data does; a greeting or a recipe-switch doesn't need them. Recipe semantics ride a
         // profile/recipe turn. All still declared as tools regardless — only the guidance text is gated.

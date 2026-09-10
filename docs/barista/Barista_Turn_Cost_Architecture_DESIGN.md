@@ -4,6 +4,38 @@ Grounded entirely in the seams listed in the request's §6. Nothing below assume
 
 ---
 
+## STATUS — code audit 2026-09-10 (much of this design is already built)
+
+Mapping the real seams on `feat/barista` showed the migration table (§7) overstates what's unbuilt.
+Ground truth, so we don't rebuild what exists:
+
+- **Step 0 (module gating) — DONE.** `_scopedSystemPrompt()` (`qml/assistant/AssistantOverlay.qml`)
+  splits an always-resident `_coreSystemPrompt` from per-turn/sticky gated modules. The ~20k-char
+  dial-in DATA block, coffee-brain, query-shots, recipes, profiles, camera, web instruction text are
+  **already peeled out of the core and gated** by a keyword classifier (casual / dialin / profiles /
+  camera / web). The `chars=` measurement harness (`[barista] scoped prompt chars=…`) is live.
+- **Step 6 (async cross-session rolling summary) — DONE.** `AIManager::requestSessionSummary()` →
+  `AssistantSettings::setSessionSummary` (QSettings), seeded into the next session's anchor.
+- **Step 7 (Anthropic caching) — DONE.** `stageCachePrefixLen(coreSystemPrompt.length)` →
+  `AnthropicProvider::buildCachedSystemPrompt(prompt, cachePrefixLen)`. No-op on Gemini (correct).
+- **Step 1 (trim resident core) — IN PROGRESS.** Slice 1 (2026-09-10): the coaching-framework prose
+  (DIALING FRAMEWORK / SHOT TYPES / TALKING ABOUT A SHOT, ~900 tokens) was relocated verbatim out of
+  the resident core into a gated `_mods.coaching` that rides `includeDialin` — cutting ~900 tokens off
+  every casual/greeting turn (a straight win on Gemini). JUST-PULLED / log-taste stays resident on
+  purpose (a one-word taste reaction trips the casual gate and must still log the shot).
+- **Step 2 (structured C++ session-anchor struct) — DEFERRED.** A string anchor already carries
+  bean/profile/prior-summary and live data rides `requestBaristaContext`; the struct is marginal.
+- **Step 3 (intent router → prompt scoping) — substantially DONE** via Step 0's classifier; only the
+  per-bucket *retrieval-plan* extension and an embedding fallback remain, and the fallback is
+  add-only-if-measured.
+- **Step 4 (per-bucket tool filtering) — NOT STARTED.** All 46 `buildTools()` tools still ship every
+  turn. This is the next slice.
+- **Step 5 (deterministic math short-circuit) — NOT STARTED, optional.**
+
+Remaining real work: finish Step 1 trimming as warranted, do Step 4 (tool filtering), optionally Step 5.
+
+---
+
 ## 1. Turn-scoped context assembly
 
 **Mechanism: a local, deterministic intent router — no LLM round-trip.**

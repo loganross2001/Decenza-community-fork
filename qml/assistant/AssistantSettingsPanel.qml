@@ -444,6 +444,42 @@ Rectangle {
                         }
                     }
 
+                    // [barista-fork] Streaming voice — experimental. ON speaks the reply as it streams in
+                    // (~1s to first audio) instead of after the whole turn. Anthropic provider only, and only
+                    // when web search is off (it falls back to the normal path otherwise). Safe to flip on-device.
+                    BaristaSectionCard {
+                        caption: TranslationManager.translate("barista.settings.voiceStreaming", "Streaming voice (experimental)")
+
+                        Tr {
+                            Layout.fillWidth: true
+                            key: "barista.settings.voiceStreamingDesc"
+                            fallback: "Speak the reply as it arrives instead of waiting for the whole answer. Anthropic only, and only when web search is off. Experimental — turn it off if the voice misbehaves."
+                            color: Theme.textSecondaryColor; font: Theme.labelFont; wrapMode: Text.WordWrap
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.spacingSmall
+                            Switch {
+                                id: voiceStreamSwitch
+                                checked: root._settings ? root._settings.voiceStreaming : false
+                                onToggled: if (root._settings) root._settings.voiceStreaming = checked
+                                Accessible.role: Accessible.CheckBox
+                                Accessible.name: trVoiceStream.text
+                                Accessible.checked: checked
+                                Accessible.focusable: true
+                                Accessible.onToggleAction: toggle()
+                            }
+                            Tr {
+                                id: trVoiceStream
+                                Layout.fillWidth: true
+                                key: "barista.settings.voiceStreamingOn"
+                                fallback: "Stream the voice"
+                                color: Theme.textColor; font: Theme.bodyFont; wrapMode: Text.WordWrap
+                            }
+                        }
+                    }
+
                     // [barista-fork] Diagnostics — the always-on voice/coaching timeline recorder. Lets the
                     // owner reproduce a glitch and hand back the exported log; stays on the device.
                     BaristaSectionCard {

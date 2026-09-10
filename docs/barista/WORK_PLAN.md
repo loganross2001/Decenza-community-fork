@@ -86,65 +86,34 @@ queue. If anyone ever puts the barista on Anthropic, fix those first (see memory
 1c (2-deep lookahead) DROPPED as moot. **Real issue surfaced instead → see the new forward item 1.**
 
 ## Forward plan (priority order)
-1. **ElevenLabs first-word / short-word clipping (owner's actual daily path: Gemini + ElevenLabs).** The start
-   of a reply (first syllable / a short word) gets dropped intermittently. Leading hypothesis: A2DP Bluetooth-
-   speaker cold-start clip — the keepalive that's meant to hold the sink warm stops the instant playback starts
-   (`handleAndroidPlaybackStarted` → `stopThinkingLoop()` fires before the real audio's ~100-300ms cold-start
-   flows), and/or the keepalive.wav is too sub-perceptible to keep an A2DP sink awake. Candidate fix: overlap
-   the keepalive across the first ~300ms of real audio (don't stop it until audio is audible). ⚠️ On-device
-   audio timing — NOT verifiable on macOS; needs owner listening. The timing log (`barista-diagnostics.log`) is
-   a tablet FILE, not an HTTP endpoint — to pin the exact cause, either the owner shares that file or add a
-   ShotServer route to serve it.
-2. **(was 1) Wire the voice-streaming pipeline.** ⏸️ PARKED (see above). Original slicing kept for reference:
-   - ✅ **1a DONE (CI, no tablet) 2026-09-09 — not committed:** pure `RespondTextExtractor` (respond
-     `input_json_delta` → incremental spoken text, `tst_respondtextextractor` 15 cases); pure
-     `assembleAnthropicResponse(events)` in `anthropicstreamparser.{h,cpp}` (SSE events → whole-body-equivalent
-     `{content, stop_reason}`, 5 byte-identity fixture tests in `tst_anthropicstreamparser` proving it feeds the
-     tool loop identically to the whole-body parse); and `onAnalysisReply`'s post-`readAll()` body extracted
-     verbatim into `AnthropicProvider::finalizeConversationResponse(root)` (behavior-preserving — `tst_aiproviders`
-     + `tst_aimanager` still green) so the streaming path drives ONE identical tool loop. Lever-1 wins.
-   - ✅ **1b BUILT 2026-09-09 (macOS app + all affected tests green; NOT yet on-device-verified — needs the
-     tablet, and the overlay QML is unlinted so a green build ≠ it works):** `RequestOptions.streaming` +
-     `AssistantSettings.voiceStreaming` (QSettings, default OFF); SSE in `aiprovider.cpp` (`onStreamReadyRead`
-     emits early `respond`-text via RespondTextExtractor→streamTextDelta; `onStreamReply` assembles events→
-     `finalizeConversationResponse`→emits `streamTextEnd` when terminal; `resetStreamState` per round; whole-body
-     stays the fallback); threaded `streaming` through `AIManager::analyzeConversation` (gated `streaming &&
-     !webSearch`) + `AIConversation.voiceStreaming`; `AssistantVoice` serial `SpeechQueue` (`feedStreamDelta`/
-     `endStream`, SpeechChunker + FIFO, `speaking`+`streaming` held across the queue via the 3 clip-finish hooks:
-     desktop EndOfMedia, native TTS Ready, Android finished; 1.2s first-chunk timer; barge-in clears in `stop()`);
-     `BaristaModule` wires `AIManager::conversationStreamText/End`→voice C++-direct (bypasses QML); double-speak
-     guarded on `Barista.voice.streaming` in BOTH paths (`BaristaConversation::onModelSpeakable/onModelFinal` for
-     useNewConversation=ON, and `AssistantOverlay` legacy `_speakSanitised` sites). Pure files moved to the
-     UNCONDITIONAL cmake block (aiprovider references them even in a DECENZA_BARISTA=OFF build); narrow
-     `decenza_baristastreamlib` keeps zero test-source duplication. **NEXT = tablet verify** (enable
-     voiceStreaming + turn web search OFF; check first-audio latency, no double-speak, mic stays gated across the
-     queue, barge-in). Original 1b detail:
-   - **1b (first device trip):** `RequestOptions.streaming` + SSE in `aiprovider.cpp` (barista-only:
-     `readyRead`→`AnthropicStreamParser`; on `message_stop` `assembleAnthropicResponse(events)`→synthetic root
-     →`finalizeConversationResponse(root)` [both DONE in 1a]; `parser.reset()`+re-arm `readyRead` each re-POST
-     round; reset `m_accumulatedText` only at turn start). ⚠️**GATE streaming to `voiceStreaming && !webSearch`**
-     — fall back to the whole-body path when web search is ON (`AssistantSettings.webSearchEnabled` defaults
-     ON). Reason: a web-search turn stops with `pause_turn` and the continuation echoes `content` VERBATIM on
-     re-POST, but `assembleAnthropicResponse` is deliberately LOSSY for server-tool blocks (keeps only `type`,
-     drops id/name/input/results — pinned by `tst_anthropicstreamparser::assembleServerToolBlockIsLossy`), so a
-     streamed web-search re-POST would be malformed. Do NOT widen streaming to web-search turns without first
-     making that reconstruction faithful to server_tool_use/web_search_tool_result (the parser would need to
-     carry their input/results too). The `respond`+client-tool turns that streaming DOES cover reconstruct
-     faithfully (5 byte-identity fixtures green). Route deltas **C++-direct** (module wires
-     provider/manager streaming signal → new `AssistantVoice::feedStreamDelta()`, bypassing QML) and guard
-     the QML `_speakSanitised` calls in `AssistantOverlay.qml` with `if (!voiceStreaming)` so the full answer
-     isn't ALSO spoken (double-speak). `AssistantVoice` owns a `SpeechChunker` + a **serial** queue: speak
-     chunk N, dequeue N+1 on playback-finished (`EndOfMedia`/`handleAndroidPlaybackFinished`/native
-     `stateChanged→Ready`) — the queue must intercept that event so `speaking` stays true across the queue
-     (else the mic reopens mid-answer; tangles with `m_pendingSynth`/`m_speakGen`). `AssistantSettings.
-     voiceStreaming` (QSettings `barista/voiceStreaming`, default OFF) gates the whole feature.
-   - **1c (second slice):** the 2-deep synth lookahead (design §1.3) — pure cloud-gap removal; defer.
-   Verify with the tablet's real `ttsProvider` (remote read); confirm flag-OFF unchanged; macOS `ctest`
-   before the APK. This is the one piece needing the tablet — now cheap to iterate.
-2. **Full scroll conversion of the History & Data tab** — it's the only settings tab without a ScrollView
-   (every other tab scrolls); the toggle-collapse fix was a targeted band-aid. This is the proper,
-   upstream-worthy fix. Big/complex file (2369 lines) — do it carefully, verify on macOS first.
-3. **Optional dev lever:** the ShotServer barista dev-endpoint (above), if voice iteration is too slow.
+> **Order set by the owner 2026-09-10:** do **Proactive coaching Increment 2** first, then the **Turn-cost
+> architecture**. The History & Data ScrollView conversion stays open but deferred behind those.
+
+1. **Proactive coaching — Increment 2 (similar-bean / community "opening read").** Increment 1 (cross-bean
+   `palateProfile` in `src/ai/aimanager.cpp` + the layered OPENING READ prompt clause) is **BUILT + committed +
+   passes the full suite** (the memory's "written, not built" note was stale — it compiled and tests are green;
+   what's left there is owner on-device *listening*, not code). Increment 2 = extend the opening read to
+   similar beans / community data. Spec: `docs/barista/PROACTIVE_COACHING.md` (Increment 1 = "WRITTEN"; Increment
+   2 not started). Memory: `decenza-barista-proactive-coaching`.
+2. **Turn-cost architecture** — `docs/barista/Barista_Turn_Cost_Architecture_DESIGN.md`. Tighten how much
+   context each barista turn assembles (turn-scoped context; bias the router toward mild over-inclusion on
+   ambiguous small talk — over-inclusion costs money, under-inclusion costs trust). A "cut token cost" build;
+   the design exists, implementation not started.
+3. **Full ScrollView conversion of the History & Data settings tab** — OPEN, deferred by owner behind 1–2. The
+   only settings tab without a ScrollView; the toggle-collapse fix (`44e88b55`) was a band-aid. Proper,
+   upstream-worthy fix; big file (~2,400 lines) — do carefully. macOS-verifiable, no tablet needed.
+4. **ElevenLabs "trips up / gets quieter"** (owner's daily Gemini + ElevenLabs path). NOT a Bluetooth/speaker
+   issue (owner confirmed no BT speaker) — it's the **turbo model's synthesis stutter + loudness instability**.
+   FIRST fix is zero-code: owner switches the ElevenLabs model in barista settings → **Voice** tab from
+   **"Turbo — fastest, more stutter"** to **"Multilingual v2 — steadier, slower."** If that's not enough, small
+   code tweak in `synthElevenLabs`: raise `stability` 0.5→~0.65 + a loudness-consistency setting, build into an
+   APK. *Owner is testing the model switch.*
+
+## ⏸️ Parked / done (not active)
+- **Voice streaming** — PARKED, see the "Voice streaming — PARKED" section above (moot for Gemini; 3 known
+  code-review bugs unfixed; flag `voiceStreaming` default OFF; nothing to do unless the barista goes Anthropic).
+- **Optional dev lever** — a QT_DEBUG ShotServer endpoint driving `BaristaConversation` remotely (see "honest
+  remaining gap" above); only if on-device voice iteration proves too slow. Not needed now.
 
 ## Key pointers
 - Design: `BARISTA_VOICE_STREAMING_DESIGN.md`, `BARISTA_TwoWay_Comms_Redesign.md`.

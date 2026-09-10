@@ -96,10 +96,20 @@ queue. If anyone ever puts the barista on Anthropic, fix those first (see memory
    `docs/barista/PROACTIVE_COACHING.md`; `tst_aimanager`/`tst_aiproviders`/`tst_closeintent` green. The earlier
    "not started" note (here + memory) was stale. **What's left is owner on-device *listening*, not code** — the
    Increment-1 behaviour cases in `PROACTIVE_COACHING.md` cover it. Memory: `decenza-barista-proactive-coaching`.
-2. **Turn-cost architecture** — `docs/barista/Barista_Turn_Cost_Architecture_DESIGN.md`. Tighten how much
-   context each barista turn assembles (turn-scoped context; bias the router toward mild over-inclusion on
-   ambiguous small talk — over-inclusion costs money, under-inclusion costs trust). A "cut token cost" build;
-   the design exists, implementation not started.
+2. **Turn-cost architecture** — `docs/barista/Barista_Turn_Cost_Architecture_DESIGN.md` (see its STATUS block).
+   A code audit (2026-09-10) found most of the 8-step design was ALREADY built (module-gating / Step 0,
+   Anthropic caching / Step 7, rolling summary / Step 6, the math short-circuit / Step 5 all live). Work done
+   this session:
+   - ✅ **Slice 1 (Step 1) — SHIPPED** (`87aae3b1`): relocated the coaching-framework prose (~900 tokens) out
+     of the always-resident core into a gated `_mods.coaching` that rides `includeDialin`, cutting ~900 tokens
+     off every casual/greeting turn (a straight win on Gemini). Verbatim move → no voice change on coaching
+     turns → no ear-test needed. Build clean, AI tests green.
+   - ⏸️ **Slice 2 (Step 4, per-turn tool filtering) — DEFERRED by owner.** Safely buildable only via sticky
+     `active.*` gating (a current-utterance filter would drop `apply_dial_change`/`log_tasting_feedback` on an
+     approval turn — silent no-op), realistic win modest (~500 tok, decaying), live change needing on-device
+     validation. Owner chose to skip for now.
+   - ✅ **Slice 3 (Step 5, deterministic math) — was already built + tested** (`tryQuickMath`).
+   Remaining: finish Step 1 trimming further if warranted; Slice 2 available if the token cut is wanted later.
 3. **Full ScrollView conversion of the History & Data settings tab** — OPEN, deferred by owner behind 1–2. The
    only settings tab without a ScrollView; the toggle-collapse fix (`44e88b55`) was a band-aid. Proper,
    upstream-worthy fix; big file (~2,400 lines) — do carefully. macOS-verifiable, no tablet needed.

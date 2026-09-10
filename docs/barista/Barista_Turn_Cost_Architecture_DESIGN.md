@@ -28,11 +28,22 @@ Ground truth, so we don't rebuild what exists:
 - **Step 3 (intent router → prompt scoping) — substantially DONE** via Step 0's classifier; only the
   per-bucket *retrieval-plan* extension and an embedding fallback remain, and the fallback is
   add-only-if-measured.
-- **Step 4 (per-bucket tool filtering) — NOT STARTED.** All 46 `buildTools()` tools still ship every
-  turn. This is the next slice.
-- **Step 5 (deterministic math short-circuit) — NOT STARTED, optional.**
+- **Step 4 (per-bucket tool filtering) — DECLINED this session (2026-09-10).** All ~39 main-set tools
+  still ship every `clientTools` turn (the ~7 web/visualizer tools are already gated on `webSearch`). A
+  naïve per-turn filter is UNSAFE: the casual regex matches approval/taste words ("yeah", "perfect"), so
+  trimming on the current utterance would drop `apply_dial_change` / `log_tasting_feedback` on the exact
+  turn they must fire — a silent success-that-did-nothing. It's safely buildable via STICKY `active.*`
+  gating (always-on writes + escape reads; sticky-gate only recipe-CRUD / camera / reasoning-reads), but
+  the realistic win is modest (~39→~20 tools, ~500 tok on Gemini, decaying) and it's a live behavioral
+  change needing on-device validation. Owner chose to defer it in favour of Step 5.
+- **Step 5 (deterministic math short-circuit) — DONE.** `barista::tryQuickMath()` (`src/barista/
+  closeintent.cpp:144`) answers pure ratio/dose/yield questions locally and speaks them (wired at
+  `baristaconversation.cpp:320`, skipping the model turn entirely); high-precision (returns "" for
+  anything conversational, bounds-checked), 14 test cases in `tests/tst_closeintent.cpp` incl. the
+  "discussion not math" false-positive guard.
 
-Remaining real work: finish Step 1 trimming as warranted, do Step 4 (tool filtering), optionally Step 5.
+Remaining real work: finish Step 1 trimming as warranted. Step 4 is deferred (see above); Steps 0/5/6/7
+are built.
 
 ---
 

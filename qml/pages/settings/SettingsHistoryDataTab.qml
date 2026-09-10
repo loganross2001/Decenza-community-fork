@@ -751,11 +751,16 @@ KeyboardAwareContainer {
         Rectangle {
             objectName: "enableServer"
             Layout.fillWidth: true
-            Layout.fillHeight: true
+            // Size to content, not fill-height. A fill-height card in this column shrinks toward zero when the
+            // column runs short — e.g. the People roster grows as people are added — which collapses the Enable
+            // Server toggle out of view on smaller screens (reported on the tablet: the toggle was missing and
+            // untappable while it renders fine on a tall desktop window). Mirror peopleCard's content-sizing.
+            Layout.preferredHeight: enableServerContent.implicitHeight + Theme.scaled(30)
             color: Theme.cardBackgroundColor
             radius: Theme.cardRadius
 
             ColumnLayout {
+                id: enableServerContent
                 anchors.fill: parent
                 anchors.margins: Theme.scaled(15)
                 spacing: Theme.scaled(10)

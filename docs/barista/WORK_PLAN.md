@@ -75,8 +75,27 @@ fragments) — NOT raw `text_delta`. `AnthropicStreamParser` already demuxes `In
 the missing piece is a **pure streaming-JSON-string extractor** for the `respond.text` field. (A rare
 non-forced turn could still emit `text_delta`; handle both, but the respond path is the norm.)
 
+## ⏸️ Voice streaming — PARKED 2026-09-09 (on-device reality killed the value)
+Built end-to-end (1a+1b, committed+pushed, flag `voiceStreaming` **default OFF**), but the owner's on-device
+test made it moot: streaming is **Anthropic-only**, the owner runs **Gemini** (Anthropic Sonnet is ~10s to
+first audio — model latency streaming can't fix; Gemini ~2s whole-reply, so they're staying on Gemini). Left
+**parked** (flag-off, dormant) per owner. ⚠️ It also has **3 known bugs from code review** (NOT fixed — not
+worth polishing an unused path): C1 mic reopens between chunks on native/Android (`updateSpeaking` runs before
+`onSpeechClipFinished`), C2 desktop cloud path exposed to same, I1 a no-finish-signal `speak()` wedges the
+queue. If anyone ever puts the barista on Anthropic, fix those first (see memory `decenza-barista-voice-streaming`).
+1c (2-deep lookahead) DROPPED as moot. **Real issue surfaced instead → see the new forward item 1.**
+
 ## Forward plan (priority order)
-1. **Wire the voice-streaming pipeline.** Sliced per advisor (headless-first, tablet last):
+1. **ElevenLabs first-word / short-word clipping (owner's actual daily path: Gemini + ElevenLabs).** The start
+   of a reply (first syllable / a short word) gets dropped intermittently. Leading hypothesis: A2DP Bluetooth-
+   speaker cold-start clip — the keepalive that's meant to hold the sink warm stops the instant playback starts
+   (`handleAndroidPlaybackStarted` → `stopThinkingLoop()` fires before the real audio's ~100-300ms cold-start
+   flows), and/or the keepalive.wav is too sub-perceptible to keep an A2DP sink awake. Candidate fix: overlap
+   the keepalive across the first ~300ms of real audio (don't stop it until audio is audible). ⚠️ On-device
+   audio timing — NOT verifiable on macOS; needs owner listening. The timing log (`barista-diagnostics.log`) is
+   a tablet FILE, not an HTTP endpoint — to pin the exact cause, either the owner shares that file or add a
+   ShotServer route to serve it.
+2. **(was 1) Wire the voice-streaming pipeline.** ⏸️ PARKED (see above). Original slicing kept for reference:
    - ✅ **1a DONE (CI, no tablet) 2026-09-09 — not committed:** pure `RespondTextExtractor` (respond
      `input_json_delta` → incremental spoken text, `tst_respondtextextractor` 15 cases); pure
      `assembleAnthropicResponse(events)` in `anthropicstreamparser.{h,cpp}` (SSE events → whole-body-equivalent

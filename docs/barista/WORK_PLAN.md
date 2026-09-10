@@ -110,9 +110,22 @@ queue. If anyone ever puts the barista on Anthropic, fix those first (see memory
      validation. Owner chose to skip for now.
    - ✅ **Slice 3 (Step 5, deterministic math) — was already built + tested** (`tryQuickMath`).
    Remaining: finish Step 1 trimming further if warranted; Slice 2 available if the token cut is wanted later.
-3. **Full ScrollView conversion of the History & Data settings tab** — OPEN, deferred by owner behind 1–2. The
-   only settings tab without a ScrollView; the toggle-collapse fix (`44e88b55`) was a band-aid. Proper,
-   upstream-worthy fix; big file (~2,400 lines) — do carefully. macOS-verifiable, no tablet needed.
+3. ✅ **Full ScrollView conversion of the History & Data settings tab — DONE (2026-09-10), owner visual owed.**
+   Wrapped the top-level `RowLayout` in a `Flickable` (`contentFlickable`, `contentHeight:
+   mainLayout.implicitHeight`, `VerticalFlick` + `StopAtBounds` + `ScrollBar.vertical`), mirroring
+   `SettingsMachineTab`'s Flickable-over-RowLayout pattern — the closest well-structured sibling. The three
+   columns went from `Layout.fillHeight: true` to content-sized + `Layout.alignment: Qt.AlignTop` (the two card
+   Rectangles get `implicitHeight: <innerColumn>.implicitHeight + margins`, the shipping MachineTab idiom; the
+   right ColumnLayout is intrinsically content-sized). Key structural finding: the RowLayout does NOT close near
+   the 3 columns — every dialog/Connections/Timer is declared *inside* it and it closes at EOF (line ~2385); all
+   those are Popups/non-visual/`parent: Overlay.overlay`-reparented, so the layout only ever manages the 3
+   columns, which is why the wrap needed no 2,300-line re-indent. The `44e88b55` band-aid comment on the Enable
+   Server card (fill-height-collapse rationale, now structurally impossible) was rewritten. Single-file diff
+   (+29/−9). **Verified:** clean build, QML diagnostics gate clean 251/251, `ctest` 124/126 (the 2 reds —
+   `failonwarning_lint`, `tst_qmlregistration/Barista` — are pre-existing C++ barista-fork failures, not this
+   change), app launches with zero binding-loop / QML warnings. **Owed:** owner eyeballs the live scroll on
+   macOS (the tab loads lazily via a Loader; couldn't drive the Qt UI to that exact sub-tab headlessly). Not
+   committed yet.
 4. **ElevenLabs "trips up / gets quieter"** (owner's daily Gemini + ElevenLabs path). NOT a Bluetooth/speaker
    issue (owner confirmed no BT speaker) — it's the **turbo model's synthesis stutter + loudness instability**.
    FIRST fix is zero-code: owner switches the ElevenLabs model in barista settings → **Voice** tab from

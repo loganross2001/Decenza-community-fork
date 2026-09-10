@@ -48,19 +48,38 @@ KeyboardAwareContainer {
         visible: false
     }
 
-    RowLayout {
+    // Vertical scroll container so the three columns stay reachable when the
+    // page is shorter than their content (short screens / large accessibility
+    // fonts). Mirrors SettingsMachineTab's Flickable-over-RowLayout pattern;
+    // the columns below are content-sized and top-aligned rather than
+    // fill-height. The dialogs/Connections/Timers declared later in this file
+    // sit inside this RowLayout too, but they are Popups/non-visual/overlay-
+    // reparented, so the layout only ever manages the three columns.
+    Flickable {
+        id: contentFlickable
         anchors.fill: parent
+        contentHeight: mainLayout.implicitHeight
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        flickableDirection: Flickable.VerticalFlick
+        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+        RowLayout {
+        id: mainLayout
+        width: parent.width
         spacing: Theme.scaled(15)
 
         // Left column: Shot History stats and import
         Rectangle {
             objectName: "shotHistory"
             Layout.preferredWidth: Theme.scaled(300)
-            Layout.fillHeight: true
+            Layout.alignment: Qt.AlignTop
+            implicitHeight: shotHistoryContent.implicitHeight + Theme.scaled(24)
             color: Theme.cardBackgroundColor
             radius: Theme.cardRadius
 
             ColumnLayout {
+                id: shotHistoryContent
                 anchors.fill: parent
                 anchors.margins: Theme.scaled(12)
                 spacing: Theme.scaled(6)
@@ -267,7 +286,8 @@ KeyboardAwareContainer {
         Rectangle {
             objectName: "dailyBackup"
             Layout.preferredWidth: Theme.scaled(280)
-            Layout.fillHeight: true
+            Layout.alignment: Qt.AlignTop
+            implicitHeight: backupColumn.implicitHeight + Theme.scaled(20)
             color: Theme.cardBackgroundColor
             radius: Theme.cardRadius
 
@@ -520,7 +540,7 @@ KeyboardAwareContainer {
         // Right column: People (barista roster), Share Data, and Export Shots cards
         ColumnLayout {
             Layout.preferredWidth: Theme.scaled(280)
-            Layout.fillHeight: true
+            Layout.alignment: Qt.AlignTop
             spacing: Theme.scaled(15)
 
         // People (barista roster) card — always available so a user can add a
@@ -751,10 +771,9 @@ KeyboardAwareContainer {
         Rectangle {
             objectName: "enableServer"
             Layout.fillWidth: true
-            // Size to content, not fill-height. A fill-height card in this column shrinks toward zero when the
-            // column runs short — e.g. the People roster grows as people are added — which collapses the Enable
-            // Server toggle out of view on smaller screens (reported on the tablet: the toggle was missing and
-            // untappable while it renders fine on a tall desktop window). Mirror peopleCard's content-sizing.
+            // Content-sized like every card in this column; the whole tab scrolls
+            // vertically (contentFlickable), so a card that outgrows the page is
+            // reached by scrolling rather than by shrinking its neighbours.
             Layout.preferredHeight: enableServerContent.implicitHeight + Theme.scaled(30)
             color: Theme.cardBackgroundColor
             radius: Theme.cardRadius
@@ -2365,5 +2384,6 @@ KeyboardAwareContainer {
         }
     }
 
-}
+    } // RowLayout mainLayout
+    } // Flickable contentFlickable
 }

@@ -66,7 +66,15 @@ Still worth doing in the live app (behavior the tests don't cover):
 3. A bean sharing roast/origin with others you've rated → `similarBeanExperience` surfaces and the
    barista can advise "on your other washed Ethiopians…".
 
-## Increment 2 — WRITTEN, not yet built
+## Increment 2 — BUILT + committed (2026-09-10 audit)
+
+Landed in `4e1768bb` ("open with a cross-bean palate read and similar-bean advice") alongside
+Increment 1; 2b landed in `338130d9`. The C++ data side (`buildSimilarBeanBlock` + the
+`similarBeanExperience` wiring) and the QML persona side (the SIMILAR BEANS & COMMUNITY clause) are
+both present on `feat/barista` and match the spec below. `tst_aimanager`/`tst_aiproviders`/
+`tst_closeintent` pass. What's left is the same as Increment 1: **owner on-device *listening*, not
+code** (verify the opening read actually surfaces similar-bean/community advice in the live app —
+the behaviour cases at the end of Increment 1 cover it).
 
 ### A. New data: similar-bean transfer learning
 `buildSimilarBeanBlock(db, current)` in `src/ai/aimanager.cpp` emits `similarBeanExperience` — the

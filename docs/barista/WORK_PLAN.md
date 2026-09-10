@@ -89,12 +89,13 @@ queue. If anyone ever puts the barista on Anthropic, fix those first (see memory
 > **Order set by the owner 2026-09-10:** do **Proactive coaching Increment 2** first, then the **Turn-cost
 > architecture**. The History & Data ScrollView conversion stays open but deferred behind those.
 
-1. **Proactive coaching — Increment 2 (similar-bean / community "opening read").** Increment 1 (cross-bean
-   `palateProfile` in `src/ai/aimanager.cpp` + the layered OPENING READ prompt clause) is **BUILT + committed +
-   passes the full suite** (the memory's "written, not built" note was stale — it compiled and tests are green;
-   what's left there is owner on-device *listening*, not code). Increment 2 = extend the opening read to
-   similar beans / community data. Spec: `docs/barista/PROACTIVE_COACHING.md` (Increment 1 = "WRITTEN"; Increment
-   2 not started). Memory: `decenza-barista-proactive-coaching`.
+1. ✅ **Proactive coaching — Increment 2 (similar-bean / community "opening read") — BUILT + committed (audit
+   2026-09-10).** Both increments were already on the branch: Increment 1 (cross-bean `palateProfile` + OPENING
+   READ clause) and Increment 2 (`buildSimilarBeanBlock` → `similarBeanExperience` + the SIMILAR BEANS &
+   COMMUNITY persona clause, `4e1768bb`; the brand-new-bean case 2b, `338130d9`). Implementation matches
+   `docs/barista/PROACTIVE_COACHING.md`; `tst_aimanager`/`tst_aiproviders`/`tst_closeintent` green. The earlier
+   "not started" note (here + memory) was stale. **What's left is owner on-device *listening*, not code** — the
+   Increment-1 behaviour cases in `PROACTIVE_COACHING.md` cover it. Memory: `decenza-barista-proactive-coaching`.
 2. **Turn-cost architecture** — `docs/barista/Barista_Turn_Cost_Architecture_DESIGN.md`. Tighten how much
    context each barista turn assembles (turn-scoped context; bias the router toward mild over-inclusion on
    ambiguous small talk — over-inclusion costs money, under-inclusion costs trust). A "cut token cost" build;

@@ -123,9 +123,9 @@ queue. If anyone ever puts the barista on Anthropic, fix those first (see memory
    Server card (fill-height-collapse rationale, now structurally impossible) was rewritten. Single-file diff
    (+29/−9). **Verified:** clean build, QML diagnostics gate clean 251/251, `ctest` 124/126 (the 2 reds —
    `failonwarning_lint`, `tst_qmlregistration/Barista` — are pre-existing C++ barista-fork failures, not this
-   change), app launches with zero binding-loop / QML warnings. **Owed:** owner eyeballs the live scroll on
-   macOS (the tab loads lazily via a Loader; couldn't drive the Qt UI to that exact sub-tab headlessly). Not
-   committed yet.
+   change), app launches with zero binding-loop / QML warnings. Committed `24bedeb4` (feat/barista + main FF'd).
+   **✅ Owner-confirmed on-device 2026-09-11:** installed to the tablet (SM-X200) via adb wireless and the
+   History & Data tab scrolls cleanly. Item fully closed.
 4. **ElevenLabs "trips up / gets quieter"** (owner's daily Gemini + ElevenLabs path). NOT a Bluetooth/speaker
    issue (owner confirmed no BT speaker) — it's the **turbo model's synthesis stutter + loudness instability**.
    FIRST fix is zero-code: owner switches the ElevenLabs model in barista settings → **Voice** tab from

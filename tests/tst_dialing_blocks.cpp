@@ -36,6 +36,9 @@
 #include "history/equipmentstorage.h"
 #include "ai/dialing_blocks.h"
 #include "ai/shotsummarizer.h"  // initTestCase pins the missing-resource qWarning
+#include "barista/coachplanstorage.h"   // [barista-fork] P3 judge-pass integration
+#include "barista/coachplanjudge.h"     // [barista-fork] runJudgePassStatic under test
+#include <QDateTime>
 #include "shotcurvefixtures.h"
 #include "shotrowfixtures.h"
 
@@ -1192,6 +1195,255 @@ private slots:
             {"successCondition", "OK"},
             {"reasoning", "Slow flow toward profile target"}
         };
+    }
+
+    // --- [barista-fork] Plan-outcome ledger: the P3 judge pass (CoachPlanJudge::runJudgePassStatic).
+    // Two DBs — plans in an assistant.db, shots in the shots.db template — nested so both connections are
+    // open at once. Reuses the same follow-up matcher shape as buildRecentAdviceBlock, tightened by equipment.
+
+    void judgePass_freezesFollowedOutcome()
+    {
+        const QString shotsPath = freshDbPath();
+        initAndClose(shotsPath);
+        const QString asstPath = m_tempDir.path() + QStringLiteral("/judge_asst_ok.db");
+        const qint64 nowSec = QDateTime::currentSecsSinceEpoch();
+        const qint64 priorTs = nowSec - 2 * 3600;
+        const qint64 nextTs = nowSec - 1 * 3600;
+
+        withRawDb(shotsPath, "jp_shots_ok", [&](QSqlDatabase& shotsDb) {
+            const qint64 priorId = insertShot(shotsDb, ShotRow{
+                .uuid = "jp-prior", .timestamp = priorTs, .profileName = "80's Espresso",
+                .profileKbId = "kb-80s", .duration = 28.0, .finalWeight = 36.0, .doseWeight = 18.0,
+                .beanBrand = "Onyx", .beanType = "Geo", .grinderSetting = "5.0", .enjoyment = 60 });
+            QVERIFY(priorId > 0);
+            const qint64 nextId = insertShot(shotsDb, ShotRow{
+                .uuid = "jp-next", .timestamp = nextTs, .profileName = "80's Espresso",
+                .profileKbId = "kb-80s", .duration = 35.0, .finalWeight = 42.0, .doseWeight = 18.0,
+                .beanBrand = "Onyx", .beanType = "Geo", .grinderSetting = "4.75", .enjoyment = 78 });
+            QVERIFY(nextId > 0);
+
+            withRawDb(asstPath, "jp_asst_ok", [&](QSqlDatabase& asstDb) {
+                QVERIFY(CoachPlanStorage::ensureSchemaStatic(asstDb));
+                QJsonObject sn{ {"grinderSetting", "4.75"} };
+                sn["expectedDurationSec"] = QJsonArray{ 32, 38 };
+                sn["expectedFlowMlPerSec"] = QJsonArray{ 1.0, 1.5 };
+                QVariantMap f;
+                f.insert("anchorShotId", priorId);
+                f.insert("beanBrand", "Onyx"); f.insert("beanType", "Geo");
+                f.insert("profileKbId", "kb-80s"); f.insert("equipmentId", 0);
+                f.insert("source", "fenced");
+                f.insert("structuredNext", QString::fromUtf8(QJsonDocument(sn).toJson(QJsonDocument::Compact)));
+                f.insert("lever", "grind"); f.insert("direction", "finer");
+                f.insert("createdAt", priorTs);
+                const qint64 planId = CoachPlanStorage::insertPlanStatic(asstDb, f);
+                QVERIFY(planId > 0);
+
+                QCOMPARE(CoachPlanJudge::runJudgePassStatic(asstDb, shotsDb, nowSec), 1);
+
+                const QVariantList judged =
+                    CoachPlanStorage::fetchPlansStatic(asstDb, QString(), QString(), QString(), "judged", 50);
+                QCOMPARE(judged.size(), 1);
+                const QVariantMap r = judged.first().toMap();
+                QCOMPARE(r.value("adherence").toString(), QStringLiteral("followed"));  // 5.0 -> 4.75 as advised
+                QCOMPARE(r.value("followUpShotId").toLongLong(), nextId);
+                QCOMPARE(r.value("judgedAt").toLongLong(), nowSec);
+                // duration 35s in [32,38] and avg flow 42/35=1.2 in [1.0,1.5].
+                QVERIFY(r.value("inPredictedRange").toString().contains(QStringLiteral("true")));
+
+                // Idempotent: a second pass judges nothing already frozen.
+                QCOMPARE(CoachPlanJudge::runJudgePassStatic(asstDb, shotsDb, nowSec + 1), 0);
+                QVERIFY(CoachPlanStorage::fetchOpenPlansStatic(asstDb, 50).isEmpty());
+            });
+        });
+    }
+
+    void judgePass_leavesOpenWhenNoFollowUp()
+    {
+        const QString shotsPath = freshDbPath();
+        initAndClose(shotsPath);
+        const QString asstPath = m_tempDir.path() + QStringLiteral("/judge_asst_nofollow.db");
+        const qint64 nowSec = QDateTime::currentSecsSinceEpoch();
+
+        withRawDb(shotsPath, "jp_shots_nf", [&](QSqlDatabase& shotsDb) {
+            const qint64 priorId = insertShot(shotsDb, ShotRow{
+                .uuid = "jp-nf-prior", .timestamp = nowSec - 3600, .profileName = "80's Espresso",
+                .profileKbId = "kb-80s", .grinderSetting = "5.0" });
+            QVERIFY(priorId > 0);
+            withRawDb(asstPath, "jp_asst_nf", [&](QSqlDatabase& asstDb) {
+                QVERIFY(CoachPlanStorage::ensureSchemaStatic(asstDb));
+                QVariantMap f;
+                f.insert("anchorShotId", priorId);
+                f.insert("profileKbId", "kb-80s"); f.insert("equipmentId", 0);
+                f.insert("structuredNext", "{\"grinderSetting\":\"4.75\"}");
+                f.insert("lever", "grind"); f.insert("direction", "finer");
+                QVERIFY(CoachPlanStorage::insertPlanStatic(asstDb, f) > 0);
+
+                QCOMPARE(CoachPlanJudge::runJudgePassStatic(asstDb, shotsDb, nowSec), 0);
+                QCOMPARE(CoachPlanStorage::fetchOpenPlansStatic(asstDb, 50).size(), 1);  // still open
+            });
+        });
+    }
+
+    void judgePass_ignoresFollowUpOnDifferentProfile()
+    {
+        const QString shotsPath = freshDbPath();
+        initAndClose(shotsPath);
+        const QString asstPath = m_tempDir.path() + QStringLiteral("/judge_asst_wrongprof.db");
+        const qint64 nowSec = QDateTime::currentSecsSinceEpoch();
+
+        withRawDb(shotsPath, "jp_shots_wp", [&](QSqlDatabase& shotsDb) {
+            const qint64 priorId = insertShot(shotsDb, ShotRow{
+                .uuid = "jp-wp-prior", .timestamp = nowSec - 2 * 3600, .profileName = "80's Espresso",
+                .profileKbId = "kb-80s", .grinderSetting = "5.0" });
+            QVERIFY(priorId > 0);
+            // A later shot, but on a DIFFERENT profile → must not match.
+            QVERIFY(insertShot(shotsDb, ShotRow{
+                .uuid = "jp-wp-other", .timestamp = nowSec - 3600, .profileName = "Blooming",
+                .profileKbId = "kb-other", .grinderSetting = "4.75" }) > 0);
+            withRawDb(asstPath, "jp_asst_wp", [&](QSqlDatabase& asstDb) {
+                QVERIFY(CoachPlanStorage::ensureSchemaStatic(asstDb));
+                QVariantMap f;
+                f.insert("anchorShotId", priorId);
+                f.insert("profileKbId", "kb-80s"); f.insert("equipmentId", 0);
+                f.insert("structuredNext", "{\"grinderSetting\":\"4.75\"}");
+                f.insert("lever", "grind"); f.insert("direction", "finer");
+                QVERIFY(CoachPlanStorage::insertPlanStatic(asstDb, f) > 0);
+
+                QCOMPARE(CoachPlanJudge::runJudgePassStatic(asstDb, shotsDb, nowSec), 0);
+                QCOMPARE(CoachPlanStorage::fetchOpenPlansStatic(asstDb, 50).size(), 1);  // still open
+            });
+        });
+    }
+
+    // --- [barista-fork] P4: coachTrackRecord block + recall tool, end-to-end through the judge pass.
+
+    void trackRecord_confirmsRepeatedTierAPattern()
+    {
+        const QString shotsPath = freshDbPath();
+        initAndClose(shotsPath);
+        const QString asstPath = m_tempDir.path() + QStringLiteral("/tr_confirm_asst.db");
+        const qint64 T = QDateTime::currentSecsSinceEpoch() - 10 * 86400;
+
+        withRawDb(shotsPath, "tr_shots", [&](QSqlDatabase& shotsDb) {
+            // Two finer-grind pairs on the same bean+profile, each rated up → two Tier-A "improved" outcomes.
+            const auto mk = [&](const char* uuid, qint64 ts, const QString& grind, int rating) {
+                return insertShot(shotsDb, ShotRow{ .uuid = uuid, .timestamp = ts, .profileName = "P",
+                    .profileKbId = "kb-P", .doseWeight = 18.0, .beanBrand = "Onyx", .beanType = "Geo",
+                    .grinderSetting = grind, .enjoyment = rating });
+            };
+            const qint64 a1 = mk("tr-a1", T,            "5.0",  62);
+            mk("tr-f1", T + 1 * 86400, "4.75", 78);
+            const qint64 a2 = mk("tr-a2", T + 2 * 86400, "4.75", 71);
+            mk("tr-f2", T + 3 * 86400, "4.5",  80);
+            QVERIFY(a1 > 0 && a2 > 0);
+
+            const auto plan = [&](QSqlDatabase& db, qint64 anchorId, const QString& grind, qint64 created) {
+                QVariantMap f;
+                f.insert("anchorShotId", anchorId); f.insert("beanBrand", "Onyx"); f.insert("beanType", "Geo");
+                f.insert("profileKbId", "kb-P"); f.insert("equipmentId", 0);
+                f.insert("structuredNext", QStringLiteral("{\"grinderSetting\":\"%1\"}").arg(grind));
+                f.insert("lever", "grind"); f.insert("direction", "finer"); f.insert("createdAt", created);
+                QVERIFY(CoachPlanStorage::insertPlanStatic(db, f) > 0);
+            };
+            withRawDb(asstPath, "tr_asst", [&](QSqlDatabase& asstDb) {
+                QVERIFY(CoachPlanStorage::ensureSchemaStatic(asstDb));
+                plan(asstDb, a1, "4.75", T);
+                plan(asstDb, a2, "4.5",  T + 2 * 86400);
+
+                const QJsonObject block = CoachPlanJudge::buildTrackRecord(asstDb, shotsDb, "Onyx", "Geo", T + 4 * 86400);
+                QVERIFY(!block.isEmpty());
+                const QJsonArray onBean = block.value("onThisBean").toArray();
+                QCOMPARE(onBean.size(), 1);
+                const QJsonObject pat = onBean.first().toObject();
+                QCOMPARE(pat.value("pattern").toString(), QStringLiteral("grind finer"));
+                QCOMPARE(pat.value("confirmed").toBool(), true);
+                QVERIFY(pat.value("outcomes").toString().contains("2 of 2"));
+                QVERIFY(pat.value("outcomes").toString().contains("62→78"));
+                QVERIFY(block.contains("lastPlan"));
+            });
+        });
+    }
+
+    void trackRecord_confirmedWorseCarriesEffectNotJustConfirmed()
+    {
+        // A reliably-BAD move: finer, followed, rating DROPPED, twice. Must ship confirmed:true with
+        // effect:"worse" (so the persona steers away), never read as "it worked".
+        const QString shotsPath = freshDbPath();
+        initAndClose(shotsPath);
+        const QString asstPath = m_tempDir.path() + QStringLiteral("/tr_worse_asst.db");
+        const qint64 T = QDateTime::currentSecsSinceEpoch() - 10 * 86400;
+
+        withRawDb(shotsPath, "tr_w_shots", [&](QSqlDatabase& shotsDb) {
+            const auto mk = [&](const char* uuid, qint64 ts, const QString& grind, int rating) {
+                return insertShot(shotsDb, ShotRow{ .uuid = uuid, .timestamp = ts, .profileName = "P",
+                    .profileKbId = "kb-P", .doseWeight = 18.0, .beanBrand = "Onyx", .beanType = "Geo",
+                    .grinderSetting = grind, .enjoyment = rating });
+            };
+            const qint64 a1 = mk("tw-a1", T,            "5.0",  80);
+            mk("tw-f1", T + 1 * 86400, "4.75", 62);   // worse 80→62
+            const qint64 a2 = mk("tw-a2", T + 2 * 86400, "4.75", 78);
+            mk("tw-f2", T + 3 * 86400, "4.5",  60);   // worse 78→60
+            QVERIFY(a1 > 0 && a2 > 0);
+            const auto plan = [&](QSqlDatabase& db, qint64 anchorId, const QString& grind, qint64 created) {
+                QVariantMap f;
+                f.insert("anchorShotId", anchorId); f.insert("beanBrand", "Onyx"); f.insert("beanType", "Geo");
+                f.insert("profileKbId", "kb-P"); f.insert("equipmentId", 0);
+                f.insert("structuredNext", QStringLiteral("{\"grinderSetting\":\"%1\"}").arg(grind));
+                f.insert("lever", "grind"); f.insert("direction", "finer"); f.insert("createdAt", created);
+                QVERIFY(CoachPlanStorage::insertPlanStatic(db, f) > 0);
+            };
+            withRawDb(asstPath, "tr_w_asst", [&](QSqlDatabase& asstDb) {
+                QVERIFY(CoachPlanStorage::ensureSchemaStatic(asstDb));
+                plan(asstDb, a1, "4.75", T);
+                plan(asstDb, a2, "4.5",  T + 2 * 86400);
+                const QJsonObject block = CoachPlanJudge::buildTrackRecord(asstDb, shotsDb, "Onyx", "Geo", T + 4 * 86400);
+                const QJsonArray onBean = block.value("onThisBean").toArray();
+                QCOMPARE(onBean.size(), 1);
+                const QJsonObject pat = onBean.first().toObject();
+                QCOMPARE(pat.value("confirmed").toBool(), true);
+                QCOMPARE(pat.value("effect").toString(), QStringLiteral("worse"));   // NOT read as "worked"
+                QVERIFY(pat.value("outcomes").toString().contains("got worse"));
+            });
+        });
+    }
+
+    void trackRecord_absentWhenOnlyTierC()
+    {
+        const QString shotsPath = freshDbPath();
+        initAndClose(shotsPath);
+        const QString asstPath = m_tempDir.path() + QStringLiteral("/tr_absent_asst.db");
+        const qint64 T = QDateTime::currentSecsSinceEpoch() - 5 * 86400;
+
+        withRawDb(shotsPath, "tr_c_shots", [&](QSqlDatabase& shotsDb) {
+            // Anchor + a follow-up that did NOT move the grind → adherence 'ignored' → Tier C.
+            const qint64 a1 = insertShot(shotsDb, ShotRow{ .uuid = "trc-a1", .timestamp = T, .profileName = "P",
+                .profileKbId = "kb-P", .doseWeight = 18.0, .beanBrand = "Onyx", .beanType = "Geo",
+                .grinderSetting = "5.0", .enjoyment = 60 });
+            insertShot(shotsDb, ShotRow{ .uuid = "trc-f1", .timestamp = T + 86400, .profileName = "P",
+                .profileKbId = "kb-P", .doseWeight = 18.0, .beanBrand = "Onyx", .beanType = "Geo",
+                .grinderSetting = "5.0", .enjoyment = 65 });   // grind unchanged → ignored
+            QVERIFY(a1 > 0);
+            withRawDb(asstPath, "tr_c_asst", [&](QSqlDatabase& asstDb) {
+                QVERIFY(CoachPlanStorage::ensureSchemaStatic(asstDb));
+                QVariantMap f;
+                f.insert("anchorShotId", a1); f.insert("beanBrand", "Onyx"); f.insert("beanType", "Geo");
+                f.insert("profileKbId", "kb-P"); f.insert("equipmentId", 0);
+                f.insert("structuredNext", "{\"grinderSetting\":\"4.75\"}");
+                f.insert("lever", "grind"); f.insert("direction", "finer"); f.insert("createdAt", T);
+                QVERIFY(CoachPlanStorage::insertPlanStatic(asstDb, f) > 0);
+
+                // Judged as 'ignored' (Tier C) and the last plan wasn't followed → block absent.
+                const QJsonObject block = CoachPlanJudge::buildTrackRecord(asstDb, shotsDb, "Onyx", "Geo", T + 2 * 86400);
+                QVERIFY2(block.isEmpty(), "a Tier-C-only ledger must not surface a proactive block");
+
+                // …but the recall tool DOES surface it, with the Tier-C label.
+                const QJsonArray rows = CoachPlanJudge::recallOutcomes(asstDb, shotsDb, "Onyx", "Geo", QString(), 20, T + 2 * 86400);
+                QCOMPARE(rows.size(), 1);
+                const QJsonObject r = rows.first().toObject();
+                QCOMPARE(r.value("adherence").toString(), QStringLiteral("ignored"));
+                QCOMPARE(r.value("tier").toString(), QStringLiteral("C"));
+            });
+        });
     }
 
     void recentAdvice_qualifyingTurnRendersWithAdherenceFollowed()

@@ -10,8 +10,11 @@
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QVariantMap>
 
 #include "barista/coffeeknowledgebase.h"
+#include "barista/baristatrace.h"        // [barista-fork] detector verdicts -> KB trace_signatures
+#include "history/shotprojection.h"
 
 class TstCoffeeKnowledgeBase : public QObject {
     Q_OBJECT
@@ -140,6 +143,191 @@ private slots:
         const CoffeeKnowledgeBase kb = CoffeeKnowledgeBase::fromJson(shippedKb());
         const QJsonObject r = kb.planForGoal(QStringLiteral("make it purple"), QString());
         QVERIFY(!r.value(QStringLiteral("found")).toBool());
+    }
+
+    // ===== [barista-fork] Trace->KB signature bridge (T1) =====================================
+    // BaristaTrace::objectiveTraceSignatures maps detector verdicts onto the KB's named
+    // trace_signatures, and CoffeeKnowledgeBase::traceSignature(id) resolves each to its cited
+    // meaning. The load-bearing contract: every id the bridge can emit MUST resolve in the shipped
+    // KB (a typo is a build-time failure here, never a runtime-invented signature).
+
+    static ShotProjection shotWith(const QVariantMap &detectorResults) {
+        ShotProjection s;
+        s.detectorResults = detectorResults;
+        return s;
+    }
+    static QVariantMap grindMap(const QString &direction, const QVariantMap &extra = {}) {
+        QVariantMap g{{QStringLiteral("checked"), true}, {QStringLiteral("hasData"), true},
+                      {QStringLiteral("direction"), direction}};
+        for (auto it = extra.cbegin(); it != extra.cend(); ++it) g.insert(it.key(), it.value());
+        return g;
+    }
+    static QVariantMap channelingMap(const QString &severity, double spikeSec = 0.0) {
+        return {{QStringLiteral("checked"), true}, {QStringLiteral("severity"), severity},
+                {QStringLiteral("spikeTimeSec"), spikeSec}};
+    }
+    static QVariantMap flowTrendMap(const QString &direction, double deltaMlPerSec = 0.0) {
+        return {{QStringLiteral("checked"), true}, {QStringLiteral("direction"), direction},
+                {QStringLiteral("deltaMlPerSec"), deltaMlPerSec}};
+    }
+
+    void traceSignatureResolvesAndCites() {
+        const CoffeeKnowledgeBase kb = CoffeeKnowledgeBase::fromJson(shippedKb());
+        const QJsonObject r = kb.traceSignature(QStringLiteral("choke"));
+        QVERIFY(r.value(QStringLiteral("found")).toBool());
+        QCOMPARE(r.value(QStringLiteral("class")).toString(), QStringLiteral("grind"));
+        QVERIFY2(!r.value(QStringLiteral("meaning")).toString().isEmpty(), "signature carries a meaning");
+        QVERIFY2(!r.value(QStringLiteral("next_change")).toString().isEmpty(), "signature carries a next_change");
+        QVERIFY2(!r.value(QStringLiteral("citations")).toArray().isEmpty(), "signature carries provenance");
+    }
+
+    void traceSignatureUnknownIdIsHonest() {
+        const CoffeeKnowledgeBase kb = CoffeeKnowledgeBase::fromJson(shippedKb());
+        QVERIFY(!kb.traceSignature(QStringLiteral("not_a_real_signature")).value(QStringLiteral("found")).toBool());
+    }
+
+    // The full set of ids the bridge is capable of emitting must each resolve in the shipped KB.
+    void everyEmittableTraceIdResolvesInKb() {
+        const CoffeeKnowledgeBase kb = CoffeeKnowledgeBase::fromJson(shippedKb());
+        const QStringList ids{
+            QStringLiteral("flow_exceeds_pressure"), QStringLiteral("pressure_notch_heal"),
+            QStringLiteral("choke"), QStringLiteral("gusher"),
+            QStringLiteral("flow_stall_after_pi"), QStringLiteral("trace_flow_never_caps")};
+        for (const QString &id : ids)
+            QVERIFY2(kb.traceSignature(id).value(QStringLiteral("found")).toBool(), qPrintable(id));
+    }
+
+    void mapsMeasuredGrindAndChannelingFaults() {
+        using BaristaTrace::objectiveTraceSignatures;
+
+        const auto choke = objectiveTraceSignatures(shotWith({
+            {QStringLiteral("grind"), grindMap(QStringLiteral("chokedPuck"), {
+                {QStringLiteral("chokedPuck"), true},
+                {QStringLiteral("gates"), QVariantMap{{QStringLiteral("meanPressurizedFlowMlPerSec"), 0.31},
+                                                      {QStringLiteral("pressurizedDurationSec"), 18.0}}}})}}));
+        QCOMPARE(choke.size(), 1);
+        QCOMPARE(choke.first().signatureId, QStringLiteral("choke"));
+        QCOMPARE(choke.first().grounding, QStringLiteral("measured"));
+        QVERIFY2(choke.first().evidence.contains(QStringLiteral("0.31")), "choke evidence carries the measured flow");
+
+        const auto gusher = objectiveTraceSignatures(shotWith({
+            {QStringLiteral("grind"), grindMap(QStringLiteral("yieldOvershoot"),
+                {{QStringLiteral("yieldOvershoot"), true}, {QStringLiteral("yieldRatio"), 1.35}})}}));
+        QCOMPARE(gusher.size(), 1);
+        QCOMPARE(gusher.first().signatureId, QStringLiteral("gusher"));
+        QCOMPARE(gusher.first().grounding, QStringLiteral("measured"));
+
+        const auto sustained = objectiveTraceSignatures(shotWith({
+            {QStringLiteral("channeling"), channelingMap(QStringLiteral("sustained"), 9.5)}}));
+        QCOMPARE(sustained.size(), 1);
+        QCOMPARE(sustained.first().signatureId, QStringLiteral("flow_exceeds_pressure"));
+        QCOMPARE(sustained.first().grounding, QStringLiteral("measured"));
+
+        const auto transient = objectiveTraceSignatures(shotWith({
+            {QStringLiteral("channeling"), channelingMap(QStringLiteral("transient"), 6.0)}}));
+        QCOMPARE(transient.size(), 1);
+        QCOMPARE(transient.first().signatureId, QStringLiteral("pressure_notch_heal"));
+    }
+
+    // tooFine splits: with flow trending DOWN it is a measured post-PI stall; alone it is only
+    // an inferred "never caps" (average shortfall is not a per-sample claim).
+    void tooFineSplitsByFlowTrend() {
+        using BaristaTrace::objectiveTraceSignatures;
+
+        const auto stall = objectiveTraceSignatures(shotWith({
+            {QStringLiteral("grind"), grindMap(QStringLiteral("tooFine"), {{QStringLiteral("deltaMlPerSec"), -0.5}})},
+            {QStringLiteral("flowTrend"), flowTrendMap(QStringLiteral("falling"), -0.3)}}));
+        QCOMPARE(stall.size(), 1);
+        QCOMPARE(stall.first().signatureId, QStringLiteral("flow_stall_after_pi"));
+        QCOMPARE(stall.first().grounding, QStringLiteral("measured"));
+
+        const auto neverCaps = objectiveTraceSignatures(shotWith({
+            {QStringLiteral("grind"), grindMap(QStringLiteral("tooFine"), {{QStringLiteral("deltaMlPerSec"), -0.6}})},
+            {QStringLiteral("flowTrend"), flowTrendMap(QStringLiteral("stable"), 0.0)}}));
+        QCOMPARE(neverCaps.size(), 1);
+        QCOMPARE(neverCaps.first().signatureId, QStringLiteral("trace_flow_never_caps"));
+        QVERIFY2(neverCaps.first().grounding == QStringLiteral("inferred"),
+                 "trace_flow_never_caps is consistent-with only, never asserted");
+    }
+
+    void cleanShotEmitsNoTraceSignature() {
+        using BaristaTrace::objectiveTraceSignatures;
+        QVERIFY(objectiveTraceSignatures(shotWith({})).isEmpty());
+        const auto onTarget = objectiveTraceSignatures(shotWith({
+            {QStringLiteral("grind"), grindMap(QStringLiteral("onTarget"))},
+            {QStringLiteral("channeling"), channelingMap(QStringLiteral("none"))},
+            {QStringLiteral("flowTrend"), flowTrendMap(QStringLiteral("stable"))}}));
+        QVERIFY2(onTarget.isEmpty(), "an on-target, unchanneled shot asserts no curve fault");
+    }
+
+    // Contract, exercised end-to-end: whatever the bridge emits across a battery of shots, every
+    // hit's id resolves in the KB and its grounding is one of the two sanctioned labels.
+    void everyEmittedHitResolvesAndIsLabelled() {
+        using BaristaTrace::objectiveTraceSignatures;
+        const CoffeeKnowledgeBase kb = CoffeeKnowledgeBase::fromJson(shippedKb());
+        const QList<ShotProjection> battery{
+            shotWith({{QStringLiteral("grind"), grindMap(QStringLiteral("chokedPuck"), {{QStringLiteral("chokedPuck"), true}})}}),
+            shotWith({{QStringLiteral("grind"), grindMap(QStringLiteral("yieldOvershoot"), {{QStringLiteral("yieldOvershoot"), true}})}}),
+            shotWith({{QStringLiteral("grind"), grindMap(QStringLiteral("tooFine"), {{QStringLiteral("deltaMlPerSec"), -0.5}})},
+                      {QStringLiteral("flowTrend"), flowTrendMap(QStringLiteral("falling"), -0.3)}}),
+            shotWith({{QStringLiteral("grind"), grindMap(QStringLiteral("tooFine"), {{QStringLiteral("deltaMlPerSec"), -0.6}})}}),
+            shotWith({{QStringLiteral("channeling"), channelingMap(QStringLiteral("sustained"), 9.0)}}),
+            shotWith({{QStringLiteral("channeling"), channelingMap(QStringLiteral("transient"), 5.0)}})};
+        int totalHits = 0;
+        for (const ShotProjection &s : battery) {
+            for (const BaristaTrace::SignatureHit &h : objectiveTraceSignatures(s)) {
+                ++totalHits;
+                QVERIFY2(kb.traceSignature(h.signatureId).value(QStringLiteral("found")).toBool(),
+                         qPrintable(QStringLiteral("emitted unknown signature id: ") + h.signatureId));
+                QVERIFY2(h.grounding == QStringLiteral("measured") || h.grounding == QStringLiteral("inferred"),
+                         qPrintable(QStringLiteral("bad grounding label: ") + h.grounding));
+                QVERIFY2(!h.evidence.isEmpty(), "every hit carries its measured evidence");
+            }
+        }
+        QCOMPARE(totalHits, battery.size());  // each fixture emits exactly one signature
+    }
+
+    // buildLastShotTraceRead joins the bridge hits to their KB meaning/next_change/citation and
+    // splits measured (assert) vs inferred (a maybe) for the opening read.
+    void lastShotTraceReadLeadsWithMeasuredFault() {
+        const CoffeeKnowledgeBase kb = CoffeeKnowledgeBase::fromJson(shippedKb());
+        const QJsonObject r = BaristaTrace::buildLastShotTraceRead(shotWith({
+            {QStringLiteral("grind"), grindMap(QStringLiteral("chokedPuck"), {
+                {QStringLiteral("chokedPuck"), true},
+                {QStringLiteral("gates"), QVariantMap{{QStringLiteral("meanPressurizedFlowMlPerSec"), 0.31},
+                                                      {QStringLiteral("pressurizedDurationSec"), 18.0}}}})}}), kb);
+        const QJsonArray measured = r.value(QStringLiteral("measured")).toArray();
+        QCOMPARE(measured.size(), 1);
+        const QJsonObject e = measured.first().toObject();
+        QCOMPARE(e.value(QStringLiteral("signatureId")).toString(), QStringLiteral("choke"));
+        QCOMPARE(e.value(QStringLiteral("class")).toString(), QStringLiteral("grind"));
+        QVERIFY2(!e.value(QStringLiteral("evidence")).toString().isEmpty(), "measured entry carries its evidence");
+        QVERIFY2(!e.value(QStringLiteral("meaning")).toString().isEmpty(), "measured entry carries the KB meaning");
+        QVERIFY2(!e.value(QStringLiteral("nextChange")).toString().isEmpty(), "measured entry carries the cited next move");
+        QVERIFY2(!r.contains(QStringLiteral("inferred")), "a purely-measured shot has no inferred array");
+        QVERIFY2(!r.value(QStringLiteral("note")).toString().isEmpty(), "the read carries the grounding note");
+        // Citation cap: choke has two provenance entries; the read keeps at most one.
+        QVERIFY2(e.value(QStringLiteral("citations")).toArray().size() <= 1, "citations capped at 1");
+    }
+
+    void lastShotTraceReadHedgesInferredSignal() {
+        const CoffeeKnowledgeBase kb = CoffeeKnowledgeBase::fromJson(shippedKb());
+        const QJsonObject r = BaristaTrace::buildLastShotTraceRead(shotWith({
+            {QStringLiteral("grind"), grindMap(QStringLiteral("tooFine"), {{QStringLiteral("deltaMlPerSec"), -0.6}})}}), kb);
+        const QJsonArray inferred = r.value(QStringLiteral("inferred")).toArray();
+        QCOMPARE(inferred.size(), 1);
+        const QJsonObject e = inferred.first().toObject();
+        QCOMPARE(e.value(QStringLiteral("signatureId")).toString(), QStringLiteral("trace_flow_never_caps"));
+        QVERIFY2(!e.value(QStringLiteral("basis")).toString().isEmpty(), "inferred entry carries its basis");
+        QVERIFY2(!e.contains(QStringLiteral("meaning")), "inferred entry is NOT presented as a measured meaning");
+        QVERIFY2(!r.contains(QStringLiteral("measured")), "a purely-inferred shot has no measured array");
+    }
+
+    void lastShotTraceReadEmptyOnCleanShot() {
+        const CoffeeKnowledgeBase kb = CoffeeKnowledgeBase::fromJson(shippedKb());
+        QVERIFY(BaristaTrace::buildLastShotTraceRead(shotWith({}), kb).isEmpty());
+        QVERIFY(BaristaTrace::buildLastShotTraceRead(shotWith({
+            {QStringLiteral("grind"), grindMap(QStringLiteral("onTarget"))}}), kb).isEmpty());
     }
 };
 

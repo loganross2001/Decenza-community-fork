@@ -52,6 +52,11 @@ public:
     // Q6 — goal layer. Map a human goal to a target region and a roast-aware dialing path.
     QJsonObject planForGoal(const QString &goal, const QString &roast) const;
 
+    // Look up one trace signature by id (as emitted by BaristaTrace::objectiveTraceSignatures).
+    // Returns { found, id, signature, meaning, class, next_change, citations } — the descriptive
+    // vocabulary + provenance for a measured/inferred curve fault. { found:false } for an unknown id.
+    QJsonObject traceSignature(const QString &id) const;
+
 private:
     CoffeeKnowledgeBase() = default;
     void populate(const QJsonObject &root);

@@ -230,6 +230,25 @@ QJsonArray CoffeeKnowledgeBase::citationsFor(const QJsonArray &provenance) const
     return out;
 }
 
+QJsonObject CoffeeKnowledgeBase::traceSignature(const QString &id) const
+{
+    for (const QJsonValue &v : m_traceSignatures) {
+        const QJsonObject t = v.toObject();
+        if (t.value(QStringLiteral("id")).toString() != id)
+            continue;
+        return QJsonObject {
+            {QStringLiteral("found"), true},
+            {QStringLiteral("id"), id},
+            {QStringLiteral("signature"), t.value(QStringLiteral("signature"))},
+            {QStringLiteral("meaning"), t.value(QStringLiteral("meaning"))},
+            {QStringLiteral("class"), t.value(QStringLiteral("class"))},
+            {QStringLiteral("next_change"), t.value(QStringLiteral("next_change"))},
+            {QStringLiteral("citations"), citationsFor(t.value(QStringLiteral("provenance")).toArray())},
+        };
+    }
+    return QJsonObject { {QStringLiteral("found"), false}, {QStringLiteral("id"), id} };
+}
+
 QJsonObject CoffeeKnowledgeBase::translateTaste(const QString &word) const
 {
     const QJsonObject *d = findDescriptor(word);

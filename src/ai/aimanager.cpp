@@ -20,8 +20,13 @@
 #include "../history/recipestorage.h"   // [barista-fork] Recipes 2.0 proactive context block
 #include "../history/baristastorage.h"  // [barista-fork] Phase 1 identity: roster for the [Who] block
 #include "../barista/baristatools.h"
+#include "../barista/baristatrace.h"      // [barista-fork] lastShotTraceRead opening-read grounding (T2)
+#include "../barista/coffeeknowledgebase.h"  // [barista-fork] KB meanings/citations for the trace read
 #include "../barista/feedbackstorage.h"   // [barista-fork] verbal-feedback KB (proactive context + write tool)
 #include "../barista/tasksstorage.h"      // [barista-fork] reminders + maintenance (proactive dueItems + task tools)
+#include "../barista/coachplanstorage.h"  // [barista-fork] plan-outcome ledger (recordCoachPlan at finalization)
+#include "../barista/coachplanjudge.h"    // [barista-fork] judge pass + coachTrackRecord block (read side)
+#include "../barista/baristadiagnostics.h" // [barista-fork] one-glance capture trace (why a plan row was/wasn't written)
 #include "../core/translationmanager.h"
 
 #include <QNetworkAccessManager>
@@ -530,6 +535,29 @@ void AIManager::createProviders()
                 if (!applied.isEmpty())
                     m_pendingToolStructuredNext = applied;
             }
+            // [barista-fork] Plan-outcome ledger (DoR §1.3): when the model consults recommend_next_shot, stash
+            // the returned recommendation's lineage for THIS turn so a plan row written at finalization can carry
+            // the KB's own {id, confidence, prep_gate} — closing the gap where the hypothesis/falsifier were
+            // returned to the model and forgotten. Wrap `done` to sniff the result WITHOUT altering it (the model
+            // receives the identical payload). Runs on the main thread like the apply_dial_change capture above.
+            if (name == QLatin1String("recommend_next_shot")) {
+                auto inner = std::move(done);
+                done = [this, inner = std::move(inner)](QJsonValue result) {
+                    const QJsonObject obj = result.toObject();
+                    QJsonObject lineage;
+                    const QString recId = obj.value(QStringLiteral("recommendation")).toObject()
+                                              .value(QStringLiteral("id")).toString();
+                    if (!recId.isEmpty())
+                        lineage.insert(QStringLiteral("kbRecId"), recId);
+                    if (obj.contains(QStringLiteral("confidence")))
+                        lineage.insert(QStringLiteral("kbConfidence"), obj.value(QStringLiteral("confidence")).toString());
+                    if (obj.contains(QStringLiteral("prep_gate")))
+                        lineage.insert(QStringLiteral("kbPrepGate"), obj.value(QStringLiteral("prep_gate")).toBool() ? 1 : 0);
+                    if (!lineage.isEmpty())
+                        m_pendingKbRecommendation = lineage;
+                    inner(result);
+                };
+            }
             // [barista-fork] Thread the feedback KB + the app-side anchor/dial snapshot into the executor so
             // log_tasting_feedback stamps shot_id + bean/profile/dial itself (never from the model). The
             // m_webToolsHandler seam runs the fast-path web tools (get_weather/get_stock_quote/get_local_news).
@@ -799,6 +827,65 @@ std::optional<QJsonObject> AIManager::parseStructuredNext(const QString& assista
     }
     if (!doc.isObject()) return std::nullopt;
     return doc.object();
+}
+
+void AIManager::recordCoachPlan(const QJsonObject& structuredNext, const QString& source)
+{
+    if (!m_coachPlanStorage || structuredNext.isEmpty()) {
+        // A silent no-row here is a wiring bug (storage unset) — log it so an empty table is diagnosable.
+        BaristaDiagnostics::record(QStringLiteral("coach"), QStringLiteral("plan_skip"),
+            {{QStringLiteral("reason"), m_coachPlanStorage ? QStringLiteral("empty_prediction")
+                                                           : QStringLiteral("no_storage")}});
+        return;   // ledger not wired (DECENZA_BARISTA=OFF / tests), or no prediction → no row.
+    }
+
+    // Bean/profile/equipment/dial come from the APP-SIDE anchor snapshot, NEVER the model (DoR §1.3).
+    const QVariantMap snap = m_lastBaristaAnchorSnapshot;
+    const QString profileKbId = snap.value(QStringLiteral("profileKbId")).toString();
+    if (profileKbId.isEmpty()) {
+        // Expected when the anchor didn't match a KB profile (bean-general note). Logged so "table empty after a
+        // dial-in turn" is one glance: this reason vs no_storage vs never-reached (no structuredNext / non-barista).
+        BaristaDiagnostics::record(QStringLiteral("coach"), QStringLiteral("plan_skip"),
+            {{QStringLiteral("reason"), QStringLiteral("no_profile_scope")}});
+        return;   // unscopable; the judge pass could never match it.
+    }
+
+    // Rebuild a minimal anchor ShotProjection (only the fields deriveLeverDirection reads) from the snapshot dial.
+    ShotProjection anchor;
+    anchor.grinderSetting = snap.value(QStringLiteral("grind")).toString();
+    anchor.doseWeightG    = snap.value(QStringLiteral("doseG")).toDouble();
+    anchor.profileName    = snap.value(QStringLiteral("profile")).toString();
+    anchor.rpm            = snap.value(QStringLiteral("rpm")).toLongLong();
+    const CoachPlanStorage::LeverDirection ld =
+        CoachPlanStorage::deriveLeverDirection(structuredNext, anchor);
+
+    const QJsonObject kb = takePendingKbRecommendation();
+
+    QVariantMap fields;
+    fields.insert(QStringLiteral("anchorShotId"), snap.value(QStringLiteral("shotId")).toLongLong());
+    fields.insert(QStringLiteral("beanBrand"),   snap.value(QStringLiteral("beanBrand")).toString());
+    fields.insert(QStringLiteral("beanType"),    snap.value(QStringLiteral("beanType")).toString());
+    fields.insert(QStringLiteral("profileKbId"), profileKbId);
+    fields.insert(QStringLiteral("equipmentId"), snap.value(QStringLiteral("equipmentId")).toLongLong());
+    fields.insert(QStringLiteral("source"),      source);
+    fields.insert(QStringLiteral("structuredNext"),
+                  QString::fromUtf8(QJsonDocument(structuredNext).toJson(QJsonDocument::Compact)));
+    fields.insert(QStringLiteral("lever"),     ld.lever);
+    fields.insert(QStringLiteral("direction"), ld.direction);
+    if (kb.contains(QStringLiteral("kbRecId")))
+        fields.insert(QStringLiteral("kbRecId"), kb.value(QStringLiteral("kbRecId")).toString());
+    if (kb.contains(QStringLiteral("kbConfidence")))
+        fields.insert(QStringLiteral("kbConfidence"), kb.value(QStringLiteral("kbConfidence")).toString());
+    if (kb.contains(QStringLiteral("kbPrepGate")))
+        fields.insert(QStringLiteral("kbPrepGate"), kb.value(QStringLiteral("kbPrepGate")).toInt());
+
+    m_coachPlanStorage->requestLogPlan(fields);   // async; supersedes older open plans in this scope
+    BaristaDiagnostics::record(QStringLiteral("coach"), QStringLiteral("plan_write"),
+        {{QStringLiteral("source"), source},
+         {QStringLiteral("lever"), ld.lever},
+         {QStringLiteral("direction"), ld.direction},
+         {QStringLiteral("anchorShotId"), snap.value(QStringLiteral("shotId")).toLongLong()},
+         {QStringLiteral("kbRecId"), kb.value(QStringLiteral("kbRecId")).toString()}});
 }
 
 QJsonArray AIManager::sanitizeApiMessages(const QJsonArray& messages)
@@ -1669,6 +1756,7 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
         QJsonArray knownFacts;     // [barista-fork] durable basic facts the user told the barista (remember_fact)
         QJsonObject palateProfile; // [barista-fork] cross-bean read of what the user's ratings say they like
         QJsonObject similarBean;   // [barista-fork] what the user liked on beans resembling the current one
+        QJsonObject coachTrackRecord; // [barista-fork] the barista's OWN past advice on this bean + outcomes (P4)
 
         withTempDb(dbPath, "barista_ctx", [&](QSqlDatabase& db) {
             // Anchor: latest shot for the current bean; else latest overall (robust to bean-name drift).
@@ -1796,6 +1884,23 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
                         o["suggestedAdjustment"] = sj.value(QStringLiteral("suggested_adjustment"));
                     beanFeedback.append(o);
                 }
+            });
+        }
+
+        // [barista-fork] Plan-outcome track record (DoR §3.2 / P4): the barista's OWN past advice on THIS bean and
+        // what actually followed. Reads BOTH assistant.db (the ledger) and shots.db (live ratings/channeling for
+        // the tier gate), so it opens a nested withTempDb over each. Runs the judge pass FIRST (judge-before-read,
+        // and judge-before-record for THIS session since the prime precedes any turn). Absent below the §1.5 floor.
+        if (!feedbackDbPath.isEmpty() && !dbPath.isEmpty() && (!beanBrand.isEmpty() || !beanType.isEmpty())) {
+            const qint64 now = QDateTime::currentSecsSinceEpoch();
+            withTempDb(feedbackDbPath, "barista_coach_ctx", [&](QSqlDatabase& asstDb) {
+                withTempDb(dbPath, "barista_coach_shots", [&](QSqlDatabase& shotsDb) {
+                    // Cost: judge pass + 2 shot loads per judged plan on this bean, capped at 50 plans, on the
+                    // background context worker (nothing user- or machine-facing blocks on it). Grows with this
+                    // bean's coaching history; if that cap is ever hit routinely, page the fetch. Off-main by
+                    // construction, so the budget is generous — measure before adding a cache.
+                    coachTrackRecord = CoachPlanJudge::buildTrackRecord(asstDb, shotsDb, beanBrand, beanType, now);
+                });
             });
         }
 
@@ -1955,7 +2060,7 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
 
         QMetaObject::invokeMethod(qApp, [self, serial, shot, anchorId, beanFilterMissed,
                                          beanBrand, beanType, profileName, beanFeedback, dueItems, docChange,
-                                         occasion, knownFacts, blocks, fullHistory, palateProfile, similarBean, recipesBlock, whoBlock]() {
+                                         occasion, knownFacts, blocks, fullHistory, palateProfile, similarBean, coachTrackRecord, recipesBlock, whoBlock]() {
             if (!self || serial != self->m_baristaContextSerial)
                 return;   // stale — a newer request superseded this one
             self->m_lastBaristaAnchorId = (anchorId > 0 && shot.isValid()) ? anchorId : 0;
@@ -1977,6 +2082,13 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
                     if (shot.finalWeightG > 0)         snap["yieldG"] = shot.finalWeightG;
                     if (!shot.grinderSetting.isEmpty()) snap["grind"] = shot.grinderSetting;
                     if (shot.temperatureOverrideC > 0)  snap["tempC"] = shot.temperatureOverrideC;
+                    if (shot.rpm > 0)                   snap["rpm"]   = static_cast<qint64>(shot.rpm);
+                    // [barista-fork] Plan-outcome ledger scope (DoR §1.4): profile_kb_id + equipment_id come from
+                    // this SAME anchor shot so the ledger's three scope keys (anchor_shot_id/profile_kb_id/
+                    // equipment_id) describe one shot — the judge pass reads the anchor's timestamp and filters
+                    // the follow-up by these, so they must be mutually consistent.
+                    if (!shot.profileKbId.isEmpty()) snap["profileKbId"] = shot.profileKbId;
+                    snap["equipmentId"] = shot.equipmentId;
                     // [barista-fork] A VERBAL rating/taste lands on the SHOT record (enjoyment + a "Tasted sour"
                     // marker) via ShotHistoryStorage::requestApplyTasteToShot, which reads the shot's notes LIVE
                     // on the DB thread — so we deliberately do NOT snapshot notes here (a session-stale snapshot
@@ -2048,6 +2160,15 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
             if (shot.doseWeightG > 0 && shot.finalWeightG > 0)
                 obj.insert(QStringLiteral("descriptor"), DrinkTypes::espressoShotDescriptor(
                     shot.finalWeightG / shot.doseWeightG, shot.beanBrand, shot.beanType));
+            // [barista-fork] Trace-grounded opening (T2): the specific KB trace_signature(s) the
+            // detectors matched on this last shot, joined to their cited meaning + next move, split
+            // measured (assert) vs inferred (a maybe). Lets the opening read lead with the measured
+            // curve fault ("that last one choked") instead of a generic grind guess. Absent when the
+            // shot ran clean, so the persona degrades to the palate/bean read. Barista-only call-site
+            // insertion, like descriptor above.
+            if (const QJsonObject traceRead = BaristaTrace::buildLastShotTraceRead(
+                    shot, CoffeeKnowledgeBase::instance()); !traceRead.isEmpty())
+                obj.insert(QStringLiteral("lastShotTraceRead"), traceRead);
             // Same for the two secondary anchor shots the barista may reference (best-recent
             // and bean-best) so NONE of the shots it sees is a bare stat bag. Both blocks carry
             // ratio + beanBrand + beanType (dialing_blocks.cpp).
@@ -2080,6 +2201,10 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
             // bean tasted, so the barista closes the loop ("you called this sour twice") without a tool call.
             if (!beanFeedback.isEmpty())
                 obj.insert(QStringLiteral("recentTastingFeedbackOnThisBean"), beanFeedback);
+            // [barista-fork] The barista's own coaching track record on this bean (P4). Absent below the §1.5
+            // floor (no Tier-A data and no followed last plan), so the persona degrades to the palate/feedback read.
+            if (!coachTrackRecord.isEmpty())
+                obj.insert(QStringLiteral("coachTrackRecord"), coachTrackRecord);
             // [barista-fork] PROACTIVE-REC INPUTS: bean age + freshness read + storage state for the ACTIVE
             // bag (from live SettingsDye — safe here, this callback runs on the main thread). Lets the barista
             // decide whether to OFFER one recipe tweak on its first reply (grind finer as a bag ages, re-dial
@@ -2550,6 +2675,9 @@ void AIManager::analyzeConversation(const QString& systemPrompt, const QJsonArra
     // (e.g. one whose turn failed, or that was superseded) can NEVER leak into this turn's finalization. Unconditional
     // — a no-op for the advisor path (no client tools) and for turns that don't call the write tool.
     m_pendingToolStructuredNext = QJsonObject{};
+    // [barista-fork] Same discipline for the plan-outcome ledger's KB lineage (DoR §1.3): clear it at the single
+    // per-turn choke point so a prior turn's recommend_next_shot result can never attach to a later plan row.
+    m_pendingKbRecommendation = QJsonObject{};
     emit analyzingChanged();
 
     // Strip internal-only per-turn keys (shotId / structuredNext) that providers reject as extra inputs

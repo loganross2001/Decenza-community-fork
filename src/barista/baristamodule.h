@@ -20,6 +20,7 @@ class AssistantSettings;
 class AssistantOrchestrator;
 class AssistantVoice;
 class FeedbackStorage;   // [barista-fork] verbal-feedback KB
+class CoachPlanStorage;  // [barista-fork] plan-outcome ledger (assistant.db)
 class BaristaWebTools;   // [barista-fork] fast-path web tools (weather / stock / local news)
 class BaristaCloudTools; // [barista-fork] coffee cloud tools (Visualizer shots + canonical bean lookup)
 class CoachPhrasebook;   // [barista-fork] model-generated live-coach phrasing
@@ -117,6 +118,9 @@ private:
     // [barista-fork] Reminders + maintenance store (SAME assistant.db as m_feedbackStorage). Owned here,
     // initialized with the path derived beside shots.db, handed to AIManager for the task tools + dueItems.
     TasksStorage* m_tasksStorage = nullptr;
+    // [barista-fork] Plan-outcome ledger (SAME assistant.db). Owned here, initialized beside shots.db, handed to
+    // AIManager which writes plan rows at barista turn finalization (recordCoachPlan). DoR §1.
+    CoachPlanStorage* m_coachPlanStorage = nullptr;
     // [barista-fork] Periodic Decent maintenance-docs check (network + rate-limit + hash). Owned here;
     // persists its state through m_tasksStorage (assistant.db maintenance_doc_state row).
     MaintenanceDocSync* m_docSync = nullptr;

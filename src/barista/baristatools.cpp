@@ -9,6 +9,8 @@
 #include "feedbackstorage.h"
 #include "tasksstorage.h"
 #include "coffeeknowledgebase.h"  // [barista-fork] grounded coffee-science brain (translate/recommend/plan tools)
+#include "baristatrace.h"         // [barista-fork] detector verdicts -> KB trace_signatures (opening-read grounding)
+#include "coachplanjudge.h"       // [barista-fork] recall_coaching_outcomes → plan-outcome ledger read side
 #include "baristadiagnostics.h"  // [barista-fork] tool-call timeline recorder
 #include "../history/recipestorage.h"  // [barista-fork] Recipes 2.0 tools (list_recipes / activate / etc.)
 #include "../core/yieldspec.h"          // [barista-fork] update_recipe yield-anchor (ratio clamp / mode)
@@ -273,6 +275,31 @@ QJsonArray BaristaTools::toolDefinitions()
     sfSchema["required"] = QJsonArray{ QString("bean_brand"), QString("bean_type") };
     sf["input_schema"] = sfSchema;
     tools.append(sf);
+
+    // [barista-fork] recall_coaching_outcomes (READ) — the plan-outcome ledger's go-deeper surface (DoR §3.2).
+    // The current bean's confirmed patterns + last plan are ALREADY in the context block (coachTrackRecord);
+    // this is the on-demand path for a full event history, a different bean, one lever, or the Tier-C
+    // "suggested, not tried" rows the proactive block omits.
+    QJsonObject rc;
+    // [fork-index] tool=recall_coaching_outcomes | domain=bean | change=-
+    rc["name"] = QString("recall_coaching_outcomes");
+    rc["description"] = QString(
+        "Look up how your OWN past advice on a bean actually panned out — each recommendation, whether the user "
+        "followed it, whether the shot ran as predicted, their rating, and a confidence tier. The current bean's "
+        "confirmed patterns are already in your context; reach for this for the full event history, a different "
+        "bean, one lever, or advice that was suggested but not tried.");
+    QJsonObject rcSchema; rcSchema["type"] = QString("object");
+    QJsonObject rcProps;
+    rcProps["bean_brand"] = strProp("Optional roaster / bean brand to filter by (case-insensitive). Omit for all beans.");
+    rcProps["bean_type"]  = strProp("Optional bean name / type to filter by (case-insensitive). Omit for all beans.");
+    rcProps["lever"]      = strProp("Optional lever filter: grind, dose, profile, repeat, or multi.");
+    QJsonObject rcLimit; rcLimit["type"] = QString("integer");
+    rcLimit["description"] = QString("Optional max rows (default 20, cap 50).");
+    rcProps["limit"] = rcLimit;
+    rcSchema["properties"] = rcProps;
+    // No required fields — all optional (default: all beans, newest first).
+    rc["input_schema"] = rcSchema;
+    tools.append(rc);
 
     // [barista-fork] Coffee-bag management tools (list_bags / add_bag / update_bag / finish_bag / delete_bag).
     // These let the user manage their bean inventory BY VOICE. All ride the app-side bagOp seam (CoffeeBagStorage);
@@ -1512,6 +1539,16 @@ void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage*
                                          .value(QStringLiteral("direction")).toString();
                 if (!gdir.isEmpty()) md[QStringLiteral("grindDirection")] = gdir;
                 md[QStringLiteral("objectiveTrace")] = ctx.value(QStringLiteral("trace"));
+                // [barista-fork] Richer than the 4-axis: the specific KB trace_signatures the detectors
+                // matched on THIS shot, each tagged measured/inferred + its evidence, so the model
+                // asserts only what the machine saw. Omitted when the shot carried no signature.
+                QJsonArray traceSigs;
+                for (const BaristaTrace::SignatureHit& h : BaristaTrace::objectiveTraceSignatures(shot))
+                    traceSigs.append(QJsonObject{
+                        {QStringLiteral("signatureId"), h.signatureId},
+                        {QStringLiteral("grounding"), h.grounding},
+                        {QStringLiteral("evidence"), h.evidence}});
+                if (!traceSigs.isEmpty()) md[QStringLiteral("traceSignatures")] = traceSigs;
                 result[QStringLiteral("machine_data")] = md;
 
                 // Prior-shot history for THIS bean+profile so advice builds on what's already been tried.
@@ -2516,6 +2553,39 @@ void BaristaTools::executeTool(ShotHistoryStorage* shotHistory, FeedbackStorage*
 
     if (!shotHistory) {
         done(QJsonObject{{QStringLiteral("error"), QStringLiteral("shot history unavailable")}});
+        return;
+    }
+
+    // recall_coaching_outcomes — the plan-outcome ledger's go-deeper surface (DoR §3.2). Reads BOTH the ledger
+    // (assistant.db, via feedback->databasePath() — same file CoachPlanStorage uses) and shots.db (live ratings),
+    // runs the judge pass first, and returns per-event rows INCLUDING the Tier-C history the proactive
+    // coachTrackRecord block omits. Off-main with two nested withTempDb (mirrors recommend_next_shot threading).
+    if (name == QLatin1String("recall_coaching_outcomes")) {
+        const QString asstPath = feedback ? feedback->databasePath() : QString();
+        const QString shotsPath = shotHistory->databasePath();
+        if (asstPath.isEmpty() || shotsPath.isEmpty()) {
+            done(QJsonObject{{QStringLiteral("error"), QStringLiteral("coaching ledger unavailable")}});
+            return;
+        }
+        const QString beanBrand = input.value(QStringLiteral("bean_brand")).toString().trimmed();
+        const QString beanType  = input.value(QStringLiteral("bean_type")).toString().trimmed();
+        const QString lever     = input.value(QStringLiteral("lever")).toString().trimmed();
+        const int limit = input.contains(QStringLiteral("limit")) ? input.value(QStringLiteral("limit")).toInt() : 20;
+        const qint64 now = QDateTime::currentSecsSinceEpoch();
+        QThread* thread = QThread::create([=]() {
+            QJsonArray rows;
+            withTempDb(asstPath, "barista_recall_asst", [&](QSqlDatabase& asstDb) {
+                withTempDb(shotsPath, "barista_recall_shots", [&](QSqlDatabase& shotsDb) {
+                    rows = CoachPlanJudge::recallOutcomes(asstDb, shotsDb, beanBrand, beanType, lever, limit, now);
+                });
+            });
+            QMetaObject::invokeMethod(qApp, [done, rows]() {
+                done(QJsonObject{{QStringLiteral("returnedCount"), rows.size()},
+                                 {QStringLiteral("outcomes"), rows}});
+            }, Qt::QueuedConnection);
+        });
+        QObject::connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+        thread->start();
         return;
     }
 

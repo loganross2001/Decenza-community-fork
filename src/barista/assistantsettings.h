@@ -85,6 +85,10 @@ class AssistantSettings : public QObject {
     // whole-body path exactly. Streaming additionally falls back to whole-body whenever web search is on for the
     // turn (server-tool re-POSTs can't be rebuilt from the stream) — see AIManager::analyzeConversation.
     Q_PROPERTY(bool voiceStreaming READ voiceStreaming WRITE setVoiceStreaming NOTIFY voiceStreamingChanged)
+    // [barista-fork] Chunked TTS: speak a COMPLETE reply sentence-by-sentence through the speech queue so the
+    // first sentence starts ~1s instead of after the whole reply synthesizes (fixes the length-scaled voice lag
+    // on the non-streaming ElevenLabs/Gemini path). Default ON; toggling OFF restores the whole-reply speak().
+    Q_PROPERTY(bool speakInChunks READ speakInChunks WRITE setSpeakInChunks NOTIFY speakInChunksChanged)
     Q_PROPERTY(bool avatarEnabled READ avatarEnabled WRITE setAvatarEnabled NOTIFY avatarEnabledChanged)
     Q_PROPERTY(QString avatarStyle READ avatarStyle WRITE setAvatarStyle NOTIFY avatarStyleChanged)
     // [barista-fork] Size of the avatar on the collapsed EDGE TAB (the pull-tab on the screen edge). Owner-
@@ -217,6 +221,8 @@ public:
     void setUseNewConversation(bool on);
     bool voiceStreaming() const;                  // [barista-fork] streaming-voice feature flag (default off)
     void setVoiceStreaming(bool on);
+    bool speakInChunks() const;                   // [barista-fork] chunked TTS of a complete reply (default ON)
+    void setSpeakInChunks(bool on);
     bool avatarEnabled() const;                   // show the animated character face (default on)
     void setAvatarEnabled(bool e);
 
@@ -287,6 +293,7 @@ signals:
     void voiceIdMaybeChanged();
     void useNewConversationChanged();
     void voiceStreamingChanged();   // [barista-fork]
+    void speakInChunksChanged();    // [barista-fork]
     void avatarEnabledChanged();
     void avatarStyleChanged();
     void avatarTabSizeChanged();

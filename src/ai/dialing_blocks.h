@@ -536,6 +536,27 @@ inline StructuredNextSummary summarizeStructuredNext(const QJsonObject& sn)
     return out;
 }
 
+// The #1053 closed-loop graders, hoisted from dialing_blocks.cpp's anonymous
+// namespace (DoR §W5) so the plan-outcome ledger's judge pass reuses the exact
+// attribution logic rather than re-implementing it. All three are pure over
+// their inputs; definitions live in dialing_blocks.cpp beside their file-local
+// helpers.
+//
+// computeAdherence: per-field followed|partial|ignored|unclear over a
+// structuredNext prediction `sn`, the follow-up shot `actual`, and the anchor
+// shot `prior` (the no-movement and prose-grinder guards are inside).
+QString computeAdherence(const QJsonObject& sn, const ShotProjection& actual,
+                         const ShotProjection& prior);
+
+// computeOutcomeInPredictedRange: did the follow-up's duration / average flow
+// land inside `sn`'s expected windows. Returns a JSON object of per-field bools.
+QJsonObject computeOutcomeInPredictedRange(const QJsonObject& sn,
+                                           const ShotProjection& actual);
+
+// synthesizeRecommendationSummary: one-line human-readable digest of `sn`,
+// used when a turn carried no prose recommendation of its own.
+QString synthesizeRecommendationSummary(const QJsonObject& sn);
+
 // Inputs for the closed-loop coaching `recentAdvice` block (issue #1053).
 // The caller pulls qualifying assistant turns from the active conversation
 // (`AIConversation::recentAssistantTurns(max)` for the in-app advisor, or

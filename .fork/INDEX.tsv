@@ -1,54 +1,56 @@
 kind	name	domain	file:line	change	what	gate/deps/refs
-tool	add_personal_date	barista	src/barista/baristatools.cpp:551	-		
-tool	compare_shots	barista	src/barista/baristatools.cpp:148	-	diff 2-5 shots side by side (signed deltas + which quality verdicts flipped)	
-tool	complete_reminder	barista	src/barista/baristatools.cpp:636	-		
-tool	create_reminder	barista	src/barista/baristatools.cpp:525	-		
-tool	dismiss_maintenance_doc_change	barista	src/barista/baristatools.cpp:708	-		
-tool	end_conversation	barista	src/barista/baristatools.cpp:482	-		
-tool	forget_fact	barista	src/barista/baristatools.cpp:602	-		
-tool	get_local_news	barista	src/barista/baristatools.cpp:1132	-	recent headlines (Google News RSS, keyless)	
-tool	get_shot_detail	barista	src/barista/baristatools.cpp:126	-	the follow-up to query_shots: pull ONE shot's full dial-in + quality analysis so	
-tool	get_stock_quote	barista	src/barista/baristatools.cpp:1113	-	latest price for a ticker (Yahoo Finance, keyless)	
-tool	get_visualizer_shot	barista	src/barista/baristatools.cpp:1156	-	pull ANY shot by id/link (the user's own OR a public/community one)	
-tool	get_weather	barista	src/barista/baristatools.cpp:1090	-	current conditions for a city (open-meteo, keyless)	
-tool	list_due_reminders	barista	src/barista/baristatools.cpp:620	-		
-tool	log_maintenance	barista	src/barista/baristatools.cpp:654	-		
-tool	query_shots	barista	src/barista/baristatools.cpp:101	-	on-demand lookup across the user's FULL local shot history	
-tool	remember_fact	barista	src/barista/baristatools.cpp:577	-		
-tool	search_visualizer_shots	barista	src/barista/baristatools.cpp:1176	-	the user's own cloud history, or the public feed, as ids to pull	
-tool	set_active_user	barista	src/barista/baristatools.cpp:984	-		
-tool	update_maintenance_default	barista	src/barista/baristatools.cpp:677	-		
-tool	add_bag	bean	src/barista/baristatools.cpp:320	-	create a new bag in the inventory	
-seam	bagOp	bean	src/barista/baristamodule.cpp:838	-	bridges barista bag tools (add/update/finish/delete/list) to storage	refs=CoffeeBagStorage::requestCreateBag
-tool	delete_bag	bean	src/barista/baristatools.cpp:381	-	permanently remove a bag (refused if shots reference it)	
-tool	detect_grind_drift	bean	src/barista/baristatools.cpp:193	-	has a fixed grind setting drifted faster/slower over time (grinder wear / aging beans)?	
+seam	CoachPlanStorage	barista	src/barista/coachplanstorage.h:18	-		
+tool	add_personal_date	barista	src/barista/baristatools.cpp:578	-		
+tool	compare_shots	barista	src/barista/baristatools.cpp:150	-	diff 2-5 shots side by side (signed deltas + which quality verdicts flipped)	
+tool	complete_reminder	barista	src/barista/baristatools.cpp:663	-		
+tool	create_reminder	barista	src/barista/baristatools.cpp:552	-		
+tool	dismiss_maintenance_doc_change	barista	src/barista/baristatools.cpp:735	-		
+tool	end_conversation	barista	src/barista/baristatools.cpp:509	-		
+tool	forget_fact	barista	src/barista/baristatools.cpp:629	-		
+tool	get_local_news	barista	src/barista/baristatools.cpp:1159	-	recent headlines (Google News RSS, keyless)	
+tool	get_shot_detail	barista	src/barista/baristatools.cpp:128	-	the follow-up to query_shots: pull ONE shot's full dial-in + quality analysis so	
+tool	get_stock_quote	barista	src/barista/baristatools.cpp:1140	-	latest price for a ticker (Yahoo Finance, keyless)	
+tool	get_visualizer_shot	barista	src/barista/baristatools.cpp:1183	-	pull ANY shot by id/link (the user's own OR a public/community one)	
+tool	get_weather	barista	src/barista/baristatools.cpp:1117	-	current conditions for a city (open-meteo, keyless)	
+tool	list_due_reminders	barista	src/barista/baristatools.cpp:647	-		
+tool	log_maintenance	barista	src/barista/baristatools.cpp:681	-		
+tool	query_shots	barista	src/barista/baristatools.cpp:103	-	on-demand lookup across the user's FULL local shot history	
+tool	remember_fact	barista	src/barista/baristatools.cpp:604	-		
+tool	search_visualizer_shots	barista	src/barista/baristatools.cpp:1203	-	the user's own cloud history, or the public feed, as ids to pull	
+tool	set_active_user	barista	src/barista/baristatools.cpp:1011	-		
+tool	update_maintenance_default	barista	src/barista/baristatools.cpp:704	-		
+tool	add_bag	bean	src/barista/baristatools.cpp:347	-	create a new bag in the inventory	
+seam	bagOp	bean	src/barista/baristamodule.cpp:843	-	bridges barista bag tools (add/update/finish/delete/list) to storage	refs=CoffeeBagStorage::requestCreateBag
+tool	delete_bag	bean	src/barista/baristatools.cpp:408	-	permanently remove a bag (refused if shots reference it)	
+tool	detect_grind_drift	bean	src/barista/baristatools.cpp:195	-	has a fixed grind setting drifted faster/slower over time (grinder wear / aging beans)?	
 api	fetchBagPage	bean	src/barista/baristacloudtools.h:35	-	fetch a roaster product page's readable text (keyless) for the model to extract bean details	
-tool	fetch_bag_page	bean	src/barista/baristatools.cpp:1216	-	fetch a roaster product page's readable text so the model can extract bean details itself	
-tool	finish_bag	bean	src/barista/baristatools.cpp:363	-	mark a bag as finished/empty (removes it from the active inventory)	
-tool	get_bean_profile	bean	src/barista/baristatools.cpp:173	-	any bean's freshness + history, or any profile's design intent, on demand	
-tool	list_bags	bean	src/barista/baristatools.cpp:283	-	the inventory, so the model can resolve "the Ethiopia" to a bagId before editing it	
-tool	log_tasting_feedback	bean	src/barista/baristatools.cpp:218	-		
-tool	look_up_bean	bean	src/barista/baristatools.cpp:1197	-	canonical bean details (keyless Visualizer canonical search)	
-tool	open_bag_camera	bean	src/barista/baristatools.cpp:503	-		
-tool	search_tasting_feedback	bean	src/barista/baristatools.cpp:258	-		
-tool	translate_taste	bean	src/barista/baristatools.cpp:1007	-	the Rosetta Stone: one perceptual word -> its mechanism	
-tool	update_bag	bean	src/barista/baristatools.cpp:345	-	edit fields on an existing bag	
-tool	activate_recipe	recipe	src/barista/baristatools.cpp:760	-		
-tool	apply_dial_change	recipe	src/barista/baristatools.cpp:408	-		
-tool	archive_recipe	recipe	src/barista/baristatools.cpp:909	-		
+tool	fetch_bag_page	bean	src/barista/baristatools.cpp:1243	-	fetch a roaster product page's readable text so the model can extract bean details itself	
+tool	finish_bag	bean	src/barista/baristatools.cpp:390	-	mark a bag as finished/empty (removes it from the active inventory)	
+tool	get_bean_profile	bean	src/barista/baristatools.cpp:175	-	any bean's freshness + history, or any profile's design intent, on demand	
+tool	list_bags	bean	src/barista/baristatools.cpp:310	-	the inventory, so the model can resolve "the Ethiopia" to a bagId before editing it	
+tool	log_tasting_feedback	bean	src/barista/baristatools.cpp:220	-		
+tool	look_up_bean	bean	src/barista/baristatools.cpp:1224	-	canonical bean details (keyless Visualizer canonical search)	
+tool	open_bag_camera	bean	src/barista/baristatools.cpp:530	-		
+tool	recall_coaching_outcomes	bean	src/barista/baristatools.cpp:284	-		
+tool	search_tasting_feedback	bean	src/barista/baristatools.cpp:260	-		
+tool	translate_taste	bean	src/barista/baristatools.cpp:1034	-	the Rosetta Stone: one perceptual word -> its mechanism	
+tool	update_bag	bean	src/barista/baristatools.cpp:372	-	edit fields on an existing bag	
+tool	activate_recipe	recipe	src/barista/baristatools.cpp:787	-		
+tool	apply_dial_change	recipe	src/barista/baristatools.cpp:435	-		
+tool	archive_recipe	recipe	src/barista/baristatools.cpp:936	-		
 pill	brewQuickSelect	recipe	qml/components/layout/items/BrewQuickSelectItem.qml:18	-	brew-bar pill — brew quick-select (dose/grind/temp/yield) via BrewQuickSelectDialog	
-tool	clone_recipe	recipe	src/barista/baristatools.cpp:891	-		
-tool	create_recipe	recipe	src/barista/baristatools.cpp:841	-		
-tool	create_related_profile	recipe	src/barista/baristatools.cpp:440	-		
-tool	deactivate_recipe	recipe	src/barista/baristatools.cpp:967	-		
-tool	delete_recipe	recipe	src/barista/baristatools.cpp:928	-		
-tool	get_active_recipe	recipe	src/barista/baristatools.cpp:746	-		
-tool	list_profiles	recipe	src/barista/baristatools.cpp:948	-		
-tool	list_recipes	recipe	src/barista/baristatools.cpp:724	-		
-tool	plan_for_goal	recipe	src/barista/baristatools.cpp:1057	-	human goal -> target region + roast-aware dialing path	
+tool	clone_recipe	recipe	src/barista/baristatools.cpp:918	-		
+tool	create_recipe	recipe	src/barista/baristatools.cpp:868	-		
+tool	create_related_profile	recipe	src/barista/baristatools.cpp:467	-		
+tool	deactivate_recipe	recipe	src/barista/baristatools.cpp:994	-		
+tool	delete_recipe	recipe	src/barista/baristatools.cpp:955	-		
+tool	get_active_recipe	recipe	src/barista/baristatools.cpp:773	-		
+tool	list_profiles	recipe	src/barista/baristatools.cpp:975	-		
+tool	list_recipes	recipe	src/barista/baristatools.cpp:751	-		
+tool	plan_for_goal	recipe	src/barista/baristatools.cpp:1084	-	human goal -> target region + roast-aware dialing path	
 pill	profileQuickSelect	recipe	qml/components/layout/items/ProfileQuickSelectItem.qml:15	-	brew-bar pill — pick from favorite profiles; ProfileManager.loadProfile	
-tool	recommend_next_shot	recipe	src/barista/baristatools.cpp:1027	-	the planner: taste + shot context -> ONE change, stated as a checkable hypothesis	
-tool	update_recipe	recipe	src/barista/baristatools.cpp:784	-		
+tool	recommend_next_shot	recipe	src/barista/baristatools.cpp:1054	-	the planner: taste + shot context -> ONE change, stated as a checkable hypothesis	
+tool	update_recipe	recipe	src/barista/baristatools.cpp:811	-		
 entry	AssistantVoice::speak	voice	src/barista/assistantvoice.h:89	-	TTS entry — speaks a reply (ElevenLabs/OpenAI), unit/ratio-normalized, muted-aware	
 entry	BaristaConversation::captureBagPhotoRequested	voice	src/barista/baristaconversation.h:83	-	voice-driven bag-photo shutter — "ready" while camera open → capture, no model turn	
 entry	BaristaConversation::onFinalText	voice	src/barista/baristaconversation.h:89	-	voice turn arbiter — STT final -> model turn; Listening/Thinking/Speaking state machine	

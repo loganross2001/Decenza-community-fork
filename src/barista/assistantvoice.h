@@ -97,6 +97,10 @@ public:
     // Barista role only; a muted barista stays silent. (2-deep synth lookahead is a later slice; this is serial.)
     Q_INVOKABLE void feedStreamDelta(const QString& textDelta);
     Q_INVOKABLE void endStream();
+    // [barista-fork] Chunked TTS of a COMPLETE reply (not a stream): runs the whole reply through the same
+    // SpeechChunker + serial queue as the streaming path, so the first sentence synthesizes+plays in ~1s instead
+    // of waiting for the entire reply to synthesize. Barista role only; falls back to plain speak() otherwise.
+    Q_INVOKABLE void speakChunked(const QString& rawText);
     Q_INVOKABLE void stop();
     Q_INVOKABLE void setVoiceByName(const QString& name);  // persists to settings + applies
     Q_INVOKABLE void preview();                            // speak a sample line to audition a voice

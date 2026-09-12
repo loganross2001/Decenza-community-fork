@@ -980,6 +980,9 @@ add_decenza_test(tst_aimanager
     ${CMAKE_SOURCE_DIR}/src/barista/baristatools.cpp  # BaristaTools, referenced by aimanager.cpp's client-tool wire-up
     ${CMAKE_SOURCE_DIR}/src/barista/baristadiagnostics.cpp  # [barista-fork] baristatools.cpp calls BaristaDiagnostics::record
     ${CMAKE_SOURCE_DIR}/src/barista/coffeeknowledgebase.cpp  # [barista-fork] baristatools.cpp calls CoffeeKnowledgeBase (coffee brain); not in any shared lib
+    ${CMAKE_SOURCE_DIR}/src/barista/baristatrace.cpp  # [barista-fork] baristatools.cpp + aimanager.cpp call BaristaTrace (trace->KB signatures); ShotProjection via decenza_shotlib
+    ${CMAKE_SOURCE_DIR}/src/barista/coachplanstorage.cpp  # [barista-fork] aimanager.cpp::recordCoachPlan calls CoachPlanStorage (plan-outcome ledger); not in any shared lib
+    ${CMAKE_SOURCE_DIR}/src/barista/coachplanjudge.cpp    # [barista-fork] aimanager.cpp::requestBaristaContext calls CoachPlanJudge::buildTrackRecord
     ${CMAKE_BINARY_DIR}/version_code.cpp
     ${TST_AIMANAGER_AI_RESOURCES}
 )
@@ -1360,6 +1363,8 @@ qt_add_resources(TST_DIALING_BLOCKS_AI_RESOURCES
     ${CMAKE_SOURCE_DIR}/resources/ai.qrc)
 add_decenza_test(tst_dialing_blocks
     tst_dialing_blocks.cpp
+    ${CMAKE_SOURCE_DIR}/src/barista/coachplanstorage.cpp  # [barista-fork] P3 judge-pass integration cases (ledger + graders + shot loader all linked here)
+    ${CMAKE_SOURCE_DIR}/src/barista/coachplanjudge.cpp    # [barista-fork] runJudgePassStatic under test
     ${CMAKE_BINARY_DIR}/version_code.cpp
     ${TST_DIALING_BLOCKS_AI_RESOURCES}
 )
@@ -1854,6 +1859,17 @@ add_decenza_test(tst_maintenancedocsync
     ${CMAKE_SOURCE_DIR}/src/barista/tasksstorage.cpp
 )
 
+# --- tst_coachplanstorage: [barista-fork] plan-outcome ledger DB layer + lever/direction
+# derivation (DoR §1 / P1). Static-helper coverage of CoachPlanStorage against a real SQLite
+# file (same withRawDb pattern as tst_maintenancedocsync) + the pure deriveLeverDirection table.
+# deriveLeverDirection reads the anchor ShotProjection's dial fields, so shotprojection.cpp is
+# linked; GrinderAliases is header-only. Pure Qt Sql/Core; no GUI, no AIManager. ---
+add_decenza_test(tst_coachplanstorage
+    tst_coachplanstorage.cpp
+    ${CMAKE_SOURCE_DIR}/src/barista/coachplanstorage.cpp
+    ${CMAKE_SOURCE_DIR}/src/history/shotprojection.cpp   # deriveLeverDirection reads anchor dial fields
+)
+
 # --- tst_exifdate: EXIF date scanning from JPEG bytes.
 # Header-only and dependency-free, which is the point: the same logic inside
 # ShotServer::extractImageDate was untestable without linking a web server, a
@@ -1895,6 +1911,8 @@ target_compile_definitions(tst_kb_schema PRIVATE
 add_decenza_test(tst_coffeeknowledgebase
     tst_coffeeknowledgebase.cpp
     ${CMAKE_SOURCE_DIR}/src/barista/coffeeknowledgebase.cpp
+    ${CMAKE_SOURCE_DIR}/src/barista/baristatrace.cpp       # [barista-fork] detector->trace_signatures bridge
+    ${CMAKE_SOURCE_DIR}/src/history/shotprojection.cpp     # baristatrace reads ShotProjection.detectorResults
 )
 
 # --- failonwarning_lint: guard that every QTEST_*MAIN test file arms

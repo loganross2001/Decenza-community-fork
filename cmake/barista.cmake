@@ -41,6 +41,15 @@ target_sources(Decenza PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/coffeeknowledgebase.cpp
 )
 
+# BaristaTrace — the measurement->KB-vocabulary bridge (detector verdicts -> named trace_signatures)
+# for the opening read. Registered UNCONDITIONALLY like BaristaTools: baristatools.cpp (unconditional,
+# recommend_next_shot) and aimanager.cpp (the lastShotTraceRead context field) both call it. Depends
+# only on ShotProjection + Qt Core, so it is safe in the DB-only test binaries too.
+target_sources(Decenza PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristatrace.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/baristatrace.cpp
+)
+
 # The KB data is bundled through THIS private module (never the shared resources/ai.qrc), so the
 # barista's coffee-science asset stays entirely inside the fork and upstream's resource lists are
 # untouched — the same isolation the barista QML uses. Its own prefix (/barista) keeps it clear of
@@ -77,6 +86,21 @@ target_sources(Decenza PRIVATE
 target_sources(Decenza PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/tasksstorage.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/tasksstorage.cpp
+)
+
+# CoachPlanStorage owns the plan-outcome ledger (DoR §1; SAME assistant.db as FeedbackStorage).
+# Registered UNCONDITIONALLY like the two stores above: it is co-resident fork schema and its
+# capture/aggregation seams (P2+) live on the unconditional aimanager/baristatools paths.
+target_sources(Decenza PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/coachplanstorage.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/coachplanstorage.cpp
+)
+
+# CoachPlanJudge — the plan-outcome ledger's lazy judge pass (DoR §1.4). Own TU so its DialingBlocks +
+# ShotHistoryStorage deps don't fan out onto lean targets that only need CoachPlanStorage.
+target_sources(Decenza PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/coachplanjudge.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/barista/coachplanjudge.cpp
 )
 
 # [barista-fork] Streaming-voice SSE parser + respond-text extractor. Registered UNCONDITIONALLY: the

@@ -793,6 +793,7 @@ void AIConversation::onAnalysisComplete(const QString& response)
     // downstream callers (recentAdvice block #1053, future coachmark UI)
     // can read the structured prediction without re-parsing prose.
     std::optional<QJsonObject> structuredNext = AIManager::parseStructuredNext(response);
+    const bool structuredNextFromFenced = structuredNext.has_value();   // [barista-fork] plan-row source (fenced vs tool_applied)
     // [barista-fork] Closed-loop bridge (issue #1053 regression): on the barista's Anthropic path the model may
     // APPLY a dial change by CALLING apply_dial_change instead of emitting a fenced structuredNext block. That
     // capture is stashed on AIManager for the current turn. Always take() it (clears regardless, so it can't
@@ -803,6 +804,14 @@ void AIConversation::onAnalysisComplete(const QString& response)
     if (!structuredNext.has_value() && !pendingToolNext.isEmpty())
         structuredNext = pendingToolNext;
     addAssistantMessage(response, structuredNext);
+
+    // [barista-fork] Plan-outcome ledger (DoR §1.3 / P2): record ONE plan row when THIS barista turn committed a
+    // structuredNext prediction. m_toolsEnabled is the barista-turn marker — the advisor's ask()/resetInMemory()
+    // clears it, so a non-barista turn can only ever SKIP the write, never mis-write. Ships silently: nothing
+    // reads the ledger until P4. AIManager stamps bean/profile/equipment from its app-side anchor snapshot.
+    if (m_toolsEnabled && structuredNext.has_value() && m_aiManager)
+        m_aiManager->recordCoachPlan(*structuredNext,
+            structuredNextFromFenced ? QStringLiteral("fenced") : QStringLiteral("tool_applied"));
 
     // Auto-save so conversation can be continued later
     saveToStorage();

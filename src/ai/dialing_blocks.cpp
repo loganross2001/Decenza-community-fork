@@ -1002,6 +1002,12 @@ bool setupChangedFromPrior(const ShotProjection& prior, const ShotProjection& ac
     return false;
 }
 
+}  // anonymous namespace — the file-local helpers above stay TU-visible below
+
+// [barista-fork] Hoisted out of the anonymous namespace (DoR §W5): the
+// plan-outcome judge pass (CoachPlanStorage) reuses these three graders via
+// dialing_blocks.h instead of re-implementing the #1053 attribution logic.
+// Definitions stay in this TU so they keep calling the file-local helpers.
 QString computeAdherence(const QJsonObject& sn, const ShotProjection& actual,
                           const ShotProjection& prior)
 {
@@ -1088,7 +1094,7 @@ QString computeAdherence(const QJsonObject& sn, const ShotProjection& actual,
     return QStringLiteral("partial");
 }
 
-bool inRange(double value, const QJsonArray& range)
+static bool inRange(double value, const QJsonArray& range)  // file-local; internal linkage after the anon close
 {
     if (range.size() != 2) return false;
     const double low = range.at(0).toDouble();
@@ -1143,8 +1149,6 @@ QString synthesizeRecommendationSummary(const QJsonObject& sn)
         head += QStringLiteral("; expect ") + s.expectedParts.mid(0, 2).join(QStringLiteral(", "));
     return head;
 }
-
-} // namespace
 
 QJsonArray buildRecentAdviceBlock(QSqlDatabase& db,
                                   const RecentAdviceInputs& in)

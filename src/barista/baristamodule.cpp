@@ -9,6 +9,7 @@
 #include "baristacontextbuilder.h"
 #include "feedbackstorage.h"
 #include "tasksstorage.h"
+#include "coachplanstorage.h"     // [barista-fork] plan-outcome ledger (owned here, set on AIManager)
 #include "maintenancedocsync.h"
 #include "baristavoiceid.h"       // [barista-fork] voice-ID enrollment + probe coordinator
 #include "coachphrasebook.h"      // [barista-fork] live-coach model-generated phrasing + gameplan
@@ -197,6 +198,7 @@ BaristaModule::BaristaModule(MainController* mainController, MachineState* machi
           appSettings, this))
     , m_feedbackStorage(new FeedbackStorage(this))
     , m_tasksStorage(new TasksStorage(this))
+    , m_coachPlanStorage(new CoachPlanStorage(this))   // [barista-fork] plan-outcome ledger (assistant.db)
     // [barista-fork] Periodic Decent maintenance-docs check. Owns its own QNAM; persists via m_tasksStorage.
     , m_docSync(new MaintenanceDocSync(m_tasksStorage, this))
     // [barista-fork] Fast-path web tools get a PRIVATE QNAM (no shared cookie jar) — each tool contacts only its
@@ -239,6 +241,8 @@ BaristaModule::BaristaModule(MainController* mainController, MachineState* machi
             // [barista-fork] Reminders + maintenance share the SAME assistant.db file (each store's
             // ensureSchema is idempotent and touches only its own tables).
             m_tasksStorage->initialize(assistantDb);
+            // [barista-fork] Plan-outcome ledger shares the SAME assistant.db (idempotent ensureSchema, own tables).
+            m_coachPlanStorage->initialize(assistantDb);
             // [barista-fork] Coach phrasebook persists its model-generated cue pools in assistant.db (rides the backup).
             m_coachPhrasebook->initialize(assistantDb);
             // [barista-fork] Start the independent KB backup now that assistant.db's path is known — a
@@ -276,6 +280,7 @@ BaristaModule::BaristaModule(MainController* mainController, MachineState* machi
         if (AIManager* ai = mainController->aiManager()) {
             ai->setFeedbackStorage(m_feedbackStorage);
             ai->setTasksStorage(m_tasksStorage);   // [barista-fork] task tools + dueItems context block
+            ai->setCoachPlanStorage(m_coachPlanStorage);   // [barista-fork] plan-outcome ledger (recordCoachPlan at finalization)
             // [barista-fork] apply_dial_change → applyFromNext, via a std::function seam (keeps BaristaActions
             // out of the AI TUs / DB-only tests). m_actions outlives AIManager (both parented under the module).
             BaristaActions* actions = m_actions;

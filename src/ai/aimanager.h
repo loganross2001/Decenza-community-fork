@@ -28,6 +28,7 @@ class Settings;
 class ShotHistoryStorage;
 class FeedbackStorage;   // [barista-fork]
 class TasksStorage;      // [barista-fork] reminders + maintenance (assistant.db)
+class CoachPlanStorage;  // [barista-fork] plan-outcome ledger (assistant.db)
 class TranslationManager;
 class ProfileManager;
 
@@ -218,6 +219,10 @@ public:
     // by requestBaristaContext's proactive dueItems block — safe to wire after construction.
     void setTasksStorage(TasksStorage* storage) { m_tasksStorage = storage; }
     TasksStorage* tasksStorage() const { return m_tasksStorage; }
+    // [barista-fork] Plan-outcome ledger (assistant.db, DoR §1). Written silently at barista turn finalization
+    // (recordCoachPlan); read by the P4 track-record block + recall tool. Safe to wire after construction.
+    void setCoachPlanStorage(CoachPlanStorage* storage) { m_coachPlanStorage = storage; }
+    CoachPlanStorage* coachPlanStorage() const { return m_coachPlanStorage; }
     // [barista-fork] Dial-apply handler for the apply_dial_change write tool (approve-then-apply). A std::function
     // seam (not a BaristaActions* member) so this header/TU never names BaristaActions — keeps the machine-source
     // chain out of DB-only tests. Wired from BaristaModule to BaristaActions::applyFromNext.
@@ -300,6 +305,21 @@ public:
         m_pendingToolStructuredNext = QJsonObject{};
         return out;
     }
+    // [barista-fork] Plan-outcome ledger (DoR §1.3): the recommend_next_shot executor stashes the KB
+    // recommendation's lineage ({kbRecId, kbConfidence, kbPrepGate}) for the CURRENT turn so a plan row can
+    // carry it. take()n once at recordCoachPlan and cleared, and also cleared unconditionally at the per-turn
+    // choke point (analyzeConversation) so it can never leak into a later turn that made no KB call.
+    QJsonObject takePendingKbRecommendation() {
+        QJsonObject out = m_pendingKbRecommendation;
+        m_pendingKbRecommendation = QJsonObject{};
+        return out;
+    }
+    // [barista-fork] Plan-outcome ledger capture (DoR §1.3). Called at barista turn finalization
+    // (AIConversation::onAnalysisComplete) when the turn committed a structuredNext prediction. Writes ONE
+    // plan row from the app-side anchor snapshot (bean/profile/equipment/dial — never the model) + the KB
+    // lineage + the derived lever/direction. `source` is "fenced" or "tool_applied". No-op when the ledger
+    // isn't wired or the anchor lacks a KB profile (unscopable → the judge pass could never match it).
+    void recordCoachPlan(const QJsonObject& structuredNext, const QString& source);
     // Null until wired (and in tests that never wire it) — callers must check.
     // True while a metadata write THIS class started is awaiting its outcome.
     //
@@ -600,6 +620,7 @@ private:
     ShotHistoryStorage* m_shotHistory = nullptr;
     FeedbackStorage* m_feedbackStorage = nullptr;   // [barista-fork] verbal-feedback KB (assistant.db)
     TasksStorage* m_tasksStorage = nullptr;         // [barista-fork] reminders + maintenance (assistant.db)
+    CoachPlanStorage* m_coachPlanStorage = nullptr; // [barista-fork] plan-outcome ledger (assistant.db)
     // [barista-fork] apply_dial_change handler → BaristaActions::applyFromNext (std::function seam; see setter).
     std::function<QVariantMap(const QVariantMap&, qint64)> m_applyDialHandler;
     // [barista-fork] end_conversation handler → AssistantOrchestrator::requestDismiss (std::function seam; see setter).
@@ -668,6 +689,10 @@ private:
     // finalization (AIConversation::onAnalysisComplete) and again unconditionally at the top of analyzeConversation
     // (the single choke point for every turn) so a failed / superseded tool-turn can't leak into the next turn.
     QJsonObject m_pendingToolStructuredNext;
+    // [barista-fork] Pending KB recommendation lineage for the CURRENT turn (DoR §1.3). Set by the
+    // recommend_next_shot branch of the client-tool lambda; take()n at recordCoachPlan and cleared alongside
+    // m_pendingToolStructuredNext at the analyzeConversation choke point.
+    QJsonObject m_pendingKbRecommendation;
     // Dedicated serial for requestBaristaContext — must NOT share m_contextSerial with
     // requestRecentShotContext, or one silently invalidates the other's callback (S1).
     int m_baristaContextSerial = 0;

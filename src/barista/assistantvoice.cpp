@@ -461,6 +461,32 @@ void AssistantVoice::endStream() {
         speakNextChunk();   // speak the tail, or (nothing left) settle streaming off
 }
 
+void AssistantVoice::speakChunked(const QString& rawText) {
+    // [barista-fork] Speak a COMPLETE reply sentence-by-sentence through the streaming queue, so the first
+    // sentence starts ~1s in rather than after the whole reply synthesizes (the length-scaled ElevenLabs lag on
+    // the non-streaming/Gemini path). Same machinery as feedStreamDelta+endStream, but the whole reply is fed at
+    // once: enqueueChunks releases every complete sentence immediately (first plays now, rest queue), then
+    // endStream flushes the trailing partial and lets the queue drain. Barista-only (the queue is barista-scoped);
+    // anything else, or a muted barista, falls back to the plain whole-reply path.
+    if (m_role != Role::Barista || rawText.trimmed().isEmpty()) {
+        speak(rawText);
+        return;
+    }
+    if (m_settings && !m_settings->voiceEnabled()) {
+        speak(rawText);   // let speak() log the muted-suppress + settle consistently
+        return;
+    }
+    m_streamActive = true;
+    m_chunker.reset();
+    m_speechQueue.clear();
+    m_clipInFlight = false;
+    setStreamSpeaking(true);
+    m_pendingSynth = true;   // hold `speaking` true (mic gated) from before the first clip
+    updateSpeaking();
+    enqueueChunks(m_chunker.feed(rawText));   // every complete sentence; speakNextChunk fires the first now
+    endStream();                              // flush the tail + drain (no more text is coming)
+}
+
 void AssistantVoice::setStreamSpeaking(bool on) {
     if (on == m_streamSpeaking)
         return;

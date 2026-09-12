@@ -749,6 +749,19 @@ void AssistantSettings::setVoiceStreaming(bool on) {
     emit voiceStreamingChanged();
 }
 
+bool AssistantSettings::speakInChunks() const {
+    // [barista-fork] Default ON: speak the reply sentence-by-sentence so the first words land ~1s in rather than
+    // after the whole reply synthesizes. Toggling OFF restores the single whole-reply speak() (the reverse switch).
+    return m_settings.value(QStringLiteral("barista/speakInChunks"), true).toBool();
+}
+
+void AssistantSettings::setSpeakInChunks(bool on) {
+    if (speakInChunks() == on)
+        return;
+    m_settings.setValue(QStringLiteral("barista/speakInChunks"), on);
+    emit speakInChunksChanged();
+}
+
 bool AssistantSettings::avatarEnabled() const {
     return m_settings.value(QStringLiteral("barista/avatarEnabled"), true).toBool();
 }

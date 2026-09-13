@@ -139,6 +139,38 @@ private slots:
                  "sweeter on a light roast should push toward MORE extraction");
     }
 
+    // [barista-fork] Regression for the #4 roast-band bug: the KB conditions coaching only for the
+    // light/dark EXTREMES (opposite moves), so a compound band (medium-dark/medium-light) must resolve
+    // to the NEUTRAL medium bucket — no roast-specific move — NOT to its nearest extreme. Before the
+    // longest-match bucket() fix, "medium-dark" matched the "dark" substring first and inherited the
+    // full dark path (owner: wrong band). "sweeter" carries both a light and a dark roast_conditioned.
+    void planForGoalTreatsCompoundRoastsAsNeutralMedium() {
+        const CoffeeKnowledgeBase kb = CoffeeKnowledgeBase::fromJson(shippedKb());
+        const auto rsp = [&kb](const QString& roast) {
+            return kb.planForGoal(QStringLiteral("sweeter"), roast)
+                     .value(QStringLiteral("roast_specific_path")).toString();
+        };
+        // The extremes still carry their (opposite) roast-specific moves — the fix didn't flatten them.
+        QVERIFY(!rsp(QStringLiteral("light")).isEmpty());
+        QVERIFY(!rsp(QStringLiteral("dark")).isEmpty());
+        QVERIFY(rsp(QStringLiteral("light")) != rsp(QStringLiteral("dark")));
+        // Plain medium is the neutral baseline: no roast-specific move.
+        QCOMPARE(rsp(QStringLiteral("medium")), QString());
+        // Compound bands resolve to neutral medium, NOT their nearest extreme (the bug).
+        QCOMPARE(rsp(QStringLiteral("medium-dark")), QString());
+        QCOMPARE(rsp(QStringLiteral("medium-light")), QString());
+        // The canonical capitalized form the app stores ("Medium-Dark") behaves identically.
+        QCOMPARE(rsp(QStringLiteral("Medium-Dark")), QString());
+        // Abbreviated compound forms too — "med" alone loses on length to "dark"/"light", so the
+        // "med-dark"/"med light" keywords carry them. A compound never resolves to an extreme.
+        QCOMPARE(rsp(QStringLiteral("med-dark")), QString());
+        QCOMPARE(rsp(QStringLiteral("med-light")), QString());
+        QCOMPARE(rsp(QStringLiteral("med dark")), QString());
+        // Plain medium spellings stay neutral; a bare extreme is unaffected.
+        QCOMPARE(rsp(QStringLiteral("med")), QString());
+        QVERIFY(!rsp(QStringLiteral("nordic")).isEmpty());   // "nordic" still resolves to the light path
+    }
+
     void planForUnknownGoalIsHonest() {
         const CoffeeKnowledgeBase kb = CoffeeKnowledgeBase::fromJson(shippedKb());
         const QJsonObject r = kb.planForGoal(QStringLiteral("make it purple"), QString());

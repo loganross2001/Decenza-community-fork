@@ -78,11 +78,23 @@ Match matchTrace(const QString &cond, const QString &user)
 QString bucket(const QString &raw, const QList<QPair<QString, QStringList>> &map)
 {
     const QString s = norm(raw);
+    // [barista-fork] Most-specific (LONGEST matching keyword) wins, not first-in-list. Roast bands
+    // overlap as substrings — "medium-dark" contains both "dark" (4) and "medium" (6) — so a first-hit
+    // scan silently resolved a compound band to whichever extreme was listed first (medium-dark -> dark),
+    // handing it the extreme's opposite-direction roast_specific_path. Longest-match makes "medium" win,
+    // so medium-dark / medium-light resolve to the NEUTRAL medium bucket (owner 2026-09-13): the KB
+    // conditions coaching only for the light/dark extremes, and a partial band must not inherit an
+    // extreme's move. Order-independent — the ratio/body maps have no overlapping keywords, so they are
+    // unaffected. norm() only trims+lowercases, so the hyphen stays and both substrings are present.
+    QString best;
+    qsizetype bestLen = 0;
     for (const auto &m : map)
         for (const QString &kw : m.second)
-            if (s.contains(kw))
-                return m.first;
-    return QString();
+            if (kw.size() > bestLen && s.contains(kw)) {
+                best = m.first;
+                bestLen = kw.size();
+            }
+    return best;
 }
 
 Match matchBucket(const QString &cond, const QString &user,
@@ -104,7 +116,15 @@ Match matchBucket(const QString &cond, const QString &user,
 const QList<QPair<QString, QStringList>> kRoastMap = {
     {QStringLiteral("light"), {QStringLiteral("light"), QStringLiteral("nordic")}},
     {QStringLiteral("dark"), {QStringLiteral("dark")}},
-    {QStringLiteral("medium"), {QStringLiteral("medium"), QStringLiteral("med")}},
+    // [barista-fork] Any medium-family string resolves to the neutral medium bucket, INCLUDING the
+    // compounds — a compound band always contains "med"/"medium", a pure extreme never does. Longest-
+    // match handles the full-word compounds ("medium-dark" -> "medium"(6) beats "dark"(4)), but the
+    // "med" ABBREVIATION (3) loses to "dark"(4)/"light"(5), so the abbreviated compound forms are listed
+    // explicitly to win on length. See planForGoalTreatsCompoundRoastsAsNeutralMedium.
+    {QStringLiteral("medium"), {QStringLiteral("medium"),
+                                QStringLiteral("med-dark"), QStringLiteral("med-light"),
+                                QStringLiteral("med dark"), QStringLiteral("med light"),
+                                QStringLiteral("med")}},
 };
 const QList<QPair<QString, QStringList>> kRatioMap = {
     {QStringLiteral("wide"), {QStringLiteral("wide"), QStringLiteral("long")}},

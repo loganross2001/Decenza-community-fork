@@ -120,7 +120,7 @@ void LiveShotCoach::evaluate(double shotTime) {
         && m_peakPressure < PRESSURE_FLOOR_BAR) {
         m_firedNoPuck = true;
         emitCue(QStringLiteral("no-puck"),
-                tr_("liveCoach.cue.noPuck", "Low pressure — did the puck seat?"),
+                tr_("liveCoach.cue.noPuck", "Pressure's barely building — not much resistance in the puck"),
                 QStringLiteral("caution"), /*speak=*/true, shotTime);
         return;
     }
@@ -180,7 +180,7 @@ void LiveShotCoach::evaluate(double shotTime) {
             if (avgDelta < -FLOW_DEVIATION_THRESHOLD) {
                 m_firedFlow = true;
                 emitCue(QStringLiteral("flow-slow"),
-                        tr_("liveCoach.cue.flowSlow", "Running slow — tight puck"),
+                        tr_("liveCoach.cue.flowSlow", "Running slow — this one'll come in heavy"),
                         QStringLiteral("info"), /*speak=*/true, shotTime);
                 return;
             }

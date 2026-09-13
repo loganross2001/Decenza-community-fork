@@ -424,8 +424,9 @@ Item {
         var clean = (t || "").replace(/```[\s\S]*?```/g, " ").replace(/[*_#`>]/g, "")
                               .replace(/^\s*[-•]\s+/gm, "").replace(/\s+/g, " ").trim()
         // [barista-fork] Chunked TTS (default on): speak the reply sentence-by-sentence so the first words land
-        // ~1s in instead of after the whole reply synthesizes. Toggling speakInChunks off restores whole-reply speak().
-        if (root._settings && root._settings.speakInChunks && typeof root._voice.speakChunked === "function")
+        // ~1s in instead of after the whole reply synthesizes. speakChunked() owns the speakInChunks gate (off →
+        // whole-reply speak() internally), so hand it the complete reply unconditionally — one policy authority.
+        if (typeof root._voice.speakChunked === "function")
             root._voice.speakChunked(clean)
         else
             root._voice.speak(clean)

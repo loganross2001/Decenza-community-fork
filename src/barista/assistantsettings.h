@@ -221,7 +221,7 @@ public:
     void setUseNewConversation(bool on);
     bool voiceStreaming() const;                  // [barista-fork] streaming-voice feature flag (default off)
     void setVoiceStreaming(bool on);
-    bool speakInChunks() const;                   // [barista-fork] chunked TTS of a complete reply (default ON)
+    bool speakInChunks() const;                   // [barista-fork] chunked TTS of a complete reply (default OFF; whole-reply)
     void setSpeakInChunks(bool on);
     bool avatarEnabled() const;                   // show the animated character face (default on)
     void setAvatarEnabled(bool e);

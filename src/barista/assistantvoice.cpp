@@ -213,7 +213,18 @@ void AssistantVoice::updateSpeaking() {
         m_audible = active;
         emit audibleChanged();
     }
-    const bool now = m_pendingSynth || active;
+    // [barista-fork] C1: during chunked barista playback (m_streamSpeaking) a clip finishing calls updateSpeaking()
+    // BEFORE onSpeechClipFinished() starts the next clip (handleAndroidPlaybackFinished order at ~1052/1053), so
+    // pendingSynth and active are both briefly false BETWEEN sentences. Hold `speaking` true while the stream still
+    // has a clip in flight or chunks queued, so the voice-conversation FSM doesn't drain the turn / reopen the mic
+    // mid-reply. Coaching cues go through speak() (never sets m_streamSpeaking), so this term is inert for them —
+    // only barista chunked playback (speakChunked) ever sees it. Drops to false once at the true end, when
+    // speakNextChunk's drained branch clears m_clipInFlight + setStreamSpeaking(false) before this runs.
+    // ...OR a prefetch is outstanding (m_prefetchInFlight) / the player is waiting on one (m_prefetchPending):
+    // the "current clip finished, next not yet synthesized" window is the same blip class as C1, new trigger.
+    const bool streamOutstanding = m_streamSpeaking
+        && (m_clipInFlight || m_prefetchInFlight || m_prefetchPending || !m_speechQueue.isEmpty());
+    const bool now = m_pendingSynth || active || streamOutstanding;
     if (now == m_speaking)
         return;
     m_speaking = now;
@@ -425,7 +436,9 @@ void AssistantVoice::speakNextChunk() {
     if (!m_speechQueue.isEmpty()) {
         const QString chunk = m_speechQueue.takeFirst();
         m_clipInFlight = true;
-        speak(chunk);   // sets m_pendingSynth → `speaking` stays true across the clip-to-clip handoff
+        speak(chunk);          // sets m_pendingSynth → `speaking` stays true across the clip-to-clip handoff
+        prefetchNextChunk();   // [barista-fork] overlap the NEXT chunk's synth with THIS clip's playback (no-op
+                               // for streaming / native / empty queue) so the next sentence has no synth gap.
         return;
     }
     if (m_streamActive) {
@@ -445,7 +458,82 @@ void AssistantVoice::speakNextChunk() {
 void AssistantVoice::onSpeechClipFinished() {
     if (!m_streamSpeaking)
         return;   // not in a streamed queue → ordinary single-utterance completion, nothing to advance
+    // [barista-fork] PREFETCH: play the next clip with no synth gap when it's already in hand; if its synth is
+    // still in flight, wait and play it the moment it lands (the guard holds `speaking` true meanwhile); only
+    // when neither applies (native provider / no key / genuinely drained) fall back to the serial advance.
+    if (!m_prefetchPath.isEmpty()) { advancePrefetched(); return; }
+    if (m_prefetchInFlight) {
+        m_prefetchPending = true;
+        BaristaDiagnostics::record(QStringLiteral("voice"), QStringLiteral("prefetch_wait"), {});
+        updateSpeaking();
+        return;
+    }
     speakNextChunk();
+}
+
+void AssistantVoice::prefetchNextChunk() {
+    // Only cloud providers have a network round-trip worth hiding; native TTS synthesizes locally with no gap.
+    // Gate to a COMPLETE reply (m_streamActive false — the speakChunked case): the incremental streaming path
+    // appends chunks over time, so "prefetch the next" isn't well-defined there and it stays on the serial path.
+    if (m_streamActive || m_speechQueue.isEmpty() || m_prefetchInFlight || !m_prefetchPath.isEmpty())
+        return;
+    const QString provider = effectiveProvider();
+    const QString raw = m_speechQueue.first();
+    // Normalize identically to speak() (espresso notation → words) so a prefetched clip is pronounced the same.
+    const QString text = speechnormalize::normalizeForSpeech(raw);
+    QNetworkReply* reply = nullptr;
+    if (provider == QLatin1String("elevenlabs")) reply = postElevenLabs(text);
+    else if (provider == QLatin1String("openai")) reply = postOpenAI(text);
+    if (!reply)
+        return;   // native / no key → the serial path speaks this chunk on the next clip-finish
+    m_prefetchText = m_speechQueue.takeFirst();
+    m_prefetchInFlight = true;
+    m_prefetchReply = reply;
+    BaristaDiagnostics::record(QStringLiteral("voice"), QStringLiteral("prefetch_start"),
+        {{QStringLiteral("chars"), m_prefetchText.size()}});
+    const int gen = m_streamGen;
+    connect(reply, &QNetworkReply::finished, this, [this, reply, gen] {
+        m_prefetchReply.clear();
+        m_prefetchInFlight = false;
+        if (gen != m_streamGen) {   // superseded by a new utterance / stop / dismiss → drop it
+            reply->deleteLater();
+            return;
+        }
+        if (reply->error() == QNetworkReply::NoError) {
+            m_prefetchPath = writeMp3ToFile(reply->readAll());
+            BaristaDiagnostics::record(QStringLiteral("voice"), QStringLiteral("prefetch_ready"),
+                {{QStringLiteral("ok"), !m_prefetchPath.isEmpty()}});
+        } else {
+            m_prefetchPath.clear();   // synth failed → fall back to serial synth of this chunk
+            BaristaDiagnostics::record(QStringLiteral("voice"), QStringLiteral("prefetch_fallback"),
+                {{QStringLiteral("err"), reply->errorString()}});
+        }
+        reply->deleteLater();
+        if (m_prefetchPending) {   // the player finished the prior clip and is waiting on THIS one
+            m_prefetchPending = false;
+            if (!m_prefetchPath.isEmpty()) {
+                advancePrefetched();
+            } else {                // failed prefetch → re-queue the text and synth it serially, don't wedge
+                m_speechQueue.prepend(m_prefetchText);
+                m_prefetchText.clear();
+                speakNextChunk();
+            }
+            return;
+        }
+        updateSpeaking();   // not waiting yet — recompute the hold now that m_prefetchInFlight cleared
+    });
+}
+
+void AssistantVoice::advancePrefetched() {
+    const QString path = m_prefetchPath;
+    m_prefetchPath.clear();
+    m_prefetchText.clear();
+    m_clipInFlight = true;
+    m_pendingSynth = true;   // hold `speaking` until the native onStarted flips m_androidPlaying (mirrors speak())
+    updateSpeaking();
+    BaristaDiagnostics::record(QStringLiteral("voice"), QStringLiteral("prefetch_play"), {});
+    playFile(path);
+    prefetchNextChunk();     // fire the FOLLOWING chunk's synth to overlap this clip's playback
 }
 
 void AssistantVoice::endStream() {
@@ -476,6 +564,17 @@ void AssistantVoice::speakChunked(const QString& rawText) {
         speak(rawText);   // let speak() log the muted-suppress + settle consistently
         return;
     }
+    // [barista-fork] speakInChunks is the single authority for the chunk-vs-whole-reply policy: callers hand a
+    // COMPLETE reply to speakChunked() unconditionally and this gate decides. Off → the whole-reply speak() path.
+    if (m_settings && !m_settings->speakInChunks()) {
+        speak(rawText);
+        return;
+    }
+    ++m_streamGen;           // [barista-fork] one generation for THIS whole reply — all its chunks + prefetches
+    m_prefetchText.clear();  // start clean; a prior reply's prefetch (if any) is now a stale generation
+    m_prefetchPath.clear();
+    m_prefetchInFlight = false;
+    m_prefetchPending = false;
     m_streamActive = true;
     m_chunker.reset();
     m_speechQueue.clear();
@@ -485,6 +584,9 @@ void AssistantVoice::speakChunked(const QString& rawText) {
     updateSpeaking();
     enqueueChunks(m_chunker.feed(rawText));   // every complete sentence; speakNextChunk fires the first now
     endStream();                              // flush the tail + drain (no more text is coming)
+    // The first speakNextChunk ran while m_streamActive was still true (prefetch self-gates off then), so kick
+    // the next chunk's synth now that endStream cleared it — overlapping chunk 1's synth with chunk 0's playback.
+    prefetchNextChunk();
 }
 
 void AssistantVoice::setStreamSpeaking(bool on) {
@@ -494,13 +596,10 @@ void AssistantVoice::setStreamSpeaking(bool on) {
     emit streamingChanged();
 }
 
-void AssistantVoice::synthOpenAI(const QString& text) {
+QNetworkReply* AssistantVoice::postOpenAI(const QString& text) {
     const QString key = openaiKey();
-    if (key.isEmpty()) {                 // no key → graceful fallback to the native voice
-        if (m_tts) { applyNativeParams(); m_tts->say(text); }
-        else { m_pendingSynth = false; updateSpeaking(); }
-        return;
-    }
+    if (key.isEmpty())
+        return nullptr;                  // no key → caller falls back to native
     QNetworkRequest req(QUrl(QStringLiteral("https://api.openai.com/v1/audio/speech")));
     req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
     req.setRawHeader("Authorization", "Bearer " + key.toUtf8());
@@ -513,7 +612,16 @@ void AssistantVoice::synthOpenAI(const QString& text) {
         {QStringLiteral("response_format"), QStringLiteral("mp3")},
         {QStringLiteral("speed"), effectiveSpeed()},    // this role's user-adjustable pace
     };
-    QNetworkReply* reply = m_net->post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
+    return m_net->post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
+}
+
+void AssistantVoice::synthOpenAI(const QString& text) {
+    QNetworkReply* reply = postOpenAI(text);
+    if (!reply) {                        // no key → graceful fallback to the native voice
+        if (m_tts) { applyNativeParams(); m_tts->say(text); }
+        else { m_pendingSynth = false; updateSpeaking(); }
+        return;
+    }
     connect(reply, &QNetworkReply::finished, this, [this, reply, text, gen = m_speakGen] {
         if (gen == m_speakGen) {   // ignore a superseded / dismissed request's late reply
             if (reply->error() == QNetworkReply::NoError)
@@ -525,13 +633,10 @@ void AssistantVoice::synthOpenAI(const QString& text) {
     });
 }
 
-void AssistantVoice::synthElevenLabs(const QString& text) {
+QNetworkReply* AssistantVoice::postElevenLabs(const QString& text) {
     const QString key = m_settings->elevenlabsApiKey();
-    if (key.isEmpty()) {                 // no key → graceful fallback to the native voice
-        if (m_tts) { applyNativeParams(); m_tts->say(text); }
-        else { m_pendingSynth = false; updateSpeaking(); }
-        return;
-    }
+    if (key.isEmpty())
+        return nullptr;                  // no key → caller falls back to native
     QNetworkRequest req(QUrl(QStringLiteral("https://api.elevenlabs.io/v1/text-to-speech/%1")
                              .arg(effectiveElevenlabsVoiceId())));
     req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
@@ -561,7 +666,16 @@ void AssistantVoice::synthElevenLabs(const QString& text) {
             {QStringLiteral("similarity_boost"), 0.8},
         }},
     };
-    QNetworkReply* reply = m_net->post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
+    return m_net->post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
+}
+
+void AssistantVoice::synthElevenLabs(const QString& text) {
+    QNetworkReply* reply = postElevenLabs(text);
+    if (!reply) {                        // no key → graceful fallback to the native voice
+        if (m_tts) { applyNativeParams(); m_tts->say(text); }
+        else { m_pendingSynth = false; updateSpeaking(); }
+        return;
+    }
     connect(reply, &QNetworkReply::finished, this, [this, reply, text, gen = m_speakGen] {
         if (gen == m_speakGen) {   // ignore a superseded / dismissed request's late reply
             if (reply->error() == QNetworkReply::NoError)
@@ -651,11 +765,29 @@ void AssistantVoice::fetchElevenlabsVoices() {
     });
 }
 
-void AssistantVoice::playMp3(const QByteArray& audio) {
-    if (audio.isEmpty()) {
-        m_pendingSynth = false; updateSpeaking();   // no audio will play → release the pending hold
-        return;
-    }
+QString AssistantVoice::writeMp3ToFile(const QByteArray& audio) {
+    if (audio.isEmpty())
+        return QString();
+    // Android's media backend truncates in-memory (QBuffer) sources after a fraction of a second —
+    // write the mp3 to a temp file and play that; files play reliably and to completion.
+    // ALTERNATE the filename each utterance: reusing one path makes the Android backend cache the prior
+    // clip's DURATION and stop the new (longer) audio early (the cut-off-mid-sentence bug), and setSource
+    // with the same URL is a no-op in Qt. A fresh path forces a clean reload with the correct duration.
+    // Namespace the temp path by ROLE so the barista and coaching instances don't clobber each other's clips.
+    // THREE-file rotation (not two): with prefetch a clip can be PLAYING while the next is being WRITTEN and a
+    // third was just freed — two slots would let the write land on the still-playing file.
+    const QString rolePrefix = (m_role == Role::Coaching) ? QStringLiteral("c") : QStringLiteral("b");
+    const QString path = QDir::tempPath()
+                       + QStringLiteral("/decenza_tts_%1%2.mp3").arg(rolePrefix).arg(m_ttsFileSeq++ % 3);
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        return QString();
+    f.write(audio);
+    f.close();
+    return path;
+}
+
+void AssistantVoice::playFile(const QString& path) {
 #ifndef Q_OS_ANDROID
     if (!m_player) {
         m_pendingSynth = false; updateSpeaking();
@@ -673,31 +805,14 @@ void AssistantVoice::playMp3(const QByteArray& audio) {
         m_audioOut->setDevice(QMediaDevices::defaultAudioOutput());
         m_audioOut->setVolume(effectiveVolume());
     }
-#endif
-    // Android's media backend truncates in-memory (QBuffer) sources after a fraction of a second —
-    // write the mp3 to a temp file and play that; files play reliably and to completion.
-    // ALTERNATE the filename each utterance: reusing one path makes the Android backend cache the prior
-    // clip's DURATION and stop the new (longer) audio early (the cut-off-mid-sentence bug), and setSource
-    // with the same URL is a no-op in Qt. A fresh path forces a clean reload with the correct duration.
-    // Namespace the temp path by ROLE: the barista and coaching instances both cycle through the same
-    // two-file rotation, so an un-namespaced path would let them clobber each other's clips — reviving the
-    // Android "cut off mid-sentence" duration-cache bug across instances. A per-role prefix keeps them apart.
-    // (The desktop QMediaPlayer path plays the same local file.)
-    const QString rolePrefix = (m_role == Role::Coaching) ? QStringLiteral("c") : QStringLiteral("b");
-    const QString path = QDir::tempPath()
-                       + QStringLiteral("/decenza_tts_%1%2.mp3").arg(rolePrefix).arg(m_ttsFileSeq++ % 2);
-    QFile f(path);
-    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-        m_pendingSynth = false; updateSpeaking();
-        return;
-    }
-    f.write(audio);
-    f.close();
-#ifdef Q_OS_ANDROID
+    m_player->setSource(QUrl());
+    m_player->setSource(QUrl::fromLocalFile(path));
+    m_player->play();
+#else
     // Hand the file to Android's MediaPlayer (USAGE_MEDIA) — it follows the system route to the external
-    // speaker, unlike Qt. m_pendingSynth stays true (set in speak()) until the native onStarted callback flips
-    // m_androidPlaying on, so `speaking` never drops during the network→prepare gap. Java releases the prior
-    // clip + a playId guard suppresses its late callbacks, so this cleanly supersedes a barge-in.
+    // speaker, unlike Qt. m_pendingSynth stays true (set in speak()/advancePrefetched()) until the native
+    // onStarted callback flips m_androidPlaying on, so `speaking` never drops during the prepare gap. Java
+    // releases the prior clip + a playId guard suppresses its late callbacks, so this cleanly supersedes a barge-in.
     m_androidPlaying = false;
     if (m_androidPlayer.isValid()) {
         // [barista-fork] Log the volume actually sent to the native player — so a "volume slider does nothing"
@@ -711,20 +826,35 @@ void AssistantVoice::playMp3(const QByteArray& audio) {
     } else {
         m_pendingSynth = false; updateSpeaking();   // no native player → don't wedge `speaking`
     }
-#else
-    m_player->setSource(QUrl());
-    m_player->setSource(QUrl::fromLocalFile(path));
-    m_player->play();
 #endif
+}
+
+void AssistantVoice::playMp3(const QByteArray& audio) {
+    const QString path = writeMp3ToFile(audio);
+    if (path.isEmpty()) {
+        m_pendingSynth = false; updateSpeaking();   // no audio / write failed → release the pending hold
+        return;
+    }
+    playFile(path);
 }
 
 void AssistantVoice::stop() {
     ++m_speakGen;              // discard any in-flight synth reply
+    ++m_streamGen;             // [barista-fork] discard any in-flight PREFETCH reply (its gen check now fails)
     m_pendingSynth = false;
     // [barista-fork] Barge-in / new turn: abandon any streamed queue so the next thing spoken isn't the tail of
     // an interrupted reply. Clears the FIFO + chunker and drops `streaming`.
     m_streamActive = false;
     m_clipInFlight = false;
+    // [barista-fork] Cancel an in-flight prefetch and drop any ready/pending prefetched clip — the gen bump above
+    // already neutralizes its late reply, but abort now so we don't hold the connection or play a stale clip.
+    if (m_prefetchReply)
+        m_prefetchReply->abort();
+    m_prefetchReply.clear();
+    m_prefetchInFlight = false;
+    m_prefetchPending = false;
+    m_prefetchText.clear();
+    m_prefetchPath.clear();
     m_speechQueue.clear();
     m_chunker.reset();
     if (m_firstChunkTimer)

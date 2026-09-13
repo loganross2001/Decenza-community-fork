@@ -51,7 +51,7 @@ tool	plan_for_goal	recipe	src/barista/baristatools.cpp:1084	-	human goal -> targ
 pill	profileQuickSelect	recipe	qml/components/layout/items/ProfileQuickSelectItem.qml:15	-	brew-bar pill — pick from favorite profiles; ProfileManager.loadProfile	
 tool	recommend_next_shot	recipe	src/barista/baristatools.cpp:1054	-	the planner: taste + shot context -> ONE change, stated as a checkable hypothesis	
 tool	update_recipe	recipe	src/barista/baristatools.cpp:811	-		
-entry	AssistantVoice::speak	voice	src/barista/assistantvoice.h:89	-	TTS entry — speaks a reply (ElevenLabs/OpenAI), unit/ratio-normalized, muted-aware	
+entry	AssistantVoice::speak	voice	src/barista/assistantvoice.h:91	-	TTS entry — speaks a reply (ElevenLabs/OpenAI), unit/ratio-normalized, muted-aware	
 entry	BaristaConversation::captureBagPhotoRequested	voice	src/barista/baristaconversation.h:83	-	voice-driven bag-photo shutter — "ready" while camera open → capture, no model turn	
 entry	BaristaConversation::onFinalText	voice	src/barista/baristaconversation.h:89	-	voice turn arbiter — STT final -> model turn; Listening/Thinking/Speaking state machine	
 entry	VoiceInput::finalText	voice	src/barista/voiceinput.h:48	-	STT entry — a complete spoken utterance enters the conversation (Android SpeechRecognizer)	

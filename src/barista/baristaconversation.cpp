@@ -402,7 +402,10 @@ void BaristaConversation::onModelFinal(const QString& text, bool endConversation
         return;
     }
     setState(State::Speaking);
-    if (m_voice) m_voice->speak(text);
+    // [barista-fork] speakChunked() speaks a COMPLETE reply sentence-by-sentence so the first sentence plays ~1s
+    // in rather than after the whole reply synthesizes (the length-scaled ElevenLabs lag on the non-streaming
+    // Gemini path). It owns the speakInChunks gate and falls back to whole-reply speak() when off / non-barista.
+    if (m_voice) m_voice->speakChunked(text);
 }
 
 void BaristaConversation::onCloseRequested()
@@ -485,7 +488,7 @@ void BaristaConversation::onVoiceSpeakingChanged()
     if (!m_pendingAnswer.isEmpty()) {
         const QString a = m_pendingAnswer;
         m_pendingAnswer.clear();
-        if (m_voice) m_voice->speak(a);   // stays in Speaking; the next speechEnded re-dispatches
+        if (m_voice) m_voice->speakChunked(a);   // chunked like onModelFinal; stays in Speaking, next speechEnded re-dispatches
         return;
     }
     if (m_turnInFlight) { setState(State::Thinking); return; }

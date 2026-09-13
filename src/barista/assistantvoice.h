@@ -3,6 +3,7 @@
 #include <QObject>
 #include <QStringList>
 #include <QVariantList>
+#include <QPointer>   // [barista-fork] m_prefetchReply — safe weak handle to an in-flight prefetch POST
 
 #include "speechchunker.h"   // [barista-fork] streaming-voice chunker, owned by value below
 
@@ -16,6 +17,7 @@ class QMediaPlayer;
 class QAudioOutput;
 class QBuffer;
 class QNetworkAccessManager;
+class QNetworkReply;   // [barista-fork] prefetch POST handle (return types + m_prefetchReply)
 class QTimer;
 class AssistantSettings;
 class Settings;
@@ -202,6 +204,17 @@ private:
     void synthOpenAI(const QString& text);       // POST OpenAI TTS → play the returned mp3
     void synthElevenLabs(const QString& text);   // POST ElevenLabs TTS → play the returned mp3
     void playMp3(const QByteArray& audio);       // play compressed audio via QMediaPlayer
+    // [barista-fork] Cloud-TTS POST factored out so both the play path (synth*) and the prefetch path
+    // (prefetchNextChunk) build one identical request — no drift in body/headers/model between them.
+    QNetworkReply* postOpenAI(const QString& text);       // fire the OpenAI TTS POST (no connect); nullptr if no key
+    QNetworkReply* postElevenLabs(const QString& text);   // fire the ElevenLabs TTS POST (no connect); nullptr if no key
+    // [barista-fork] playMp3 split: write bytes to a rotating temp file (returns path, "" on failure) vs play a
+    // ready file. Prefetch writes ahead (writeMp3ToFile) then plays on demand (playFile) with no re-synth.
+    QString writeMp3ToFile(const QByteArray& audio);
+    void playFile(const QString& path);
+    // [barista-fork] PREFETCH: synth the next queued chunk while the current plays; play it with no gap on finish.
+    void prefetchNextChunk();     // pull queue head → synth ahead into m_prefetchPath (cloud providers only)
+    void advancePrefetched();     // play the ready prefetched clip, then kick the following prefetch
     QString openaiKey() const;                   // reuse the app's OpenAI key
     // [barista-fork] The selected thinking-earcon asset ("hum"|"breath"|"pulse"|"drone" → qrc path); empty when
     // "off". On Android the qrc asset is extracted to a temp file once (the native MediaPlayer can't read qrc:).
@@ -254,6 +267,17 @@ private:
     // path makes Android's media backend cache the prior clip's DURATION and stop the new (longer) audio
     // early — the "cut off mid-sentence" bug. A fresh path each time forces a clean reload.
     int m_ttsFileSeq = 0;
+    // [barista-fork] PREFETCH (chunked barista only): synthesize chunk N+1 while chunk N plays so the ~1-2s
+    // per-request cloud-TTS latency is hidden inside the current clip's playback instead of falling in the gap
+    // between sentences. m_streamGen is a PER-UTTERANCE generation stamped once at speakChunked() start (NOT
+    // per-chunk like m_speakGen) — every chunk of one reply shares it, so a prefetch reply isn't discarded as
+    // "stale" when the current clip's own speak() bumps m_speakGen. stop()/dismiss/new utterance bump it.
+    int m_streamGen = 0;
+    QString m_prefetchText;              // chunk currently being synthesized ahead ("" = none)
+    QString m_prefetchPath;              // ready prefetched clip file ("" = none ready)
+    bool m_prefetchInFlight = false;     // a prefetch POST is outstanding
+    bool m_prefetchPending = false;      // current clip finished; waiting on the in-flight prefetch to arrive
+    QPointer<QNetworkReply> m_prefetchReply;   // so stop() can abort an in-flight prefetch
 #ifdef Q_OS_ANDROID
     // [barista-fork] Native Android MediaPlayer (USAGE_MEDIA) — the cloud-TTS playback path on Android, because
     // Qt can't see/route to the external speaker. m_androidPlaying mirrors its state (set by the JNI callbacks)

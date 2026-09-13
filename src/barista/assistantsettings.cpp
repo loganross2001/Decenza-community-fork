@@ -750,9 +750,12 @@ void AssistantSettings::setVoiceStreaming(bool on) {
 }
 
 bool AssistantSettings::speakInChunks() const {
-    // [barista-fork] Default ON: speak the reply sentence-by-sentence so the first words land ~1s in rather than
-    // after the whole reply synthesizes. Toggling OFF restores the single whole-reply speak() (the reverse switch).
-    return m_settings.value(QStringLiteral("barista/speakInChunks"), true).toBool();
+    // [barista-fork] Default OFF (owner 2026-09-12): the barista speaks the WHOLE reply as one continuous
+    // response — a conversation, not sentence-by-sentence. On-device the chunked path started sooner but left a
+    // ~1-2s synth pause between every sentence (serial cloud TTS), which the owner found not enjoyable; even
+    // prefetch delivers as separate clips. ON re-enables the chunked+C1+prefetch path (kept, dormant) for the
+    // faster-first-word tradeoff if ever revisited. See [[decenza-barista-voice-streaming]].
+    return m_settings.value(QStringLiteral("barista/speakInChunks"), false).toBool();
 }
 
 void AssistantSettings::setSpeakInChunks(bool on) {

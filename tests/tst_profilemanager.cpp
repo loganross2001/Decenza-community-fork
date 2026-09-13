@@ -1123,7 +1123,7 @@ private slots:
         f.transport.clearWrites();
 
         QSignalSpy spy(&f.profileManager, &ProfileManager::profileUploadBlocked);
-        ScopedWarningFilter filter("BLOCKED during active phase|^  #");
+        ScopedWarningFilter filter("BLOCKED during active phase|^\\[Profiles\\]\\[profilemanager\\]   #");
         f.profileManager.uploadCurrentProfile();
 
         // Should NOT write to BLE
@@ -3007,7 +3007,7 @@ private slots:
             MachineState::Phase::Cleaning
         };
 
-        ScopedWarningFilter filter("BLOCKED during active phase|^  #");
+        ScopedWarningFilter filter("BLOCKED during active phase|^\\[Profiles\\]\\[profilemanager\\]   #");
         for (MachineState::Phase phase : blockedPhases) {
             McpTestFixture f;
             loadDFlowProfile(f);
@@ -3028,7 +3028,7 @@ private slots:
     void pendingUploadRetriesOnIdle() {
         McpTestFixture f;
         loadDFlowProfile(f);
-        ScopedWarningFilter filter("BLOCKED during active phase|^  #");
+        ScopedWarningFilter filter("BLOCKED during active phase|^\\[Profiles\\]\\[profilemanager\\]   #");
 
         // Block upload during Pouring
         f.machineState.m_phase = MachineState::Phase::Pouring;
@@ -3051,7 +3051,7 @@ private slots:
     void pendingUploadClearedOnDisconnect() {
         McpTestFixture f;
         loadDFlowProfile(f);
-        ScopedWarningFilter filter("BLOCKED during active phase|^  #");
+        ScopedWarningFilter filter("BLOCKED during active phase|^\\[Profiles\\]\\[profilemanager\\]   #");
 
         // Block upload during Pouring
         f.machineState.m_phase = MachineState::Phase::Pouring;
@@ -4592,6 +4592,68 @@ private slots:
         QCOMPARE(f.profileManager.m_profileUploadRetryAttempts, 0);
     }
 
+    void queueClearFailureReArmsPendingUpload() {
+        // A cleared queue leaves the DE1 holding an UNKNOWN profile: frames are
+        // indexed slot writes with no commit step, under a header that already
+        // declared the new frame count. The app cannot gate a group-head shot,
+        // so the pending flag is the only thing that restores the invariant.
+        McpTestFixture f;
+        loadDFlowProfile(f);
+        f.profileManager.uploadCurrentProfile();
+
+        emit f.device.profileUploaded(false,
+            QStringLiteral("command queue cleared during upload"));
+
+        QVERIFY(f.profileManager.m_profileUploadPending);
+    }
+
+    void supersededFailureDoesNotReArmPendingUpload() {
+        // The counterpart: the newer upload owns the outcome, so re-arming here
+        // would queue a redundant third upload on the next phase change.
+        McpTestFixture f;
+        loadDFlowProfile(f);
+        f.profileManager.uploadCurrentProfile();
+
+        emit f.device.profileUploaded(false,
+            QStringLiteral("superseded by a new upload"));
+
+        QVERIFY(!f.profileManager.m_profileUploadPending);
+    }
+
+    void queueClearedUploadRetriesOnceFlowEnds() {
+        // The field sequence from the 2026-09-10 Android log, end to end:
+        // deferred upload on a sleeping machine, wake to Idle, upload starts,
+        // an auto-flush clears the queue mid-batch. Before the ReArm
+        // classification the pending flag was dropped here and the machine kept
+        // whatever it held until the user next touched a profile.
+        McpTestFixture f;
+        loadDFlowProfile(f);
+        f.transport.writes.clear();
+
+        f.machineState.m_phase = MachineState::Phase::Sleep;
+        f.profileManager.uploadCurrentProfileOnConnect();
+        QVERIFY(f.writesTo(DE1::Characteristic::HEADER_WRITE).isEmpty());
+
+        f.machineState.m_phase = MachineState::Phase::Idle;
+        emit f.machineState.phaseChanged();
+        QCOMPARE(f.writesTo(DE1::Characteristic::HEADER_WRITE).size(), 1);
+
+        emit f.device.profileUploaded(false,
+            QStringLiteral("command queue cleared during upload"));
+
+        // Flow is running — nothing may be written at the machine now.
+        f.transport.writes.clear();
+        f.machineState.m_phase = MachineState::Phase::Pouring;
+        emit f.machineState.phaseChanged();
+        QVERIFY(f.writesTo(DE1::Characteristic::HEADER_WRITE).isEmpty());
+
+        // Flow ended: the profile must go back up before the next shot.
+        f.machineState.m_phase = MachineState::Phase::Idle;
+        emit f.machineState.phaseChanged();
+        QCOMPARE(f.writesTo(DE1::Characteristic::HEADER_WRITE).size(), 1);
+        QVERIFY(!f.writesTo(DE1::Characteristic::FRAME_WRITE).isEmpty());
+    }
+
     void transportDisconnectResetsRetryState() {
         McpTestFixture f;
         loadDFlowProfile(f);
@@ -4640,7 +4702,7 @@ private slots:
         // active-phase gap.
         McpTestFixture f;
         loadDFlowProfile(f);
-        ScopedWarningFilter filter("BLOCKED during active phase|^  #");
+        ScopedWarningFilter filter("BLOCKED during active phase|^\\[Profiles\\]\\[profilemanager\\]   #");
 
         // Prime: one retryable failure arms the retry timer and sets
         // attempts=1.

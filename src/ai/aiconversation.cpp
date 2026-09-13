@@ -1,3 +1,4 @@
+#include "core/diagnosticlogging.h"
 #include "aiconversation.h"
 #include "core/appsettings.h"
 #include "aimanager.h"
@@ -59,13 +60,13 @@ QString AIConversation::providerName() const
 void AIConversation::ask(const QString& systemPrompt, const QString& userMessage)
 {
     if (!m_aiManager) {
-        qWarning() << "AIConversation::ask called without AIManager";
+        AIOperationLog::begin("conversation", false, 0, m_pendingShotId)->finish("rejected", "managerUnavailable");
         m_errorMessage = tr_("ai.error.notAvailable", "AI not available");
         emit errorOccurred(m_errorMessage);
         return;
     }
     if (m_busy) {
-        qDebug() << "AIConversation::ask ignored — already busy";
+        AIOperationLog::begin("conversation", false, 0, m_pendingShotId)->finish("rejected", "busy");
         return;
     }
 
@@ -90,17 +91,17 @@ void AIConversation::ask(const QString& systemPrompt, const QString& userMessage
 bool AIConversation::followUp(const QString& userMessage)
 {
     if (!m_aiManager) {
-        qWarning() << "AIConversation::followUp called without AIManager";
+        AIOperationLog::begin("conversation", false, 0, m_pendingShotId)->finish("rejected", "managerUnavailable");
         m_errorMessage = tr_("ai.error.notAvailable", "AI not available");
         emit errorOccurred(m_errorMessage);
         return false;
     }
     if (m_busy) {
-        qDebug() << "AIConversation::followUp ignored — already busy";
+        AIOperationLog::begin("conversation", false, 0, m_pendingShotId)->finish("rejected", "busy");
         return false;
     }
     if (m_systemPrompt.isEmpty()) {
-        qWarning() << "AIConversation::followUp called without prior ask()";
+        AIOperationLog::begin("conversation", false, 0, m_pendingShotId)->finish("rejected", "noPriorConversation");
         m_errorMessage = tr_("ai.error.startNewFirst", "Please start a new conversation first");
         emit errorOccurred(m_errorMessage);
         return false;
@@ -259,7 +260,7 @@ void AIConversation::clearHistory()
     emit historyChanged();
     emit canRetryChanged();
     emit savedConversationChanged();
-    qDebug() << "AIConversation: History cleared for key:" << m_storageKey;
+    DIAG_DEBUG(AI, "AIConversation") << "History cleared for key:" << m_storageKey;
 }
 
 void AIConversation::resetInMemory()
@@ -459,7 +460,7 @@ void AIConversation::appendAssistantTurnForKey(
         if (err.error == QJsonParseError::NoError && doc.isArray()) {
             messages = doc.array();
         } else {
-            qWarning() << "AIConversation::appendAssistantTurnForKey: existing messages "
+            DIAG_WARN(AI, "AIConversation") << "appendAssistantTurnForKey: existing messages "
                           "for key" << storageKey << "did not parse as JSON array — "
                           "appending to empty;" << err.errorString();
         }
@@ -680,7 +681,7 @@ AIConversation::ImportTally AIConversation::importConversationsStatic(
                           QJsonDocument(index).toJson(QJsonDocument::Compact));
     }
 
-    qDebug() << "AIConversation::importConversationsStatic:" << tally.conversationsImported
+    DIAG_DEBUG(AI, "AIConversation") << "importConversationsStatic:" << tally.conversationsImported
              << "conversation(s) imported," << skippedExisting
              << "already present," << malformed << "malformed," << tally.refusedLegacyKey
              << "keyed before equipment," << tally.refusedNeedShots
@@ -765,6 +766,8 @@ void AIConversation::dropTrailingFailedUserTurn()
 void AIConversation::sendRequest()
 {
     if (!m_aiManager || !m_aiManager->isConfigured()) {
+        AIOperationLog::begin(QStringLiteral("advisorConversation"), false, 0, m_pendingShotId)
+            ->finish(QStringLiteral("rejected"), QStringLiteral("notConfigured"));
         m_errorMessage = tr_("ai.error.notConfigured", "AI not configured");
         emit errorOccurred(m_errorMessage);
         return;
@@ -776,8 +779,10 @@ void AIConversation::sendRequest()
 
     trimHistory();
 
-    qDebug() << "AIConversation: Sending request with" << m_messages.size() << "messages";
-    m_aiManager->analyzeConversation(m_systemPrompt, m_messages, m_webSearchEnabled, m_toolsEnabled, m_voiceStreaming);
+    DIAG_DEBUG(AI, "AIConversation") << "Sending request with" << m_messages.size() << "messages";
+    // [barista-fork] union: fork's per-turn flags (webSearch/tools/streaming) + upstream's shotId correlation.
+    m_aiManager->analyzeConversation(m_systemPrompt, m_messages, m_webSearchEnabled, m_toolsEnabled,
+                                     m_voiceStreaming, m_pendingShotId);
 }
 
 void AIConversation::onAnalysisComplete(const QString& response)
@@ -821,7 +826,7 @@ void AIConversation::onAnalysisComplete(const QString& response)
     emit canRetryChanged();
     emit responseReceived(response);
 
-    qDebug() << "AIConversation: Response received, history now has" << m_messages.size() << "messages";
+    DIAG_DEBUG(AI, "AIConversation") << "Response received, history now has" << m_messages.size() << "messages";
 }
 
 void AIConversation::onInterimText(const QString& text)
@@ -851,7 +856,7 @@ void AIConversation::onAnalysisFailed(const QString& error)
     emit canRetryChanged();
     emit errorOccurred(error);
 
-    qDebug() << "AIConversation: Request failed:" << error;
+    // AIManager owns the safe terminal diagnostic; never repeat remote error prose here.
 }
 
 bool AIConversation::canRetry() const
@@ -864,7 +869,7 @@ bool AIConversation::canRetry() const
 void AIConversation::retry()
 {
     if (!canRetry()) {
-        qDebug() << "AIConversation::retry ignored — no pending failed turn (busy:" << m_busy
+        DIAG_DEBUG(AI, "AIConversation") << "retry ignored — no pending failed turn (busy:" << m_busy
                  << "messages:" << m_messages.size() << ")";
         return;
     }
@@ -1161,7 +1166,7 @@ void AIConversation::saveToStorage()
 {
     if (m_storageKey.isEmpty()) {
         if (!m_messages.isEmpty())
-            qWarning() << "AIConversation::saveToStorage: storage key is empty but conversation has" << m_messages.size() << "messages — data not saved";
+            DIAG_WARN(AI, "AIConversation") << "saveToStorage: storage key is empty but conversation has" << m_messages.size() << "messages — data not saved";
         return;
     }
 
@@ -1214,7 +1219,7 @@ void AIConversation::saveToStorage()
                         toWrite[i] = msg;
                     }
                 }
-                qDebug() << "AIConversation::saveToStorage: reconciled" << (onDisk.size() - expectedPriorSize)
+                DIAG_DEBUG(AI, "AIConversation") << "saveToStorage: reconciled" << (onDisk.size() - expectedPriorSize)
                           << "message(s) appended by another writer for key:" << m_storageKey;
             }
         }
@@ -1233,7 +1238,7 @@ void AIConversation::saveToStorage()
         m_messages = toWrite;
 
     emit savedConversationChanged();
-    qDebug() << "AIConversation: Saved conversation with" << m_messages.size() << "messages to key:" << m_storageKey;
+    DIAG_DEBUG(AI, "AIConversation") << "Saved conversation with" << m_messages.size() << "messages to key:" << m_storageKey;
 }
 
 void AIConversation::repairStaleTurnShotIds()
@@ -1264,7 +1269,7 @@ void AIConversation::repairStaleTurnShotIds()
         // calls back here when it can. Logged because the silent version of this
         // branch is the one that actually fires in production.
         if (!m_messages.isEmpty()) {
-            qDebug() << "AIConversation::repairStaleTurnShotIds: no shot storage yet for key"
+            DIAG_DEBUG(AI, "AIConversation") << "repairStaleTurnShotIds: no shot storage yet for key"
                      << m_storageKey << "- deferring until it is wired";
         }
         return;
@@ -1286,7 +1291,7 @@ void AIConversation::repairStaleTurnShotIds()
         // an unanswered question is the aggressive direction, not the
         // conservative one: one transient SQLITE_BUSY would strip every
         // advisor-to-shot link on the device, permanently, at the next save.
-        qWarning() << "AIConversation::repairStaleTurnShotIds: could not check turn shot"
+        DIAG_WARN(AI, "AIConversation") << "repairStaleTurnShotIds: could not check turn shot"
                    << "references for key" << m_storageKey << "- leaving them as they are";
         return;
     }
@@ -1304,7 +1309,7 @@ void AIConversation::repairStaleTurnShotIds()
 
     const int dropped = dropUnresolvableShotIds(m_messages, *live);
     if (dropped > 0) {
-        qDebug() << "AIConversation::repairStaleTurnShotIds: dropped" << dropped
+        DIAG_DEBUG(AI, "AIConversation") << "repairStaleTurnShotIds: dropped" << dropped
                  << "turn shot reference(s) that name no existing shot, for key"
                  << m_storageKey;
     } else {
@@ -1313,7 +1318,7 @@ void AIConversation::repairStaleTurnShotIds()
         // submitted log from the check never having run at all — which is the
         // state this method was added to fix, so silence is the wrong default
         // for exactly the reader trying to confirm it works.
-        qDebug() << "AIConversation::repairStaleTurnShotIds: all" << checked
+        DIAG_DEBUG(AI, "AIConversation") << "repairStaleTurnShotIds: all" << checked
                  << "distinct turn shot reference(s) resolve, for key" << m_storageKey;
     }
 }
@@ -1333,14 +1338,14 @@ void AIConversation::loadFromStorage()
         QJsonParseError parseError;
         QJsonDocument doc = QJsonDocument::fromJson(messagesJson, &parseError);
         if (parseError.error != QJsonParseError::NoError) {
-            qWarning() << "AIConversation::loadFromStorage: JSON parse error for key" << m_storageKey
+            DIAG_WARN(AI, "AIConversation") << "loadFromStorage: JSON parse error for key" << m_storageKey
                         << ":" << parseError.errorString();
             m_errorMessage = tr_("ai.error.loadHistoryFailed", "Could not load conversation history");
             emit errorOccurred(m_errorMessage);
         } else if (doc.isArray()) {
             m_messages = doc.array();
         } else {
-            qWarning() << "AIConversation::loadFromStorage: Expected JSON array but got"
+            DIAG_WARN(AI, "AIConversation") << "loadFromStorage: Expected JSON array but got"
                         << (doc.isObject() ? "object" : "other") << "for key" << m_storageKey;
         }
     }
@@ -1370,7 +1375,7 @@ void AIConversation::loadFromStorage()
     emit historyChanged();
     emit canRetryChanged();
     emit savedConversationChanged();
-    qDebug() << "AIConversation: Loaded conversation with" << m_messages.size() << "messages from key:" << m_storageKey;
+    DIAG_DEBUG(AI, "AIConversation") << "Loaded conversation with" << m_messages.size() << "messages from key:" << m_storageKey;
 }
 
 bool AIConversation::hasSavedConversation() const
@@ -1385,7 +1390,7 @@ bool AIConversation::hasSavedConversation() const
     QJsonParseError parseError;
     QJsonDocument doc = QJsonDocument::fromJson(messagesJson, &parseError);
     if (parseError.error != QJsonParseError::NoError) {
-        qWarning() << "AIConversation::hasSavedConversation: corrupted data for key" << m_storageKey;
+        DIAG_WARN(AI, "AIConversation") << "hasSavedConversation: corrupted data for key" << m_storageKey;
         return false;
     }
     return doc.isArray() && !doc.array().isEmpty();
@@ -1437,7 +1442,7 @@ void AIConversation::trimHistory()
                 // payload shape moved without this code following it.
                 if (content.trimmed().startsWith(QLatin1Char('{'))
                     && content.contains(QStringLiteral("\"shotLabel\""))) {
-                    qWarning() << "AIConversation::trimHistory: Shot message could not be summarized, payload may have changed shape";
+                    DIAG_WARN(AI, "AIConversation") << "trimHistory: Shot message could not be summarized, payload may have changed shape";
                 }
                 droppedFollowUps++;
             }
@@ -1479,7 +1484,7 @@ void AIConversation::trimHistory()
     m_messages = trimmed;
 
     if (removed > 0) {
-        qDebug() << "AIConversation: Trimmed history, removed" << removed << "messages,"
+        DIAG_DEBUG(AI, "AIConversation") << "Trimmed history, removed" << removed << "messages,"
                  << summaries.size() << "shots summarized," << m_messages.size() << "messages remaining";
     }
 }

@@ -1,3 +1,5 @@
+#include <utility>
+#include "core/diagnosticlogging.h"
 #include "aimanager.h"
 #include "core/appsettings.h"
 #include "core/beanbaselogging.h"
@@ -79,7 +81,7 @@ ShotProjection coerceShot(const QVariant& v)
     // That's a benign degrade, but log it so a future QML arg-shape regression
     // is debuggable instead of silently flagging every shot as a mistake.
     if (m.isEmpty())
-        qWarning() << "AIManager::coerceShot: empty/non-map shot arg (type"
+        DIAG_WARN(AI, "AIManager") << "coerceShot: empty/non-map shot arg (type"
                    << v.typeName() << ") — shot will read as a mistake";
     return ShotProjection::fromVariantMap(m);
 }
@@ -481,7 +483,32 @@ AIManager::AIManager(QNetworkAccessManager* networkManager, Settings* settings, 
     connect(m_settings->ai(), &SettingsAI::configurationChanged, this, &AIManager::onSettingsChanged);
 }
 
-AIManager::~AIManager() = default;
+AIManager::~AIManager()
+{
+    if (m_logOperation)
+        m_logOperation->finish(QStringLiteral("cancelled"), QStringLiteral("managerDestroyed"));
+}
+
+AIOperationLog::Ptr AIManager::requestDiagnostic(const QString& operationId, const QString& kind,
+                                                bool bag, qint64 shotId)
+{
+    const auto previous = AIOperationLog::find(operationId);
+    // A page fetch may hand off its unfinished context once. A second entry
+    // using an active/completed id is a separate request: its rejection must
+    // not terminate the original, and a completed id cannot record a new result.
+    if (previous && !previous->terminal && previous != m_logOperation)
+        return previous;
+    return AIOperationLog::begin(kind, bag, previous ? previous->bagId : 0,
+                                previous && previous->shotId ? previous->shotId : shotId);
+}
+
+void AIManager::dispatchDiagnostic(const AIOperationLog::Ptr& operation, AIProvider* provider,
+                                    const QString& stage)
+{
+    m_logOperation = operation;
+    operation->useProvider(selectedProvider(), provider->modelName(), stage);
+    provider->setDiagnosticOperation(operation);
+}
 
 void AIManager::createProviders()
 {
@@ -743,7 +770,7 @@ AIProvider* AIManager::currentProvider() const
     // "no provider configured", which names the real problem.
     AIProvider* provider = providerById(selectedProvider());
     if (!provider && !selectedProvider().isEmpty())
-        qWarning() << "AIManager: no provider for selected id" << selectedProvider();
+        DIAG_WARN(AI, "AIManager") << "no provider for selected id" << selectedProvider();
     return provider;
 }
 
@@ -822,7 +849,7 @@ std::optional<QJsonObject> AIManager::parseStructuredNext(const QString& assista
     QJsonParseError err{};
     const QJsonDocument doc = QJsonDocument::fromJson(inner.toUtf8(), &err);
     if (err.error != QJsonParseError::NoError) {
-        qWarning() << "AIManager::parseStructuredNext: structuredNext parse failed —" << err.errorString();
+        DIAG_WARN(AI, "AIManager") << "parseStructuredNext: structuredNext parse failed —" << err.errorString();
         return std::nullopt;
     }
     if (!doc.isObject()) return std::nullopt;
@@ -972,7 +999,7 @@ void AIManager::maybePersistRatingFromReply(const QString& userReply,
     if (!parsed->notes.isEmpty()) {
         metadata.insert(QStringLiteral("espressoNotes"), parsed->notes);
     }
-    qDebug() << "AIManager: conversational rating capture — writing"
+    DIAG_DEBUG(AI, "AIManager") << "conversational rating capture — writing"
              << parsed->score << "to shot" << shotId
              << "(notes" << (parsed->notes.isEmpty() ? "absent" : "present") << ")";
     // Same reason as the bean-metadata capture below: this is the user's own
@@ -1250,7 +1277,7 @@ void AIManager::maybePersistBeanCorrectionFromReply(const QString& userReply,
     if (parsed->roastDate)  metadata.insert(QStringLiteral("roastDate"),  *parsed->roastDate);
     if (metadata.isEmpty()) return;
 
-    qDebug() << "AIManager: conversational bean-metadata capture — writing"
+    DIAG_DEBUG(AI, "AIManager") << "conversational bean-metadata capture — writing"
              << metadata.keys() << "to shot" << shotId;
     // Tracked so the outcome is read. This write carries something the USER
     // just said; losing it silently is the defect this replaces.
@@ -1407,7 +1434,7 @@ void AIManager::setShotHistoryStorage(ShotHistoryStorage* storage)
             // prepare or exec failure — only one of those is "no such shot".
             // Field logs are read and acted on by users' own AI assistants, so a
             // confident wrong diagnosis costs more than a neutral one.
-            qWarning() << "AIManager: metadata write to shot" << shotId
+            DIAG_WARN(AI, "AIManager") << "metadata write to shot" << shotId
                        << "did not land, so what the user told the advisor was not saved."
                        << "Leading candidate is a conversation turn still naming a shot id"
                        << "from a database this device no longer has; a database that was"
@@ -1452,7 +1479,7 @@ void AIManager::requestRecentShotContext(const QVariant& shotData, qint64 contex
             // ai_advisor_invoke resolves, so both surfaces feed the one
             // assembler identical input.
             const ShotRecord record =
-                ShotHistoryStorage::loadShotRecordStatic(db, contextShotId);
+                ShotHistoryStorage::loadShotRecordStatic(db, contextShotId, nullptr, Q_FUNC_INFO);
             const ShotProjection ctxShot = ShotHistoryStorage::convertShotRecord(record);
             // The database is the only source of this shot now, and
             // loadShotRecordStatic returns a default record for BOTH a failed
@@ -1462,7 +1489,7 @@ void AIManager::requestRecentShotContext(const QVariant& shotData, qint64 contex
             // nobody is told why. Bail with a log instead; the caller's bare
             // "ready" still fires below.
             if (!ctxShot.isValid()) {
-                qWarning() << "AIManager::requestRecentShotContext: shot" << contextShotId
+                DIAG_WARN(AI, "AIManager") << "requestRecentShotContext: shot" << contextShotId
                            << "did not resolve — advisor context will be empty";
                 return;
             }
@@ -2248,9 +2275,13 @@ void AIManager::testConnection()
     provider->testConnection();
 }
 
-void AIManager::analyze(const QString& systemPrompt, const QString& userPrompt)
+void AIManager::analyze(const QString& systemPrompt, const QString& userPrompt, qint64 shotId,
+                        const QString& operationId)
 {
+    const auto operation = requestDiagnostic(operationId, QStringLiteral("advisor"), false, shotId);
+
     if (m_analyzing) {
+        operation->finish(QStringLiteral("rejected"), QStringLiteral("busy"));
         m_lastError = tr_("ai.error.analysisInProgress", "Analysis already in progress");
         emit errorOccurred(m_lastError);
         return;
@@ -2258,17 +2289,20 @@ void AIManager::analyze(const QString& systemPrompt, const QString& userPrompt)
 
     AIProvider* provider = currentProvider();
     if (!provider) {
+        operation->finish(QStringLiteral("rejected"), QStringLiteral("noProvider"));
         m_lastError = tr_("ai.error.noProviderConfigured", "No AI provider configured");
         emit errorOccurred(m_lastError);
         return;
     }
 
     if (!isConfigured()) {
+        operation->finish(QStringLiteral("rejected"), QStringLiteral("notConfigured"));
         m_lastError = tr_("ai.error.providerNotConfigured", "AI provider not configured");
         emit errorOccurred(m_lastError);
         return;
     }
 
+    dispatchDiagnostic(operation, provider, QStringLiteral("provider"));
     m_analyzing = true;
     m_isConversationRequest = false;
     m_isProductPageSearch = false;
@@ -2280,7 +2314,7 @@ void AIManager::analyze(const QString& systemPrompt, const QString& userPrompt)
     m_lastSystemPrompt = systemPrompt;
     m_lastUserPrompt = userPrompt;
 
-    logPrompt(selectedProvider(), systemPrompt, userPrompt);
+    logPrompt(m_logOperation ? m_logOperation->provider : selectedProvider(), systemPrompt, userPrompt);
     provider->analyze(systemPrompt, userPrompt);
 }
 
@@ -2354,14 +2388,18 @@ void AIManager::requestSessionSummary(const QString& userToken, const QString& c
 }
 
 void AIManager::extractCoffeeBagDetails(const QString& requestToken, const QString& pageText,
-                                        const QString& kind)
+                                        const QString& kind, const QString& operationId)
 {
+    const auto operation = requestDiagnostic(operationId, QStringLiteral("bagExtraction"), true);
+
     if (m_analyzing) {
+        operation->finish(QStringLiteral("rejected"), QStringLiteral("busy"));
         emit bagDetailsExtractionFailed(requestToken, QStringLiteral("busy"));
         return;
     }
     AIProvider* provider = currentProvider();
     if (!provider || !isConfigured()) {
+        operation->finish(QStringLiteral("rejected"), QStringLiteral("notConfigured"));
         emit bagDetailsExtractionFailed(requestToken, QStringLiteral("notConfigured"));
         return;
     }
@@ -2402,6 +2440,7 @@ void AIManager::extractCoffeeBagDetails(const QString& requestToken, const QStri
     const QString& systemPrompt =
         (kind == QLatin1String("tea")) ? kTeaPrompt : kCoffeePrompt;
 
+    dispatchDiagnostic(operation, provider, QStringLiteral("providerText"));
     m_analyzing = true;
     m_isConversationRequest = false;
     m_isBagExtractionRequest = true;
@@ -2412,7 +2451,7 @@ void AIManager::extractCoffeeBagDetails(const QString& requestToken, const QStri
     m_lastSystemPrompt = systemPrompt;
     m_lastUserPrompt = QStringLiteral("[Bag page text from %1, %2 chars]")
                            .arg(requestToken).arg(pageText.size());
-    logPrompt(selectedProvider(), systemPrompt, m_lastUserPrompt);
+    logPrompt(m_logOperation ? m_logOperation->provider : selectedProvider(), systemPrompt, m_lastUserPrompt);
     provider->analyze(systemPrompt, pageText);
 }
 
@@ -2423,23 +2462,28 @@ bool AIManager::supportsUrlExtraction() const
 }
 
 void AIManager::extractCoffeeBagDetailsFromUrl(const QString& requestToken, const QString& url,
-                                               const QString& kind)
+                                               const QString& kind, const QString& operationId)
 {
+    const auto operation = requestDiagnostic(operationId, QStringLiteral("bagExtraction"), true);
+
     // Stage-2 extraction (add-recipe-wizard-tea): the local page fetch got
     // nothing (JS-rendered shop), so the PROVIDER fetches the URL itself via
     // its server-side web-fetch tool. Same JSON contract as stage 1 plus one
     // extra key: imageUrl (the main product photo) — SPA pages have no
     // og:image for the normal photo pipeline to find.
     if (m_analyzing) {
+        operation->finish(QStringLiteral("rejected"), QStringLiteral("busy"));
         emit bagDetailsExtractionFailed(requestToken, QStringLiteral("busy"));
         return;
     }
     AIProvider* provider = currentProvider();
     if (!provider || !isConfigured()) {
+        operation->finish(QStringLiteral("rejected"), QStringLiteral("notConfigured"));
         emit bagDetailsExtractionFailed(requestToken, QStringLiteral("notConfigured"));
         return;
     }
     if (!provider->supportsUrlAnalysis()) {
+        operation->finish(QStringLiteral("rejected"), QStringLiteral("urlFetchUnsupported"));
         emit bagDetailsExtractionFailed(requestToken, QStringLiteral("urlFetchUnsupported"));
         return;
     }
@@ -2480,6 +2524,7 @@ void AIManager::extractCoffeeBagDetailsFromUrl(const QString& requestToken, cons
     const QString userPrompt = QStringLiteral(
         "Fetch this product page and extract the details: %1").arg(url);
 
+    dispatchDiagnostic(operation, provider, QStringLiteral("providerUrl"));
     m_analyzing = true;
     m_isConversationRequest = false;
     m_isBagExtractionRequest = true;
@@ -2489,7 +2534,7 @@ void AIManager::extractCoffeeBagDetailsFromUrl(const QString& requestToken, cons
 
     m_lastSystemPrompt = systemPrompt;
     m_lastUserPrompt = userPrompt;
-    logPrompt(selectedProvider(), systemPrompt, userPrompt);
+    logPrompt(m_logOperation ? m_logOperation->provider : selectedProvider(), systemPrompt, userPrompt);
     provider->analyzeUrl(systemPrompt, userPrompt);
 }
 
@@ -2504,32 +2549,37 @@ void AIManager::logProductPageSearchDeclined(const QString& reason) const
     BEANBASE_INFO_STDERR("FindPage", QStringLiteral("Automatic search declined - %1").arg(reason));
 }
 
-void AIManager::findProductPage(const QString& requestToken, const QString& roaster,
-                                const QString& coffee, const QString& kind)
+QString AIManager::findProductPage(const QString& requestToken, const QString& roaster,
+                                const QString& coffee, const QString& kind, qint64 bagId)
 {
+    auto operation = AIOperationLog::begin(QStringLiteral("productPageSearch"), true, bagId);
+
     // The last rung of the photo/details ladder: the bag has no usable URL by
     // any deterministic route, so the provider is asked to find one with its
     // own web tool. The result is a SUGGESTION — the caller confirms it before
     // it is stored, because a model's guess written into `link` would be read
     // by every downstream consumer as fact.
     if (m_analyzing) {
+        operation->finish(QStringLiteral("rejected"), QStringLiteral("busy"));
         emit productPageSearchFailed(requestToken, QStringLiteral("busy"));
-        return;
+        return operation->id;
     }
     AIProvider* provider = currentProvider();
     if (!provider || !isConfigured()) {
+        operation->finish(QStringLiteral("rejected"), QStringLiteral("notConfigured"));
         // No substitution, ever: a user with one provider selected must not be
         // billed on another because this one is unconfigured.
         emit productPageSearchFailed(requestToken, QStringLiteral("notConfigured"));
-        return;
+        return operation->id;
     }
     // SEARCH, not fetch. Only OpenAI's tool does both; Anthropic's web_fetch
     // and Gemini's url_context can only open a URL the prompt already names,
     // so routing this through analyzeUrl left two of the three providers
     // answering from memory.
     if (!provider->supportsWebSearch()) {
+        operation->finish(QStringLiteral("rejected"), QStringLiteral("webSearchUnsupported"));
         emit productPageSearchFailed(requestToken, QStringLiteral("webSearchUnsupported"));
-        return;
+        return operation->id;
     }
 
     const QString what = (kind == QLatin1String("tea"))
@@ -2544,6 +2594,7 @@ void AIManager::findProductPage(const QString& requestToken, const QString& roas
         "no commentary.").arg(what);
     const QString userPrompt = QStringLiteral("Vendor: %1\nProduct: %2").arg(roaster, coffee);
 
+    dispatchDiagnostic(operation, provider, QStringLiteral("providerSearch"));
     m_analyzing = true;
     m_isConversationRequest = false;
     m_isBagExtractionRequest = false;
@@ -2553,8 +2604,15 @@ void AIManager::findProductPage(const QString& requestToken, const QString& roas
 
     m_lastSystemPrompt = systemPrompt;
     m_lastUserPrompt = userPrompt;
-    logPrompt(selectedProvider(), systemPrompt, userPrompt);
+    logPrompt(m_logOperation ? m_logOperation->provider : selectedProvider(), systemPrompt, userPrompt);
     provider->searchWeb(systemPrompt, userPrompt);
+    return operation->id;
+}
+
+void AIManager::abandonDiagnosticOperation(const QString& id)
+{
+    if (const auto operation = AIOperationLog::find(id))
+        operation->finish(QStringLiteral("superseded"), QStringLiteral("consumerStoppedWaiting"));
 }
 
 // static
@@ -2625,7 +2683,7 @@ QVariantMap AIManager::parseBagExtraction(const QString& response, bool* ok)
             }
             value = parts.join(QStringLiteral(", "));
         } else if (raw.isObject()) {
-            qWarning() << "AIManager: bag extraction returned an object for" << key << "- skipped";
+            DIAG_WARN(BEANBASE, "AIManager") << "bag extraction returned an object for" << key << "- skipped";
         } else {
             value = raw.toVariant().toString().trimmed();
         }
@@ -2644,26 +2702,32 @@ QVariantMap AIManager::parseBagExtraction(const QString& response, bool* ok)
 }
 
 void AIManager::analyzeConversation(const QString& systemPrompt, const QJsonArray& messages,
-                                    bool webSearch, bool clientTools, bool streaming)
+                                    bool webSearch, bool clientTools, bool streaming, qint64 shotId)
 {
+    auto operation = AIOperationLog::begin(QStringLiteral("advisorConversation"), false, 0, shotId);
+
     if (m_analyzing) {
+        operation->finish(QStringLiteral("rejected"), QStringLiteral("busy"));
         emit conversationErrorOccurred(tr_("ai.error.analysisInProgress", "Analysis already in progress"));
         return;
     }
 
     AIProvider* provider = currentProvider();
     if (!provider) {
+        operation->finish(QStringLiteral("rejected"), QStringLiteral("noProvider"));
         m_lastError = tr_("ai.error.noProviderConfigured", "No AI provider configured");
         emit conversationErrorOccurred(m_lastError);
         return;
     }
 
     if (!isConfigured()) {
+        operation->finish(QStringLiteral("rejected"), QStringLiteral("notConfigured"));
         m_lastError = tr_("ai.error.providerNotConfigured", "AI provider not configured");
         emit conversationErrorOccurred(m_lastError);
         return;
     }
 
+    dispatchDiagnostic(operation, provider, QStringLiteral("provider"));
     m_analyzing = true;
     m_isConversationRequest = true;
     m_isProductPageSearch = false;
@@ -2689,7 +2753,9 @@ void AIManager::analyzeConversation(const QString& systemPrompt, const QJsonArra
     m_lastSystemPrompt = systemPrompt;
     m_lastUserPrompt = QString("[Conversation with %1 messages]").arg(apiMessages.size());
 
-    logPrompt(selectedProvider(), systemPrompt, m_lastUserPrompt);
+    // [barista-fork] logPrompt uses the diagnostic operation's resolved provider when one is dispatched
+    // (upstream diagnostics-correlation), falling back to selectedProvider() otherwise.
+    logPrompt(m_logOperation ? m_logOperation->provider : selectedProvider(), systemPrompt, m_lastUserPrompt);
     // [barista-fork] Interactive conversation turns get a ~30s per-request timeout (vs the 60s deep-analysis
     // default) so a stalled request fails+recovers fast instead of a long freeze. transferTimeout is per-request
     // inactivity, so each tool-round leg gets its own 30s — a healthy leg completes in seconds.
@@ -2733,12 +2799,40 @@ void AIManager::refreshOllamaModels()
 
 void AIManager::onAnalysisComplete(const QString& response)
 {
+    const auto operation = std::exchange(m_logOperation, {});
+    bool bagParsed = false;
+    const QVariantMap bagFields = m_isBagExtractionRequest
+        ? parseBagExtraction(response, &bagParsed) : QVariantMap();
+    const QString foundUrl = m_isProductPageSearch ? parseProductPageUrl(response) : QString();
+    if (operation) {
+        operation->stage = QStringLiteral("interpretation");
+        if (m_isBagExtractionRequest) {
+            operation->finish(bagParsed ? (bagFields.isEmpty() ? QStringLiteral("empty") : QStringLiteral("success"))
+                                        : QStringLiteral("failed"),
+                              bagParsed ? QStringLiteral("extractionParsed") : QStringLiteral("invalidExtractionOutput"),
+                              bagFields.size());
+        } else if (m_isProductPageSearch) {
+            const auto start = response.indexOf(QLatin1Char('{'));
+            const auto end = response.lastIndexOf(QLatin1Char('}'));
+            const auto doc = start >= 0 && end > start
+                ? QJsonDocument::fromJson(response.mid(start, end - start + 1).toUtf8()) : QJsonDocument();
+            const bool empty = start >= 0 && end > start && doc.isObject() && doc.object().isEmpty();
+            operation->finish(!foundUrl.isEmpty() ? QStringLiteral("success")
+                              : empty ? QStringLiteral("empty") : QStringLiteral("failed"),
+                              !foundUrl.isEmpty() ? QStringLiteral("productPageFound")
+                              : empty ? QStringLiteral("noProductPage") : QStringLiteral("invalidSearchOutput"),
+                              foundUrl.isEmpty() ? 0 : 1);
+        } else {
+            operation->finish(response.trimmed().isEmpty() ? QStringLiteral("failed") : QStringLiteral("success"),
+                              response.trimmed().isEmpty() ? QStringLiteral("emptyAdvice") : QStringLiteral("adviceReady"));
+        }
+    }
     m_analyzing = false;
     m_lastRecommendation = response;
     m_lastError.clear();
 
-    // Log the successful response
-    logResponse(selectedProvider(), response, true);
+    // File receipt records provider delivery; the main-log verdict above records interpretation.
+    logResponse(operation ? operation->provider : selectedProvider(), response, true, operation);
 
     emit analyzingChanged();
 
@@ -2747,7 +2841,7 @@ void AIManager::onAnalysisComplete(const QString& response)
         m_isProductPageSearch = false;
         const QString token = m_productPageToken;
         m_productPageToken.clear();
-        const QString url = parseProductPageUrl(response);
+        const QString url = foundUrl;
         if (url.isEmpty())
             emit productPageSearchFailed(token, QStringLiteral("notFound"));
         else
@@ -2766,10 +2860,8 @@ void AIManager::onAnalysisComplete(const QString& response)
         m_isBagExtractionRequest = false;
         const QString token = m_bagExtractionToken;
         m_bagExtractionToken.clear();
-        bool parsed = false;
-        const QVariantMap fields = parseBagExtraction(response, &parsed);
-        if (parsed)
-            emit bagDetailsExtracted(token, fields);
+        if (bagParsed)
+            emit bagDetailsExtracted(token, bagFields);
         else
             emit bagDetailsExtractionFailed(token, QStringLiteral("unreadable"));
     } else if (m_isConversationRequest) {
@@ -2806,11 +2898,14 @@ void AIManager::onStreamEnd()
 
 void AIManager::onAnalysisFailed(const QString& error)
 {
+    const auto operation = std::exchange(m_logOperation, {});
+    if (operation)
+        operation->finish(QStringLiteral("failed"), QStringLiteral("providerFailure"));
     m_analyzing = false;
     m_lastError = error;
 
     // Log the failed response
-    logResponse(selectedProvider(), error, false);
+    logResponse(operation ? operation->provider : selectedProvider(), error, false, operation);
 
     emit analyzingChanged();
 
@@ -2962,20 +3057,20 @@ void AIManager::loadConversationIndex()
         QJsonParseError parseError;
         QJsonDocument doc = QJsonDocument::fromJson(indexJson, &parseError);
         if (parseError.error != QJsonParseError::NoError) {
-            qWarning() << "AIManager::loadConversationIndex: JSON parse error:" << parseError.errorString();
+            DIAG_WARN(AI, "AIManager") << "loadConversationIndex: JSON parse error:" << parseError.errorString();
         } else if (doc.isArray()) {
             QJsonArray arr = doc.array();
             for (const QJsonValue& val : arr) {
                 ConversationEntry entry = ConversationEntry::fromJson(val.toObject());
                 if (entry.key.isEmpty()) {
-                    qWarning() << "AIManager::loadConversationIndex: Skipping entry with empty key";
+                    DIAG_WARN(AI, "AIManager") << "loadConversationIndex: Skipping entry with empty key";
                     continue;
                 }
                 m_conversationIndex.append(entry);
             }
         }
     }
-    qDebug() << "AIManager: Loaded conversation index with" << m_conversationIndex.size() << "entries";
+    DIAG_DEBUG(AI, "AIManager") << "Loaded conversation index with" << m_conversationIndex.size() << "entries";
 }
 
 void AIManager::saveConversationIndex()
@@ -3020,7 +3115,7 @@ void AIManager::evictOldestConversation()
     settings.remove(prefix + "messages");
     settings.remove(prefix + "timestamp");
 
-    qDebug() << "AIManager: Evicted oldest conversation:" << oldest.beanBrand << oldest.beanType << oldest.profileName;
+    DIAG_DEBUG(AI, "AIManager") << "Evicted oldest conversation:" << oldest.beanBrand << oldest.beanType << oldest.profileName;
     saveConversationIndex();
 }
 
@@ -3036,7 +3131,7 @@ void AIManager::clearAllConversationsOnce(const QString& migrationId)
     settings.endGroup();
 
     settings.setValue(markerKey, true);
-    qDebug() << "AIManager: cleared all conversations for migration" << migrationId;
+    DIAG_DEBUG(AI, "AIManager") << "cleared all conversations for migration" << migrationId;
 }
 
 void AIManager::migrateFromLegacyConversation()
@@ -3052,7 +3147,7 @@ void AIManager::migrateFromLegacyConversation()
     QJsonDocument doc = QJsonDocument::fromJson(legacyMessages);
     if (!doc.isArray() || doc.array().isEmpty()) return;
 
-    qDebug() << "AIManager: Migrating legacy conversation to keyed storage";
+    DIAG_DEBUG(AI, "AIManager") << "Migrating legacy conversation to keyed storage";
 
     // Use a fixed key for the legacy conversation
     QString legacyKey = "_legacy";
@@ -3080,7 +3175,7 @@ void AIManager::migrateFromLegacyConversation()
     // settings.remove("ai/conversation/messages");
     // settings.remove("ai/conversation/timestamp");
 
-    qDebug() << "AIManager: Legacy conversation migrated to key:" << legacyKey;
+    DIAG_DEBUG(AI, "AIManager") << "Legacy conversation migrated to key:" << legacyKey;
 }
 
 QString AIManager::switchConversation(const QVariant& shotData)
@@ -3096,7 +3191,7 @@ QString AIManager::switchConversation(const QVariant& shotData)
 
     // Refuse if busy
     if (m_conversation->isBusy()) {
-        qWarning() << "AIManager: Cannot switch conversation while busy";
+        DIAG_WARN(AI, "AIManager") << "Cannot switch conversation while busy";
         return m_conversation->storageKey();
     }
 
@@ -3150,7 +3245,7 @@ QString AIManager::switchConversation(const QVariant& shotData)
     }
 
     emit m_conversation->savedConversationChanged();
-    qDebug() << "AIManager: Switched to conversation key:" << key << "(" << entry.label() << ")";
+    DIAG_DEBUG(AI, "AIManager") << "Switched to conversation key:" << key << "(" << entry.label() << ")";
     return key;
 }
 
@@ -3166,7 +3261,7 @@ void AIManager::loadMostRecentConversation()
     m_conversation->setStorageKey(entry.key);
     m_conversation->setContextLabel(entry.label());
     m_conversation->loadFromStorage();
-    qDebug() << "AIManager: Loaded most recent conversation:" << entry.key
+    DIAG_DEBUG(AI, "AIManager") << "Loaded most recent conversation:" << entry.key
              << "(" << entry.label() << ")";
 }
 
@@ -3219,6 +3314,7 @@ QString AIManager::logPath() const
 
 void AIManager::logPrompt(const QString& provider, const QString& systemPrompt, const QString& userPrompt)
 {
+    const auto operation = m_logOperation;
     // Store for pairing with response
     m_lastSystemPrompt = systemPrompt;
     m_lastUserPrompt = userPrompt;
@@ -3239,9 +3335,8 @@ void AIManager::logPrompt(const QString& provider, const QString& systemPrompt, 
         out << "\n=== USER PROMPT ===\n\n";
         out << userPrompt << "\n";
         file.close();
-        qDebug() << "AI: Logged prompt to" << promptFile;
     } else {
-        qWarning() << "AI: Failed to write prompt log:" << file.errorString();
+        DECENZA_SUBSYS_VALUE_STREAM(operation ? operation->owner() : QStringLiteral(DECENZA_LOG_MARKER_AI), "Files", qWarning) << (operation ? operation->fields() : QString()) << "Failed to write prompt log:" << file.errorString();
     }
 
     // Also append to conversation history
@@ -3256,11 +3351,12 @@ void AIManager::logPrompt(const QString& provider, const QString& systemPrompt, 
         out << userPrompt << "\n";
         history.close();
     } else {
-        qWarning() << "AI: Failed to append to conversation history:" << history.errorString();
+        DECENZA_SUBSYS_VALUE_STREAM(operation ? operation->owner() : QStringLiteral(DECENZA_LOG_MARKER_AI), "Files", qWarning) << (operation ? operation->fields() : QString()) << "Failed to append to conversation history:" << history.errorString();
     }
 }
 
-void AIManager::logResponse(const QString& provider, const QString& response, bool success)
+void AIManager::logResponse(const QString& provider, const QString& response, bool success,
+                            const AIOperationLog::Ptr& operation)
 {
     QString path = logPath();
     QString timestamp = QDateTime::currentDateTime().toString("yyyy-MM-dd_HH-mm-ss");
@@ -3277,9 +3373,8 @@ void AIManager::logResponse(const QString& provider, const QString& response, bo
         out << "\n=== RESPONSE ===\n\n";
         out << response << "\n";
         file.close();
-        qDebug() << "AI: Logged response to" << responseFile;
     } else {
-        qWarning() << "AI: Failed to write response log:" << file.errorString();
+        DECENZA_SUBSYS_VALUE_STREAM(operation ? operation->owner() : QStringLiteral(DECENZA_LOG_MARKER_AI), "Files", qWarning) << (operation ? operation->fields() : QString()) << "Failed to write response log:" << file.errorString();
     }
 
     // Write complete Q&A file (prompt + response together)
@@ -3304,9 +3399,8 @@ void AIManager::logResponse(const QString& provider, const QString& response, bo
         out << QString("=").repeated(60) << "\n\n";
         out << response << "\n";
         qa.close();
-        qDebug() << "AI: Logged Q&A to" << qaFile;
     } else {
-        qWarning() << "AI: Failed to write Q&A log:" << qa.errorString();
+        DECENZA_SUBSYS_VALUE_STREAM(operation ? operation->owner() : QStringLiteral(DECENZA_LOG_MARKER_AI), "Files", qWarning) << (operation ? operation->fields() : QString()) << "Failed to write Q&A log:" << qa.errorString();
     }
 
     // Also append to conversation history
@@ -3320,6 +3414,6 @@ void AIManager::logResponse(const QString& provider, const QString& response, bo
         out << response << "\n";
         history.close();
     } else {
-        qWarning() << "AI: Failed to append to conversation history:" << history.errorString();
+        DECENZA_SUBSYS_VALUE_STREAM(operation ? operation->owner() : QStringLiteral(DECENZA_LOG_MARKER_AI), "Files", qWarning) << (operation ? operation->fields() : QString()) << "Failed to append to conversation history:" << history.errorString();
     }
 }

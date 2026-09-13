@@ -1,4 +1,5 @@
 #pragma once
+#include "operationlog.h"
 
 #include <QObject>
 #include <QString>
@@ -370,7 +371,8 @@ public:
     Q_INVOKABLE void testConnection();
 
     // Generic analysis - sends system prompt and user prompt to current provider
-    Q_INVOKABLE void analyze(const QString& systemPrompt, const QString& userPrompt);
+    Q_INVOKABLE void analyze(const QString& systemPrompt, const QString& userPrompt, qint64 shotId = 0,
+                             const QString& operationId = {});
 
     // Extract structured coffee-bag details from a roaster product page's
     // plain text (add-bag-detail-editing "Get info"). Same provider plumbing
@@ -386,7 +388,8 @@ public:
     // plus structured brewing fields (brewTempC normalized to Celsius,
     // leafGramsPer100Ml normalized from per-cup wordings, steepTime).
     Q_INVOKABLE void extractCoffeeBagDetails(const QString& requestToken, const QString& pageText,
-                                             const QString& kind = QStringLiteral("coffee"));
+                                             const QString& kind = QStringLiteral("coffee"),
+                                             const QString& operationId = QString());
     // Stage-2 extraction fallback: the local page fetch got nothing (a
     // JS-rendered shop), so the provider fetches the URL itself via its
     // server-side web tool (Anthropic web_fetch, OpenAI Responses web_search,
@@ -396,7 +399,8 @@ public:
     // supportsUrlExtraction().
     Q_INVOKABLE bool supportsUrlExtraction() const;
     Q_INVOKABLE void extractCoffeeBagDetailsFromUrl(const QString& requestToken, const QString& url,
-                                                    const QString& kind = QStringLiteral("coffee"));
+                                                    const QString& kind = QStringLiteral("coffee"),
+                                                    const QString& operationId = QString());
     // [barista-fork] Live-coaching phrasebook: ONE bracketing AI call returning model-generated VARIED phrasings
     // per cue id + a pre-shot gameplan (the live coaches' no-canned-strings rule). Own token + signals — never
     // routed to the advisor/conversation. See CoachPhrasebook.
@@ -422,8 +426,10 @@ public:
     // its own web tool. Completes via productPageFound / -Failed. The result
     // is a suggestion the caller must have confirmed before storing — see the
     // bag-detail-editing spec.
-    Q_INVOKABLE void findProductPage(const QString& requestToken, const QString& roaster,
-                                     const QString& coffee, const QString& kind);
+    // Diagnostic abandonment only; never cancels or reschedules provider work.
+    Q_INVOKABLE void abandonDiagnosticOperation(const QString& id);
+    Q_INVOKABLE QString findProductPage(const QString& requestToken, const QString& roaster,
+                                     const QString& coffee, const QString& kind, qint64 bagId = 0);
     // Whether the SELECTED provider can search the web (Anthropic, OpenAI and
     // Gemini all can, each with its own tool). Distinct from
     // supportsUrlExtraction(), which is about fetching a URL already known.
@@ -442,8 +448,11 @@ public:
     // [barista-fork] `streaming` = the barista's voiceStreaming flag. The stream is gated OFF whenever web search
     // is on for the turn (a paused server-tool re-POST can't be rebuilt from the stream), so the effective
     // RequestOptions.streaming = streaming && !webSearch — see analyzeConversation.
+    // [barista-fork] `shotId` (upstream diagnostics-correlation): correlates this conversation's AIOperationLog
+    // with the shot the advisor was asked about; 0 = none. Trailing so the fork's bool call form is unaffected.
     void analyzeConversation(const QString& systemPrompt, const QJsonArray& messages,
-                             bool webSearch = false, bool clientTools = false, bool streaming = false);
+                             bool webSearch = false, bool clientTools = false, bool streaming = false,
+                             qint64 shotId = 0);
 
     // Extract the trailing fenced ```json block from an assistant message.
     // The shot-analysis system prompt asks the model to append a `nextShot`
@@ -610,9 +619,15 @@ private:
     AIProvider* currentProvider() const;
 
     // Logging
+    AIOperationLog::Ptr requestDiagnostic(const QString& operationId, const QString& kind,
+                                         bool bag, qint64 shotId = 0);
+    void dispatchDiagnostic(const AIOperationLog::Ptr& operation, AIProvider* provider,
+                            const QString& stage);
+    AIOperationLog::Ptr m_logOperation;
     QString logPath() const;
     void logPrompt(const QString& provider, const QString& systemPrompt, const QString& userPrompt);
-    void logResponse(const QString& provider, const QString& response, bool success);
+    void logResponse(const QString& provider, const QString& response, bool success,
+                     const AIOperationLog::Ptr& operation = {});
 
     Settings* m_settings = nullptr;
     QNetworkAccessManager* m_networkManager = nullptr;

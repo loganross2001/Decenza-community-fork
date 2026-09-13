@@ -1,3 +1,4 @@
+#include "core/diagnosticlogging.h"
 #include "settingsserializer.h"
 #include "appsettings.h"
 #include "settings.h"
@@ -577,7 +578,7 @@ bool SettingsSerializer::importFromJson(Settings* settings, const QJsonObject& j
                 // dead code and a restore that left the steam selection wrong
                 // still announced "Settings restored from backup".
                 importOk = false;
-                qWarning() << "SettingsSerializer: imported selectedPitcher" << sel
+                DIAG_WARN(STORAGE, "SettingsSerializer") << "imported selectedPitcher" << sel
                            << "out of range after import; leaving current selection";
             }
         }
@@ -687,7 +688,7 @@ bool SettingsSerializer::importFromJson(Settings* settings, const QJsonObject& j
 
         if (profile.contains("favorites")) {
             QJsonArray favorites = profile["favorites"].toArray();
-            qWarning() << "SettingsSerializer: importFromJson replacing" << settings->app()->favoriteProfiles().size()
+            DIAG_WARN(STORAGE, "SettingsSerializer") << "importFromJson replacing" << settings->app()->favoriteProfiles().size()
                        << "favorites with" << favorites.size() << "from import";
             // Remove existing favorites in reverse
             QVariantList existingFavs = settings->app()->favoriteProfiles();
@@ -808,7 +809,7 @@ bool SettingsSerializer::importFromJson(Settings* settings, const QJsonObject& j
                 // already wiped its colour, while a shot source survived untouched, so the
                 // restore diverged from the backup in a different way per device.
                 settings->theme()->clearBackground();
-                qInfo() << "[Settings] Backup used a background image; image paths are "
+                DIAG_INFO(STORAGE, "settingsserializer") << "Backup used a background image; image paths are "
                            "device-local and are not restored. Pick a background again.";
             }
         }
@@ -1002,7 +1003,7 @@ bool SettingsSerializer::importFromJson(Settings* settings, const QJsonObject& j
             int imported = 0, rejected = 0;
             for (auto it = perProfile.begin(); it != perProfile.end(); ++it) {
                 if (!it.value().isDouble()) {
-                    qWarning() << "Settings import: flow calibration for" << it.key()
+                    DIAG_WARN(STORAGE, "settingsserializer") << "Settings import: flow calibration for" << it.key()
                                << "is not a number (type:" << it.value().type() << "), skipping";
                     rejected++;
                     continue;
@@ -1013,7 +1014,7 @@ bool SettingsSerializer::importFromJson(Settings* settings, const QJsonObject& j
                     settings->calibration()->setProfileFlowCalibration(it.key(), val);
                     imported++;
                 } else {
-                    qWarning() << "Settings import: flow calibration out of bounds for"
+                    DIAG_WARN(STORAGE, "settingsserializer") << "Settings import: flow calibration out of bounds for"
                                << it.key() << ":" << val << "(expected ["
                                << SettingsCalibration::kProfileFlowCalMin << ","
                                << SettingsCalibration::kProfileFlowCalMax << "])";
@@ -1021,7 +1022,7 @@ bool SettingsSerializer::importFromJson(Settings* settings, const QJsonObject& j
                 }
             }
             if (rejected > 0) {
-                qWarning() << "Settings import: per-profile flow calibration -"
+                DIAG_WARN(STORAGE, "settingsserializer") << "Settings import: per-profile flow calibration -"
                            << imported << "imported," << rejected << "rejected";
             }
         }

@@ -4,7 +4,6 @@
 
 #include <QDateTime>
 #include "githubreleaseclient.h"
-#include "crashhandler.h"
 #include "settings.h"
 #include "settings_app.h"
 #include "translationmanager.h"
@@ -276,6 +275,7 @@ void UpdateChecker::onReleaseInfoReceived()
         m_errorMessage = tr_("update.error.checkFailed", "Failed to check for updates: %1").arg(m_currentReply->errorString());
         emit errorMessageChanged();
         APP_WARN_STREAM("Update") << m_errorMessage;
+        m_checkFailureLogged = true;
         m_currentReply->deleteLater();
         m_currentReply = nullptr;
         return;
@@ -294,6 +294,7 @@ void UpdateChecker::parseReleaseInfo(const QByteArray& data)
     if (!doc.isArray()) {
         m_errorMessage = tr_("update.error.invalidResponse", "Invalid response from GitHub");
         APP_WARN_STREAM("Update") << m_errorMessage << "- response:" << data.left(200);
+        m_checkFailureLogged = true;
         emit errorMessageChanged();
         return;
     }
@@ -316,11 +317,17 @@ void UpdateChecker::parseReleaseInfo(const QByteArray& data)
 
     if (!found) {
         m_errorMessage = tr_("update.error.noReleases", "No releases found");
+        APP_WARN_STREAM("Update") << "No eligible releases in the response";
+        m_checkFailureLogged = true;
         emit errorMessageChanged();
         return;
     }
 
     QString tagName = release["tag_name"].toString();
+    if (m_checkFailureLogged) {
+        APP_INFO_STREAM("Update") << "Update check recovered; received an eligible release";
+        m_checkFailureLogged = false;
+    }
     QString body = release["body"].toString();
     bool wasBeta = m_latestIsBeta;
     m_latestIsBeta = release["prerelease"].toBool();
@@ -1067,13 +1074,7 @@ bool UpdateChecker::installApk(const QString& apkPath)
     // Tear down our long-lived sockets (ShotServer listener, QNAM keepalive,
     // RelayClient WebSocket) before the JNI dispatch — see the signal's
     // declaration for the QSocketNotifier race we're avoiding (#865).
-    // Snapshot the fd table around the teardown so the next crash log
-    // tells us which fd ends up reaped (the speculative teardown is best-
-    // effort; if it doesn't fix #865 the diff between these two dumps is
-    // what'll narrow it down).
-    CrashHandler::logOpenFileDescriptors("UpdateChecker pre-teardown");
     emit aboutToDispatchInstall();
-    CrashHandler::logOpenFileDescriptors("UpdateChecker post-teardown");
 
     QJniObject javaPath = QJniObject::fromString(apkPath);
     jboolean ok = QJniObject::callStaticMethod<jboolean>(

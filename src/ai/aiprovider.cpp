@@ -1,3 +1,8 @@
+#include "core/diagnosticlogging.h"
+
+#define PROVIDER_DEBUG(tag) DECENZA_SUBSYS_VALUE_STREAM(diagnosticOwner(), tag, qDebug) << diagnosticFields()
+#define PROVIDER_INFO(tag) DECENZA_SUBSYS_VALUE_STREAM(diagnosticOwner(), tag, qInfo) << diagnosticFields()
+#define PROVIDER_WARN(tag) DECENZA_SUBSYS_VALUE_STREAM(diagnosticOwner(), tag, qWarning) << diagnosticFields()
 #include "aiprovider.h"
 #include "airequestshape.h"
 #include <QDateTime>
@@ -78,15 +83,12 @@ bool AIProvider::dispatchTruncatedOrEmpty(const QString& text, bool truncated,
 
 QString AIProvider::logSafeErrorBody(const QByteArray& body)
 {
-    // Prefer the machine-readable classification, which never carries request
-    // content. Fall back to a bounded prefix when the body isn't the shape we
-    // expect (an HTML error page from a proxy, say).
-    const QJsonObject error = QJsonDocument::fromJson(body).object()["error"].toObject();
-    const QString type = error["type"].toString();
-    const QString code = error["code"].toString();
-    if (!type.isEmpty() || !code.isEmpty())
-        return QStringLiteral("type=%1 code=%2").arg(type, code);
-    return QString::fromUtf8(body.left(LOG_BODY_LIMIT));
+    // Even error.type/code and HTML prefixes are remote text and may echo a
+    // prompt or credentials. Shape + byte count are sufficient beside HTTP and
+    // QNetworkReply's numeric status, captured on the operation itself.
+    return QStringLiteral("bodyFormat=%1 bodyBytes=%2 contentOmitted")
+        .arg(QJsonDocument::fromJson(body).isObject() ? QStringLiteral("json") : QStringLiteral("other"))
+        .arg(body.size());
 }
 
 QString AIProvider::friendlyNetworkError(QNetworkReply* reply) const
@@ -149,12 +151,16 @@ int AIProvider::computeRetryDelayMs(int retryCount, QNetworkReply* reply)
 
 bool AIProvider::tryScheduleRetry(QNetworkReply* reply)
 {
+    if (auto operation = m_logOperation.lock())
+        operation->network(QStringLiteral("provider"), reply->url().toString(),
+                           reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt(),
+                           int(reply->error()));
     if (!m_retryFn) return false;
     const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
     if (!isRetryableHttpStatus(status, m_retryCount)) return false;
     const int delay = computeRetryDelayMs(++m_retryCount, reply);
     const QByteArray body = reply->readAll();
-    qWarning() << name() << "HTTP" << status << "- retry" << m_retryCount
+    PROVIDER_DEBUG("Retry") << "HTTP" << status << "- retry" << m_retryCount
                << "in" << delay << "ms"
                << (body.isEmpty() ? QString() : QStringLiteral("- ") + logSafeErrorBody(body));
     // QTimer::singleShot is intentional: the server signalled a transient error and we must
@@ -163,7 +169,11 @@ bool AIProvider::tryScheduleRetry(QNetworkReply* reply)
     // new analyze() call arrives before this one fires.
     const int gen = m_reqGen;
     QTimer::singleShot(delay, this, [this, gen]() {
-        if (gen == m_reqGen) m_retryFn();
+        if (gen != m_reqGen) return;
+        // sendRequest replaces m_retryFn. Keep this callable and its captured
+        // request alive until the resend has finished reading that request.
+        const auto retry = m_retryFn;
+        retry();
     });
     return true;
 }
@@ -172,7 +182,7 @@ void AIProvider::analyzeConversation(const QString& systemPrompt, const QJsonArr
 {
     // Default fallback: flatten messages into a single string and call analyze()
     // This loses multi-turn context — providers should override for native support
-    qWarning() << "AIProvider::analyzeConversation: Using flatten fallback for provider"
+    PROVIDER_WARN("AIProvider") << "analyzeConversation: Using flatten fallback for provider"
                << name() << "- consider implementing native multi-turn support";
     QString flatPrompt;
     for (int i = 0; i < messages.size(); i++) {
@@ -294,7 +304,7 @@ void OpenAIProvider::setModel(const QString& modelId)
             return;
         }
     }
-    qWarning() << "OpenAIProvider::setModel ignoring unknown model id:" << modelId;
+    PROVIDER_WARN("OpenAIProvider") << "setModel ignoring unknown model id:" << modelId;
 }
 
 QString OpenAIProvider::shortModelName() const
@@ -446,12 +456,12 @@ void OpenAIProvider::onResponsesReply(QNetworkReply* reply)
             QString apiError = bodyDoc.object()["error"].toObject()["message"].toString();
             if (!apiError.isEmpty()) {
                 int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-                qWarning() << "OpenAI Responses API error" << status << "-" << apiError;
+                PROVIDER_DEBUG("aiprovider") << "OpenAI Responses API error" << status << "remoteErrorContentOmitted";
                 emit analysisFailed(tr_("ai.openai.error", "OpenAI error: %1").arg(apiError));
                 return;
             }
             // Bounded/classified, never the raw body — see logSafeErrorBody().
-            qWarning() << "AI request failed"
+            PROVIDER_DEBUG("aiprovider") << "AI request failed"
                        << reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt()
                        << "-" << logSafeErrorBody(body);
         }
@@ -501,9 +511,9 @@ void OpenAIProvider::onResponsesReply(QNetworkReply* reply)
     const QString incompleteReason = root["incomplete_details"].toObject()["reason"].toString();
     const bool truncated = status != QLatin1String("completed");
     if (text.isEmpty() || truncated) {
-        qWarning() << "OpenAI Responses: model" << m_model << "status" << status
-                   << "incomplete_reason" << incompleteReason
-                   << "part types" << partTypes << "text chars" << text.size();
+        PROVIDER_DEBUG("aiprovider") << "OpenAI Responses: model" << diagnosticModel() << "status" << diagnosticCode(status)
+                   << "incomplete_reason" << diagnosticCode(incompleteReason)
+                   << "part count" << partTypes.size() << "text chars" << text.size();
         // A refusal explains itself; surfacing it beats the generic message,
         // which is the failure #1691 took three days to place.
         if (text.isEmpty() && !refusal.isEmpty()) {
@@ -563,12 +573,12 @@ void OpenAIProvider::onAnalysisReply(QNetworkReply* reply)
             QString apiError = bodyDoc.object()["error"].toObject()["message"].toString();
             if (!apiError.isEmpty()) {
                 int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-                qWarning() << "OpenAI API error" << status << "-" << apiError;
+                PROVIDER_DEBUG("aiprovider") << "OpenAI API error" << status << "remoteErrorContentOmitted";
                 emit analysisFailed(tr_("ai.openai.error", "OpenAI error: %1").arg(apiError));
                 return;
             }
             // Bounded/classified, never the raw body — see logSafeErrorBody().
-            qWarning() << "AI request failed"
+            PROVIDER_DEBUG("aiprovider") << "AI request failed"
                        << reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt()
                        << "-" << logSafeErrorBody(body);
         }
@@ -600,7 +610,7 @@ void OpenAIProvider::onAnalysisReply(QNetworkReply* reply)
     const bool truncated = finishReason == QLatin1String("length")
                         || finishReason == QLatin1String("content_filter");
     if (content.isEmpty() || truncated) {
-        qWarning() << "OpenAI: model" << m_model << "finish_reason" << finishReason
+        PROVIDER_DEBUG("OpenAI") << "model" << diagnosticModel() << "finish_reason" << diagnosticCode(finishReason)
                    << "content chars" << content.size()
                    << "reasoning tokens"
                    << root["usage"].toObject()["completion_tokens_details"]
@@ -782,7 +792,7 @@ void AnthropicProvider::setModel(const QString& modelId)
             return;
         }
     }
-    qWarning() << "AnthropicProvider::setModel ignoring unknown model id:" << modelId;
+    PROVIDER_WARN("AnthropicProvider") << "setModel ignoring unknown model id:" << modelId;
 }
 
 QString AnthropicProvider::shortModelName() const
@@ -1213,12 +1223,12 @@ void AnthropicProvider::onAnalysisReply(QNetworkReply* reply)
             QString apiError = bodyDoc.object()["error"].toObject()["message"].toString();
             if (!apiError.isEmpty()) {
                 int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-                qWarning() << "Anthropic API error" << status << "-" << apiError;
+                PROVIDER_DEBUG("aiprovider") << "Anthropic API error" << status << "remoteErrorContentOmitted";
                 emit analysisFailed(tr_("ai.anthropic.error", "Anthropic error: %1").arg(apiError));
                 return;
             }
             // Bounded/classified, never the raw body — see logSafeErrorBody().
-            qWarning() << "AI request failed"
+            PROVIDER_DEBUG("aiprovider") << "AI request failed"
                        << reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt()
                        << "-" << logSafeErrorBody(body);
         }
@@ -1270,7 +1280,7 @@ void AnthropicProvider::finalizeConversationResponse(const QJsonObject& root)
             return;
         }
         // Upstream #1691: distinguish a truncated empty reply (max_tokens) from a genuinely empty one.
-        qWarning() << "Anthropic: model" << m_model << "no content blocks, stop_reason" << stopReason;
+        PROVIDER_DEBUG("Anthropic") << "model" << diagnosticModel() << "no content blocks, stop_reason" << diagnosticCode(stopReason);
         emit analysisFailed(stopReason == QLatin1String("max_tokens")
             ? truncatedResponseError()
             : tr_("ai.anthropic.noResponse", "Anthropic returned no response"));
@@ -1442,8 +1452,8 @@ void AnthropicProvider::finalizeConversationResponse(const QJsonObject& root)
         QStringList blockTypes;
         for (const QJsonValue& block : content)
             blockTypes << block.toObject()["type"].toString();
-        qWarning() << "Anthropic: model" << m_model << "stop_reason" << stopReason
-                   << "block types" << blockTypes << "text chars" << text.size()
+        PROVIDER_DEBUG("Anthropic") << "model" << diagnosticModel() << "stop_reason" << diagnosticCode(stopReason)
+                   << "block count" << blockTypes.size() << "text chars" << text.size()
                    << "output tokens" << root["usage"].toObject()["output_tokens"].toInt();
         if (dispatchTruncatedOrEmpty(text, unfinished,
                 tr_("ai.anthropic.emptyContent", "Anthropic returned empty response content")))
@@ -1705,7 +1715,7 @@ void GeminiProvider::setModel(const QString& modelId)
             return;
         }
     }
-    qWarning() << "GeminiProvider::setModel ignoring unknown model id:" << modelId;
+    PROVIDER_WARN("GeminiProvider") << "setModel ignoring unknown model id:" << modelId;
 }
 
 QString GeminiProvider::shortModelName() const
@@ -2013,7 +2023,7 @@ void GeminiProvider::analyzeConversation(const QString& systemPrompt, const QJso
         QJsonObject m = msg.toObject();
         QString role = m["role"].toString();
         if (role != "user" && role != "assistant") {
-            qWarning() << "GeminiProvider: Skipping message with unexpected role:" << role;
+            PROVIDER_WARN("GeminiProvider") << "Skipping message with unexpected role:" << role;
             continue;
         }
         QJsonObject content;
@@ -2069,12 +2079,12 @@ void GeminiProvider::onAnalysisReply(QNetworkReply* reply)
             QString apiError = bodyDoc.object()["error"].toObject()["message"].toString();
             if (!apiError.isEmpty()) {
                 int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-                qWarning() << "Gemini API error" << status << "-" << apiError;
+                PROVIDER_DEBUG("aiprovider") << "Gemini API error" << status << "remoteErrorContentOmitted";
                 emit analysisFailed(tr_("ai.gemini.error", "Gemini error: %1").arg(apiError));
                 return;
             }
             // Bounded/classified, never the raw body — see logSafeErrorBody().
-            qWarning() << "AI request failed"
+            PROVIDER_DEBUG("aiprovider") << "AI request failed"
                        << reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt()
                        << "-" << logSafeErrorBody(body);
         }
@@ -2092,7 +2102,7 @@ void GeminiProvider::onAnalysisReply(QNetworkReply* reply)
     }
 
     const QJsonObject usage = root["usageMetadata"].toObject();
-    qInfo() << "Gemini usage — prompt:" << usage["promptTokenCount"].toInt()
+    PROVIDER_DEBUG("aiprovider") << "Gemini usage — prompt:" << usage["promptTokenCount"].toInt()
             << "thoughts:" << usage["thoughtsTokenCount"].toInt()
             << "output:" << usage["candidatesTokenCount"].toInt()
             << "total:" << usage["totalTokenCount"].toInt();
@@ -2103,7 +2113,7 @@ void GeminiProvider::onAnalysisReply(QNetworkReply* reply)
         // candidates. That reason IS the explanation; discarding it left the
         // user with five generic words and the log with nothing.
         const QString blockReason = root["promptFeedback"].toObject()["blockReason"].toString();
-        qWarning() << "Gemini: model" << m_model << "no candidates, blockReason" << blockReason;
+        PROVIDER_DEBUG("Gemini") << "model" << diagnosticModel() << "no candidates, blockReason" << diagnosticCode(blockReason);
         emit analysisFailed(blockReason.isEmpty()
             ? tr_("ai.gemini.noResponse", "Gemini returned no response")
             : tr_("ai.gemini.blocked", "Gemini refused the request (%1).").arg(blockReason));
@@ -2212,8 +2222,9 @@ void GeminiProvider::onAnalysisReply(QNetworkReply* reply)
     }
     if (text.isEmpty() || truncated) {
         // thoughtsTokenCount is the field that names a thinking-ate-the-budget
-        // failure on sight (upstream #1691), so log it next to the reason.
-        qWarning() << "Gemini: model" << m_model << "finishReason" << finishReason
+        // failure on sight (upstream #1691), so log it next to the reason rather
+        // than only in the qInfo line above.
+        PROVIDER_DEBUG("Gemini") << "model" << diagnosticModel() << "finishReason" << diagnosticCode(finishReason)
                    << "parts" << parts.size() << "text chars" << text.size()
                    << "thought tokens" << usage["thoughtsTokenCount"].toInt()
                    << "output tokens" << usage["candidatesTokenCount"].toInt();
@@ -2420,12 +2431,12 @@ void OpenRouterProvider::onAnalysisReply(QNetworkReply* reply)
             QString apiError = bodyDoc.object()["error"].toObject()["message"].toString();
             if (!apiError.isEmpty()) {
                 int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-                qWarning() << "OpenRouter API error" << status << "-" << apiError;
+                PROVIDER_DEBUG("aiprovider") << "OpenRouter API error" << status << "remoteErrorContentOmitted";
                 emit analysisFailed(tr_("ai.openrouter.error", "OpenRouter error: %1").arg(apiError));
                 return;
             }
             // Bounded/classified, never the raw body — see logSafeErrorBody().
-            qWarning() << "AI request failed"
+            PROVIDER_DEBUG("aiprovider") << "AI request failed"
                        << reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt()
                        << "-" << logSafeErrorBody(body);
         }
@@ -2456,8 +2467,8 @@ void OpenRouterProvider::onAnalysisReply(QNetworkReply* reply)
     const QJsonObject choiceError = choice["error"].toObject();
     if (!choiceError.isEmpty()) {
         const QString message = choiceError["message"].toString();
-        qWarning() << "OpenRouter: model" << m_model << "upstream error"
-                   << choiceError["code"].toVariant() << "-" << message;
+        PROVIDER_DEBUG("OpenRouter") << "model" << diagnosticModel() << "upstream error"
+                   << "remoteErrorContentOmitted";
         emit analysisFailed(tr_("ai.openrouter.error", "OpenRouter error: %1")
             .arg(message.isEmpty() ? tr_("ai.error.unknown", "unknown error") : message));
         return;
@@ -2475,7 +2486,7 @@ void OpenRouterProvider::onAnalysisReply(QNetworkReply* reply)
                         || finishReason == QLatin1String("content_filter")
                         || finishReason == QLatin1String("error");
     if (content.isEmpty() || truncated) {
-        qWarning() << "OpenRouter: model" << m_model << "finish_reason" << finishReason
+        PROVIDER_DEBUG("OpenRouter") << "model" << diagnosticModel() << "finish_reason" << diagnosticCode(finishReason)
                    << "content chars" << content.size();
         const QString refusal = message["refusal"].toString();
         if (content.isEmpty() && !refusal.isEmpty()) {
@@ -2669,7 +2680,7 @@ void OllamaProvider::onAnalysisReply(QNetworkReply* reply)
     if (reply->error() != QNetworkReply::NoError) {
         QByteArray body = reply->readAll();
         if (!body.isEmpty())
-            qWarning() << "Ollama request failed"
+            PROVIDER_DEBUG("aiprovider") << "Ollama request failed"
                        << reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt()
                        << "-" << logSafeErrorBody(body);
         emit analysisFailed(friendlyNetworkError(reply));
@@ -2694,7 +2705,7 @@ void OllamaProvider::onAnalysisReply(QNetworkReply* reply)
         // and this fallback otherwise masks a legitimately-empty chat reply
         // (truncation, refusal, thinking-only) behind a shape probe.
         if (!response.isEmpty())
-            qWarning() << "OllamaProvider: /api/chat message.content was empty; "
+            PROVIDER_WARN("OllamaProvider") << "/api/chat message.content was empty; "
                           "fell back to the /api/generate response field";
     }
 
@@ -2712,7 +2723,7 @@ void OllamaProvider::onAnalysisReply(QNetworkReply* reply)
         // message.thinking with a possibly-empty message.content — literally
         // #1691's shape, on a local model. Say so rather than logging nothing,
         // which is what this branch did.
-        qWarning() << "Ollama: model" << m_model << "done_reason" << doneReason
+        PROVIDER_DEBUG("Ollama") << "model" << diagnosticModel() << "done_reason" << diagnosticCode(doneReason)
                    << "content chars" << response.size()
                    << "thinking chars" << message["thinking"].toString().size()
                    << "eval_count" << root["eval_count"].toInt();

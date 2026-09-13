@@ -67,6 +67,7 @@ class BLEManager : public QObject {
     Q_PROPERTY(QVariantList discoveredDevices READ discoveredDevices NOTIFY devicesChanged)
     Q_PROPERTY(QVariantList discoveredScales READ discoveredScales NOTIFY scalesChanged)
     Q_PROPERTY(bool scaleConnectionFailed READ scaleConnectionFailed NOTIFY scaleConnectionFailedChanged)
+    Q_PROPERTY(bool scaleConnecting READ scaleConnecting NOTIFY scaleConnectingChanged)
     Q_PROPERTY(QVariantList discoveredRefractometers READ discoveredRefractometers NOTIFY refractometersChanged)
     Q_PROPERTY(bool refractometerConnected READ isRefractometerConnected NOTIFY refractometerConnectedChanged)
     Q_PROPERTY(bool hasSavedDE1 READ hasSavedDE1 CONSTANT)
@@ -106,6 +107,7 @@ public:
     QVariantList discoveredDevices() const;
     QVariantList discoveredScales() const;
     bool scaleConnectionFailed() const { return m_scaleConnectionFailed; }
+    bool scaleConnecting() const { return m_scaleConnectionTimer->isActive(); }
     bool hasSavedScale() const { return !m_savedScaleAddress.isEmpty(); }
     // True when the saved primary is the debug simulator's synthetic entry
     // ("sim:..."), which main.cpp promotes to primary when no real scale has
@@ -624,87 +626,19 @@ private:
     // reports about this device is a problem — the failures all belong to the
     // driver, which has R2_WARN. Add one when a call site needs it, not before.
 
-    // A connect failure that REPEATS while nothing changes. Logs at its normal
-    // tier for the first few, then drops to DEBUG until the next successful
-    // connect.
-    //
-    // The failure is real every time, but the reconnect ladder retries forever,
-    // so at a flat WARN an absent scale produced 46 "connection timeout" and 24
-    // "unreachable" warnings in one 48 h capture — enough to train a reader to
-    // skim past the tier that is supposed to mean "look here". The first ones
-    // carry the diagnosis; the rest only carry "still absent", which the ladder
-    // lines already say.
-    //
-    // `tier` is the level the message would carry if it were not repeating, so
-    // the budget suppresses WITHOUT re-tiering: a WARN-only budget would have to
-    // promote any narrative routed through it, making the quiet lines loud.
-    //
-    // Accuracy note, because the first version of this comment justified `tier`
-    // with lines that do not use it: it cited the WiFi driver's "resolving again"
-    // and "dialing remembered address" as the INFO half of a failing cycle. Those
-    // are DEBUG (WIFI_LOG), were demoted in the same change that wrote this, and
-    // do not go through the sink at all. RepeatTier::Info is therefore reachable
-    // in source (main.cpp translates the sink's bool) but never produced at
-    // runtime — the sole sink call passes warn=true. The enum is kept because the
-    // no-re-tiering property is the right design and a second caller is cheap to
-    // add; it is NOT kept because something currently needs it. Wire a narrative
-    // line through the sink or delete the enum, but do not read this paragraph as
-    // evidence that the INFO path is exercised.
-    //
-    // `source` names who wrote the line, so a driver routing through this class's
-    // budget still reads as the driver. Without it the driver's suppressed lines
-    // would be stamped "BLEManager" and a reader would go looking in the wrong
-    // file.
-    // Public for the same reason scaleDebug/Info/Warn are: code outside this
-    // class emits lines belonging to this subsystem's failing cycle, and the
-    // budget only works if it sees ALL of them.
-    //
-    // That was the defect. The manager's three ladder lines were budgeted and
-    // DecentScaleWifi's three were not, so past the budget the manager fell
-    // silent while the driver kept warning every 60 s — a repeating fragment
-    // carrying neither the attempt number nor the outcome. Noisier than
-    // suppressing nothing and less useful than suppressing everything.
-    //
-    // ONE store, deliberately: a second counter in the driver would be a second
-    // policy, and resetRepeatFailureBudget() would not reach it, so a scale that
-    // reconnected would re-arm half its messages.
-    //
-    // Two overloads, and the split is the point: the defaults that are correct
-    // for this class are WRONG for everyone else, and a default cannot tell which
-    // caller it has. While `source` defaulted on the public signature,
-    // `scaleRepeatFailure(msg)` from any other file compiled cleanly and stamped
-    // the line "BLEManager" — sending a reader to the wrong file, which is
-    // verbatim the hazard logtags.h documents for a shared forwarder that
-    // hard-codes its own name. The default was safe only while this was private,
-    // and it stopped being private in the same change that kept it.
-    //
-    // So: the convenience form is private and means "this class wrote it"; every
-    // caller outside states both tier and source, because outside this class
-    // neither has a defensible default.
+    // Repeated failures use the common suppression utility. A new failure is
+    // immediate; recovery or a fresh user attempt flushes the previous episode.
 private:
     void scaleRepeatFailure(const QString& message);
 
 public:
     enum class RepeatTier { Info, Warn };
-    void scaleRepeatFailure(const QString& message,
-                            RepeatTier tier,
-                            const QString& source);
+    void scaleRepeatFailure(const QString& message, RepeatTier tier, const QString& source);
 private:
-    // The DE1 equivalent, sharing the budget map. Same shape, [DE1] marker.
     void de1RepeatFailure(const QString& message);
-    // Clears every message's warn budget. Call on a successful connect (either
-    // device) and on any fresh user-initiated attempt — see the definition for
-    // why the latter is not optional.
-    //
-    // Coarse on purpose: it clears both subsystems' budgets. Re-arming a warning
-    // that did not need re-arming costs one line; failing to re-arm one costs a
-    // silent failure, so the coarse direction is the safe one.
+    bool shouldReportRepeatFailure(const QString& owner, const QString& source, const QString& message);
     void resetRepeatFailureBudget();
-    // Keyed per MESSAGE, deliberately: a subsystem-wide counter suppressed a
-    // genuinely NEW failure arriving mid-run, because an unrelated repeat had
-    // already spent the budget.
-    QHash<QString, int> m_repeatFailureCounts;
-    static constexpr int kScaleFailuresAtWarn = 3;
+    LogCollapse m_repeatFailureLog{LogCollapse::kChangesOnly};
 
 public:
 
@@ -779,6 +713,7 @@ signals:
     void devicesChanged();
     void scalesChanged();
     void scaleConnectionFailedChanged();
+    void scaleConnectingChanged();
     void de1Discovered(const QBluetoothDeviceInfo& device);
     // For BLE entries `device` carries the real QBluetoothDeviceInfo. For
     // WiFi entries (type == "decent-wifi") `device` is default-constructed
@@ -866,6 +801,8 @@ private slots:
 
 private:
     bool isDE1Device(const QBluetoothDeviceInfo& device) const;
+    void startScaleConnectionTimer();
+    void stopScaleConnectionTimer();
     QString getScaleType(const QBluetoothDeviceInfo& device) const;
     void requestBluetoothPermission();
     void doStartScan();
@@ -1130,8 +1067,16 @@ private:
     // report "Not found" directly instead of starting a WiFi→BLE fallback scan —
     // the user asked for a specific WiFi address, so we don't silently switch
     // transports. Set when the attempt starts; cleared on connect success, on
-    // timeout (consumed), and reset when a non-manual reconnect begins.
+    // timeout (consumed), reset when a non-manual reconnect begins, and cleared
+    // when the saved scale is forgotten (clearSavedScale).
     bool m_manualWifiConnect = false;
+    // True while a manually-tapped BLE scale row (connectToScale) connect
+    // attempt is pending. Tells onScaleConnectionTimeout not to treat a timeout
+    // as the saved WiFi primary's own reconnect failing — the user explicitly
+    // picked this BLE row, possibly for a scale whose saved primary is a WiFi
+    // address, so a WiFi→BLE fallback here would be mislabeled. Cleared on the
+    // same four occasions as m_manualWifiConnect above.
+    bool m_manualBleConnect = false;
     // Debounces user-visible scan-error popups. Without this, repeated scan
     // attempts (refractometer auto-reconnect ticks, scale reconnect retries)
     // would re-fire the same error toast indefinitely. We pop a given error

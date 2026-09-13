@@ -20,7 +20,7 @@
 //     necessarily evenly — a transport may hand over several samples at
 //     once, which is what the de-jitter block in processWeight() exists for
 //   - configure(): called once at shot start with targets and learning data
-//   - setTargetWeight(): may update SAW target mid-shot (e.g. user +10g bump)
+//   - setTargetWeight(): may update SAW target mid-shot (the adjustment buttons)
 //   - setCurrentFrame(): called at ~5Hz from DE1 shot samples
 //
 // Output (via QueuedConnection back to main thread):
@@ -43,7 +43,7 @@ public slots:
                    QVector<FrameExitCondition> frameExitConditions,
                    QVector<double> learningDrips, QVector<double> learningFlows,
                    bool sawConverged, double sensorLagSeconds = 0.38);
-    // Live SAW target update (e.g. user pressed +10g mid-shot). Writes are serialized
+    // Live SAW target update (the mid-shot adjustment buttons). Writes are serialized
     // on the worker thread via QueuedConnection from main thread, so no extra locking.
     void setTargetWeight(double weight);
     // pressure/flow are the live firmware sensor readings from the same DE1
@@ -345,20 +345,8 @@ private:
     // 100 s static window produced 50 identical lines, and one submitted log
     // carried 567 of them.
     //
-    // Keyed on a CONSTANT, not on the text — the text carries the weight, so
-    // keying on it would file every value under its own run and none of them
-    // would ever close. With one key, a weight that moves is a changed line
-    // that emits at once carrying the previous value's tally, which is exactly
-    // the transition a reader is looking for.
-    //
-    // EPISODIC — a shot ends — so it is flushed in endShotCycle(), the
-    // cycle-exit chokepoint that runs even when flow never started, and in
-    // resetForRetare(), where a new tare ends the window the line describes.
-    //
-    // NOT in startExtraction(). That is where the old throttle was cleared and
-    // it is the wrong place for a flush: the span flush() reports is
-    // nowMs - lastEmitMs, so closing a run at the NEXT run's start dates the
-    // window to the next shot and prints it in that shot's narrative.
+    // One healthy constant-sample observation per shot/tare episode. Flush in
+    // endShotCycle() and resetForRetare() so counts cannot cross shots.
     LogCollapse m_constantSampleLog{LogCollapse::kChangesOnly};
     bool m_flowBecameValidLogged = false;  // Log once when flowShort transitions 0→valid
     bool m_untaredCupSignalled = false;   // Fire untaredCupDetected only once per extraction

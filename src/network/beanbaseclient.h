@@ -1,4 +1,5 @@
 #pragma once
+#include "ai/operationlog.h"
 
 #include <QObject>
 #include <QString>
@@ -130,11 +131,11 @@ public:
     // the original URL. Never called for a live URL — no URL reaches the
     // archive until the roaster has been asked first.
     //
-    // Silent on a miss for THIS entry point (the caller decides what a miss
-    // means: validateBagLink turns it into bagLinkDead; an already-dead bag
-    // has nothing left to say). Silent too when the archive itself fails —
-    // that must never be mistaken for "no capture", which would permanently
-    // stamp a bag dead over a blip.
+    // Silent unless it finds a capture: this entry point only ever UPGRADES a
+    // link. The bag is already marked dead by the 404 that sent it here, so a
+    // miss and an archive failure need not be told apart — which is just as
+    // well, since the availability API answers both with the same empty
+    // envelope.
     Q_INVOKABLE void lookupArchivedLink(const QString& canonicalId, const QString& productUrl);
 
     // --- Link state, for ordering Bean Base search results ---
@@ -228,7 +229,10 @@ public:
     // "Get info" AI extraction — the same reduction Visualizer's scraper
     // performs (drop script/style/svg/img, strip tags, squish). Follows
     // redirects; emits pageTextReady/pageTextFailed.
-    Q_INVOKABLE void fetchPageText(const QString& url);
+    Q_INVOKABLE QString fetchPageText(const QString& url, qint64 bagId = 0);
+    // Ends only the diagnostic narrative when the consumer stops waiting. It
+    // deliberately leaves the existing network/cancellation policy in charge.
+    Q_INVOKABLE void abandonPageOperation(const QString& operationId);
     // The HTML -> squished-plain-text reduction. Static + public for tests.
     static QString extractPageText(const QByteArray& html);
 
@@ -284,8 +288,8 @@ signals:
     // "Get info" page fetch (add-bag-detail-editing): the product page's
     // plain text (tags stripped, whitespace squished, length-capped), ready
     // for AI extraction. url is echoed back so stale results are discardable.
-    void pageTextReady(const QString& url, const QString& text);
-    void pageTextFailed(const QString& url, const QString& error);
+    void pageTextReady(const QString& url, const QString& text, const QString& operationId);
+    void pageTextFailed(const QString& url, const QString& error, const QString& operationId);
     // The image re-search recovered a product URL for a blob that lacked
     // `link` (linked before the url→link capture). BagCard backfills it into
     // the bag blob so the details popup can offer the reorder link.
@@ -319,10 +323,15 @@ private:
     void startBagImageResolve(const QString& canonicalId, const QString& roastName,
                               const QString& productUrl, bool force);
     void fetchProductPage(const QString& canonicalId, const QString& productUrl);
-    // Shared body of the two archive entry points. `done(snapshot, answered)`:
-    // a non-empty snapshot is a hit; empty with answered=true is a confirmed
-    // no-capture; empty with answered=false means the question was never
-    // answered (archive fault, or never asked) and carries no verdict.
+    // Shared body of the archive entry points. `done(snapshot, answered)`: a
+    // non-empty snapshot is a hit; empty with answered=true is the API's own
+    // "nothing here"; empty with answered=false means it never answered.
+    //
+    // `answered` is honest but nearly unusable for a verdict: archive.org
+    // returns the same empty `archived_snapshots` envelope for a URL it never
+    // archived and for one it cannot look up right now. Only the extraction
+    // log still reads it, to say which of the two it looked like. No caller
+    // decides a bag's fate on it — the link check's own 404 does that.
     void queryArchiveSnapshot(const QString& canonicalId, const QString& productUrl,
                               std::function<void(const QString&, bool)> done);
     // The availability request itself, with no guard of its own. Three callers
@@ -330,12 +339,14 @@ private:
     // per (bag, url), the link-state probe once per url, and the extraction
     // fallback not at all — a user who presses Get info twice asked twice.
     void fetchArchiveAvailability(const QString& productUrl,
-                                  std::function<void(const QString&, bool)> done);
+                                  std::function<void(const QString&, bool)> done,
+                                  const AIOperationLog::Ptr& operation = {});
     // The page-text GET itself. `reportUrl` is what the signals echo, so the
     // caller matches on the URL it asked for however the fetch was redirected
     // through the archive. `archiveFallback` is false on the retry, which is
     // what bounds the recursion at one extra fetch.
-    void requestPageText(const QString& fetchUrl, const QString& reportUrl, bool archiveFallback);
+    void requestPageText(const QString& fetchUrl, const QString& reportUrl, bool archiveFallback,
+                         const AIOperationLog::Ptr& operation);
     void startLinkStateProbe(const QString& url, bool useGet);
     void finishLinkStateProbe(const QString& url, const QString& state);
     // fallbackImageUrl is tried whenever the first URL yields nothing usable

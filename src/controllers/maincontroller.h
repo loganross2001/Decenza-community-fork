@@ -518,7 +518,7 @@ public slots:
 
     Q_INVOKABLE void factoryResetAndQuit();
 
-    // Mid-shot SAW adjustment (e.g. user pressed +10g to "salvage" a too-fast shot).
+    // Mid-shot SAW adjustment, clamped to at least 1 g so SAW stays enabled.
     // No-op outside Preinfusion/Pouring or when no SAW target is set. Intentionally
     // only mutates MachineState — leaving the persisted profile/setting untouched so
     // the next shot reverts to the user's normal target.
@@ -755,7 +755,6 @@ private:
     double m_lastShotTime = 0;      // Last shot sample time relative to shot start (for weight sync)
     bool m_extractionStarted = false;
     int m_lastFrameNumber = -1;
-    int m_trackLogCounter = 0;
     double m_filteredGoalPressure = 0.0;
     double m_filteredGoalFlow = 0.0;
     int m_frameWeightSkipSent = -1;  // Frame number for which we've sent a weight-based skip command

@@ -1,3 +1,4 @@
+#include "core/diagnosticlogging.h"
 #include "livesteamcoach.h"
 #include "../barista/baristadiagnostics.h"  // [barista-fork] coaching timeline recorder
 
@@ -32,7 +33,7 @@ LiveSteamCoach::LiveSteamCoach(MachineState* machineState, Settings* settings,
                 this, &LiveSteamCoach::onSteamFlowStopped);
     } else {
         // Breadcrumb: without a MachineState the coach is permanently inert.
-        qDebug() << "[SteamCoach] no MachineState — coach inert";
+        DIAG_DEBUG(STEAM, "livesteamcoach") << "no MachineState — coach inert";
     }
 
     // Cache the two toggle values and keep them fresh via NOTIFY signals
@@ -44,7 +45,7 @@ LiveSteamCoach::LiveSteamCoach(MachineState* machineState, Settings* settings,
                 this, &LiveSteamCoach::refreshEnabledFlags);
         refreshEnabledFlags();
     } else {
-        qDebug() << "[SteamCoach] no Settings — coach disabled";
+        DIAG_DEBUG(STEAM, "livesteamcoach") << "no Settings — coach disabled";
     }
 }
 
@@ -171,7 +172,7 @@ void LiveSteamCoach::evaluate() {
                 // the scale next time). Spoken politely too (when the audio
                 // setting is on) — an audio-only user would otherwise get
                 // unexplained dead air.
-                qDebug() << "[SteamCoach] duration not milk-derived — no coaching (pill shown)";
+                DIAG_DEBUG(STEAM, "livesteamcoach") << "duration not milk-derived — no coaching (pill shown)";
                 emitCue(QStringLiteral("no-coaching"),
                         tr_("steamCoach.cue.noCoaching",
                             "No coaching — milk weight not captured"),
@@ -185,7 +186,7 @@ void LiveSteamCoach::evaluate() {
                 // pill would be a lie here (milk WAS captured) and the user
                 // made this change deliberately — clear the active cue and go
                 // quiet instead.
-                qDebug() << "[SteamCoach] duration stopped being milk-derived mid-steam — coaching off (no pill)";
+                DIAG_DEBUG(STEAM, "livesteamcoach") << "duration stopped being milk-derived mid-steam — coaching off (no pill)";
                 clearCue();
             }
         }
@@ -213,7 +214,7 @@ void LiveSteamCoach::evaluate() {
     if (timeout <= 0) {
         if (!m_loggedUntimed) {
             m_loggedUntimed = true;
-            qDebug() << "[SteamCoach] no target duration (manual steam) — stretch cue only";
+            DIAG_DEBUG(STEAM, "livesteamcoach") << "no target duration (manual steam) — stretch cue only";
         }
         return;
     }

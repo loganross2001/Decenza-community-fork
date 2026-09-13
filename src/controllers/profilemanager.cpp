@@ -1,3 +1,4 @@
+#include "core/diagnosticlogging.h"
 #include <optional>
 #include "core/settings_app.h"
 #include "profilemanager.h"
@@ -71,33 +72,51 @@ static constexpr int kUploadRetryBaseMs = 1000;
 static constexpr int kUploadRetryMaxMs = 8000;
 static constexpr int kMaxUploadRetryAttempts = 5;
 
-// Reasons returned by DE1Device::profileUploaded(false, reason) that should
-// NOT trigger an auto-retry. The rest (frame sequence mismatch, ACK timeout)
-// are treated as retryable.
+// How a failed upload must be followed up. Reasons come from
+// DE1Device::profileUploaded(false, reason); matching them in one table keeps
+// the prefixes off the handler, where a second match site would be free to
+// drift from this one.
 //
 // We use startsWith() rather than exact equality so DE1Device can include
 // variable details after a stable prefix — for example "frame sequence
 // mismatch (expected [0x00, 0x01], got [0x00, 0x00])" carries the hex
-// payload in the same string. The exact retryable/non-retryable prefix
-// text is locked down by tst_profileupload.cpp's `.at(1).toString()`
-// assertions, so any future rename of a reason string in
-// finishProfileUpload() will break those tests loudly before it can
-// silently flip classification here.
-static bool isRetryableUploadFailure(const QString& reason) {
+// payload in the same string. The exact prefix text is locked down by
+// tst_profileupload.cpp's `.at(1).toString()` assertions, so any future
+// rename of a reason string in finishProfileUpload() will break those tests
+// loudly before it can silently flip classification here.
+enum class UploadFailureFollowUp {
+    Retry,    // Transient — arm the backoff timer.
+    ReArm,    // What the DE1 now holds is unknown — re-upload at the next safe moment.
+    Defer,    // Another path already owns the re-upload.
+};
+
+static UploadFailureFollowUp classifyUploadFailure(const QString& reason) {
     // Superseded: a newer upload is already in flight — let it own the outcome.
-    if (reason.startsWith(QStringLiteral("superseded"))) return false;
-    // Queue cleared: a shot/steam/hot-water just started, clearing the queue
-    // intentionally. The next uploadCurrentProfile() will re-arm.
-    if (reason.startsWith(QStringLiteral("command queue cleared"))) return false;
+    if (reason.startsWith(QStringLiteral("superseded")))
+        return UploadFailureFollowUp::Defer;
+    // Queue cleared: flow started and cleared the queue mid-upload. A timer
+    // retry would fight the shot, but Defer is wrong too — nothing else
+    // re-uploads, and what the DE1 holds is now unknown. Frames are indexed
+    // slot writes with no commit step (profile.cpp:2298) under a header that
+    // already declared the new frame COUNT (profile.cpp:2276), so an
+    // interrupted batch leaves the machine executing that count over a MIX of
+    // new frames and the previous profile's in the slots that never arrived —
+    // and the group-head button extracts that mix without the app in the loop.
+    // ReArm restores the invariant via phaseChanged, once the machine is
+    // Idle/Ready again: after the flow, never during it.
+    if (reason.startsWith(QStringLiteral("command queue cleared")))
+        return UploadFailureFollowUp::ReArm;
     // BLE disconnect: the reconnect path (initialSettingsComplete ->
     // applyAllSettings -> uploadCurrentProfile) already re-uploads when the
     // link comes back. Retrying on a timer would race with that.
-    if (reason.startsWith(QStringLiteral("BLE disconnect"))) return false;
+    if (reason.startsWith(QStringLiteral("BLE disconnect")))
+        return UploadFailureFollowUp::Defer;
     // Firmware flash: DE1Device dropped the call because a firmware update is in
     // progress. The reconnect path re-uploads once the flash completes and the
     // DE1 reconnects — no timer retry needed, and it would just flood the log.
-    if (reason.startsWith(QStringLiteral("firmware flash"))) return false;
-    return true;
+    if (reason.startsWith(QStringLiteral("firmware flash")))
+        return UploadFailureFollowUp::Defer;
+    return UploadFailureFollowUp::Retry;
 }
 
 
@@ -122,13 +141,13 @@ ProfileManager::ProfileManager(Settings* settings, DE1Device* device,
             if (!m_profileUploadPending) return;
             auto phase = m_machineState->phase();
             if (phase == MachineState::Phase::Disconnected) {
-                qDebug() << "Clearing pending profile upload: device disconnected";
+                DIAG_DEBUG(PROFILES, "profilemanager") << "Clearing pending profile upload: device disconnected";
                 m_profileUploadPending = false;
                 return;
             }
             if (phase == MachineState::Phase::Idle || phase == MachineState::Phase::Ready ||
                 phase == MachineState::Phase::Heating) {
-                qDebug() << "Retrying pending profile upload now that phase is" << m_machineState->phaseString();
+                DIAG_DEBUG(PROFILES, "profilemanager") << "Retrying pending profile upload now that phase is" << m_machineState->phaseString();
                 uploadCurrentProfile();
             }
         });
@@ -138,11 +157,11 @@ ProfileManager::ProfileManager(Settings* settings, DE1Device* device,
     // with a retryable reason, arm m_profileUploadRetryTimer with exponential
     // backoff (capped at 8s). After kMaxUploadRetryAttempts consecutive
     // failures, give up and set m_de1CommunicationFailure so the UI surfaces
-    // a "power-cycle the DE1" dialog. Success — or any non-retryable reason
-    // like "superseded" — resets the counter.
+    // a "power-cycle the DE1" dialog. Only success resets the counter; a
+    // non-retryable reason returns without touching it.
     m_profileUploadRetryTimer.setSingleShot(true);
     connect(&m_profileUploadRetryTimer, &QTimer::timeout, this, [this]() {
-        qDebug() << "ProfileManager: retrying failed profile upload (attempt"
+        DIAG_DEBUG(PROFILES, "ProfileManager") << "retrying failed profile upload (attempt"
                  << m_profileUploadRetryAttempts << "of" << kMaxUploadRetryAttempts
                  << "— last failure:" << m_lastUploadFailureReason << ")";
         // Timer is no longer active (it's firing) — the retry indicator
@@ -176,21 +195,31 @@ ProfileManager::ProfileManager(Settings* settings, DE1Device* device,
                 }
                 return;
             }
-            if (!isRetryableUploadFailure(reason)) {
-                // Not a retry condition — don't bump the counter. The
-                // existing m_profileUploadPending / phaseChanged machinery
-                // handles queue-clear and supersede cases on its own.
-                // The pending upload (if any) will ride the reconnect path.
-                if (hadPending) {
+            const UploadFailureFollowUp followUp = classifyUploadFailure(reason);
+            if (followUp != UploadFailureFollowUp::Retry) {
+                // Not a retry condition — don't bump the counter and don't arm
+                // the timer; it would race a shot, a newer upload, or a
+                // reconnect. A deferred profile change still rides the path
+                // that owns the re-upload.
+                if (hadPending || followUp == UploadFailureFollowUp::ReArm) {
                     m_profileUploadPending = true;
+                }
+                if (followUp == UploadFailureFollowUp::ReArm) {
+                    // The matching WARN is DE1Device's "Profile upload FAILED".
+                    // Say the recovery at a tier the connections views show
+                    // (they default to minLevel INFO), or a reader sees only
+                    // the failure half and concludes it never recovered.
+                    DIAG_INFO(PROFILES, "ProfileManager")
+                        << "profile upload was cleared by the machine; "
+                           "re-queued and will upload when it returns to idle";
                 }
                 return;
             }
             m_lastUploadFailureReason = reason;
             m_profileUploadRetryAttempts++;
             if (m_profileUploadRetryAttempts >= kMaxUploadRetryAttempts) {
-                qWarning().noquote() << QStringLiteral(
-                    "ProfileManager: profile upload failed %1 consecutive times — "
+                DIAG_WARN(PROFILES, "ProfileManager").noquote() << QStringLiteral(
+                    "profile upload failed %1 consecutive times — "
                     "giving up and asking the user to power-cycle the DE1. "
                     "Last reason: %2")
                     .arg(m_profileUploadRetryAttempts)
@@ -211,8 +240,8 @@ ProfileManager::ProfileManager(Settings* settings, DE1Device* device,
             // attempts=1 -> 1000ms, 2 -> 2000ms, 3 -> 4000ms, 4 -> 8000ms.
             const int shift = qMin(m_profileUploadRetryAttempts - 1, 20);
             const int delayMs = qMin(kUploadRetryBaseMs * (1 << shift), kUploadRetryMaxMs);
-            qDebug().noquote() << QStringLiteral(
-                "ProfileManager: profile upload failed (%1); retrying in %2 ms "
+            DIAG_DEBUG(PROFILES, "ProfileManager").noquote() << QStringLiteral(
+                "profile upload failed (%1); retrying in %2 ms "
                 "(attempt %3 of %4)")
                 .arg(reason)
                 .arg(delayMs)
@@ -240,7 +269,7 @@ ProfileManager::ProfileManager(Settings* settings, DE1Device* device,
                      phase == MachineState::Phase::Pouring ||
                      phase == MachineState::Phase::Ending);
                 if (isEspressoShot) {
-                    qWarning() << "ProfileManager: aborting in-progress shot "
+                    DIAG_WARN(PROFILES, "ProfileManager") << "aborting in-progress shot "
                                   "because profile upload is retrying (DE1 may "
                                   "be running stale frames). Phase was:"
                                << m_machineState->phaseString();
@@ -268,7 +297,7 @@ ProfileManager::ProfileManager(Settings* settings, DE1Device* device,
                 m_uploadPendingAfterInFlight = false;
                 if (m_profileUploadRetryTimer.isActive()
                     || m_profileUploadRetryAttempts > 0) {
-                    qDebug() << "ProfileManager: resetting upload-retry state "
+                    DIAG_DEBUG(PROFILES, "ProfileManager") << "resetting upload-retry state "
                                 "because DE1 disconnected";
                     m_profileUploadRetryTimer.stop();
                     m_profileUploadRetryAttempts = 0;
@@ -283,7 +312,7 @@ ProfileManager::ProfileManager(Settings* settings, DE1Device* device,
     if (m_profileStorage) {
         connect(m_profileStorage, &ProfileStorage::configuredChanged, this, [this]() {
             if (m_profileStorage->isConfigured()) {
-                qDebug() << "[ProfileManager] Storage configured, refreshing profiles";
+                DIAG_DEBUG(PROFILES, "profilemanager") << "Storage configured, refreshing profiles";
                 refreshProfiles();
             }
         });
@@ -315,7 +344,7 @@ ProfileManager::ProfileManager(Settings* settings, DE1Device* device,
     // Check for temp file (modified profile from previous session)
     QString tempPath = profilesPath() + "/_current.json";
     if (QFile::exists(tempPath)) {
-        qDebug() << "Loading modified profile from temp file:" << tempPath;
+        DIAG_DEBUG(PROFILES, "profilemanager") << "Loading modified profile from temp file:" << tempPath;
         // Restored straight from disk without going through loadProfile(), and uploaded
         // below — the path upstream added its second call site for (de1plus/gui.tcl:2078).
         setCurrentProfile(Profile::loadFromFile(tempPath),
@@ -538,7 +567,7 @@ void ProfileManager::latchForShot() {
     // short. Log the resolution so a debug log can answer "what did this
     // shot actually target, and why" — the field diagnoses these through the
     // log, and every latch bug so far has been invisible in it.
-    qDebug().noquote() << QString("[Yield] latched target=%1g dose=%2g anchor=%3:%4")
+    DIAG_DEBUG(PROFILES, "profilemanager").noquote() << QString("latched target=%1g dose=%2g anchor=%3:%4")
         .arg(m_latchedTargetG, 0, 'f', 1).arg(m_latchedDoseG, 0, 'f', 1)
         .arg(m_latchedYieldMode).arg(m_latchedYieldAnchorValue, 0, 'f', 2);
 }
@@ -558,7 +587,7 @@ void ProfileManager::releaseShotLatch() {
     // ever happens mid-shot, this line is the evidence, and its absence on a
     // normal shot end is free.
     if (!qFuzzyCompare(resolved, m_latchedTargetG))
-        qDebug().noquote() << QString("[Yield] latch released, re-resolved %1g -> %2g")
+        DIAG_DEBUG(PROFILES, "profilemanager").noquote() << QString("latch released, re-resolved %1g -> %2g")
             .arg(m_latchedTargetG, 0, 'f', 1).arg(resolved, 0, 'f', 1);
     if (m_machineState)
         m_machineState->setTargetWeight(resolved);
@@ -619,7 +648,7 @@ void ProfileManager::activateBrewWithOverrides(double dose, double yieldValue,
         // side effect of committing the dialog.
     }
 
-    qDebug() << "Brew overrides activated: dose=" << dose << "g, yield ="
+    DIAG_DEBUG(PROFILES, "profilemanager") << "Brew overrides activated: dose=" << dose << "g, yield ="
              << yieldValue << YieldSpec::normalizedMode(yieldMode)
              << "-> target=" << targetWeight() << "g";
 
@@ -653,7 +682,7 @@ void ProfileManager::clearBrewOverrides() {
         m_settings->brew()->clearAllBrewOverrides();
     }
     // MachineState sync happens via brewOverridesChanged signal connection
-    qDebug() << "Brew overrides cleared, profile defaults apply, target=" << m_currentProfile.targetWeight() << "g";
+    DIAG_DEBUG(PROFILES, "profilemanager") << "Brew overrides cleared, profile defaults apply, target=" << m_currentProfile.targetWeight() << "g";
 }
 
 void ProfileManager::resetBrewOverridesForLoadedProfile() {
@@ -726,8 +755,8 @@ void ProfileManager::applyRecommendedDoseIfProfileOwnsIt() {
         // recipe's doseG, so a mistimed profile load does not merely show the
         // wrong number, it erases what the bean or the recipe remembered.
         if (!dye->doseLadderResolved()) {
-            qDebug().noquote()
-                << QStringLiteral("[dose] '%1' recommends %2 g but the bag/recipe rows have not "
+            DIAG_DEBUG(PROFILES, "profilemanager").noquote()
+                << QStringLiteral("'%1' recommends %2 g but the bag/recipe rows have not "
                                   "arrived yet, so the dose ladder cannot be resolved "
                                   "(dose-source-precedence) — live dose stays %3 g. Re-select the "
                                   "profile once loading settles if you want its dose.")
@@ -741,8 +770,8 @@ void ProfileManager::applyRecommendedDoseIfProfileOwnsIt() {
             // evidence the ladder ran at all, and the likely reading is that
             // the profile's recommendation is unset.
             const bool recipeOwns = dye->doseOwner() == SettingsDye::DoseOwner::Recipe;
-            qDebug().noquote()
-                << QStringLiteral("[dose] '%1' recommends %2 g but the active %3 owns the dose "
+            DIAG_DEBUG(PROFILES, "profilemanager").noquote()
+                << QStringLiteral("'%1' recommends %2 g but the active %3 owns the dose "
                                   "and outranks the profile (dose-source-precedence) — live dose "
                                   "stays %4 g. Change it with MCP %5, or clear the %3; loading a "
                                   "profile will not override it.")
@@ -986,7 +1015,7 @@ void ProfileManager::markProfileClean() {
         // Remove temp file since we're now clean
         QString tempPath = profilesPath() + "/_current.json";
         QFile::remove(tempPath);
-        qDebug() << "Profile marked clean, removed temp file";
+        DIAG_DEBUG(PROFILES, "profilemanager") << "Profile marked clean, removed temp file";
     }
 }
 
@@ -1126,7 +1155,7 @@ const ProfileInfo* ProfileManager::findProfileByTitleForKb(const QString& profil
         if (info.title != profileTitle) continue;
         if (!hit) { hit = &info; continue; }
         if (hit->kbIds != info.kbIds || hit->kbDerivedFrom != info.kbDerivedFrom) {
-            qWarning() << "ProfileManager: profiles" << hit->filename << "and"
+            DIAG_WARN(PROFILES, "ProfileManager") << "profiles" << hit->filename << "and"
                        << info.filename << "share the title" << profileTitle
                        << "but resolve to different KB entries - showing neither";
             return nullptr;
@@ -1206,7 +1235,7 @@ QVariantMap ProfileManager::profileDialInDiff(const QString& profileTitle) const
     bool onDisk = false;
     const Profile catalogProfile = loadProfileByFilename(found->filename, &onDisk);
     if (!onDisk)
-        qWarning() << "ProfileManager: catalog holds" << found->filename
+        DIAG_WARN(PROFILES, "ProfileManager") << "catalog holds" << found->filename
                    << "but no copy exists in storage, the user folder, the downloaded"
                    << "folder or :/profiles - the profile catalog is stale";
 
@@ -1274,7 +1303,7 @@ bool ProfileManager::isProfileInSelectedList(const QString& filename) const {
         // Defensive: an unknown ProfileSource (added later without updating
         // this switch) should default to "not selectable" so auto-load doesn't
         // silently pin a profile whose eligibility rules haven't been defined.
-        qWarning() << "isProfileInSelectedList: unhandled ProfileSource for"
+        DIAG_WARN(PROFILES, "profilemanager") << "isProfileInSelectedList: unhandled ProfileSource for"
                    << filename << "— treating as not selected";
         return false;
     }
@@ -1288,7 +1317,7 @@ void ProfileManager::loadAutoLoadProfileIfNeeded() {
     if (filename.isEmpty()) return;
 
     if (!isProfileInSelectedList(filename)) {
-        qDebug() << "ProfileManager: auto-load filename" << filename
+        DIAG_DEBUG(PROFILES, "ProfileManager") << "auto-load filename" << filename
                  << "no longer in Selected list — clearing";
         m_settings->app()->setAutoLoadProfileFilename("");
         emit autoLoadStaleCleared();
@@ -1299,7 +1328,7 @@ void ProfileManager::loadAutoLoadProfileIfNeeded() {
         return; // Already active
     }
 
-    qDebug() << "ProfileManager: loading auto-load profile" << filename;
+    DIAG_DEBUG(PROFILES, "ProfileManager") << "loading auto-load profile" << filename;
     loadProfile(filename);
 }
 
@@ -1325,7 +1354,7 @@ bool ProfileManager::deleteProfile(const QString& filename) {
     // since imported copies can shadow the built-in version)
     if (m_profileStorage && m_profileStorage->isConfigured()) {
         if (m_profileStorage->deleteProfile(filename)) {
-            qDebug() << "Deleted profile from ProfileStorage:" << filename;
+            DIAG_DEBUG(PROFILES, "profilemanager") << "Deleted profile from ProfileStorage:" << filename;
             deleted = true;
         }
     }
@@ -1333,12 +1362,12 @@ bool ProfileManager::deleteProfile(const QString& filename) {
     // Always try to clean up local folder copies
     QString userPath = userProfilesPath() + "/" + filename + ".json";
     if (QFile::remove(userPath)) {
-        qDebug() << "Deleted profile from user storage:" << userPath;
+        DIAG_DEBUG(PROFILES, "profilemanager") << "Deleted profile from user storage:" << userPath;
         deleted = true;
     }
     QString downloadedPath = downloadedProfilesPath() + "/" + filename + ".json";
     if (QFile::remove(downloadedPath)) {
-        qDebug() << "Deleted profile from downloaded storage:" << downloadedPath;
+        DIAG_DEBUG(PROFILES, "profilemanager") << "Deleted profile from downloaded storage:" << downloadedPath;
         deleted = true;
     }
 
@@ -1351,10 +1380,10 @@ bool ProfileManager::deleteProfile(const QString& filename) {
             // it never was. Say so, or the log claims a built-in was tidied when
             // a real profile was removed and nothing announced it.
             if (deletedTitle.isEmpty())
-                qWarning() << "Deleted" << filename
+                DIAG_WARN(PROFILES, "profilemanager") << "Deleted" << filename
                            << "but it was not in the profile catalog — cannot resolve its title,"
                            << "so nothing holding a title reference to it will be told";
-            qDebug() << "Cleaned up local override for built-in profile:" << filename;
+            DIAG_DEBUG(PROFILES, "profilemanager") << "Cleaned up local override for built-in profile:" << filename;
             refreshProfiles();
         }
         return false;
@@ -1400,12 +1429,12 @@ bool ProfileManager::deleteProfile(const QString& filename) {
         if (!deletedTitle.isEmpty() && findProfileByTitle(deletedTitle).isEmpty())
             emit profileDeleted(deletedTitle);
         else if (!deletedTitle.isEmpty())
-            qDebug() << "Deleted" << filename << "but title" << deletedTitle
+            DIAG_DEBUG(PROFILES, "profilemanager") << "Deleted" << filename << "but title" << deletedTitle
                      << "still resolves — not announcing a deletion";
         return true;
     }
 
-    qWarning() << "Failed to delete profile:" << filename;
+    DIAG_WARN(PROFILES, "profilemanager") << "Failed to delete profile:" << filename;
     return false;
 }
 
@@ -1439,7 +1468,7 @@ bool ProfileManager::resetProfileToDefault(const QString& filename) {
     // Refresh and reload from the built-in QRC resource
     refreshProfiles();
     loadProfile(filename);
-    qDebug() << "Reset built-in profile to default:" << filename;
+    DIAG_DEBUG(PROFILES, "profilemanager") << "Reset built-in profile to default:" << filename;
     return true;
 }
 
@@ -1674,16 +1703,16 @@ void ProfileManager::upgradeStoredEncoding(const QString& resolvedName,
     // see the espressoTemperatureHealed() guard at the call site.
     const QStringList parity = Profile::jsonParityErrors(original, canonical);
     if (!parity.isEmpty()) {
-        qWarning() << "ProfileManager: leaving" << resolvedName
+        DIAG_WARN(PROFILES, "ProfileManager") << "leaving" << resolvedName
                    << "in its stored encoding — converting it would not be lossless:"
                    << parity.join(QStringLiteral("; "));
         return;
     }
 
     if (loaded.saveToFile(target))   // QSaveFile: temp + atomic rename
-        qDebug() << "ProfileManager: upgraded stored encoding for" << resolvedName;
+        DIAG_DEBUG(PROFILES, "ProfileManager") << "upgraded stored encoding for" << resolvedName;
     else
-        qWarning() << "ProfileManager: failed to upgrade stored encoding for" << resolvedName
+        DIAG_WARN(PROFILES, "ProfileManager") << "failed to upgrade stored encoding for" << resolvedName
                    << "- the profile loaded fine and is unchanged on disk";
 }
 
@@ -1724,7 +1753,7 @@ bool ProfileManager::loadProfile(const QString& profileName) {
     for (auto it = m_profileTitles.begin(); it != m_profileTitles.end(); ++it) {
         if (it.value() == profileName) {
             resolvedName = it.key();  // Found filename for this title
-            qDebug() << "ProfileManager::loadProfile: Resolved title" << profileName << "to filename" << resolvedName;
+            DIAG_DEBUG(PROFILES, "ProfileManager") << "loadProfile: Resolved title" << profileName << "to filename" << resolvedName;
             break;
         }
     }
@@ -1742,7 +1771,7 @@ bool ProfileManager::loadProfile(const QString& profileName) {
             candidate = Profile::loadFromJsonString(jsonContent);
             found = true;
             origin = Origin::Storage;
-            qDebug() << "Loaded profile from ProfileStorage:" << resolvedName;
+            DIAG_DEBUG(PROFILES, "profilemanager") << "Loaded profile from ProfileStorage:" << resolvedName;
         }
     }
 
@@ -1779,7 +1808,7 @@ bool ProfileManager::loadProfile(const QString& profileName) {
     // 5. Fall back to real default — this should not happen in normal operation after
     // startup validation removes stale references from favorites and currentProfile.
     if (!found) {
-        qWarning() << "ProfileManager::loadProfile: Profile not found:" << profileName
+        DIAG_WARN(PROFILES, "ProfileManager") << "loadProfile: Profile not found:" << profileName
                    << "(resolved:" << resolvedName << ")";
         emit profileLoadFailed(resolvedName);
         loadDefaultProfile();
@@ -1797,7 +1826,7 @@ bool ProfileManager::loadProfile(const QString& profileName) {
     // different profile is the same class of surprise as brewing the bad one. The
     // dialog names what we could not read so it can become a bug report.
     if (found && !candidate.isValid()) {
-        qWarning() << "ProfileManager::loadProfile: refusing" << resolvedName
+        DIAG_WARN(PROFILES, "ProfileManager") << "loadProfile: refusing" << resolvedName
                    << "-" << candidate.validationErrors().join(QStringLiteral("; "));
         emit profileRefusedUnreadable(resolvedName, candidate.title(),
                                       candidate.unsupportedStepKeys(),
@@ -1859,7 +1888,7 @@ bool ProfileManager::loadProfile(const QString& profileName) {
         switch (writeProfileBackIfLossless(resolvedName, path, origin == Origin::Storage,
                                            candidate, QString(), &parity)) {
         case WriteBack::Written:
-            qInfo() << "ProfileManager::loadProfile: removed stored recipe block from"
+            DIAG_INFO(PROFILES, "ProfileManager") << "loadProfile: removed stored recipe block from"
                     << resolvedName;
             break;
         case WriteBack::Refused:
@@ -1867,7 +1896,7 @@ bool ProfileManager::loadProfile(const QString& profileName) {
             // never be rewritten losslessly, so this would fire on every load of that
             // profile forever. The block staying on disk is harmless — nothing reads
             // one — and it is already gone in memory.
-            qInfo() << "ProfileManager::loadProfile: leaving the recipe block on disk for"
+            DIAG_INFO(PROFILES, "ProfileManager") << "loadProfile: leaving the recipe block on disk for"
                     << resolvedName << "-" << parity.join(QStringLiteral("; "))
                     << "- dropped in memory only";
             break;
@@ -1875,7 +1904,7 @@ bool ProfileManager::loadProfile(const QString& profileName) {
             // Loud: unlike a refusal this CAN succeed later, and a permanently failing
             // store (revoked SAF grant, read-only volume, full disk) would otherwise
             // retry in silence on every load forever.
-            qWarning() << "ProfileManager::loadProfile: failed to persist the recipe-block"
+            DIAG_WARN(PROFILES, "ProfileManager") << "loadProfile: failed to persist the recipe-block"
                        << "removal for" << resolvedName
                        << "- dropped in memory only, will retry on next load";
             break;
@@ -1910,16 +1939,16 @@ bool ProfileManager::loadProfile(const QString& profileName) {
                                            candidate,
                                            QStringLiteral("espresso_temperature"), &parity)) {
         case WriteBack::Written:
-            qInfo() << "ProfileManager::loadProfile: repaired stale espresso_temperature"
+            DIAG_INFO(PROFILES, "ProfileManager") << "loadProfile: repaired stale espresso_temperature"
                     << "on disk for" << resolvedName;
             break;
         case WriteBack::Refused:
-            qWarning() << "ProfileManager::loadProfile: NOT persisting the"
+            DIAG_WARN(PROFILES, "ProfileManager") << "loadProfile: NOT persisting the"
                        << "espresso_temperature repair for" << resolvedName << "-"
                        << parity.join(QStringLiteral("; ")) << "- corrected in memory only";
             break;
         case WriteBack::Failed:
-            qWarning() << "ProfileManager::loadProfile: failed to persist espresso_temperature"
+            DIAG_WARN(PROFILES, "ProfileManager") << "loadProfile: failed to persist espresso_temperature"
                        << "repair for" << resolvedName
                        << "- corrected in memory only, will retry on next load";
             break;
@@ -1965,7 +1994,7 @@ bool ProfileManager::loadProfile(const QString& profileName) {
         // Sync selectedFavoriteProfile with the loaded profile
         // This ensures the UI shows the correct pill as selected, or -1 if not a favorite
         int favoriteIndex = m_settings->app()->findFavoriteIndexByFilename(resolvedName);
-        qDebug() << "loadProfile:" << resolvedName << "favoriteIndex=" << favoriteIndex;
+        DIAG_DEBUG(PROFILES, "profilemanager") << "loadProfile:" << resolvedName << "favoriteIndex=" << favoriteIndex;
         m_settings->app()->setSelectedFavoriteProfile(favoriteIndex);
     }
 
@@ -1998,7 +2027,7 @@ bool ProfileManager::loadProfile(const QString& profileName) {
 
 bool ProfileManager::loadProfileFromJson(const QString& jsonContent) {
     if (jsonContent.isEmpty()) {
-        qWarning() << "loadProfileFromJson: Empty JSON content";
+        DIAG_WARN(PROFILES, "profilemanager") << "loadProfileFromJson: Empty JSON content";
         return false;
     }
 
@@ -2013,7 +2042,7 @@ bool ProfileManager::loadProfileFromJson(const QString& jsonContent) {
                       QStringLiteral("loadProfileFromJson"));
 
     if (m_currentProfile.title().isEmpty() || m_currentProfile.steps().isEmpty()) {
-        qWarning() << "loadProfileFromJson: Failed to parse profile JSON";
+        DIAG_WARN(PROFILES, "profilemanager") << "loadProfileFromJson: Failed to parse profile JSON";
         return false;
     }
 
@@ -2036,7 +2065,7 @@ bool ProfileManager::loadProfileFromJson(const QString& jsonContent) {
         uploadCurrentProfile();
     }
 
-    qDebug() << "Loaded profile from JSON:" << m_currentProfile.title()
+    DIAG_DEBUG(PROFILES, "profilemanager") << "Loaded profile from JSON:" << m_currentProfile.title()
              << "with" << m_currentProfile.steps().size() << "steps";
 
     emit currentProfileChanged();
@@ -2054,10 +2083,10 @@ bool ProfileManager::persistCurrentProfile() {
     QString filename = titleToFilename(m_currentProfile.title());
     QString path = downloadedProfilesPath() + "/" + filename + ".json";
     if (!m_currentProfile.saveToFile(path)) {
-        qWarning() << "ProfileManager::persistCurrentProfile: failed to save" << m_currentProfile.title();
+        DIAG_WARN(PROFILES, "ProfileManager") << "persistCurrentProfile: failed to save" << m_currentProfile.title();
         return false;
     }
-    qDebug() << "ProfileManager: persisted shot profile" << m_currentProfile.title() << "to downloaded folder";
+    DIAG_DEBUG(PROFILES, "ProfileManager") << "persisted shot profile" << m_currentProfile.title() << "to downloaded folder";
     refreshProfiles();
     return true;
 }
@@ -2300,7 +2329,7 @@ void ProfileManager::refreshProfiles() {
         for (qsizetype i = favorites.size() - 1; i >= 0; --i) {
             QString fn = favorites.at(i).toMap()[QStringLiteral("filename")].toString();
             if (!known.contains(fn)) {
-                qWarning() << "refreshProfiles: removing stale favorite" << fn << "(profile not found)";
+                DIAG_WARN(PROFILES, "profilemanager") << "refreshProfiles: removing stale favorite" << fn << "(profile not found)";
                 m_settings->app()->removeFavoriteProfile(static_cast<int>(i));
             }
         }
@@ -2313,7 +2342,7 @@ void ProfileManager::refreshProfiles() {
             QVariantList updatedFavs = m_settings->app()->favoriteProfiles();
             if (!updatedFavs.isEmpty())
                 replacement = updatedFavs.first().toMap()[QStringLiteral("filename")].toString();
-            qWarning() << "refreshProfiles: stale currentProfile" << cp
+            DIAG_WARN(PROFILES, "profilemanager") << "refreshProfiles: stale currentProfile" << cp
                        << "-> replacing with" << replacement;
             m_settings->app()->setCurrentProfile(replacement);
         }
@@ -2370,7 +2399,7 @@ void ProfileManager::uploadCurrentProfileOnConnect() {
     // If it recurs with the DE1 already AWAKE at app start, this is the wrong
     // cause and the queue depth at connect is the next suspect.
     if (m_machineState && m_machineState->phase() == MachineState::Phase::Sleep) {
-        qDebug() << "uploadCurrentProfileOnConnect() deferred: machine asleep, "
+        DIAG_DEBUG(PROFILES, "profilemanager") << "uploadCurrentProfileOnConnect() deferred: machine asleep, "
                     "will upload when it wakes";
         m_profileUploadPending = true;
         return;
@@ -2394,7 +2423,7 @@ void ProfileManager::uploadCurrentProfile() {
                               phase == MachineState::Phase::Transport);
 
         if (isActivePhase) {
-            qWarning() << "uploadCurrentProfile() BLOCKED during active phase:"
+            DIAG_WARN(PROFILES, "profilemanager") << "uploadCurrentProfile() BLOCKED during active phase:"
                        << m_machineState->phaseString();
 
             QString stackTrace = "Stack trace:\n";
@@ -2415,7 +2444,7 @@ void ProfileManager::uploadCurrentProfile() {
                         .arg(reinterpret_cast<quintptr>(stack[i]), 0, 16);
                 }
                 stackTrace += frameLine + "\n";
-                qWarning().noquote() << frameLine;
+                DIAG_WARN(PROFILES, "profilemanager").noquote() << frameLine;
             }
 #else
             stackTrace += "  (not available on Windows)\n";
@@ -2431,7 +2460,7 @@ void ProfileManager::uploadCurrentProfile() {
         // Android BLE GATT write queue. The profileUploaded signal will trigger a follow-up
         // upload when the current one completes, carrying the latest m_currentProfile.
         if (m_uploadInFlight) {
-            qDebug() << "ProfileManager: uploadCurrentProfile deferred — "
+            DIAG_DEBUG(PROFILES, "ProfileManager") << "uploadCurrentProfile deferred — "
                         "upload in flight, will retry on profileUploaded";
             m_uploadPendingAfterInFlight = true;
             return;
@@ -2447,7 +2476,7 @@ void ProfileManager::uploadCurrentProfile() {
             double overrideTemp = m_settings->brew()->temperatureOverride();
             modifiedProfile.setSteps(framesShiftedToTemperature(overrideTemp));
             modifiedProfile.setEspressoTemperature(overrideTemp);
-            qDebug() << "Uploading profile with temperature override:" << overrideTemp
+            DIAG_DEBUG(PROFILES, "profilemanager") << "Uploading profile with temperature override:" << overrideTemp
                      << "C (delta:" << (overrideTemp - m_currentProfile.espressoTemperature()) << "C)";
             m_device->uploadProfile(modifiedProfile);
             groupTemp = overrideTemp;
@@ -2470,7 +2499,7 @@ void ProfileManager::uploadCurrentProfile() {
             // machine already holds rather than a second, differently-derived
             // answer. Every production and test construction passes one.
             if (!m_steamHeaterPolicy) {
-                qWarning() << "ProfileManager: no steam heater policy — skipping the profile"
+                DIAG_WARN(PROFILES, "ProfileManager") << "no steam heater policy — skipping the profile"
                               " upload's ShotSettings write rather than guessing a steam target";
                 return;
             }
@@ -2483,10 +2512,10 @@ void ProfileManager::uploadCurrentProfile() {
                 groupTemp,
                 QStringLiteral("uploadCurrentProfile")
             );
-            qDebug() << "Set group temp to" << groupTemp << "C for profile" << m_currentProfile.title();
+            DIAG_DEBUG(PROFILES, "profilemanager") << "Set group temp to" << groupTemp << "C for profile" << m_currentProfile.title();
         }
     } else if (m_profileUploadPending) {
-        qDebug() << "uploadCurrentProfile: device not connected, keeping pending flag for later retry";
+        DIAG_DEBUG(PROFILES, "profilemanager") << "uploadCurrentProfile: device not connected, keeping pending flag for later retry";
     }
 }
 
@@ -2592,7 +2621,7 @@ void ProfileManager::uploadProfile(const QVariantMap& profileData) {
     // Save to temp file for persistence across restarts
     QString tempPath = profilesPath() + "/_current.json";
     if (!m_currentProfile.saveToFile(tempPath)) {
-        qWarning() << "Failed to save modified profile to temp file:" << tempPath;
+        DIAG_WARN(PROFILES, "profilemanager") << "Failed to save modified profile to temp file:" << tempPath;
     }
 
     // NOTE: BLE upload deferred to editor exit (QML calls uploadCurrentProfile() explicitly).
@@ -2604,7 +2633,7 @@ void ProfileManager::uploadProfile(const QVariantMap& profileData) {
 bool ProfileManager::saveProfile(const QString& filename) {
     // Prevent saving over read-only profiles
     if (isCurrentProfileReadOnly()) {
-        qWarning() << "ProfileManager::saveProfile: Cannot save read-only profile in place:" << filename;
+        DIAG_WARN(PROFILES, "ProfileManager") << "saveProfile: Cannot save read-only profile in place:" << filename;
         return false;
     }
 
@@ -2614,7 +2643,7 @@ bool ProfileManager::saveProfile(const QString& filename) {
     if (m_profileStorage && m_profileStorage->isConfigured()) {
         success = m_profileStorage->writeProfile(filename, m_currentProfile.toJsonString());
         if (success) {
-            qDebug() << "Saved profile to ProfileStorage:" << filename;
+            DIAG_DEBUG(PROFILES, "profilemanager") << "Saved profile to ProfileStorage:" << filename;
         }
     }
 
@@ -2623,9 +2652,9 @@ bool ProfileManager::saveProfile(const QString& filename) {
         QString path = userProfilesPath() + "/" + filename + ".json";
         success = m_currentProfile.saveToFile(path);
         if (success) {
-            qDebug() << "Saved profile to local file:" << path;
+            DIAG_DEBUG(PROFILES, "profilemanager") << "Saved profile to local file:" << path;
         } else {
-            qWarning() << "Failed to save profile to:" << path;
+            DIAG_WARN(PROFILES, "profilemanager") << "Failed to save profile to:" << path;
         }
     }
 
@@ -2662,7 +2691,7 @@ bool ProfileManager::saveProfile(const QString& filename) {
 bool ProfileManager::saveProfileAs(const QString& filename, const QString& title) {
     // Prevent saving with a built-in profile filename
     if (isBuiltInFilename(filename)) {
-        qWarning() << "ProfileManager::saveProfileAs: Cannot overwrite built-in profile filename:" << filename;
+        DIAG_WARN(PROFILES, "ProfileManager") << "saveProfileAs: Cannot overwrite built-in profile filename:" << filename;
         return false;
     }
 
@@ -2681,7 +2710,7 @@ bool ProfileManager::saveProfileAs(const QString& filename, const QString& title
     if (m_profileStorage && m_profileStorage->isConfigured()) {
         success = m_profileStorage->writeProfile(filename, m_currentProfile.toJsonString());
         if (success) {
-            qDebug() << "Saved profile as to ProfileStorage:" << filename;
+            DIAG_DEBUG(PROFILES, "profilemanager") << "Saved profile as to ProfileStorage:" << filename;
         }
     }
 
@@ -2690,9 +2719,9 @@ bool ProfileManager::saveProfileAs(const QString& filename, const QString& title
         QString path = userProfilesPath() + "/" + filename + ".json";
         success = m_currentProfile.saveToFile(path);
         if (success) {
-            qDebug() << "Saved profile as to local file:" << path;
+            DIAG_DEBUG(PROFILES, "profilemanager") << "Saved profile as to local file:" << path;
         } else {
-            qWarning() << "Failed to save profile to:" << path;
+            DIAG_WARN(PROFILES, "profilemanager") << "Failed to save profile to:" << path;
         }
     }
 
@@ -2735,13 +2764,13 @@ bool ProfileManager::duplicateProfile(const QString& sourceFilename, const QStri
     // with underscores. Only emoji/punctuation/symbol-only titles (no Unicode letters or digits)
     // reduce to an empty string; CJK and Cyrillic titles produce a non-empty Unicode filename.
     if (newFilename.isEmpty()) {
-        qWarning() << "ProfileManager::duplicateProfile: title sanitises to empty filename:" << newTitle;
+        DIAG_WARN(PROFILES, "ProfileManager") << "duplicateProfile: title sanitises to empty filename:" << newTitle;
         return false;
     }
 
     // Prevent duplicating with a built-in profile filename
     if (isBuiltInFilename(newFilename)) {
-        qWarning() << "ProfileManager::duplicateProfile: Cannot use built-in profile filename:" << newFilename;
+        DIAG_WARN(PROFILES, "ProfileManager") << "duplicateProfile: Cannot use built-in profile filename:" << newFilename;
         return false;
     }
 
@@ -2762,7 +2791,7 @@ bool ProfileManager::duplicateProfile(const QString& sourceFilename, const QStri
         return false;
     };
     if (collides(newFilename)) {
-        qWarning() << "ProfileManager::duplicateProfile: Profile already exists:" << newFilename;
+        DIAG_WARN(PROFILES, "ProfileManager") << "duplicateProfile: Profile already exists:" << newFilename;
         return false;
     }
 
@@ -2803,7 +2832,7 @@ bool ProfileManager::duplicateProfile(const QString& sourceFilename, const QStri
     }
 
     if (jsonContent.isEmpty()) {
-        qWarning() << "ProfileManager::duplicateProfile: Could not load source profile:" << sourceFilename;
+        DIAG_WARN(PROFILES, "ProfileManager") << "duplicateProfile: Could not load source profile:" << sourceFilename;
         return false;
     }
 
@@ -2813,7 +2842,7 @@ bool ProfileManager::duplicateProfile(const QString& sourceFilename, const QStri
     QJsonParseError parseErr;
     QJsonDocument doc = QJsonDocument::fromJson(jsonContent.toUtf8(), &parseErr);
     if (parseErr.error != QJsonParseError::NoError || !doc.isObject()) {
-        qWarning() << "ProfileManager::duplicateProfile: source JSON is malformed:" << parseErr.errorString();
+        DIAG_WARN(PROFILES, "ProfileManager") << "duplicateProfile: source JSON is malformed:" << parseErr.errorString();
         return false;
     }
 
@@ -2829,7 +2858,7 @@ bool ProfileManager::duplicateProfile(const QString& sourceFilename, const QStri
     if (m_profileStorage && m_profileStorage->isConfigured()) {
         success = m_profileStorage->writeProfile(newFilename, duplicatedProfile.toJsonString());
         if (success) {
-            qDebug() << "Duplicated profile to ProfileStorage:" << newFilename;
+            DIAG_DEBUG(PROFILES, "profilemanager") << "Duplicated profile to ProfileStorage:" << newFilename;
         }
     }
 
@@ -2838,9 +2867,9 @@ bool ProfileManager::duplicateProfile(const QString& sourceFilename, const QStri
         QString path = userProfilesPath() + "/" + newFilename + ".json";
         success = duplicatedProfile.saveToFile(path);
         if (success) {
-            qDebug() << "Duplicated profile to local file:" << path;
+            DIAG_DEBUG(PROFILES, "profilemanager") << "Duplicated profile to local file:" << path;
         } else {
-            qWarning() << "Failed to save duplicated profile to:" << path;
+            DIAG_WARN(PROFILES, "profilemanager") << "Failed to save duplicated profile to:" << path;
         }
     }
 
@@ -2857,7 +2886,7 @@ bool ProfileManager::duplicateProfile(const QString& sourceFilename, const QStri
 bool ProfileManager::renameProfile(const QString& filename, const QString& newTitle) {
     const QString trimmedTitle = newTitle.trimmed();
     if (trimmedTitle.isEmpty()) {
-        qWarning() << "ProfileManager::renameProfile: empty title for" << filename;
+        DIAG_WARN(PROFILES, "ProfileManager") << "renameProfile: empty title for" << filename;
         return false;
     }
 
@@ -2875,11 +2904,11 @@ bool ProfileManager::renameProfile(const QString& filename, const QString& newTi
         }
     }
     if (!found) {
-        qWarning() << "ProfileManager::renameProfile: unknown profile" << filename;
+        DIAG_WARN(PROFILES, "ProfileManager") << "renameProfile: unknown profile" << filename;
         return false;
     }
     if (source == ProfileSource::BuiltIn) {
-        qWarning() << "ProfileManager::renameProfile: cannot rename built-in profile" << filename;
+        DIAG_WARN(PROFILES, "ProfileManager") << "renameProfile: cannot rename built-in profile" << filename;
         return false;
     }
 
@@ -2899,7 +2928,7 @@ bool ProfileManager::renameProfile(const QString& filename, const QString& newTi
             jsonContent = QString::fromUtf8(downloadedFile.readAll());
     }
     if (jsonContent.isEmpty()) {
-        qWarning() << "ProfileManager::renameProfile: could not load profile" << filename;
+        DIAG_WARN(PROFILES, "ProfileManager") << "renameProfile: could not load profile" << filename;
         return false;
     }
 
@@ -2908,7 +2937,7 @@ bool ProfileManager::renameProfile(const QString& filename, const QString& newTi
     QJsonParseError parseErr;
     QJsonDocument doc = QJsonDocument::fromJson(jsonContent.toUtf8(), &parseErr);
     if (parseErr.error != QJsonParseError::NoError || !doc.isObject()) {
-        qWarning() << "ProfileManager::renameProfile: malformed JSON for" << filename
+        DIAG_WARN(PROFILES, "ProfileManager") << "renameProfile: malformed JSON for" << filename
                    << parseErr.errorString();
         return false;
     }
@@ -2925,7 +2954,7 @@ bool ProfileManager::renameProfile(const QString& filename, const QString& newTi
         success = renamed.saveToFile(userProfilesPath() + "/" + filename + ".json");
     }
     if (!success) {
-        qWarning() << "ProfileManager::renameProfile: failed to write" << filename;
+        DIAG_WARN(PROFILES, "ProfileManager") << "renameProfile: failed to write" << filename;
         return false;
     }
 
@@ -2935,7 +2964,7 @@ bool ProfileManager::renameProfile(const QString& filename, const QString& newTi
     // swallow it (the preceding isFavoriteProfile guard makes it near-unreachable).
     if (m_settings && m_settings->app()->isFavoriteProfile(filename)) {
         if (!m_settings->app()->updateFavoriteProfile(filename, filename, trimmedTitle)) {
-            qWarning() << "ProfileManager::renameProfile: favorite title sync failed for" << filename;
+            DIAG_WARN(PROFILES, "ProfileManager") << "renameProfile: favorite title sync failed for" << filename;
         }
     }
 
@@ -2959,7 +2988,7 @@ void ProfileManager::uploadRecipeProfile(const QVariantMap& recipeParams) {
     // Validate recipe parameters before generating frames
     QStringList issues = recipe.validate();
     if (!issues.isEmpty()) {
-        qWarning() << "RecipeParams validation issues:" << issues.join("; ");
+        DIAG_WARN(PROFILES, "profilemanager") << "RecipeParams validation issues:" << issues.join("; ");
     }
     recipe.clamp();  // Ensure values are within hardware limits
 
@@ -3018,7 +3047,7 @@ void ProfileManager::uploadRecipeProfile(const QVariantMap& recipeParams) {
         const bool fits = m_currentProfile.steps().isEmpty()
                        || RecipeAnalyzer::framesFitEditorLayout(m_currentProfile);
         if (needFrameRegen && !fits) {
-            qWarning() << "uploadRecipeProfile:" << m_currentProfile.title() << "has"
+            DIAG_WARN(PROFILES, "profilemanager") << "uploadRecipeProfile:" << m_currentProfile.title() << "has"
                        << m_currentProfile.steps().size()
                        << "frames, which its editor cannot read — keeping them rather than "
                           "regenerating from parameters that were not derived from them";
@@ -3055,7 +3084,7 @@ void ProfileManager::uploadRecipeProfile(const QVariantMap& recipeParams) {
     // NOTE: BLE upload deferred to editor exit (QML calls uploadCurrentProfile() explicitly).
     // This avoids flooding the DE1 with BLE writes on every slider tick. See #557.
 
-    qDebug() << "Recipe profile updated with" << m_currentProfile.steps().size() << "frames (BLE upload deferred)";
+    DIAG_DEBUG(PROFILES, "profilemanager") << "Recipe profile updated with" << m_currentProfile.steps().size() << "frames (BLE upload deferred)";
 }
 
 void ProfileManager::applyRecipeToScalarFields(const RecipeParams& recipe) {
@@ -3289,7 +3318,7 @@ void ProfileManager::createNewProfileWithEditorType(EditorType type, const QStri
     emit allBuiltInProfileListChanged();
 
     uploadCurrentProfile();
-    qDebug() << "Created new" << editorTypeToString(type) << "profile:" << title;
+    DIAG_DEBUG(PROFILES, "profilemanager") << "Created new" << editorTypeToString(type) << "profile:" << title;
 }
 
 void ProfileManager::convertCurrentProfileToAdvanced() {
@@ -3324,7 +3353,7 @@ void ProfileManager::convertCurrentProfileToAdvanced() {
     emit currentProfileChanged();
     emit profileModifiedChanged();
 
-    qDebug() << "Converted profile to Advanced mode:" << m_currentProfile.title();
+    DIAG_DEBUG(PROFILES, "profilemanager") << "Converted profile to Advanced mode:" << m_currentProfile.title();
 }
 
 void ProfileManager::createNewProfile(const QString& title) {
@@ -3353,7 +3382,7 @@ void ProfileManager::createNewProfile(const QString& title) {
     defaultFrame.volume = 0;
     defaultFrame.exitIf = false;
     if (!profile.addStep(defaultFrame)) {
-        qWarning() << "createNewBlankProfile: failed to add default frame";
+        DIAG_WARN(PROFILES, "profilemanager") << "createNewBlankProfile: failed to add default frame";
     }
     setCurrentProfile(std::move(profile), QStringLiteral("createNewProfile"));
 
@@ -3371,7 +3400,7 @@ void ProfileManager::createNewProfile(const QString& title) {
     emit targetWeightChanged();
 
     uploadCurrentProfile();
-    qDebug() << "Created new blank profile:" << title;
+    DIAG_DEBUG(PROFILES, "profilemanager") << "Created new blank profile:" << title;
 }
 
 
@@ -3379,7 +3408,7 @@ void ProfileManager::createNewProfile(const QString& title) {
 
 void ProfileManager::addFrame(int afterIndex) {
     if (m_currentProfile.steps().size() >= Profile::MAX_FRAMES) {
-        qWarning() << "Cannot add frame: maximum" << Profile::MAX_FRAMES << "frames reached";
+        DIAG_WARN(PROFILES, "profilemanager") << "Cannot add frame: maximum" << Profile::MAX_FRAMES << "frames reached";
         return;
     }
 
@@ -3413,7 +3442,7 @@ void ProfileManager::addFrame(int afterIndex) {
         added = m_currentProfile.insertStep(afterIndex + 1, newFrame);
     }
     if (!added) {
-        qWarning() << "Failed to add frame: maximum frame count reached (" << Profile::MAX_FRAMES << ")";
+        DIAG_WARN(PROFILES, "profilemanager") << "Failed to add frame: maximum frame count reached (" << Profile::MAX_FRAMES << ")";
         return;
     }
 
@@ -3424,23 +3453,23 @@ void ProfileManager::addFrame(int afterIndex) {
     emit currentProfileChanged();
 
     uploadCurrentProfile();
-    qDebug() << "Added frame at index" << (afterIndex + 1) << ", total frames:" << m_currentProfile.steps().size();
+    DIAG_DEBUG(PROFILES, "profilemanager") << "Added frame at index" << (afterIndex + 1) << ", total frames:" << m_currentProfile.steps().size();
 }
 
 void ProfileManager::deleteFrame(int index) {
     if (index < 0 || static_cast<qsizetype>(index) >= m_currentProfile.steps().size()) {
-        qWarning() << "Cannot delete frame: invalid index" << index;
+        DIAG_WARN(PROFILES, "profilemanager") << "Cannot delete frame: invalid index" << index;
         return;
     }
 
     // Don't allow deleting the last frame
     if (m_currentProfile.steps().size() <= 1) {
-        qWarning() << "Cannot delete the last frame";
+        DIAG_WARN(PROFILES, "profilemanager") << "Cannot delete the last frame";
         return;
     }
 
     if (!m_currentProfile.removeStep(index)) {
-        qWarning() << "deleteFrame: removeStep failed for index" << index;
+        DIAG_WARN(PROFILES, "profilemanager") << "deleteFrame: removeStep failed for index" << index;
         return;
     }
 
@@ -3452,7 +3481,7 @@ void ProfileManager::deleteFrame(int index) {
     emit currentProfileChanged();
 
     uploadCurrentProfile();
-    qDebug() << "Deleted frame at index" << index << ", total frames:" << m_currentProfile.steps().size();
+    DIAG_DEBUG(PROFILES, "profilemanager") << "Deleted frame at index" << index << ", total frames:" << m_currentProfile.steps().size();
 }
 
 void ProfileManager::moveFrameUp(int index) {
@@ -3470,7 +3499,7 @@ void ProfileManager::moveFrameUp(int index) {
     emit currentProfileChanged();
 
     uploadCurrentProfile();
-    qDebug() << "Moved frame from" << index << "to" << (index - 1);
+    DIAG_DEBUG(PROFILES, "profilemanager") << "Moved frame from" << index << "to" << (index - 1);
 }
 
 void ProfileManager::moveFrameDown(int index) {
@@ -3488,24 +3517,24 @@ void ProfileManager::moveFrameDown(int index) {
     emit currentProfileChanged();
 
     uploadCurrentProfile();
-    qDebug() << "Moved frame from" << index << "to" << (index + 1);
+    DIAG_DEBUG(PROFILES, "profilemanager") << "Moved frame from" << index << "to" << (index + 1);
 }
 
 void ProfileManager::duplicateFrame(int index) {
     if (index < 0 || static_cast<qsizetype>(index) >= m_currentProfile.steps().size()) {
-        qWarning() << "Cannot duplicate frame: invalid index" << index;
+        DIAG_WARN(PROFILES, "profilemanager") << "Cannot duplicate frame: invalid index" << index;
         return;
     }
 
     if (m_currentProfile.steps().size() >= Profile::MAX_FRAMES) {
-        qWarning() << "Cannot duplicate frame: maximum" << Profile::MAX_FRAMES << "frames reached";
+        DIAG_WARN(PROFILES, "profilemanager") << "Cannot duplicate frame: maximum" << Profile::MAX_FRAMES << "frames reached";
         return;
     }
 
     ProfileFrame copy = m_currentProfile.steps().at(index);
     copy.name = copy.name + " (copy)";
     if (!m_currentProfile.insertStep(index + 1, copy)) {
-        qWarning() << "duplicateFrame: insertStep failed at index" << (index + 1);
+        DIAG_WARN(PROFILES, "profilemanager") << "duplicateFrame: insertStep failed at index" << (index + 1);
         return;
     }
 
@@ -3517,12 +3546,12 @@ void ProfileManager::duplicateFrame(int index) {
     emit currentProfileChanged();
 
     uploadCurrentProfile();
-    qDebug() << "Duplicated frame at index" << index;
+    DIAG_DEBUG(PROFILES, "profilemanager") << "Duplicated frame at index" << index;
 }
 
 void ProfileManager::setFrameProperty(int index, const QString& property, const QVariant& value) {
     if (index < 0 || static_cast<qsizetype>(index) >= m_currentProfile.steps().size()) {
-        qWarning() << "setFrameProperty: invalid index" << index;
+        DIAG_WARN(PROFILES, "profilemanager") << "setFrameProperty: invalid index" << index;
         return;
     }
 
@@ -3552,7 +3581,7 @@ void ProfileManager::setFrameProperty(int index, const QString& property, const 
     // Popup message
     else if (property == "popup") frame.popup = value.toString();
     else {
-        qWarning() << "setFrameProperty: unknown property" << property;
+        DIAG_WARN(PROFILES, "profilemanager") << "setFrameProperty: unknown property" << property;
         return;
     }
 
@@ -3630,7 +3659,7 @@ void ProfileManager::setCurrentProfile(Profile profile, const QString& context) 
     // qInfo, not qDebug: this changes how the shot pours and can reach the user's file on
     // a later save, so it belongs in the log a user (or their AI) reads when asking why a
     // profile behaves differently than it used to.
-    qInfo() << "ProfileManager:" << context << "- capped" << capped
+    DIAG_INFO(PROFILES, "ProfileManager") << context << "- capped" << capped
             << "unlimited pressure step(s) in" << m_currentProfile.title()
             << "at" << Profile::kDefaultPressureFlowLimit
             << "mL/s (de1app default; not written to disk unless the profile is saved)";
@@ -3685,7 +3714,7 @@ QString ProfileManager::downloadedProfilesPath() const {
 double ProfileManager::getGroupTemperature() const {
     if (m_settings && m_settings->brew()->hasTemperatureOverride()) {
         double temp = m_settings->brew()->temperatureOverride();
-        qDebug() << "getGroupTemperature: using override" << temp << "C";
+        DIAG_DEBUG(PROFILES, "profilemanager") << "getGroupTemperature: using override" << temp << "C";
         return temp;
     }
     return m_currentProfile.espressoTemperature();
@@ -3763,7 +3792,7 @@ void ProfileManager::migrateProfileFolders() {
         return;
     }
 
-    qDebug() << "Migrating profile folders...";
+    DIAG_DEBUG(PROFILES, "profilemanager") << "Migrating profile folders...";
 
     // Create both folders
     userDir.mkpath(".");
@@ -3784,13 +3813,13 @@ void ProfileManager::migrateProfileFolders() {
         QString dstPath = userPath + "/" + file;
 
         if (QFile::rename(srcPath, dstPath)) {
-            qDebug() << "Migrated profile:" << file;
+            DIAG_DEBUG(PROFILES, "profilemanager") << "Migrated profile:" << file;
         } else {
-            qWarning() << "Failed to migrate profile:" << file;
+            DIAG_WARN(PROFILES, "profilemanager") << "Failed to migrate profile:" << file;
         }
     }
 
-    qDebug() << "Profile folder migration complete";
+    DIAG_DEBUG(PROFILES, "profilemanager") << "Profile folder migration complete";
 }
 
 void ProfileManager::migrateProfileFormat() {
@@ -3800,7 +3829,7 @@ void ProfileManager::migrateProfileFormat() {
         return;  // Already done
     }
 
-    qDebug() << "Migrating profile JSON format to de1app-compatible v2...";
+    DIAG_DEBUG(PROFILES, "profilemanager") << "Migrating profile JSON format to de1app-compatible v2...";
     int migrated = 0;
     int failed = 0;
 
@@ -3808,7 +3837,7 @@ void ProfileManager::migrateProfileFormat() {
     auto migrateFile = [&](const QString& filePath) {
         QFile file(filePath);
         if (!file.open(QIODevice::ReadOnly)) {
-            qWarning() << "migrateProfileFormat: Cannot open profile:" << filePath
+            DIAG_WARN(PROFILES, "profilemanager") << "migrateProfileFormat: Cannot open profile:" << filePath
                        << "-" << file.errorString();
             failed++;
             return;
@@ -3816,7 +3845,7 @@ void ProfileManager::migrateProfileFormat() {
         QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
         file.close();
         if (doc.isNull()) {
-            qWarning() << "migrateProfileFormat: Invalid JSON in profile:" << filePath;
+            DIAG_WARN(PROFILES, "profilemanager") << "migrateProfileFormat: Invalid JSON in profile:" << filePath;
             failed++;
             return;
         }
@@ -3826,7 +3855,7 @@ void ProfileManager::migrateProfileFormat() {
 
         Profile profile = Profile::fromJson(doc);
         if (profile.title().isEmpty() || profile.steps().isEmpty()) {
-            qWarning() << "migrateProfileFormat: Profile has empty title or steps:" << filePath;
+            DIAG_WARN(PROFILES, "profilemanager") << "migrateProfileFormat: Profile has empty title or steps:" << filePath;
             failed++;
             return;
         }
@@ -3840,7 +3869,7 @@ void ProfileManager::migrateProfileFormat() {
         // stored format — it still loads.
         const QStringList parity = Profile::jsonParityErrors(obj, profile.toJsonObject());
         if (!parity.isEmpty()) {
-            qWarning() << "migrateProfileFormat: leaving" << filePath
+            DIAG_WARN(PROFILES, "profilemanager") << "migrateProfileFormat: leaving" << filePath
                        << "in its stored format — converting it would not be lossless:"
                        << parity.join(QStringLiteral("; "));
             failed++;
@@ -3850,7 +3879,7 @@ void ProfileManager::migrateProfileFormat() {
         if (profile.saveToFile(filePath)) {
             migrated++;
         } else {
-            qWarning() << "migrateProfileFormat: Failed to write migrated profile:" << filePath;
+            DIAG_WARN(PROFILES, "profilemanager") << "migrateProfileFormat: Failed to write migrated profile:" << filePath;
             failed++;
         }
     };
@@ -3876,7 +3905,7 @@ void ProfileManager::migrateProfileFormat() {
 
             QJsonDocument doc = QJsonDocument::fromJson(jsonContent.toUtf8());
             if (doc.isNull()) {
-                qWarning() << "migrateProfileFormat: Invalid JSON in SAF profile:" << name;
+                DIAG_WARN(PROFILES, "profilemanager") << "migrateProfileFormat: Invalid JSON in SAF profile:" << name;
                 failed++;
                 continue;
             }
@@ -3886,7 +3915,7 @@ void ProfileManager::migrateProfileFormat() {
 
             Profile profile = Profile::fromJson(doc);
             if (profile.title().isEmpty() || profile.steps().isEmpty()) {
-                qWarning() << "migrateProfileFormat: SAF profile has empty title or steps:" << name;
+                DIAG_WARN(PROFILES, "profilemanager") << "migrateProfileFormat: SAF profile has empty title or steps:" << name;
                 failed++;
                 continue;
             }
@@ -3894,20 +3923,20 @@ void ProfileManager::migrateProfileFormat() {
             if (m_profileStorage->writeProfile(name, profile.toJsonString())) {
                 migrated++;
             } else {
-                qWarning() << "migrateProfileFormat: Failed to write SAF profile:" << name;
+                DIAG_WARN(PROFILES, "profilemanager") << "migrateProfileFormat: Failed to write SAF profile:" << name;
                 failed++;
             }
         }
     }
 
     if (failed > 0) {
-        qWarning() << "Profile format migration incomplete:" << migrated << "updated,"
+        DIAG_WARN(PROFILES, "profilemanager") << "Profile format migration incomplete:" << migrated << "updated,"
                    << failed << "failed. Will retry on next launch.";
     } else {
         if (m_settings) {
             m_settings->setValue("profile_format_migrated", true);
         }
-        qDebug() << "Profile format migration complete:" << migrated << "profiles updated";
+        DIAG_DEBUG(PROFILES, "profilemanager") << "Profile format migration complete:" << migrated << "profiles updated";
     }
 }
 
@@ -3952,7 +3981,7 @@ void ProfileManager::stripStoredRecipeBlocks() {
         return;
     }
 
-    qDebug() << "Stripping stored recipe blocks...";
+    DIAG_DEBUG(PROFILES, "profilemanager") << "Stripping stored recipe blocks...";
     int migrated = 0;
     int failed = 0;     // write errors only — these are worth retrying
     int refused = 0;    // not losslessly rewritable; retrying cannot help
@@ -3966,7 +3995,7 @@ void ProfileManager::stripStoredRecipeBlocks() {
         QJsonParseError parseError{};
         const QJsonDocument doc = QJsonDocument::fromJson(raw, &parseError);
         if (doc.isNull()) {
-            qWarning() << "stripStoredRecipeBlocks: cannot parse" << label << "-"
+            DIAG_WARN(PROFILES, "profilemanager") << "stripStoredRecipeBlocks: cannot parse" << label << "-"
                        << parseError.errorString() << "at offset" << parseError.offset;
             failed++;
             return std::nullopt;
@@ -3976,7 +4005,7 @@ void ProfileManager::stripStoredRecipeBlocks() {
 
         Profile profile = Profile::fromJson(doc);
         if (profile.title().isEmpty()) {
-            qWarning() << "stripStoredRecipeBlocks: abandoning" << label
+            DIAG_WARN(PROFILES, "profilemanager") << "stripStoredRecipeBlocks: abandoning" << label
                        << "- it carries a recipe block but no title, so it cannot be"
                        << "safely rewritten";
             failed++;
@@ -3995,7 +4024,7 @@ void ProfileManager::stripStoredRecipeBlocks() {
             // same reason upgradeStoredEncoding leaves such files alone. Its block
             // stays, harmlessly: nothing reads one, and loadProfile will try again
             // per-profile through the same gate if the encoding is ever repaired.
-            qInfo() << "stripStoredRecipeBlocks: leaving" << label
+            DIAG_INFO(PROFILES, "profilemanager") << "stripStoredRecipeBlocks: leaving" << label
                     << "as it is — rewriting it would not be lossless:"
                     << parity.join(QStringLiteral(", "));
             refused++;
@@ -4012,7 +4041,7 @@ void ProfileManager::stripStoredRecipeBlocks() {
     auto migrateFile = [&](const QString& filePath) {
         QFile file(filePath);
         if (!file.open(QIODevice::ReadOnly)) {
-            qWarning() << "stripStoredRecipeBlocks: cannot open" << filePath;
+            DIAG_WARN(PROFILES, "profilemanager") << "stripStoredRecipeBlocks: cannot open" << filePath;
             failed++;
             return;
         }
@@ -4028,12 +4057,12 @@ void ProfileManager::stripStoredRecipeBlocks() {
         // startup pass rewriting every profile a user owns, purely to tidy them, is
         // precisely the case its comment names.
         if (!profile->saveToFile(filePath)) {
-            qWarning() << "stripStoredRecipeBlocks: failed to write" << filePath
+            DIAG_WARN(PROFILES, "profilemanager") << "stripStoredRecipeBlocks: failed to write" << filePath
                        << "- left as it was; will retry on next launch";
             failed++;
             return;
         }
-        qDebug() << "stripStoredRecipeBlocks: stripped" << filePath;
+        DIAG_DEBUG(PROFILES, "profilemanager") << "stripStoredRecipeBlocks: stripped" << filePath;
         migrated++;
     };
 
@@ -4056,7 +4085,7 @@ void ProfileManager::stripStoredRecipeBlocks() {
                 // readProfile() returns "" for ANY failure without logging, so a
                 // stale SAF grant would otherwise skip the entire external store in
                 // silence and still let the completion flag be set.
-                qWarning() << "stripStoredRecipeBlocks: cannot read SAF profile" << name
+                DIAG_WARN(PROFILES, "profilemanager") << "stripStoredRecipeBlocks: cannot read SAF profile" << name
                            << "- will retry on next launch";
                 failed++;
                 continue;
@@ -4068,19 +4097,19 @@ void ProfileManager::stripStoredRecipeBlocks() {
             if (m_profileStorage->writeProfile(name, profile->toJsonString())) {
                 migrated++;
             } else {
-                qWarning() << "stripStoredRecipeBlocks: failed to write SAF profile:" << name;
+                DIAG_WARN(PROFILES, "profilemanager") << "stripStoredRecipeBlocks: failed to write SAF profile:" << name;
                 failed++;
             }
         }
     }
 
     if (failed > 0) {
-        qWarning() << "Recipe block strip incomplete:" << migrated << "stripped,"
+        DIAG_WARN(PROFILES, "profilemanager") << "Recipe block strip incomplete:" << migrated << "stripped,"
                    << refused << "left as they are," << promoted << "dose(s) promoted,"
                    << failed << "failed. Will retry on next launch.";
     } else {
         if (m_settings) m_settings->setValue("recipe_blocks_stripped", true);
-        qDebug() << "Recipe block strip complete:" << migrated << "profile(s) stripped,"
+        DIAG_DEBUG(PROFILES, "profilemanager") << "Recipe block strip complete:" << migrated << "profile(s) stripped,"
                  << promoted << "dose(s) promoted to recommended_dose,"
                  << refused << "left as they are (non-canonical encoding)";
     }
@@ -4135,7 +4164,7 @@ void ProfileManager::migrateReadOnlyProfiles() {
                 newFilename = titleToFilename(newTitle);
                 needsSave = true;
 
-                qDebug() << "migrateReadOnlyProfiles: renamed modified user override:"
+                DIAG_DEBUG(PROFILES, "profilemanager") << "migrateReadOnlyProfiles: renamed modified user override:"
                          << filename << "->" << newFilename;
                 renamed++;
             } else {
@@ -4145,7 +4174,7 @@ void ProfileManager::migrateReadOnlyProfiles() {
                 } else {
                     QFile::remove(filePath);
                 }
-                qDebug() << "migrateReadOnlyProfiles: deleted unmodified shadow of built-in:"
+                DIAG_DEBUG(PROFILES, "profilemanager") << "migrateReadOnlyProfiles: deleted unmodified shadow of built-in:"
                          << filename;
                 return;  // No further processing needed
             }
@@ -4165,12 +4194,12 @@ void ProfileManager::migrateReadOnlyProfiles() {
             if (profileType == QLatin1String("settings_2b")) {
                 if (qFuzzyIsNull(profile.espressoHoldTime()) && profile.flowProfileHoldTime() > 0) {
                     profile.setEspressoHoldTime(profile.flowProfileHoldTime());
-                    qDebug() << "migrateReadOnlyProfiles: fixed settings_2b hold time for" << filename
+                    DIAG_DEBUG(PROFILES, "profilemanager") << "migrateReadOnlyProfiles: fixed settings_2b hold time for" << filename
                              << "from flowProfileHoldTime:" << profile.flowProfileHoldTime();
                 }
                 if (qFuzzyIsNull(profile.espressoDeclineTime()) && profile.flowProfileDeclineTime() > 0) {
                     profile.setEspressoDeclineTime(profile.flowProfileDeclineTime());
-                    qDebug() << "migrateReadOnlyProfiles: fixed settings_2b decline time for" << filename
+                    DIAG_DEBUG(PROFILES, "profilemanager") << "migrateReadOnlyProfiles: fixed settings_2b decline time for" << filename
                              << "from flowProfileDeclineTime:" << profile.flowProfileDeclineTime();
                 }
             }
@@ -4179,7 +4208,7 @@ void ProfileManager::migrateReadOnlyProfiles() {
             profile.setSteps({});
             profile.regenerateSimpleFrames();
             needsSave = true;
-            qDebug() << "migrateReadOnlyProfiles: regenerated simple profile frames for" << filename;
+            DIAG_DEBUG(PROFILES, "profilemanager") << "migrateReadOnlyProfiles: regenerated simple profile frames for" << filename;
         }
 
         // 4d: Detect broken D-Flow/A-Flow profiles (wrong frame count)
@@ -4200,7 +4229,7 @@ void ProfileManager::migrateReadOnlyProfiles() {
             newFilename = titleToFilename(newTitle);
             needsSave = true;
 
-            qWarning() << "migrateReadOnlyProfiles: broken D-Flow profile"
+            DIAG_WARN(PROFILES, "profilemanager") << "migrateReadOnlyProfiles: broken D-Flow profile"
                        << filename << "has" << stepCount << "frames (expected 3),"
                        << "renamed to:" << newTitle;
             broken++;
@@ -4217,7 +4246,7 @@ void ProfileManager::migrateReadOnlyProfiles() {
             newFilename = titleToFilename(newTitle);
             needsSave = true;
 
-            qWarning() << "migrateReadOnlyProfiles: broken A-Flow profile"
+            DIAG_WARN(PROFILES, "profilemanager") << "migrateReadOnlyProfiles: broken A-Flow profile"
                        << filename << "has" << stepCount << "frames (expected 9),"
                        << "renamed to:" << newTitle;
             broken++;
@@ -4242,7 +4271,7 @@ void ProfileManager::migrateReadOnlyProfiles() {
         }
 
         if (!saved) {
-            qWarning() << "migrateReadOnlyProfiles: failed to save" << newFilename;
+            DIAG_WARN(PROFILES, "profilemanager") << "migrateReadOnlyProfiles: failed to save" << newFilename;
             failed++;
             return;
         }
@@ -4257,7 +4286,7 @@ void ProfileManager::migrateReadOnlyProfiles() {
                 }
                 if (m_settings->app()->currentProfile() == filename) {
                     m_settings->app()->setCurrentProfile(newFilename);
-                    qDebug() << "migrateReadOnlyProfiles: updated currentProfile:"
+                    DIAG_DEBUG(PROFILES, "profilemanager") << "migrateReadOnlyProfiles: updated currentProfile:"
                              << filename << "->" << newFilename;
                 }
             }
@@ -4291,11 +4320,11 @@ void ProfileManager::migrateReadOnlyProfiles() {
     }
 
     if (failed > 0) {
-        qWarning() << "Read-only profile migration incomplete:" << renamed << "renamed,"
+        DIAG_WARN(PROFILES, "profilemanager") << "Read-only profile migration incomplete:" << renamed << "renamed,"
                    << broken << "broken," << failed << "failed. Will retry on next launch.";
     } else {
         if (m_settings) m_settings->setValue("readonly_profiles_migrated_v2", true);
-        qDebug() << "Read-only profile migration complete:" << renamed << "renamed,"
+        DIAG_DEBUG(PROFILES, "profilemanager") << "Read-only profile migration complete:" << renamed << "renamed,"
                  << broken << "broken profiles detected";
 
         // Refresh profiles list after migration

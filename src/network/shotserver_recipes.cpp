@@ -348,7 +348,7 @@ void ShotServer::handleRecipesApi(QTcpSocket* socket, const QString& method,
                                       fallbackSteam, recipeStorage, respondJson]() {
             ShotRecord record;
             const bool opened = withTempDb(dbPath, "web_recipe_promote", [&](QSqlDatabase& db) {
-                record = ShotHistoryStorage::loadShotRecordStatic(db, shotId);
+                record = ShotHistoryStorage::loadShotRecordStatic(db, shotId, nullptr, Q_FUNC_INFO);
             });
             QMetaObject::invokeMethod(qApp, [opened, record, name, hasMilkProvided,
                                              hasMilk, fallbackSteam, recipeStorage, respondJson]() {
@@ -1003,7 +1003,8 @@ QString ShotServer::generateRecipesPage() const
             } else {
                 el('list').innerHTML = '<div class="grid">' + active.map(cardHtml).join('') + '</div>';
             }
-
+)HTML";
+    html += R"HTML(
             el('archivedHead').style.display = archived.length ? '' : 'none';
             el('archivedToggle').textContent = (showArchived ? 'Hide archived (' : 'Show archived (')
                 + archived.length + ')';

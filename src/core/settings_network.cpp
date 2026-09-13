@@ -1,3 +1,4 @@
+#include "core/diagnosticlogging.h"
 #include "settings_network.h"
 #include "settings.h"
 
@@ -1466,7 +1467,7 @@ void SettingsNetwork::ensureSettingsAccessible() {
 
     // No settings access found — add a settings widget to bottom right.
     addItem(QStringLiteral("settings"), QStringLiteral("bottomRight"));
-    qDebug() << "SettingsNetwork: Added settings widget to bottomRight (no settings access found)";
+    DIAG_DEBUG(APP, "SettingsNetwork") << "Added settings widget to bottomRight (no settings access found)";
 }
 
 bool SettingsNetwork::saveLayoutObjectVerified(const QJsonObject& layout, const QString& what) {
@@ -1489,8 +1490,8 @@ bool SettingsNetwork::saveLayoutObjectVerified(const QJsonObject& layout, const 
     const QSettings::Status after = m_settings.status();
 
     if (before != QSettings::NoError) {
-        qWarning().noquote()
-            << "SettingsNetwork: cannot verify the write of" << what
+        DIAG_WARN(APP, "SettingsNetwork").noquote()
+            << "cannot verify the write of" << what
             << "— the settings store was already in error state"
             << static_cast<int>(before)
             << "before this write, and QSettings::status() never clears. The value"
@@ -1498,8 +1499,8 @@ bool SettingsNetwork::saveLayoutObjectVerified(const QJsonObject& layout, const 
         return false;
     }
     if (after != QSettings::NoError) {
-        qWarning().noquote()
-            << "SettingsNetwork: FAILED to persist" << what
+        DIAG_WARN(APP, "SettingsNetwork").noquote()
+            << "FAILED to persist" << what
             << "(QSettings status" << static_cast<int>(after)
             << ") — its one-time schema gate is already consumed, so this will NOT be retried;"
             << "add the widget from Settings -> Layout if it is missing";
@@ -1549,7 +1550,7 @@ void SettingsNetwork::injectEquipmentButtonIfMissing() {
     }
     layout["zones"] = zones;
     if (saveLayoutObjectVerified(layout, QStringLiteral("the Equipment idle button")))
-        qDebug() << "SettingsNetwork: injected Equipment idle button (schema 22 crossed)";
+        DIAG_DEBUG(APP, "SettingsNetwork") << "injected Equipment idle button (schema 22 crossed)";
 }
 
 void SettingsNetwork::injectRecipesButtonIfMissing() {
@@ -1590,7 +1591,7 @@ void SettingsNetwork::injectRecipesButtonIfMissing() {
     }
     layout["zones"] = zones;
     if (saveLayoutObjectVerified(layout, QStringLiteral("the Recipes idle button")))
-        qDebug() << "SettingsNetwork: injected Recipes idle button (schema 25 crossed)";
+        DIAG_DEBUG(APP, "SettingsNetwork") << "injected Recipes idle button (schema 25 crossed)";
 }
 
 bool SettingsNetwork::setItemProperty(const QString& itemId, const QString& key, const QVariant& value) {
@@ -1602,12 +1603,12 @@ bool SettingsNetwork::setItemProperty(const QString& itemId, const QString& key,
     // setItemPropertyList (typed parameters are converted by the engine — the
     // setZoneItems pattern), and JS objects have no storable mapping here.
     if (qstrcmp(value.typeName(), "QJSValue") == 0) {
-        qWarning() << "setItemProperty: refusing JS array/object for" << key
+        DIAG_WARN(APP, "settings_network") << "setItemProperty: refusing JS array/object for" << key
                    << "- pass arrays via setItemPropertyList";
         return false;
     }
     if (!value.isValid()) {
-        qWarning() << "setItemProperty: refusing invalid value (JS undefined?) for" << key;
+        DIAG_WARN(APP, "settings_network") << "setItemProperty: refusing invalid value (JS undefined?) for" << key;
         return false;
     }
 
@@ -1631,7 +1632,7 @@ bool SettingsNetwork::setItemProperty(const QString& itemId, const QString& key,
     // Stale id (widget deleted since the editor was opened, possibly from
     // another device). Without this warning the edit vanishes with success
     // reported at every layer.
-    qWarning() << "setItemProperty: no layout item with id" << itemId << "- write for" << key << "dropped";
+    DIAG_WARN(APP, "settings_network") << "setItemProperty: no layout item with id" << itemId << "- write for" << key << "dropped";
     return false;
 }
 

@@ -1,3 +1,4 @@
+#include "core/diagnosticlogging.h"
 #include "shottimingcontroller.h"
 #include "../ble/de1device.h"
 #include "../ble/scaledevice.h"
@@ -171,7 +172,7 @@ void ShotTimingController::onShotSample(const ShotSample& sample, double pressur
     if (!isSettling && frameNumber != m_currentFrameNumber) {
         if (m_currentProfile && frameNumber >= 0 && frameNumber < m_currentProfile->steps().size()) {
             const auto& frame = m_currentProfile->steps()[frameNumber];
-            qDebug() << "FRAME CHANGE:" << m_currentFrameNumber << "->" << frameNumber
+            DIAG_DEBUG(SHOT, "shottimingcontroller") << "FRAME CHANGE:" << m_currentFrameNumber << "->" << frameNumber
                      << "name:" << frame.name << "exitWeight:" << frame.exitWeight;
         }
         m_currentFrameNumber = frameNumber;
@@ -181,7 +182,7 @@ void ShotTimingController::onShotSample(const ShotSample& sample, double pressur
         if (!m_extractionStarted) {
             m_extractionStarted = true;
             m_displayTimeBase = QDateTime::currentMSecsSinceEpoch();
-            qDebug() << "EXTRACTION STARTED at frame" << frameNumber;
+            DIAG_DEBUG(SHOT, "shottimingcontroller") << "EXTRACTION STARTED at frame" << frameNumber;
         }
     }
 
@@ -383,12 +384,12 @@ void ShotTimingController::onWeightSample(double weight, double flowRate, double
 
         double avgDrift = qAbs(avg - m_lastSettlingAvg);
 
-        SAWT_LOG(QStringLiteral("Settling: %1 g delta: %2 avg: %3 drift: %4 stable: %5 ms%6")
-                     .arg(weight, 0, 'f', 1).arg(delta, 0, 'f', 2).arg(avg, 0, 'f', 1)
-                     .arg(avgDrift, 0, 'f', 2).arg(stableMs)
-                     .arg(endedStillMs < 0
-                              ? QString()
-                              : QStringLiteral(" (broke a %1 ms run)").arg(endedStillMs)));
+        // Only a broken stability run explains a delay; routine samples are in the shot data.
+        if (endedStillMs >= 0) {
+            SAWT_LOG(QStringLiteral("Settling interrupted: weight=%1g delta=%2g avg=%3g drift=%4g endedStableMs=%5")
+                         .arg(weight, 0, 'f', 1).arg(delta, 0, 'f', 2).arg(avg, 0, 'f', 1)
+                         .arg(avgDrift, 0, 'f', 2).arg(endedStillMs));
+        }
 
         // Fast path: absolute stillness for SETTLING_STABLE_MS (original behavior)
         if (stableMs >= SETTLING_STABLE_MS) {
@@ -430,8 +431,7 @@ void ShotTimingController::onWeightSample(double weight, double flowRate, double
                 if (avgStableMs >= SETTLING_CLEAN_CAPTURE_MS) {
                     // Log the FIRST capture each settling cycle (m_lastCleanSettlingAvg
                     // is reset to 0 at startShot/startSettlingTimer). Subsequent gate
-                    // fires keep updating the value silently — logging every one would
-                    // be redundant with the per-sample `[SAW] Settling:` line.
+                    // fires keep updating the value silently; the final result retains it.
                     if (m_lastCleanSettlingAvg <= 0.0) {
                         SAWT_LOG(QStringLiteral("First clean-avg capture at %1 g "
                                                 "(gate held %2 ms, SAW trigger %3 g)")

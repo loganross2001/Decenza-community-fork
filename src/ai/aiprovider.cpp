@@ -2158,8 +2158,16 @@ void GeminiProvider::onAnalysisReply(QNetworkReply* reply)
     // sees a functionCall and this branch is inert for it.
     if (!functionCalls.isEmpty() && m_toolExecutor && m_toolRounds < MAX_TOOL_ROUNDS) {
         ++m_toolRounds;
-        // Any prose written alongside the call is a natural lead-in; buffer it and prepend to the final answer.
-        m_accumulatedText += text;
+        // [barista-fork] The model often writes a lead-in ("Checking the shot detail now…", "Let me pull up your
+        // history") in the SAME turn as the functionCall. Prepending it to the final answer glued pre-tool
+        // narration onto the post-tool reply — one spoken utterance opening with "Checking… now… The flow trace
+        // looks…" (confirmed on-device 2026-09-13: chars=396 speak_start), the very pre-announcement the persona
+        // bans. Mirror the Anthropic path (finalizeConversationResponse): DROP the FIRST round's lead-in — the
+        // final answer carries only the post-tool text. Dead-air is already covered by the non-verbal
+        // thinking-loop pulse, so no early speech is needed (Gemini has no interimText wiring). Later rounds keep
+        // buffering so a genuine mid-loop remark isn't lost.
+        if (m_toolRounds > 1)
+            m_accumulatedText += text;
         setStatus(Status::Busy);            // stay Busy while the tools run (top of this fn set Ready)
         const int gen = m_reqGen;            // guard: a superseded turn's late callback must NOT re-POST
         auto pending = std::make_shared<int>(functionCalls.size());

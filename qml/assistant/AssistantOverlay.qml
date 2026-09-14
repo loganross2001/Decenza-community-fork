@@ -1782,6 +1782,28 @@ Item {
         if (active.profiles && mods.profiles) out += "\n" + mods.profiles
         if (active.camera && mods.camera) out += "\n" + mods.camera
         if (active.web && mods.web) out += "\n" + mods.web
+        // [barista-fork] Anti-filler CLOSING CONTRACT (voice UX fix, 2026-09-13). The spoken-style rules live ~45k
+        // chars up in the persona, BEFORE the ~20k data block — where the model under-weights them, so Gemini
+        // ships numbered-list monologues and "let me look…" preambles it was already told not to (confirmed
+        // on-device: a 1012-char reply that was three bold-header bullet points). Restate the load-bearing rules
+        // tightly HERE, in the recency slot — the last thing before the conversation — with one contrastive
+        // example, since the model follows an example better than a rule. Applies to EVERY turn (casual too). This
+        // is a deliberate recap of rules stated above, not new policy; keep the two in sync if either changes.
+        out += "\n\nSPOKEN-STYLE CONTRACT — how you TALK, overrides any formatting habit above:\n"
+            + "This is read ALOUD. No markdown, no bullet points, no numbered lists, no bold, no headers — ever.\n"
+            + "Give ONE change at a time. When several things could help, say the single most useful one as a plain "
+            + "spoken sentence and offer the rest ('there's more we can try after that') — never reel off two or "
+            + "three moves in a row.\n"
+            + "Answer directly. Don't open with 'let me look…', 'checking now…', 'here's the read:', or 'that's a "
+            + "great call' — just say the thing. The wait is already covered; narrating it is filler.\n"
+            + "Depth is welcome when you're actually teaching — the why behind a lever, what the trace showed; what "
+            + "drowns it is stacked numbers, so keep figures sparse.\n"
+            + "EXAMPLE — the SAME advice, wrong then right:\n"
+            + "  WRONG (a list, read aloud): '1. Coarsen the Grind: step to 24 to open the puck. 2. Keep Ratios "
+            + "Stretched: stay near 1 to 2.4. 3. Respect Lower Temps: hold around 190.'\n"
+            + "  RIGHT (spoken, one lead move, the why kept): 'I'd take the grind to 24 — that opens the puck up and "
+            + "pulls that 46-second shot back toward 30, which is what's making it bitter. Your ratio and temp are "
+            + "already in a good spot, so leave those. Want me to set it?'"
         console.log("[barista] scoped prompt chars=" + out.length
                     + " (core=" + root._coreSystemPrompt.length + ") active="
                     + (includeDialin ? "dialin " : "") + (active.profiles ? "profiles " : "")

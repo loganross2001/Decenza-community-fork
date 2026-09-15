@@ -31,6 +31,8 @@ private:
     }
 
 private slots:
+    void init() { QTest::failOnWarning(); }
+
     void startsIdle() {
         BaristaConversation c(nullptr, nullptr, nullptr);
         QCOMPARE(c.state(), State::Idle);

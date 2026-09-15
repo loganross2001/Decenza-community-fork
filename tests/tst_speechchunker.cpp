@@ -13,6 +13,8 @@ class TestSpeechChunker : public QObject {
     Q_OBJECT
 
 private slots:
+    void init() { QTest::failOnWarning(); }
+
     // A complete short reply below minChunkChars buffers until flush — it is not emitted mid-stream.
     void shortReplyWaitsForFlush() {
         SpeechChunker c;

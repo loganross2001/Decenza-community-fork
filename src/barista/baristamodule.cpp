@@ -27,7 +27,6 @@
 #include <QDate>                              // [barista-fork] bagOp list: days-off-roast freshness
 #include "../ai/aimanager.h"
 
-#include "baristasingletons_qml.h"   // [barista-fork] BaristaModuleForeign::s_singletonInstance
 #include <QFileInfo>
 #include <QNetworkAccessManager>
 #include <QJsonObject>
@@ -1095,9 +1094,10 @@ BaristaModule* BaristaModule::install(MainController* mainController,
     // before engine.load(), so the lazy singleton create() always finds it.
     auto* module = new BaristaModule(mainController, machineState, appSettings,
                                      parent ? parent : static_cast<QObject*>(mainController));
-    // Publish as the `Barista` QML singleton (replaces the old setContextProperty, which was
-    // invisible to qmllint/qmlcachegen — see baristasingletons_qml.h).
-    BaristaModuleForeign::s_singletonInstance = module;
+    // The caller (main.cpp) publishes the returned instance as the `Barista` QML singleton
+    // (BaristaModuleForeign::s_singletonInstance), alongside every other main()-owned singleton —
+    // kept in main.cpp so the publish is greppable there (tst_qmlregistration) rather than hidden
+    // in this installer. Both happen before engine.load(), so the lazy create() always finds it.
     return module;
 }
 

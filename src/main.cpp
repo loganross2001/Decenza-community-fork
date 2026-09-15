@@ -109,6 +109,7 @@ extern "C" const char* __ubsan_default_options()
 #include "version.h"
 #ifdef DECENZA_BARISTA
 #include "barista/baristamodule.h"  // [barista-fork] hook
+#include "barista/baristasingletons_qml.h"  // [barista-fork] BaristaModuleForeign — published from main.cpp below
 #include "barista/assistantvoice.h" // [barista-fork] coaching-voice routing for the live coaches
 #include "barista/coachphrasebook.h" // [barista-fork] model-generated varied cue phrasing
 #endif
@@ -4152,6 +4153,11 @@ int main(int argc, char *argv[])
     // arbiter a handle to the barista voice so coaching can stop it during shot/steam. Assigned before
     // engine.load() below, so before any cue can fire.
     if (baristaModule) {
+        // [barista-fork] Publish as the `Barista` QML singleton, alongside every other
+        // main()-owned singleton (BLEManager/DE1Device/…). Assigned here — before engine.load()
+        // below — so the lazy singleton create() in baristasingletons_qml.h always finds it, and
+        // so the publish is visible in main.cpp where tst_qmlregistration expects it.
+        BaristaModuleForeign::s_singletonInstance = baristaModule;
         coachingVoice = baristaModule->coachingVoice();
         baristaVoice = baristaModule->voice();
         coachPhrasebook = baristaModule->coachPhrasebook();

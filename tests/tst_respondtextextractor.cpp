@@ -17,6 +17,8 @@ class TestRespondTextExtractor : public QObject {
     Q_OBJECT
 
 private slots:
+    void init() { QTest::failOnWarning(); }
+
     // The whole object in one fragment: the value decodes and the closing quote marks it done.
     void wholeObjectOneFragment() {
         RespondTextExtractor x;

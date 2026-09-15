@@ -31,6 +31,8 @@ private:
     }
 
 private slots:
+    void init() { QTest::failOnWarning(); }
+
     // A whole plain-text turn delivered in one chunk parses into the expected event sequence and text.
     void plainTextTurn() {
         AnthropicStreamParser p;

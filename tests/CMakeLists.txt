@@ -1685,8 +1685,10 @@ target_compile_definitions(tst_recipeeditorapppath PRIVATE
 
 target_include_directories(tst_profilemanager PRIVATE ${CMAKE_BINARY_DIR})
 target_compile_definitions(tst_profilemanager PRIVATE SRCDIR="${CMAKE_SOURCE_DIR}/tests")
-# Add built-in profiles QRC so isBuiltInFilename() works in tests
-qt_add_resources(PROFILES_QRC ${CMAKE_SOURCE_DIR}/resources/profiles.qrc)
+# Add built-in profiles QRC so isBuiltInFilename() works in tests. The .qrc is
+# generated from resources/profiles/ by the top-level CMakeLists.txt ("Bundled
+# profiles"), the same file the app links.
+qt_add_resources(PROFILES_QRC "${DECENZA_PROFILES_QRC}")
 target_sources(tst_profilemanager PRIVATE ${PROFILES_QRC})
 # Also needed for compareWithBuiltin test (QFile::exists(":/profiles/..."))
 target_sources(tst_tclimport PRIVATE ${PROFILES_QRC})
@@ -1756,16 +1758,17 @@ target_link_libraries(tst_mcptools_presets PRIVATE decenza_a11ylib decenza_appse
 target_include_directories(tst_mcptools_presets PRIVATE ${CMAKE_BINARY_DIR})
 
 # --- tst_webdebuglogger: WebDebugLogger session-index cache (improve-mcp-debug-log-search),
-# plus CrashHandler::getDebugLogTail(), which reads the debug.log WebDebugLogger
-# writes and whose result is the crash report's debugLogTail field. (Both resolve
-# DecenzaPaths::logsDirectory() as of #1746; before that CrashHandler used
-# AppDataLocation, a different file on Android.) crashhandler.cpp is compiled into
-# this target alone — no other test needs it, so no intermediate library. ---
+# plus CrashHandler::getDebugLogTail()/selectCrashNarrative(), which read the debug.log
+# WebDebugLogger writes and produce the crash report's debug_log_tail. crashhandler.cpp
+# is compiled into this target alone — no other test needs it, so no intermediate
+# library. It includes version.h and calls versionCode(), hence version_code.cpp. ---
 add_decenza_test(tst_webdebuglogger
     tst_webdebuglogger.cpp
     ${CMAKE_SOURCE_DIR}/src/core/crashhandler.cpp
+    ${CMAKE_BINARY_DIR}/version_code.cpp
 )
 target_link_libraries(tst_webdebuglogger PRIVATE decenza_webdebugloggerlib)
+target_include_directories(tst_webdebuglogger PRIVATE ${CMAKE_BINARY_DIR})
 
 # --- tst_mcplogfilter: shared filter/tail helpers for debug_get_log / shots_get_debug_log ---
 # (mcplogfilter.h is header-only — nothing to link beyond decenza_testlib's Qt Core.)

@@ -135,6 +135,9 @@ EquipmentItem grinderItemFromQueryRow(const QSqlQuery& query) {
     item.brand = query.value(3).toString();
     item.model = query.value(4).toString();
     item.setAttrsFromJson(query.value(5).toString());
+    // Older rows carry a stored "rpmCapable" in attrs; it is ignored on purpose.
+    if (item.kind == QStringLiteral("grinder"))
+        item.rpmCapable = EquipmentStorage::deriveRpmCapable(item.brand, item.model);
     return item;
 }
 
@@ -147,14 +150,16 @@ const char* kItemColumns = "id, package_id, kind, brand, model, attrs";
 // ---------------------------------------------------------------------------
 QString EquipmentItem::attrsJson() const
 {
-    // Only the grinder kind carries attrs (burrs + rpmCapable). A basket's specs
-    // are derived from BasketAliases at read time, so it persists an empty blob.
+    // Only the grinder kind carries attrs (burrs). rpmCapable is NOT persisted:
+    // it is a catalog fact re-derived on every read, like a basket's specs — a
+    // stored copy went stale the moment a registry flag was corrected (Varia VS6
+    // shipped with variableRpm unset, and every package created meanwhile kept
+    // "false" until its grinder was edited).
     if (kind != QStringLiteral("grinder"))
         return QStringLiteral("{}");
     QJsonObject obj;
     if (!burrs.isEmpty())
         obj.insert(QStringLiteral("burrs"), burrs);
-    obj.insert(QStringLiteral("rpmCapable"), rpmCapable);
     return QString::fromUtf8(QJsonDocument(obj).toJson(QJsonDocument::Compact));
 }
 
@@ -162,7 +167,6 @@ void EquipmentItem::setAttrsFromJson(const QString& json)
 {
     const QJsonObject obj = QJsonDocument::fromJson(json.toUtf8()).object();
     burrs = obj.value(QStringLiteral("burrs")).toString();
-    rpmCapable = obj.value(QStringLiteral("rpmCapable")).toBool();
 }
 
 // ---------------------------------------------------------------------------
@@ -307,48 +311,57 @@ void EquipmentStorage::requestPackage(qint64 packageId)
         [this, packageId, result](bool dbOpened) { if (dbOpened) emit packageReady(packageId, *result); });
 }
 
+qint64 EquipmentStorage::createPackageStatic(QSqlDatabase& db, const QVariantMap& packageMap,
+                                            EquipmentPackageView* view, QString* failReason,
+                                            bool* reused)
+{
+    EquipmentPackage pkg = EquipmentPackage::fromVariantMap(packageMap);
+    pkg.lastUsedEpoch = QDateTime::currentSecsSinceEpoch();
+    const QString brand = packageMap.value(QStringLiteral("grinderBrand")).toString();
+    const QString model = packageMap.value(QStringLiteral("grinderModel")).toString();
+    const QString burrs = packageMap.value(QStringLiteral("grinderBurrs")).toString();
+    const QString basketBrand = packageMap.value(QStringLiteral("basketBrand")).toString();
+    const QString basketModel = packageMap.value(QStringLiteral("basketModel")).toString();
+    const QString puckPrep = PuckPrep::canonicalMerged(QString(), packageMap);
+    qint64 id = findPackageByGrinderIdentityStatic(db, brand, model, burrs, 0,
+                                                   basketBrand, basketModel, puckPrep);
+    if (reused)
+        *reused = id > 0;
+    if (id <= 0) {
+        // block-duplicate-active-names: the dialog shows the cause, ShotServer's
+        // POST /api/equipment answers 409, MCP names it.
+        if (findPackageByNameStatic(db, pkg.name, 0) > 0) {
+            if (failReason)
+                *failReason = QStringLiteral("nameInUse");
+            return -1;
+        }
+        id = createPackageWithGrinderStatic(db, pkg, brand, model, burrs,
+                                            basketBrand, basketModel, puckPrep);
+        if (id <= 0 && failReason)
+            *failReason = QStringLiteral("insertFailed");
+    }
+    if (id > 0 && view) {
+        view->package = loadPackageStatic(db, id);
+        view->grinder = loadGrinderItemStatic(db, id);
+        view->basket = loadBasketItemStatic(db, id);
+        view->puckPrep = loadPuckPrepItemStatic(db, id);
+    }
+    return id;
+}
+
 void EquipmentStorage::requestCreatePackage(const QVariantMap& packageMap)
 {
     auto newId = std::make_shared<qint64>(-1);
     auto created = std::make_shared<QVariantMap>();
     runAsync("equip_create",
         [packageMap, newId, created](QSqlDatabase& db) {
-            EquipmentPackage pkg = EquipmentPackage::fromVariantMap(packageMap);
-            pkg.lastUsedEpoch = QDateTime::currentSecsSinceEpoch();
-            const QString brand = packageMap.value(QStringLiteral("grinderBrand")).toString();
-            const QString model = packageMap.value(QStringLiteral("grinderModel")).toString();
-            const QString burrs = packageMap.value(QStringLiteral("grinderBurrs")).toString();
-            const QString basketBrand = packageMap.value(QStringLiteral("basketBrand")).toString();
-            const QString basketModel = packageMap.value(QStringLiteral("basketModel")).toString();
-            const QString puckPrep = PuckPrep::canonicalMerged(QString(), packageMap);
-            // Dedup backstop: if an in-inventory package already has this exact full
-            // identity (grinder + basket + puck prep), return it instead of inserting
-            // a duplicate. The dialog blocks this in the UI too, but the storage is
-            // the authoritative guard against duplicate gear (we don't want dups).
-            const qint64 existing = findPackageByGrinderIdentityStatic(db, brand, model, burrs, 0,
-                                                                       basketBrand, basketModel, puckPrep);
-            if (existing > 0) {
-                // Same gear already in inventory — idempotent, return it.
-                *newId = existing;
-            } else if (findPackageByNameStatic(db, pkg.name, 0) > 0) {
-                // New gear, but its name duplicates another active package — reject
-                // (block-duplicate-active-names). Both callers read the "error" key
-                // to name the cause: the dialog keeps itself open and shows it, and
-                // ShotServer's POST /api/equipment turns it into a 409.
-                *newId = -1;
-                (*created)[QStringLiteral("error")] = QStringLiteral("nameInUse");
-            } else {
-                *newId = createPackageWithGrinderStatic(db, pkg, brand, model, burrs,
-                                                        basketBrand, basketModel, puckPrep);
-            }
-            if (*newId > 0) {
-                EquipmentPackageView view;
-                view.package = loadPackageStatic(db, *newId);
-                view.grinder = loadGrinderItemStatic(db, *newId);
-                view.basket = loadBasketItemStatic(db, *newId);
-                view.puckPrep = loadPuckPrepItemStatic(db, *newId);
+            EquipmentPackageView view;
+            QString failReason;
+            *newId = createPackageStatic(db, packageMap, &view, &failReason);
+            if (*newId > 0)
                 *created = view.toVariantMap();
-            }
+            else if (!failReason.isEmpty())
+                (*created)[QStringLiteral("error")] = failReason;
         },
         // Write: emit regardless — *newId is -1 on failure, a terminal status.
         [this, newId, created](bool) {
@@ -734,7 +747,6 @@ qint64 EquipmentStorage::createPackageWithGrinderStatic(QSqlDatabase& db, Equipm
         grinder.brand = brand;
         grinder.model = model;
         grinder.burrs = burrs;
-        grinder.rpmCapable = deriveRpmCapable(brand, model);
         if (insertItemStatic(db, grinder) <= 0) {
             // A package that ASKED for a grinder but lost the item resolves to a
             // blank grinder everywhere; don't leave that orphan behind — drop the
@@ -1041,7 +1053,6 @@ bool EquipmentStorage::updateGrinderItemStatic(QSqlDatabase& db, qint64 packageI
     item.brand = b;
     item.model = m;
     item.burrs = bu;
-    item.rpmCapable = deriveRpmCapable(b, m);
 
     if (cur.isValid()) {
         QSqlQuery query(db);

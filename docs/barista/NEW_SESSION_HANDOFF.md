@@ -9,20 +9,45 @@ work and before declaring a step done. Commit/push only when asked.**
 
 ## TL;DR — where everything is right now
 
-- **`feat/barista` is 2 commits ahead of where the last session left it (`55c832cc`), and those 2 are NOT
-  pushed.** `origin/feat/barista` / `origin/main` / `backup` are still at `55c832cc`.
-- **Merged `upstream/main` (`181ba7ed`) — now 0 behind / 376 ahead.** The merge dropped two of our own fork
-  commits because upstream re-solved them more completely (see below).
-- **Full desktop suite is now 127/127 GREEN** — the two long-standing pre-existing reds
-  (`tst_qmlregistration`, `failonwarning_lint`) were fixed this session. Zero known reds remain.
-- **Nothing was pushed and nothing is on the tablet yet.** The APK still running on the tablet
-  (`Decenza-filter-vc3525243`) predates this merge.
+- **Everything below is COMMITTED + PUSHED + MERGED to `origin/main`.** All refs (`feat/barista`,
+  `origin/feat/barista`, `origin/main`, `backup`) are at **`98ecec53`**. Tree clean. 0 behind upstream.
+- **Full suite 127/127 GREEN.** The two long-standing pre-existing reds were fixed this session; zero known reds.
+- **Tablet is on `vc3528235`** (the audio-device-pickers build).
+- **⚠️ The ONE open thing is owner on-device by-ear verification of the mic/speaker pickers** (see below) —
+  the code shipped before that check at the owner's instruction.
 
-### The two new commits (local only)
+### This session's commits (all pushed + merged)
 | Commit | What |
 |--------|------|
-| `08da8109` | **Merge `upstream/main` (181ba7ed)** into feat/barista — 13 commits, dropped 2 fork commits |
-| `4ddeca22` | **fix(tests): clear the two pre-existing barista test reds** (suite now 127/127) |
+| `08da8109` | **Merge `upstream/main` (181ba7ed)** — 13 commits, dropped 2 superseded fork commits |
+| `4ddeca22` | **fix(tests): clear the 2 pre-existing barista reds** (suite → 127/127) |
+| `98ecec53` | **feat(barista): Microphone & Speaker device pickers** (fix USB route hijack) |
+
+---
+
+## 🎚️ Microphone & Speaker device pickers (`98ecec53`) — the current focus
+
+**Problem (diagnosed from `stt/mic_route` diagnostics):** a JBL speaker on the USB-C hub kept becoming the
+tablet's *communication device*. A speaker has no mic, so the recogniser recorded silence → `ERROR_NO_MATCH`
+→ after a streak the barista dropped to "tap to talk," cutting the owner off. **NOT Bluetooth (owner
+confirmed), NOT the machine.** The `commDev` toggled type 2 (built-in speaker) ↔ 22 (USB_HEADSET).
+
+**Shipped:** two dropdowns on the barista **Settings → General** tab (first card, "Microphone & speaker").
+- **Mic** default "Tablet microphone (default)"; each listen pins the mic to the chosen input (empty =
+  built-in). When `setCommunicationDevice(builtinMic)` is rejected we `clearCommunicationDevice()` so capture
+  never sits on a USB speaker.
+- **Speaker** default "Automatic (system default)"; TTS pinned via `MediaPlayer.setPreferredDevice()`.
+- Keys = stable `type:productName` (NOT `getId()`), resolved live, fallback to default if the device is gone.
+- Files: NEW `DecenzaAudioDevices.java` (shared key/label/list/resolve) + `DecenzaSpeech.java` (mic) +
+  `DecenzaAudioPlayer.java` (speaker) + `assistantsettings.{h,cpp}` (`micDeviceKey`/`speakerDeviceKey` +
+  `availableMics`/`availableSpeakers` + `refreshAudioDevices()`, pushes keys to Java statics) +
+  `AssistantSettingsPanel.qml` (the two pickers).
+
+**⚠️ OWED — owner on-device by-ear check:** (1) cut-offs gone, (2) TTS still from the JBL, (3) Speaker
+dropdown lists the JBL. **If the pin doesn't hold** (still cut off, or TTS jumped to the tablet speaker):
+escalate the mic path to an own `AudioRecord` + `RecognizerIntent.EXTRA_AUDIO_SOURCE` capture — the cheap
+`setCommunicationDevice`/`clear` approach was the first attempt, and the `mic_route` log now records
+`micKey`/`pin`/`commAfter` to show what held.
 
 ---
 

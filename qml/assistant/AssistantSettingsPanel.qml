@@ -214,6 +214,71 @@ Rectangle {
                     width: generalFlick.width
                     spacing: Theme.spacingMedium
 
+                    // ── AUDIO DEVICES (mic input + speaker output routing) ──
+                    // [barista-fork] The mic defaults to the tablet's built-in (a USB speaker on the hub has no
+                    // mic and was hijacking the route → cut-offs); the speaker defaults to the system route (the
+                    // external JBL). Both are selectable and re-enumerate on open, since devices plug/unplug live.
+                    BaristaSectionCard {
+                        caption: TranslationManager.translate("barista.settings.sectionAudioDevices", "Microphone & speaker")
+
+                        Component.onCompleted: if (root._settings) root._settings.refreshAudioDevices()
+                        Connections {
+                            target: root
+                            ignoreUnknownSignals: true
+                            function onVisibleChanged() {
+                                if (root.visible && root._settings) root._settings.refreshAudioDevices()
+                            }
+                        }
+
+                        Tr {
+                            key: "barista.settings.micDevice"; fallback: "Microphone"
+                            color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true
+                        }
+                        ComboBox {
+                            id: micBox
+                            Layout.fillWidth: true
+                            textRole: "label"; valueRole: "value"
+                            model: root._settings ? root._settings.availableMics : []
+                            Accessible.name: TranslationManager.translate("barista.settings.micDevice", "Microphone")
+                            Component.onCompleted: _sync()
+                            function _sync() {
+                                if (!root._settings) return
+                                var i = indexOfValue(root._settings.micDeviceKey)
+                                currentIndex = i >= 0 ? i : 0   // saved device gone → the built-in default entry
+                            }
+                            onActivated: if (root._settings) root._settings.micDeviceKey = currentValue
+                            Connections {
+                                target: root._settings
+                                ignoreUnknownSignals: true
+                                function onAudioDevicesChanged() { micBox._sync() }
+                            }
+                        }
+
+                        Tr {
+                            key: "barista.settings.speakerDevice"; fallback: "Speaker"
+                            color: Theme.textSecondaryColor; font: Theme.labelFont; Accessible.ignored: true
+                        }
+                        ComboBox {
+                            id: speakerBox
+                            Layout.fillWidth: true
+                            textRole: "label"; valueRole: "value"
+                            model: root._settings ? root._settings.availableSpeakers : []
+                            Accessible.name: TranslationManager.translate("barista.settings.speakerDevice", "Speaker")
+                            Component.onCompleted: _sync()
+                            function _sync() {
+                                if (!root._settings) return
+                                var i = indexOfValue(root._settings.speakerDeviceKey)
+                                currentIndex = i >= 0 ? i : 0   // saved device gone → the automatic default entry
+                            }
+                            onActivated: if (root._settings) root._settings.speakerDeviceKey = currentValue
+                            Connections {
+                                target: root._settings
+                                ignoreUnknownSignals: true
+                                function onAudioDevicesChanged() { speakerBox._sync() }
+                            }
+                        }
+                    }
+
                     // ── IDENTITY ──
                     BaristaSectionCard {
                         caption: TranslationManager.translate("barista.settings.sectionIdentity", "Identity")

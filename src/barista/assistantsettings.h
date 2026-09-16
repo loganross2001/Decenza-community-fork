@@ -98,6 +98,13 @@ class AssistantSettings : public QObject {
     // "narrow" | "medium" | "wide" (default "medium").
     Q_PROPERTY(QString panelWidthMode READ panelWidthMode WRITE setPanelWidthMode NOTIFY panelWidthModeChanged)
     Q_PROPERTY(QString proactivityLevel READ proactivityLevel WRITE setProactivityLevel NOTIFY proactivityLevelChanged)
+    // [barista-fork] Audio device routing (Barista settings). micDeviceKey/speakerDeviceKey are
+    // DecenzaAudioDevices keys ("type:productName"); empty = default (built-in mic / system speaker route).
+    // availableMics/availableSpeakers are [{value,label}] lists driving the two pickers, refreshed on demand.
+    Q_PROPERTY(QString micDeviceKey READ micDeviceKey WRITE setMicDeviceKey NOTIFY micDeviceKeyChanged)
+    Q_PROPERTY(QString speakerDeviceKey READ speakerDeviceKey WRITE setSpeakerDeviceKey NOTIFY speakerDeviceKeyChanged)
+    Q_PROPERTY(QVariantList availableMics READ availableMics NOTIFY audioDevicesChanged)
+    Q_PROPERTY(QVariantList availableSpeakers READ availableSpeakers NOTIFY audioDevicesChanged)
 
 public:
     explicit AssistantSettings(QObject* parent = nullptr);
@@ -238,6 +245,17 @@ public:
     QString proactivityLevel() const;             // "off" | "greetings" | "full" (default "full")
     void setProactivityLevel(const QString& level);
 
+    // [barista-fork] Audio device routing (see the Q_PROPERTY block). Keys are DecenzaAudioDevices
+    // "type:productName"; "" = default (built-in mic / system speaker route). The setters persist the
+    // choice AND push it to the Android audio layer so it takes effect on the next listen / TTS clip.
+    QString micDeviceKey() const;
+    void setMicDeviceKey(const QString& key);
+    QString speakerDeviceKey() const;
+    void setSpeakerDeviceKey(const QString& key);
+    QVariantList availableMics() const;           // [{value,label}] incl. the built-in "default" entry
+    QVariantList availableSpeakers() const;       // [{value,label}] incl. the "automatic" default entry
+    Q_INVOKABLE void refreshAudioDevices();       // re-enumerate the device lists (call when a picker opens)
+
     // Proactivity cooldown: returns true (and stamps "now") if the last proactive nudge for this bean was
     // more than cooldownHours ago — so it doesn't re-raise the same suggestion on back-to-back shots.
     Q_INVOKABLE bool consumeProactiveNudge(const QString& beanKey, int cooldownHours);
@@ -299,6 +317,9 @@ signals:
     void avatarTabSizeChanged();
     void panelWidthModeChanged();
     void proactivityLevelChanged();
+    void micDeviceKeyChanged();       // [barista-fork]
+    void speakerDeviceKeyChanged();   // [barista-fork]
+    void audioDevicesChanged();       // [barista-fork] the available mic/speaker lists were re-enumerated
 
 private:
     // [barista-fork] Per-(voice, role) volume/speed store. currentVoiceKey() = "provider:voiceId" for the given
@@ -307,6 +328,12 @@ private:
     QString currentVoiceKey(bool coaching) const;
     double readVoiceLevel(bool coaching, const QString& field, const QString& legacyKey) const;
     void writeVoiceLevel(bool coaching, const QString& field, double value);
+
+    // [barista-fork] Push the persisted mic/speaker keys into the Android audio layer (DecenzaSpeech /
+    // DecenzaAudioPlayer). No-op off Android. Called from the ctor and whenever a key setter runs.
+    void pushAudioRoutingToJava() const;
+    mutable QVariantList m_availableMics;      // [{value,label}] cache for the Microphone picker
+    mutable QVariantList m_availableSpeakers;  // [{value,label}] cache for the Speaker picker
 
     mutable AppSettings m_settings;  // the one canonical store (DecentEspresso/Decenza)
 };

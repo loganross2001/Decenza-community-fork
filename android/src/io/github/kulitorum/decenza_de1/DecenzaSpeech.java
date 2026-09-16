@@ -28,6 +28,22 @@ public class DecenzaSpeech {
     // the benign silence family (timeout=6 / no-match=7), which fire normally across a conversational pause —
     // recreating on those would churn the recogniser through idle listening for no benefit.
     private static volatile boolean recreateOnNextStart = false;
+    // [barista-fork] The owner's chosen microphone (Barista settings), as a DecenzaAudioDevices key
+    // ("type:productName"). Empty = the tablet's built-in mic — the default, and the fix for a USB speaker
+    // hijacking the communication route. Pushed from C++ (AssistantSettings) whenever the setting changes.
+    private static volatile String preferredMicKey = "";
+    public static void setPreferredMicKey(String key) { preferredMicKey = key != null ? key : ""; }
+
+    // [barista-fork] Enumerate the tablet's input devices for the Barista Microphone picker (see
+    // DecenzaAudioDevices for the "key<TAB>label<NEWLINE>…" format). Empty string on any failure — the C++
+    // side always prepends the built-in "default" entry, so the picker is never empty.
+    public static String listInputDevices(Context ctx) {
+        try {
+            if (audio == null)
+                audio = (AudioManager) ctx.getApplicationContext().getSystemService(Context.AUDIO_SERVICE);
+            return audio != null ? DecenzaAudioDevices.list(audio, AudioManager.GET_DEVICES_INPUTS) : "";
+        } catch (Throwable t) { return ""; }
+    }
 
     // Implemented in C++ and bound via QJniEnvironment::registerNativeMethods.
     public static native void nativeOnFinal(String text);
@@ -72,7 +88,7 @@ public class DecenzaSpeech {
     // recogniser honours this is device/version-specific, so we LOG the route + whether the override took
     // (stt/mic_route) — the next session's log tells us. API 31+ only; no-op otherwise. Never throws into
     // the listen path.
-    private static void preferBuiltInMicForBluetooth(Context ctx) {
+    private static void preferBuiltInMic(Context ctx) {
         try {
             if (audio == null)
                 audio = (AudioManager) ctx.getApplicationContext().getSystemService(Context.AUDIO_SERVICE);
@@ -91,22 +107,43 @@ public class DecenzaSpeech {
             }
             AudioDeviceInfo commDev = audio.getCommunicationDevice();
             sb.append(" commDev=").append(commDev != null ? commDev.getType() : -1);
+            sb.append(" btIn=").append(btInput);
             // Output route — so the log can confirm the barista's TTS (USAGE_MEDIA) STAYS on Bluetooth A2DP
             // and the input-mic override didn't drag it onto the built-in speaker (the owner's key UX risk).
             sb.append(" a2dp=").append(audio.isBluetoothA2dpOn());
             sb.append(" outs=");
             for (AudioDeviceInfo d : audio.getDevices(AudioManager.GET_DEVICES_OUTPUTS))
                 sb.append(d.getType()).append(",");
-            // setCommunicationDevice only accepts devices from getAvailableCommunicationDevices() — an
-            // OUTPUT-anchored list that usually EXCLUDES TYPE_BUILTIN_MIC, so this likely returns false and
-            // changes nothing (forceBuiltin=false in the log). It's a harmless best-effort try: if a given
-            // Samsung build DOES accept the built-in mic it fixes the route; if not, the log tells us to move
-            // to the own-AudioRecord (EXTRA_AUDIO_SOURCE) approach. Only attempted when a BT mic is present.
-            if (btInput && builtin != null) {
-                boolean ok = audio.setCommunicationDevice(builtin);
-                sb.append(" forceBuiltin=").append(ok);
+            // [barista-fork] Pull STT capture onto the built-in mic whenever the comm route is NOT already a
+            // built-in mic — covers a USB speaker (a JBL on the USB-C hub) OR a BT headset becoming the
+            // communication device. A speaker has no microphone, so recording through it starves the
+            // recogniser (ERROR_NO_MATCH streak → "tap to talk", the owner's cut-off). setCommunicationDevice()
+            // only accepts devices from getAvailableCommunicationDevices() — output-anchored, usually EXCLUDES
+            // TYPE_BUILTIN_MIC — so it often returns false; when it does, drop any forced route with
+            // clearCommunicationDevice() so recording falls back to the built-in mic. BOTH keep the barista's
+            // TTS (USAGE_MEDIA, native MediaPlayer) on the external speaker — verify that on-device. Escalate to
+            // an own AudioRecord (EXTRA_AUDIO_SOURCE) only if the log shows NO_MATCH survives this. (btInput is
+            // still computed above for the log.)
+            // Route capture to the owner's chosen mic (Barista settings). Empty key = built-in (default). A
+            // non-empty key selects an external input (e.g. a USB mic); resolve it LIVE so a saved choice
+            // survives reconnect, and fall back to built-in if it is gone. Either way we never let capture sit
+            // on a USB SPEAKER (no mic → ERROR_NO_MATCH → "tap to talk", the owner's cut-off).
+            AudioDeviceInfo target = preferredMicKey.isEmpty()
+                ? builtin
+                : DecenzaAudioDevices.resolve(audio, AudioManager.GET_DEVICES_INPUTS, preferredMicKey);
+            if (target == null) target = builtin;   // default, or selected-but-unplugged
+            sb.append(" micKey=").append(preferredMicKey.isEmpty() ? "default" : preferredMicKey);
+            boolean commIsTarget = commDev != null && target != null && commDev.getId() == target.getId();
+            if (!commIsTarget) {
+                // setCommunicationDevice() often rejects the built-in mic (output-anchored list); when it does,
+                // clearCommunicationDevice() drops any forced route so capture falls back to the built-in mic.
+                boolean pinned = target != null && audio.setCommunicationDevice(target);
+                if (!pinned) audio.clearCommunicationDevice();
+                AudioDeviceInfo after = audio.getCommunicationDevice();
+                sb.append(" pin=").append(pinned)
+                  .append(" commAfter=").append(after != null ? after.getType() : -1);
             } else {
-                sb.append(" forceBuiltin=skip");
+                sb.append(" pin=already");
             }
             nativeMicDiag(sb.toString());
         } catch (Throwable t) {
@@ -143,7 +180,7 @@ public class DecenzaSpeech {
                     // Heal any stream left muted by an earlier build; no muting is done anymore.
                     recoverMutedStreams(ctx);
                     // Keep the mic off Bluetooth SCO (built-in mic) so the first words aren't lost.
-                    preferBuiltInMicForBluetooth(ctx);
+                    preferBuiltInMic(ctx);
                     // [barista-fork] A prior malfunction (code 5/8) leaves the recogniser wedged — tear it down so
                     // the block below builds a fresh one, instead of re-starting a broken instance into ERROR_CLIENT.
                     if (recreateOnNextStart && recognizer != null) {

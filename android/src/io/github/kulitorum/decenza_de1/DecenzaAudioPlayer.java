@@ -1,6 +1,9 @@
 package io.github.kulitorum.decenza_de1;
 
+import android.content.Context;
 import android.media.AudioAttributes;
+import android.media.AudioDeviceInfo;
+import android.media.AudioManager;
 import android.media.MediaPlayer;
 import android.os.Handler;
 import android.os.Looper;
@@ -35,6 +38,29 @@ public class DecenzaAudioPlayer {
         this.tag = tag;
     }
 
+    // [barista-fork] The owner's chosen speaker (Barista settings), as a DecenzaAudioDevices key
+    // ("type:productName"). Empty = follow the system media route (the default — today the external JBL). A
+    // non-empty key pins TTS to that output via MediaPlayer.setPreferredDevice(). Static so it applies to
+    // every player instance (barista voice, coaching voice, previews). Pushed from C++ (AssistantSettings).
+    private static volatile String preferredOutputKey = "";
+    private static AudioManager audioMgr;   // cached from the app context for device resolution at play time
+
+    public static void setPreferredOutputKey(Context ctx, String key) {
+        preferredOutputKey = key != null ? key : "";
+        if (audioMgr == null && ctx != null)
+            audioMgr = (AudioManager) ctx.getApplicationContext().getSystemService(Context.AUDIO_SERVICE);
+    }
+
+    // [barista-fork] Enumerate the tablet's output devices for the Barista Speaker picker (DecenzaAudioDevices
+    // "key<TAB>label<NEWLINE>…" format). Empty on failure — C++ prepends the "Automatic" default entry.
+    public static String listOutputDevices(Context ctx) {
+        try {
+            if (audioMgr == null && ctx != null)
+                audioMgr = (AudioManager) ctx.getApplicationContext().getSystemService(Context.AUDIO_SERVICE);
+            return audioMgr != null ? DecenzaAudioDevices.list(audioMgr, AudioManager.GET_DEVICES_OUTPUTS) : "";
+        } catch (Throwable t) { return ""; }
+    }
+
     // Play `path` (a local file path OR an http(s) URL — MediaPlayer.setDataSource accepts both) at `volume`
     // (0..1). Releases any current clip first. Follows the system media route. On prepared → nativeOnStarted;
     // on completion/error → nativeOnFinished. A play() immediately superseded by a newer play()/stop()
@@ -61,6 +87,15 @@ public class DecenzaAudioPlayer {
                             .setUsage(AudioAttributes.USAGE_MEDIA)          // <-- follows the external-speaker route
                             .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                             .build());
+                    // [barista-fork] Pin TTS to the owner's chosen speaker (Barista settings) when set; empty
+                    // key leaves USAGE_MEDIA to follow the system route (default). Resolve LIVE so a saved
+                    // choice survives reconnect; if the device is gone, setPreferredDevice(null) restores the
+                    // default route rather than going silent.
+                    if (!preferredOutputKey.isEmpty() && audioMgr != null) {
+                        AudioDeviceInfo out = DecenzaAudioDevices.resolve(
+                                audioMgr, AudioManager.GET_DEVICES_OUTPUTS, preferredOutputKey);
+                        try { m.setPreferredDevice(out); } catch (Exception e) { Log.w(TAG, "setPreferredDevice failed", e); }
+                    }
                     m.setLooping(loop);
                     m.setDataSource(path);
                     m.setVolume(volume, volume);

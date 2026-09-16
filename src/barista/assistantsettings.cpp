@@ -6,6 +6,29 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QRegularExpression>
+#include <QVariantMap>
+
+#ifdef Q_OS_ANDROID
+#include <QCoreApplication>
+#include <QJniObject>
+#endif
+
+namespace {
+// [barista-fork] Parse the "key<TAB>label<NEWLINE>key<TAB>label…" enumeration DecenzaAudioDevices hands
+// back into a [{value,label}] list for a QML picker, prepending a default entry ({"", defaultLabel}).
+QVariantList parseDeviceList(const QString& raw, const QString& defaultLabel) {
+    QVariantList out;
+    out.append(QVariantMap{{QStringLiteral("value"), QString()}, {QStringLiteral("label"), defaultLabel}});
+    const QStringList entries = raw.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+    for (const QString& e : entries) {
+        const qsizetype tab = e.indexOf(QLatin1Char('\t'));
+        if (tab <= 0) continue;
+        out.append(QVariantMap{{QStringLiteral("value"), e.left(tab)},
+                               {QStringLiteral("label"), e.mid(tab + 1)}});
+    }
+    return out;
+}
+} // namespace
 
 AssistantSettings::AssistantSettings(QObject* parent)
     : QObject(parent) {
@@ -32,6 +55,10 @@ AssistantSettings::AssistantSettings(QObject* parent)
             setCoachingVoiceSpeed(legacy);
         m_settings.remove(QStringLiteral("barista/voiceSpeed"));
     }
+
+    // [barista-fork] Apply the persisted mic/speaker routing choices to the Android audio layer at startup,
+    // so a saved selection takes effect on the first listen / TTS clip without waiting for a settings edit.
+    pushAudioRoutingToJava();
 }
 
 bool AssistantSettings::enabled() const {
@@ -603,6 +630,84 @@ void AssistantSettings::setProactivityLevel(const QString& level) {
         return;
     m_settings.setValue(QStringLiteral("barista/proactivityLevel"), level);
     emit proactivityLevelChanged();
+}
+
+// [barista-fork] Audio device routing (Microphone / Speaker pickers). Keys are DecenzaAudioDevices
+// "type:productName"; "" = default (built-in mic / system speaker route). Getters read QSettings lazily
+// like every other property; setters persist, emit, and push the choice to the Android audio layer.
+QString AssistantSettings::micDeviceKey() const {
+    return m_settings.value(QStringLiteral("barista/micDeviceKey"), QString()).toString();
+}
+
+void AssistantSettings::setMicDeviceKey(const QString& key) {
+    if (micDeviceKey() == key)
+        return;
+    m_settings.setValue(QStringLiteral("barista/micDeviceKey"), key);
+    pushAudioRoutingToJava();
+    emit micDeviceKeyChanged();
+}
+
+QString AssistantSettings::speakerDeviceKey() const {
+    return m_settings.value(QStringLiteral("barista/speakerDeviceKey"), QString()).toString();
+}
+
+void AssistantSettings::setSpeakerDeviceKey(const QString& key) {
+    if (speakerDeviceKey() == key)
+        return;
+    m_settings.setValue(QStringLiteral("barista/speakerDeviceKey"), key);
+    pushAudioRoutingToJava();
+    emit speakerDeviceKeyChanged();
+}
+
+QVariantList AssistantSettings::availableMics() const {
+    if (m_availableMics.isEmpty())
+        const_cast<AssistantSettings*>(this)->refreshAudioDevices();
+    return m_availableMics;
+}
+
+QVariantList AssistantSettings::availableSpeakers() const {
+    if (m_availableSpeakers.isEmpty())
+        const_cast<AssistantSettings*>(this)->refreshAudioDevices();
+    return m_availableSpeakers;
+}
+
+void AssistantSettings::refreshAudioDevices() {
+    QString micsRaw, spksRaw;
+#ifdef Q_OS_ANDROID
+    const QJniObject ctx = QNativeInterface::QAndroidApplication::context();
+    if (ctx.isValid()) {
+        const QJniObject mics = QJniObject::callStaticObjectMethod(
+            "io/github/kulitorum/decenza_de1/DecenzaSpeech", "listInputDevices",
+            "(Landroid/content/Context;)Ljava/lang/String;", ctx.object());
+        const QJniObject spks = QJniObject::callStaticObjectMethod(
+            "io/github/kulitorum/decenza_de1/DecenzaAudioPlayer", "listOutputDevices",
+            "(Landroid/content/Context;)Ljava/lang/String;", ctx.object());
+        if (mics.isValid()) micsRaw = mics.toString();
+        if (spks.isValid()) spksRaw = spks.toString();
+    }
+#endif
+    // The built-in mic already enumerates as an input; drop it from the list since the "default" entry IS
+    // the built-in mic, so it never appears twice. (Match by the built-in-mic type prefix "15:".)
+    QVariantList mics = parseDeviceList(micsRaw, QStringLiteral("Tablet microphone (default)"));
+    for (qsizetype i = mics.size() - 1; i >= 1; --i)
+        if (mics.at(i).toMap().value(QStringLiteral("value")).toString().startsWith(QStringLiteral("15:")))
+            mics.removeAt(i);
+    m_availableMics = mics;
+    m_availableSpeakers = parseDeviceList(spksRaw, QStringLiteral("Automatic (system default)"));
+    emit audioDevicesChanged();
+}
+
+void AssistantSettings::pushAudioRoutingToJava() const {
+#ifdef Q_OS_ANDROID
+    QJniObject::callStaticMethod<void>(
+        "io/github/kulitorum/decenza_de1/DecenzaSpeech", "setPreferredMicKey",
+        "(Ljava/lang/String;)V", QJniObject::fromString(micDeviceKey()).object<jstring>());
+    const QJniObject ctx = QNativeInterface::QAndroidApplication::context();
+    QJniObject::callStaticMethod<void>(
+        "io/github/kulitorum/decenza_de1/DecenzaAudioPlayer", "setPreferredOutputKey",
+        "(Landroid/content/Context;Ljava/lang/String;)V",
+        ctx.object(), QJniObject::fromString(speakerDeviceKey()).object<jstring>());
+#endif
 }
 
 bool AssistantSettings::webSearchEnabled() const {

@@ -70,4 +70,11 @@ private:
     // Lets handleError distinguish an idle-silence no-match (a healthy-length listen ended in silence) from a
     // broken-mic no-match storm (returns instantly). 0 = never started. See kHealthyListenMs.
     qint64 m_recogniserStartedMs = 0;
+    // [barista-fork][canary] Per-session deafness counters, reset when the session opens (setListening(true))
+    // and evaluated when it closes (setListening(false)). A session that reached a healthy listen span and
+    // logged errors but produced NO final AND NO partial could not hear the mic — the deafness signature.
+    int  m_sessionFinals = 0;
+    int  m_sessionPartials = 0;
+    int  m_sessionErrors = 0;
+    bool m_sessionHealthySpan = false;
 };

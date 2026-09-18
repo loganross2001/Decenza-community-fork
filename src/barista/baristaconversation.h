@@ -106,6 +106,10 @@ private:
     void setDisplay(const QString& t);
     void setPartial(const QString& t);
     void setMessage(const QString& t);
+    // [barista-fork] A reply/error from a turn the user tapped out of has landed and been dropped by the
+    // late-reply guard. The abandoned request has now drained (AIConversation cleared m_busy with it), so clear
+    // the stale in-flight marker and dispatch any utterance the user spoke during the drain.
+    void flushAbandonedTurn();
     void diag(const QString& event, const QString& detail = QString()) const;  // BaristaDiagnostics state records
 
     // Actuators (borrowed).
@@ -119,6 +123,7 @@ private:
     bool m_closingArmed = false;
     bool m_turnInFlight = false;
     QString m_pendingAnswer;                      // answer that arrived while a filler was still playing ("" = none)
+    QString m_queuedUtterance;                    // [barista-fork] words spoken while a tapped-out turn drains ("" = none)
     int m_softErrors = 0;                         // NO_MATCH / SPEECH_TIMEOUT run
     int m_hardErrors = 0;                         // ERROR_CLIENT / BUSY run
     int m_autoContinues = 0;                      // stall→continuation retries used THIS user turn (bounded)

@@ -8,6 +8,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.speech.RecognitionListener;
 import android.speech.RecognizerIntent;
 import android.speech.SpeechRecognizer;
@@ -28,6 +29,12 @@ public class DecenzaSpeech {
     // the benign silence family (timeout=6 / no-match=7), which fire normally across a conversational pause —
     // recreating on those would churn the recogniser through idle listening for no benefit.
     private static volatile boolean recreateOnNextStart = false;
+    // [barista-fork][probe] Warm-up-gap instrumentation (additive, read-only). Measures startListening→ready and
+    // →beginningOfSpeech, and whether onPartialResults fires at all on this Samsung/AOSP recogniser — the data that
+    // gates whether an app-layer pause-tolerance merge is safe (a large warm-up gap would drop continuation words).
+    // NOT a behavior change and emphatically NOT a RecognizerIntent silence/length extra (those cause total deafness).
+    private static volatile long startListenMs = 0;
+    private static volatile int partialCount = 0;
     // [barista-fork] The owner's chosen microphone (Barista settings), as a DecenzaAudioDevices key
     // ("type:productName"). Empty = the tablet's built-in mic — the default, and the fix for a USB speaker
     // hijacking the communication route. Pushed from C++ (AssistantSettings) whenever the setting changes.
@@ -201,6 +208,8 @@ public class DecenzaSpeech {
                     if (preferOffline)
                         intent.putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true);
                     intent.putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, ctx.getPackageName());
+                    startListenMs = SystemClock.elapsedRealtime();   // [probe] warm-up-gap baseline
+                    partialCount = 0;
                     recognizer.startListening(intent);
                 } catch (Exception e) {
                     nativeOnError(-1);
@@ -226,10 +235,14 @@ public class DecenzaSpeech {
 
     private static final RecognitionListener listener = new RecognitionListener() {
         @Override public void onResults(Bundle results) {
+            // [probe] final timing + whether any partials fired this listen (gates pause-tolerance design).
+            try { nativeMicDiag("probe finalMs=" + (SystemClock.elapsedRealtime() - startListenMs)
+                                + " partials=" + partialCount); } catch (Throwable ignored) {}
             ArrayList<String> list = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
             nativeOnFinal(list != null && !list.isEmpty() ? list.get(0) : "");
         }
         @Override public void onPartialResults(Bundle partial) {
+            partialCount++;   // [probe] confirm onPartialResults fires at all on this AOSP recogniser
             ArrayList<String> list = partial.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
             if (list != null && !list.isEmpty()) nativeOnPartial(list.get(0));
         }
@@ -241,8 +254,14 @@ public class DecenzaSpeech {
                 recreateOnNextStart = true;
             nativeOnError(error);
         }
-        @Override public void onReadyForSpeech(Bundle params) {}
-        @Override public void onBeginningOfSpeech() {}
+        @Override public void onReadyForSpeech(Bundle params) {
+            // [probe] startListening→ready gap (recogniser warm-up before it can hear anything).
+            try { nativeMicDiag("probe readyMs=" + (SystemClock.elapsedRealtime() - startListenMs)); } catch (Throwable ignored) {}
+        }
+        @Override public void onBeginningOfSpeech() {
+            // [probe] startListening→first-speech gap (does the AOSP recogniser signal speech onset at all?).
+            try { nativeMicDiag("probe beginMs=" + (SystemClock.elapsedRealtime() - startListenMs)); } catch (Throwable ignored) {}
+        }
         @Override public void onRmsChanged(float rmsdB) {}
         @Override public void onBufferReceived(byte[] buffer) {}
         @Override public void onEndOfSpeech() {}

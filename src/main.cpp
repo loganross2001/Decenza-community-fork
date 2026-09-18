@@ -2249,6 +2249,15 @@ int main(int argc, char *argv[])
                                  if (interrupt) baristaVoice->stop();
                                  else { qDebug().noquote() << ("[BaristaDiag] coach     suppressed_barista_speaking  id=" + id); return; }
                              }
+                             // [barista-fork] Same-role guard: a new cue must not truncate its OWN in-flight cue.
+                             // This branch was missing (only the cross-role baristaVoice check existed), so a
+                             // second cue mid-playback cut the first — the real coaching-role speak_INTERRUPTS_previous.
+                             // A caution/urgent cue (interrupt=true) still cuts through; an info cue is dropped
+                             // (the banner/cueChanged still fired, so the visual is not lost).
+                             if (coachingVoice->speaking()) {
+                                 if (interrupt) coachingVoice->stop();
+                                 else { qDebug().noquote() << ("[BaristaDiag] coach     suppressed_coaching_speaking  id=" + id); return; }
+                             }
                              const QString line = coachPhrasebook ? coachPhrasebook->lineFor(id, text) : text;
                              coachingVoice->speak(line);
                              return;

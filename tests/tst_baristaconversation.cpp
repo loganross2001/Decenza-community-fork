@@ -157,6 +157,63 @@ private slots:
         QVERIFY(c.micLive());
     }
 
+    // Late-reply guard: a Gemini turn is not cancellable and the 40s turnTimeout drops Thinking→Listening
+    // WITHOUT ending the in-flight request, so a slow reply can land while the user is already listening again.
+    // onModelFinal must ignore it (not resurrect Speaking / talk over the user) — the state-precondition guard
+    // its three sibling actuator inputs (onModelSpeakable/onModelError/onCloseRequested) already carried.
+    void lateModelFinalIgnoredOutsideThinkingOrSpeaking() {
+        BaristaConversation c(nullptr, nullptr, nullptr);
+        toListening(c);
+        QCOMPARE(c.state(), State::Listening);
+        c.onModelFinal(QStringLiteral("a reply the user already abandoned"), false);
+        QCOMPARE(c.state(), State::Listening);   // ignored — NOT promoted to Speaking
+    }
+
+    // [barista-fork] tap() during Thinking breaks the user out of a stuck/slow turn (owner 2026-09-17: on a 503 /
+    // long wait the barista froze in Thinking and swallowed every tap). It returns to Listening; the abandoned
+    // turn's late reply is dropped by the guard, and an utterance spoken during the drain is queued and dispatched
+    // the instant that reply lands — so nothing the user says is lost.
+    void tapBreaksOutOfThinkingAndFlushesQueuedUtterance() {
+        BaristaConversation c(nullptr, nullptr, nullptr);
+        toListening(c);
+        QSignalSpy turn(&c, &BaristaConversation::turnRequested);
+        c.onFinalText(QStringLiteral("why is my shot so sour"));
+        QCOMPARE(c.state(), State::Thinking);
+        QCOMPARE(turn.count(), 1);
+
+        c.tap();                                 // break out of the stuck turn
+        QCOMPARE(c.state(), State::Listening);   // NOT tap_ignored
+
+        // Spoken while the abandoned request is still draining: held, not dispatched (ask() would reject it busy).
+        c.onFinalText(QStringLiteral("actually make it hotter"));
+        QCOMPARE(c.state(), State::Listening);
+        QCOMPARE(turn.count(), 1);
+
+        // The abandoned turn's late reply lands (dropped by the guard) → the queued utterance dispatches now.
+        c.onModelFinal(QStringLiteral("the answer nobody is waiting for anymore"), false);
+        QCOMPARE(c.state(), State::Thinking);
+        QCOMPARE(turn.count(), 2);
+        QCOMPARE(turn.at(1).at(0).toString(), QStringLiteral("actually make it hotter"));
+    }
+
+    // [barista-fork] tap-break with nothing said during the drain: the late reply is dropped, the machine stays
+    // Listening, and the in-flight marker is cleared so the NEXT real utterance dispatches normally.
+    void tapBreakWithNoQueuedUtteranceStaysListening() {
+        BaristaConversation c(nullptr, nullptr, nullptr);
+        toListening(c);
+        QSignalSpy turn(&c, &BaristaConversation::turnRequested);
+        c.onFinalText(QStringLiteral("explain the last shot"));
+        QCOMPARE(c.state(), State::Thinking);
+        c.tap();
+        QCOMPARE(c.state(), State::Listening);
+        c.onModelFinal(QStringLiteral("stale answer"), false);   // dropped
+        QCOMPARE(c.state(), State::Listening);
+        QCOMPARE(turn.count(), 1);
+        c.onFinalText(QStringLiteral("and the one before it"));  // dispatches normally
+        QCOMPARE(c.state(), State::Thinking);
+        QCOMPARE(turn.count(), 2);
+    }
+
     // Bug B, by construction: a bare "let me check on that" is treated as a lead-in — spoken, turn kept in
     // flight, and ONE continuation requested — instead of dropping silently to Listening.
     void stallSpeaksLeadInAndContinues() {

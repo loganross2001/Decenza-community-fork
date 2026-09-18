@@ -332,7 +332,14 @@ void AssistantVoice::speak(const QString& rawText) {
         return;
     }
     // [barista-fork][diag] A new speak() while still talking is the "trips over itself" cut-off — record it.
+    // BUT the chunked path calls speak(chunk) per clip with m_speaking held TRUE across the handoff, so a plain
+    // "was m_speaking" test mislabels every normal inter-clip advance as an INTERRUPT (the ~24 false positives
+    // that hid the ~3 real ones). Split three ways: a subsequent chunk of an active stream is a benign
+    // chunk_advance; a genuine new utterance over still-playing audio is the real interrupt; everything else is a
+    // fresh start (incl. the FIRST chunk, where nothing is playing yet).
     const bool wasSpeaking = m_speaking;
+    const bool audioPlaying = m_audible;   // already mirrors updateSpeaking's `active` (incl. Android playback)
+    const bool chunkAdvance = m_streamSpeaking && m_clipInFlight && wasSpeaking;
     // Mark speaking BEFORE dispatch so speakingChanged(true) fires synchronously — the mic pauses now,
     // not after the cloud-TTS POST finally starts playback (which is the "listening while talking" bug).
     ++m_speakGen;
@@ -358,7 +365,9 @@ void AssistantVoice::speak(const QString& rawText) {
     for (const QAudioDevice& d : QMediaDevices::audioOutputs())
         outNames << d.description();
     BaristaDiagnostics::record(QStringLiteral("voice"),
-        wasSpeaking ? QStringLiteral("speak_INTERRUPTS_previous") : QStringLiteral("speak_start"),
+        chunkAdvance                 ? QStringLiteral("chunk_advance")
+        : (wasSpeaking && audioPlaying) ? QStringLiteral("speak_INTERRUPTS_previous")
+                                        : QStringLiteral("speak_start"),
         {{QStringLiteral("role"), m_role == Role::Barista ? QStringLiteral("barista") : QStringLiteral("coaching")},
          {QStringLiteral("provider"), provider},
          {QStringLiteral("chars"), rawText.size()},

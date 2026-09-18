@@ -1738,6 +1738,7 @@ QString GeminiProvider::apiUrl() const
 
 void GeminiProvider::sendRequest(const QJsonObject& requestBody)
 {
+    m_requestSentMs = QDateTime::currentMSecsSinceEpoch();   // [diag] reply-latency baseline (see onAnalysisReply)
     QUrl url(apiUrl());
     QNetworkRequest req;
     req.setUrl(url);
@@ -2102,7 +2103,11 @@ void GeminiProvider::onAnalysisReply(QNetworkReply* reply)
     }
 
     const QJsonObject usage = root["usageMetadata"].toObject();
+    // [barista-fork][diag] cachedContentTokenCount surfaces whether Gemini implicit caching (on by default for
+    // 3.x flash, min 4096-token prefix) is actually hitting on the stable persona prefix. Zero across a
+    // multi-turn conversation ⇒ the prefix is not byte-identical turn-to-turn (something dynamic leaked into it).
     PROVIDER_DEBUG("aiprovider") << "Gemini usage — prompt:" << usage["promptTokenCount"].toInt()
+            << "cached:" << usage["cachedContentTokenCount"].toInt()
             << "thoughts:" << usage["thoughtsTokenCount"].toInt()
             << "output:" << usage["candidatesTokenCount"].toInt()
             << "total:" << usage["totalTokenCount"].toInt();
@@ -2128,6 +2133,11 @@ void GeminiProvider::onAnalysisReply(QNetworkReply* reply)
     // text, opaque error. SAFETY/RECITATION/PROHIBITED_CONTENT arrive the same way.
     const QString finishReason = candidates[0].toObject()["finishReason"].toString();
     const bool truncated = finishReason == QLatin1String("MAX_TOKENS");
+    // [barista-fork][diag] model reply latency — the model half of the tool-vs-model split. Anthropic emits
+    // this in finalizeConversationResponse; the Gemini path never did, so a "stuck" Gemini turn was untimed.
+    if (m_requestSentMs != 0)
+        aiDiag(QStringLiteral("reply"), QStringLiteral("ms=%1 finish=%2 round=%3")
+               .arg(QDateTime::currentMSecsSinceEpoch() - m_requestSentMs).arg(finishReason).arg(m_toolRounds));
 
     // [barista-fork] Keep modelContent — the client-tool loop below appends it verbatim
     // as the model's functionCall turn (captured in the executor callback). The fork's
@@ -2179,9 +2189,15 @@ void GeminiProvider::onAnalysisReply(QNetworkReply* reply)
             const QJsonObject call = functionCalls[i];
             const QString toolName = call["name"].toString();
             const QString callId = call["id"].toString();   // present only on newer parallel-call responses
+            const qint64 toolT0 = QDateTime::currentMSecsSinceEpoch();
             m_toolExecutor(toolName, call["args"].toObject(),
-                [this, gen, i, toolName, callId, pending, responses, modelContent](QJsonValue result) {
+                [this, gen, i, toolName, callId, toolT0, pending, responses, modelContent](QJsonValue result) {
                     if (gen != m_reqGen) return;   // a newer turn started — drop this stale result
+                    // [barista-fork][diag] tool completion timing — split tool-vs-model time on a "stuck" turn
+                    // (mirrors the Anthropic path). Distinguishes a slow local tool (DB/bean-base) from model latency.
+                    aiDiag(QStringLiteral("tool_done"), QStringLiteral("name=%1 ms=%2 is_error=%3")
+                           .arg(toolName).arg(QDateTime::currentMSecsSinceEpoch() - toolT0)
+                           .arg(result.isObject() && result.toObject().contains(QStringLiteral("error")) ? 1 : 0));
                     // Gemini functionResponse.response must be a JSON object; wrap non-objects under "result".
                     QJsonObject responseObj;
                     if (result.isObject())      responseObj = result.toObject();

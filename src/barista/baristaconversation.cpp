@@ -152,7 +152,7 @@ void BaristaConversation::setState(State s)
     case State::Idle:
         m_primingTimeout.stop(); m_turnTimeout.stop(); m_silence.stop();
         m_needsTapIdle.stop(); m_closingWatchdog.stop();
-        m_closingArmed = false; m_turnInFlight = false; m_pendingAnswer.clear(); m_autoContinues = 0;
+        m_closingArmed = false; m_turnInFlight = false; m_pendingAnswer.clear(); m_queuedUtterance.clear(); m_autoContinues = 0;
         if (m_voice) m_voice->stop();
         break;
     case State::Priming:
@@ -240,9 +240,16 @@ void BaristaConversation::tap()
     // mic, not no-op. Go to NeedsTap (mic off, session alive); the button flips back to "Chat" to resume. This was
     // the reported "Stop button doesn't work": the new-path tap() fell through to the default no-op (the old
     // direct-VoiceInput path used to call stop() here). Confirmed by `tap_ignored detail=listening` in the logs.
-    case State::Listening: setState(State::NeedsTap); break;
+    case State::Listening: diag(QStringLiteral("tap_stop")); setState(State::NeedsTap); break;  // user Stop, not mic-death
     case State::Speaking:  if (m_voice) m_voice->stop(); onVoiceSpeakingChanged(); break;  // tap-to-skip barge-in
-    default: diag(QStringLiteral("tap_ignored"), stateName()); break;  // Priming/Thinking/Closing
+    // [barista-fork] Break out of a stuck/slow Thinking turn instead of locking the user out (owner report
+    // 2026-09-17: on a 503/long wait the barista froze in Thinking and swallowed every tap — "it wouldn't accept
+    // my statement, I had to wait and restart"). The in-flight request is not cancellable, so it keeps draining;
+    // its reply lands here in Listening and is dropped by the late-reply guard in onModelFinal/onModelError, which
+    // then calls flushAbandonedTurn() to clear m_turnInFlight and dispatch anything said during the drain. Return
+    // to Listening so the user can talk again immediately (owner chose one-tap-keep-going over stop-and-resume).
+    case State::Thinking:  diag(QStringLiteral("tap_break")); setState(State::Listening); break;
+    default: diag(QStringLiteral("tap_ignored"), stateName()); break;  // Priming/Closing
     }
 }
 
@@ -284,6 +291,15 @@ void BaristaConversation::onFinalText(const QString& text)
 {
     if (m_state != State::Listening)
         return;   // logged-and-ignored elsewhere; the mic shouldn't be hot outside Listening anyway
+    // [barista-fork] Listening with a turn STILL in flight only happens right after a tap_break: the user tapped
+    // out of Thinking and the abandoned request is still draining. ask() would reject a new turn as busy and lose
+    // it, so hold this utterance; flushAbandonedTurn() re-runs it (all the checks below still apply) the instant
+    // the abandoned reply lands and m_busy clears. Only the LAST thing said during the drain is kept.
+    if (m_turnInFlight) {
+        m_queuedUtterance = text;
+        diag(QStringLiteral("utterance_queued_draining"), text.left(40));
+        return;
+    }
     // [barista-fork] Voice-driven bag-photo capture: while the camera is open awaiting a shot, a spoken
     // affirmative ("ready" / "go" / "take it") is a deterministic SHUTTER signal, not a question for the model.
     // Fire the capture locally and stay in Listening — behaviourally identical to a manual shutter tap: the
@@ -366,6 +382,17 @@ void BaristaConversation::onModelSpeakable(const QString& text)
 
 void BaristaConversation::onModelFinal(const QString& text, bool endConversation)
 {
+    // [barista-fork] Late-reply guard (mirrors onModelSpeakable/onModelError/onCloseRequested, the only actuator
+    // input that lacked it). A Gemini turn is not cancellable (no AIConversation::cancel) and the 40s turnTimeout
+    // drops Thinking→Listening WITHOUT ending the in-flight request, so a slow reply could land after the user
+    // abandoned the turn (or after teardown) and unconditionally setState(Speaking) — the barista talking over a
+    // new utterance. Drop any reply that arrives outside Thinking/Speaking; the allow-set matches onModelSpeakable
+    // so no normal turn (reply in Thinking, or reply behind a lead-in in Speaking) is ever lost.
+    if (m_state != State::Thinking && m_state != State::Speaking) {
+        diag(QStringLiteral("model_final_ignored"), stateName());
+        flushAbandonedTurn();   // [barista-fork] this was a tapped-out turn's reply — drain done, flush the queue
+        return;
+    }
     m_closingArmed = m_closingArmed || endConversation;
 
     // [barista-fork] Stall guard: the model sometimes ENDS its turn with only a promise-to-continue
@@ -464,8 +491,10 @@ static QString friendlyModelError(const QString& raw)
 
 void BaristaConversation::onModelError(const QString& message)
 {
-    if (m_state != State::Thinking && m_state != State::Speaking)
+    if (m_state != State::Thinking && m_state != State::Speaking) {
+        flushAbandonedTurn();   // [barista-fork] a tapped-out turn that ended in error — drain done, flush the queue
         return;
+    }
     diag(QStringLiteral("model_error"), message);   // raw detail preserved in the log
     m_turnInFlight = false;
     if (m_closingArmed) { setState(State::Closing); return; }
@@ -474,6 +503,23 @@ void BaristaConversation::onModelError(const QString& message)
                : (message.isEmpty() ? QStringLiteral("Something went wrong — tap or type to try again.")
                                     : message));
     setState(State::Listening);
+}
+
+void BaristaConversation::flushAbandonedTurn()
+{
+    // The late-reply guard has just dropped the reply/error from a turn the user tapped out of. That request has
+    // now drained (AIConversation clears m_busy on the same reply, BEFORE emitting to us), so the stale in-flight
+    // marker must be cleared or it would strand a later Speaking→Thinking drain (onVoiceSpeakingChanged §504). If
+    // the user spoke during the drain, dispatch it now by re-running onFinalText so every normal check still
+    // applies. Only flush into Listening; in NeedsTap/Idle the utterance is intentionally dropped.
+    m_turnInFlight = false;
+    if (m_state == State::Listening && !m_queuedUtterance.isEmpty()) {
+        const QString q = m_queuedUtterance;
+        m_queuedUtterance.clear();
+        onFinalText(q);
+    } else {
+        m_queuedUtterance.clear();
+    }
 }
 
 void BaristaConversation::onVoiceSpeakingChanged()

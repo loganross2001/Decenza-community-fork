@@ -173,6 +173,14 @@ jobs:
       - name: No hand-written list of bundled profiles
         run: python3 scripts/check_profile_resources.py
 
+      # Blocking: these RecognizerIntent silence/length extras make the Samsung/AOSP recogniser go
+      # totally deaf (zero final results). They caused a shipped-to-tablet deafness regression. The
+      # fix is app-layer pause tolerance, never the platform endpointer. See docs/barista/STT_POISON_EXTRAS.md.
+      - name: No poison STT RecognizerIntent extras
+        run: |
+          python3 scripts/check_stt_intent_extras.py --self-test
+          python3 scripts/check_stt_intent_extras.py
+
       # Advisory by the `|| true`, not by the script: it exits non-zero for any uncovered glyph
       # outside AddLanguagePage, which it already exempts. Non-blocking because bundling another
       # OFL face is a judgement call rather than a mechanical fix.

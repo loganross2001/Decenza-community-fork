@@ -231,6 +231,7 @@ void VoiceInput::handleFinal(const QString& text) {
     setPartial(QString());
     const QString t = text.trimmed();
     if (!t.isEmpty()) {
+        ++m_sessionFinals;   // [canary] a genuine heard result → session was NOT deaf
         BaristaDiagnostics::record(QStringLiteral("stt"), QStringLiteral("final_result"),
             {{QStringLiteral("heard"), t.left(120)}});
         emit finalText(t);
@@ -246,10 +247,18 @@ void VoiceInput::handleFinal(const QString& text) {
 }
 
 void VoiceInput::handlePartial(const QString& text) {
+    ++m_sessionPartials;   // [canary] any partial means the mic heard something → not deaf
     setPartial(text);
 }
 
 void VoiceInput::handleError(int code) {
+    ++m_sessionErrors;   // [canary] count every error path this session
+    // [canary] A listen cycle that survived a healthy span (≥ kHealthyListenMs) proves the recogniser was
+    // genuinely listening; combined with zero finals/partials at session close it discriminates deafness from
+    // an instant-fail no-op that never really listened.
+    if (m_recogniserStartedMs != 0
+            && (QDateTime::currentMSecsSinceEpoch() - m_recogniserStartedMs) >= kHealthyListenMs)
+        m_sessionHealthySpan = true;
     // Language unavailable (12) / not supported (13): the on-device model isn't present. Under the
     // pragmatic privacy posture, retry with ONLINE recognition rather than failing silently.
     if ((code == 12 || code == 13) && m_preferOffline) {
@@ -298,6 +307,18 @@ void VoiceInput::setListening(bool on) {
     if (m_listening == on)
         return;
     m_listening = on;
+    if (on) {
+        m_sessionFinals = 0; m_sessionPartials = 0; m_sessionErrors = 0; m_sessionHealthySpan = false;
+    } else if (m_sessionFinals == 0 && m_sessionPartials == 0 && m_sessionErrors > 0 && m_sessionHealthySpan) {
+        // [barista-fork][canary] Deafness detector. Keyed on ABSENCE-of-final (not presence-of-error: healthy
+        // sessions legitimately carry code 5/7), and gated on a healthy listen span so a short greeting or an
+        // instant-fail no-op does not fire. Zero partials AND zero finals despite a healthy span + errors is the
+        // reboot/poison-extras deafness signature. A determined no-speech walk-away can still trip it — acceptable
+        // for a diagnostic line (no user-facing action taken).
+        BaristaDiagnostics::record(QStringLiteral("stt"), QStringLiteral("canary_fail"),
+            {{QStringLiteral("errors"), m_sessionErrors},
+             {QStringLiteral("reason"), QStringLiteral("no_final_no_partial")}});
+    }
     emit listeningChanged();
 }
 

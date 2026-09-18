@@ -627,6 +627,7 @@ private:
     QJsonObject m_pendingRequestBody;  // basis for a functionCall continuation re-POST
     QString m_accumulatedText;         // prose accumulated across tool rounds, prepended to the final answer
     int m_toolRounds = 0;              // reset per turn in the options-aware analyzeConversation
+    qint64 m_requestSentMs = 0;        // [barista-fork][diag] request-sent stamp for reply-latency (Gemini path)
     int m_currentTimeoutMs = 0;        // this turn's transfer timeout (RequestOptions.timeoutMs; 0 → default)
     static constexpr int MAX_TOOL_ROUNDS = 8;   // [barista-fork] 4→8: recipe/profile workflows chain several
                                                  // tools (list_profiles → get_active_recipe → update_recipe →

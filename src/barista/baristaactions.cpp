@@ -34,6 +34,10 @@ QVariantMap BaristaActions::applyFromNext(const QVariantMap& next, qint64 anchor
         result["blocked"] = true;
         result["blockedReason"] = QStringLiteral("a shot is in progress");
         result["applied"] = applied; result["queued"] = queued; result["failed"] = failed; result["rejected"] = rejected;
+        // [barista-fork][diag] Record that a barista apply landed DURING a live shot — the shot-vs-barista
+        // contention signal (a turn editing settings mid-extraction is exactly when per-hop latency inflates).
+        BaristaDiagnostics::record(QStringLiteral("actions"), QStringLiteral("apply_blocked_flowing"),
+            {{QStringLiteral("flowing"), true}});
         return result;
     }
 

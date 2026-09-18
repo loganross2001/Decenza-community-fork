@@ -90,5 +90,10 @@ void SpeakerGate::setQuiet(bool q)
     if (m_quiet == q)
         return;
     m_quiet = q;
+    // [barista-fork][probe] Count quiet transitions so a single reply's flap count is visible. The suspected
+    // cause of the post-reply recogniser recreate storm (72 code-5) is the gate oscillating quiet during the
+    // drain window, each flap re-arming the mic. Additive logging only — no timing/behaviour change here.
+    BaristaDiagnostics::record(QStringLiteral("gate"), QStringLiteral("quiet_flap"),
+        {{QStringLiteral("quiet"), q}});
     emit quietChanged();
 }

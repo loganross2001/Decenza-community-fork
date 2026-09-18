@@ -2248,7 +2248,13 @@ void AIManager::requestBaristaContext(const QString& beanBrand, const QString& b
                                         "the data below is the user's recent shots overall.\n\n");
             block += QStringLiteral("## The app's structured data on this user and their coffee "
                                     "(this is real — you DO have their history):\n");
-            block += QString::fromUtf8(QJsonDocument(obj).toJson(QJsonDocument::Indented));
+            // [barista-fork][L3] Compact, not Indented: this ~20k-token block is baked into the barista
+            // system prompt and rides EVERY turn (implicit-cached). Compact drops ~25-37% of its characters
+            // (indentation whitespace only) with ZERO data loss — identical keys and field paths, which is all
+            // the persona reads ("currentBean.beanFreshness", "fullHistory", …). The model parses compact JSON
+            // fine; the tradeoff is that a logged prompt_*.txt is denser to eyeball (pretty-print when reading).
+            // The smaller sibling suffix blocks below stay Indented for log readability (marginal token cost).
+            block += QString::fromUtf8(QJsonDocument(obj).toJson(QJsonDocument::Compact));
             block += dueSuffix;   // [barista-fork] due reminders/maintenance ride the same first-reply turn
             block += docSuffix;   // [barista-fork] a pending Decent cleaning-guide change to offer (rare, one-time)
             block += occasionSuffix;   // [barista-fork] today's holiday/personal dates for a warm greeting/goodbye

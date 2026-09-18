@@ -9,10 +9,13 @@ work and before declaring a step done. Commit/push only when asked.**
 
 ## 🟢 2026-09-18 — DEFERRED-CODE SWEEP (owner: "do all deferred code 7-10, then commit-push")
 
-**Branch state:** `feat/barista` @ `a3b4b10a`, pushed to `origin` + `backup`. `origin/main` still behind —
-the main FF was BLOCKED by the harness (default-branch push); owner runs `git push origin feat/barista:main`
-to land the SAFE part. Three commits since `00d037db`: `0cc81eec` (voice bundle, already deployed vc3531144),
-`a20acced` (log-marker cleanup — SAFE, ready for main), `a3b4b10a` (L3 compaction — on-device-owed, hold off main).
+**Branch state:** `feat/barista` @ `a3dfbe01`, pushed to `origin` + `backup`. `origin/main` still behind —
+the main FF was BLOCKED by the harness (default-branch push). Commits since `00d037db`: `0cc81eec` (voice
+bundle, already deployed vc3531144), `a20acced` (log-marker cleanup — SAFE, ready for main), `a3b4b10a` (L3
+compaction — on-device-owed, HOLD off main), `a3dfbe01` (this handoff).
+**To land ONLY the main-safe part (voice bundle + cleanup, excludes L3):**
+`git push origin a20acced:main` — do NOT use `feat/barista:main`, which would drag L3 onto main before the
+by-ear check. Land L3 to main only after the coaching-quality-by-ear check passes.
 
 **Outcomes (2 evidence-based no-ops, 1 shipped-neutral, 1 owner-decision):**
 - **#7 R5 mic-churn hysteresis — NO-GO (no code).** Probe hypothesis (SpeakerGate `quiet_flap` oscillating →

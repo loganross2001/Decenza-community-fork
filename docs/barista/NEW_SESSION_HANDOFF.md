@@ -7,6 +7,42 @@ work and before declaring a step done. Commit/push only when asked.**
 
 ---
 
+## 🟢 2026-09-18 — DEFERRED-CODE SWEEP (owner: "do all deferred code 7-10, then commit-push")
+
+**Branch state:** `feat/barista` @ `a3b4b10a`, pushed to `origin` + `backup`. `origin/main` still behind —
+the main FF was BLOCKED by the harness (default-branch push); owner runs `git push origin feat/barista:main`
+to land the SAFE part. Three commits since `00d037db`: `0cc81eec` (voice bundle, already deployed vc3531144),
+`a20acced` (log-marker cleanup — SAFE, ready for main), `a3b4b10a` (L3 compaction — on-device-owed, hold off main).
+
+**Outcomes (2 evidence-based no-ops, 1 shipped-neutral, 1 owner-decision):**
+- **#7 R5 mic-churn hysteresis — NO-GO (no code).** Probe hypothesis (SpeakerGate `quiet_flap` oscillating →
+  mic re-arm storm → code-5) REFUTED: `quiet_flap` is a perfect 1:1 alternation everywhere (max consecutive
+  same-value = 1, zero storming); code-5 is sparse (~1-2/session), self-recovers via the existing
+  recreate-on-next-start, doesn't cluster with flaps. Building hysteresis = engineering a non-problem. The
+  owner's "works if I repeat" symptom is now UNEXPLAINED — next candidate to probe is `echoGuardMs=400` after
+  mic resume (could clip a fast opening word), NOT the gate.
+- **#10 extraction live-coach genre — ALREADY DONE (no code).** Fixed 2026-09-13 in `313fb5f2` ("observe-only,
+  not next-shot advice"), the day after the 2026-09-12 flag; the memory just lagged the code. Phrasebook prompt
+  (`aimanager.cpp:2344`) already forbids next-shot/dial advice in live EXTRACTION cues; templates are in-genre.
+- **#9 L3 prompt shrink — SHIPPED (branch, `a3b4b10a`), on-device by-ear owed.** Per-shot rows were ALREADY
+  compacted (#1158/#1164 hoist/dedup). Only neutral lever left: the ~20k block baked into the barista system
+  prompt (`aimanager.cpp:2251`) was `Indented` → now `Compact` (~25-37% fewer chars, identical field paths,
+  caching preserved, cost win not latency). Depth/block-drop levers are LOSSY + shared with MCP/advisor → owner's
+  call, not cut. **By-ear check owed:** confirm compact JSON doesn't dent coaching quality on a real chat.
+- **#8 R6 pause-tolerance — GO on the probe gate, but NEEDS AN OWNER DECISION before building (no code).**
+  Warm-up gap `readyMs` ~54ms median (max 281), `onPartialResults` fires every listen (2-68) → short enough not
+  to drop continuation words. BUT: (1) the continuation-stitch requires breaking the `micLive` sole-authority
+  invariant to restart the recogniser mid-turn — fragile mic surgery, unverifiable headlessly, high mic-death
+  risk (the exact class the voice bundle just fixed); (2) it re-adds response latency we just removed
+  (Flash-Lite) — a real tradeoff; (3) **the exact "17s cutoff" mechanism was NOT located** — it's not the 30s
+  idle timer (`kSilenceMs`, Listening→NeedsTap), not obviously the recogniser's own endpointing.
+  **OWNER DECISION NEEDED:** which symptom is it — (a) mid-utterance split (you pause to think, it dispatches
+  half your sentence) or (b) conversation-idle drop-to-tap? The fix differs and building the wrong one is worse
+  than nothing. Given we just won on latency, recommend a SHORT continuation window (~1s) only if (a), and only
+  after locating the true cutoff on-device. Once you pick, the build is ~half a day + on-device tuning.
+
+---
+
 ## 🔴 2026-09-17 — LATENCY REGRESSION INVESTIGATION (owner reported 8–9s pauses "broke since 09-15")
 
 **Verdict: the slowdown is Gemini SERVER-SIDE latency, not a code/prompt regression. The clincher is a

@@ -112,6 +112,7 @@ extern "C" const char* __ubsan_default_options()
 #include "barista/baristasingletons_qml.h"  // [barista-fork] BaristaModuleForeign — published from main.cpp below
 #include "barista/assistantvoice.h" // [barista-fork] coaching-voice routing for the live coaches
 #include "barista/coachphrasebook.h" // [barista-fork] model-generated varied cue phrasing
+#include "barista/baristadiagnostics.h" // [barista-fork] registered diag helper for the coach-voice arbiter markers below
 #endif
 
 #ifdef Q_OS_ANDROID
@@ -2220,7 +2221,7 @@ int main(int argc, char *argv[])
                              // shows) — a delayed live cue is a wrong cue, and this is the no-nag posture.
                              if (baristaVoice && baristaVoice->speaking()) {
                                  if (interrupt) baristaVoice->stop();
-                                 else { qDebug().noquote() << ("[BaristaDiag] coach     suppressed_barista_speaking  id=" + id); return; }
+                                 else { BaristaDiagnostics::record(QStringLiteral("coach"), QStringLiteral("suppressed_barista_speaking"), {{QStringLiteral("id"), id}}); return; }
                              }
                              // [barista-fork] Model-generated varied phrasing (fallback to the deterministic text).
                              const QString line = coachPhrasebook ? coachPhrasebook->lineFor(id, text) : text;
@@ -2247,7 +2248,7 @@ int main(int argc, char *argv[])
                                  return;   // pull-coaching voice opt-in (default off)
                              if (baristaVoice && baristaVoice->speaking()) {
                                  if (interrupt) baristaVoice->stop();
-                                 else { qDebug().noquote() << ("[BaristaDiag] coach     suppressed_barista_speaking  id=" + id); return; }
+                                 else { BaristaDiagnostics::record(QStringLiteral("coach"), QStringLiteral("suppressed_barista_speaking"), {{QStringLiteral("id"), id}}); return; }
                              }
                              // [barista-fork] Same-role guard: a new cue must not truncate its OWN in-flight cue.
                              // This branch was missing (only the cross-role baristaVoice check existed), so a
@@ -2256,7 +2257,7 @@ int main(int argc, char *argv[])
                              // (the banner/cueChanged still fired, so the visual is not lost).
                              if (coachingVoice->speaking()) {
                                  if (interrupt) coachingVoice->stop();
-                                 else { qDebug().noquote() << ("[BaristaDiag] coach     suppressed_coaching_speaking  id=" + id); return; }
+                                 else { BaristaDiagnostics::record(QStringLiteral("coach"), QStringLiteral("suppressed_coaching_speaking"), {{QStringLiteral("id"), id}}); return; }
                              }
                              const QString line = coachPhrasebook ? coachPhrasebook->lineFor(id, text) : text;
                              coachingVoice->speak(line);
@@ -4194,7 +4195,7 @@ int main(int argc, char *argv[])
                 if (phase == Phase::Preinfusion && coachingVoice && coachPhrasebook->hasGameplan()
                     && settings.app()->coachGameplanEnabled() && settings.app()->espressoCoachAudioEnabled()) {
                     coachingVoice->speak(coachPhrasebook->gameplan());
-                    qDebug().noquote() << QStringLiteral("[BaristaDiag] coach     gameplan_spoken");
+                    BaristaDiagnostics::record(QStringLiteral("coach"), QStringLiteral("gameplan_spoken"));
                     if (mainController.liveShotCoach())
                         mainController.liveShotCoach()->noteExternalSpeech(0.0);
                 }
